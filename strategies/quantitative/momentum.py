@@ -126,12 +126,12 @@ class TrendFollowingStrategy(StrategyBase):
         low = data["low"]
         close = data["close"]
 
-        # 计算+DM和-DM
-        plus_dm = high.diff()
-        minus_dm = -low.diff()
+        # 计算+DM和-DM — 缓存原始 up_move/down_move 避免 plus_dm 自引用
+        up_move = high.diff()
+        down_move = -low.diff()
 
-        plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
-        minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0)
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
 
         # 计算TR
         tr1 = high - low

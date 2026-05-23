@@ -62,15 +62,29 @@ class RateLimiter:
             self._backoff_until = 0.0
             self._max_backoff = 60.0  # Maximum backoff time in seconds
 
-            # Async lock — created lazily on first async access to avoid
-            # "no current event loop" errors at import time (Python 3.9)
-            self._token_lock: Optional[asyncio.Lock] = None
+            # Async lock — pre-create when possible. If no running event loop
+            # exists at import time (Python 3.9 import-time path), fall back to
+            # lazy creation on first async access.
+            try:
+                self._token_lock: Optional[asyncio.Lock] = asyncio.Lock()
+            except RuntimeError:
+                self._token_lock = None
 
             RateLimiter._initialized = True
             logger.info(
                 f"RateLimiter initialized: {self._rate_per_minute} req/min, "
                 f"burst={self._burst}"
             )
+        else:
+            # Singleton already initialized — reject conflicting re-init params explicitly.
+            env_rpm = int(os.getenv("GLM_RATE_LIMIT_RPM", rate_per_minute))
+            env_burst = int(os.getenv("GLM_RATE_LIMIT_BURST", burst))
+            if env_rpm != self._rate_per_minute or env_burst != self._burst:
+                logger.warning(
+                    "RateLimiter singleton already initialized with "
+                    f"rate_per_minute={self._rate_per_minute}, burst={self._burst}; "
+                    f"ignoring conflicting re-init with rate_per_minute={env_rpm}, burst={env_burst}"
+                )
 
     @property
     def rate_per_minute(self) -> int:

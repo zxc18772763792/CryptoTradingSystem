@@ -19,6 +19,7 @@ from web.api import (
     ai_research,
     altcoin,
     auth as web_auth,
+    backtest,
     data,
     ml,
     news,
@@ -336,6 +337,7 @@ def test_new_sensitive_mutation_routes_require_ops_auth(monkeypatch):
         ("/api/trading", trading_accounts.router),
         ("/api/strategies", strategies.router),
         ("/api/ai", ai_research.router),
+        ("/api/backtest", backtest.router),
         ("/api/altcoin", altcoin.router),
         ("/api/ml", ml.router),
         ("/api/data", data.router),
@@ -348,6 +350,7 @@ def test_new_sensitive_mutation_routes_require_ops_auth(monkeypatch):
         ("delete", "/api/trading/accounts/demo", {}),
         ("post", "/api/strategies/start-all", {}),
         ("post", "/api/ai/runtime-config/live-decision", {"json": {"enabled": True}}),
+        ("post", "/api/backtest/run", {}),
         ("post", "/api/altcoin/radar/watchlist", {"json": {"symbol": "WIF/USDT"}}),
         ("delete", "/api/ml/models/demo-model", {}),
         ("post", "/api/data/reconnect?exchange=binance", {}),
@@ -365,6 +368,7 @@ def test_new_sensitive_mutation_routes_require_ops_auth(monkeypatch):
         ("trading_accounts", trading_accounts.router),
         ("trading_analytics", trading_analytics.router),
         ("strategies", strategies.router),
+        ("backtest", backtest.router),
         ("ai_research", ai_research.router),
         ("altcoin", altcoin.router),
         ("ml", ml.router),
@@ -387,10 +391,6 @@ def test_sensitive_router_mutations_are_route_dependency_gated(router_name: str,
 
 def test_remaining_unguarded_post_routes_are_explicit_query_operations():
     allowed = {
-        ("web/api/backtest.py", "post", "'/run'", "run_backtest"),
-        ("web/api/backtest.py", "post", "'/compare'", "compare_backtests"),
-        ("web/api/backtest.py", "post", "'/run_custom'", "run_backtest_custom"),
-        ("web/api/backtest.py", "post", "'/optimize'", "optimize_backtest"),
         ("web/api/research.py", "post", "'/workbench/overview'", "run_research_workbench_overview"),
         ("web/api/research.py", "post", "'/workbench/modules/{module_name}'", "run_research_workbench_module"),
         ("web/api/research.py", "post", "'/workbench/recommendations'", "get_research_workbench_recommendations"),
@@ -416,6 +416,69 @@ def test_remaining_unguarded_post_routes_are_explicit_query_operations():
                 unguarded.add((rel_path, method, route, node.name))
 
     assert unguarded == allowed
+
+
+def test_backtest_sensitive_routes_are_dependency_gated():
+    expected = {
+        ("POST", "/run"),
+        ("POST", "/compare"),
+        ("POST", "/run_custom"),
+        ("POST", "/optimize"),
+        ("GET", "/export"),
+    }
+    gated = set()
+    for route in backtest.router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if route.dependencies:
+            for method in route.methods or set():
+                gated.add((method, route.path))
+
+    assert expected <= gated
+
+
+def test_ai_research_decay_post_and_param_sensitivity_are_dependency_gated():
+    expected = {
+        ("GET", "/candidates/{candidate_id}/param-sensitivity"),
+        ("POST", "/candidates/{candidate_id}/decay-check"),
+    }
+    gated = set()
+    for route in ai_research.router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if route.dependencies:
+            for method in route.methods or set():
+                gated.add((method, route.path))
+
+    assert expected <= gated
+
+
+def test_strategy_export_routes_are_dependency_gated_and_sanitized():
+    expected = {
+        ("GET", "/export/{name}"),
+        ("GET", "/export"),
+    }
+    gated = set()
+    for route in strategies.router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        if route.dependencies:
+            for method in route.methods or set():
+                gated.add((method, route.path))
+
+    assert expected <= gated
+
+    payload = strategies._strategy_export_payload(
+        {
+            "name": "demo",
+            "strategy_type": "MAStrategy",
+            "params": {"period": 10, "api_key": "secret-value"},
+            "metadata": {"nested": {"token": "tok", "safe": "ok"}},
+        }
+    )
+    assert payload["params"]["api_key"] == "[REDACTED]"
+    assert payload["metadata"]["nested"]["token"] == "[REDACTED]"
+    assert payload["metadata"]["nested"]["safe"] == "ok"
 
 
 def test_account_mutation_api_key_must_have_manage_accounts_permission(monkeypatch):

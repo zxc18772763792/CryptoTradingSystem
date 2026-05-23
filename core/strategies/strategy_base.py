@@ -50,6 +50,17 @@ def bar_time(data: Any, *, fallback: Optional[datetime] = None) -> datetime:
                     if py > fallback_utc + timedelta(minutes=2):
                         shifted = py - timedelta(hours=8)
                         if shifted <= fallback_utc + timedelta(minutes=2):
+                            # Heuristic: a bar timestamp ~8h in the future
+                            # almost always means the index was Asia/Shanghai
+                            # (UTC+8) mislabeled as naive UTC. Surface a
+                            # warning so the upstream feed gets fixed rather
+                            # than silently shifting indefinitely.
+                            logger.warning(
+                                "bar_time: detected naive +8h offset on input "
+                                "index — applying -8h CST→UTC shift "
+                                f"({py.isoformat()} → {shifted.isoformat()}). "
+                                "Upstream collector should provide tz-aware UTC."
+                            )
                             return shifted
                     return py
     except Exception:

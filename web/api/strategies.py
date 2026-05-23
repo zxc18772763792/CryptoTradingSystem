@@ -56,6 +56,50 @@ from web.api.backtest import (
 
 router = APIRouter()
 
+_SENSITIVE_EXPORT_KEYS = {
+    "api_key",
+    "apikey",
+    "api_secret",
+    "secret",
+    "password",
+    "passphrase",
+    "token",
+    "private_key",
+    "access_key",
+}
+
+
+def _sanitize_strategy_export_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: Dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)
+            normalized = key.lower().replace("-", "_")
+            if any(marker in normalized for marker in _SENSITIVE_EXPORT_KEYS):
+                sanitized[key] = "[REDACTED]"
+            else:
+                sanitized[key] = _sanitize_strategy_export_value(raw_value)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_strategy_export_value(item) for item in value]
+    if isinstance(value, tuple):
+        return [_sanitize_strategy_export_value(item) for item in value]
+    return value
+
+
+def _strategy_export_payload(info: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": info.get("name"),
+        "strategy_type": info.get("strategy_type"),
+        "params": _sanitize_strategy_export_value(info.get("params", {})),
+        "symbols": info.get("symbols", []),
+        "timeframe": info.get("timeframe", "1h"),
+        "exchange": info.get("exchange", "gate"),
+        "allocation": info.get("allocation", settings.DEFAULT_STRATEGY_ALLOCATION),
+        "state": info.get("state", "idle"),
+        "metadata": _sanitize_strategy_export_value(info.get("metadata", {})),
+    }
+
 
 def _consume_audit_task_result(task) -> None:
     try:
@@ -2007,45 +2051,23 @@ async def get_strategy_summary(limit: int = 20):
     return summary
 
 
-@router.get("/export/{name}")
+@router.get("/export/{name}", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def export_strategy(name: str):
     info = strategy_manager.get_strategy_info(name)
     if not info:
         raise HTTPException(status_code=404, detail="Strategy not found")
     runtime_mode = _strategy_runtime_mode(name, info)
     return {
-        "strategy": {
-            "name": info.get("name"),
-            "strategy_type": info.get("strategy_type"),
-            "params": info.get("params", {}),
-            "symbols": info.get("symbols", []),
-            "timeframe": info.get("timeframe", "1h"),
-            "exchange": info.get("exchange", "gate"),
-            "allocation": info.get("allocation", settings.DEFAULT_STRATEGY_ALLOCATION),
-            "state": info.get("state", "idle"),
-            "metadata": info.get("metadata", {}),
-        },
+        "strategy": _strategy_export_payload(info),
         "exported_at": info.get("last_run_at"),
     }
 
 
-@router.get("/export")
+@router.get("/export", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def export_all_strategies():
     items = []
     for info in strategy_manager.list_strategies():
-        items.append(
-            {
-                "name": info.get("name"),
-                "strategy_type": info.get("strategy_type"),
-                "params": info.get("params", {}),
-                "symbols": info.get("symbols", []),
-                "timeframe": info.get("timeframe", "1h"),
-                "exchange": info.get("exchange", "gate"),
-                "allocation": info.get("allocation", settings.DEFAULT_STRATEGY_ALLOCATION),
-                "state": info.get("state", "idle"),
-                "metadata": info.get("metadata", {}),
-            }
-        )
+        items.append(_strategy_export_payload(info))
     return {"strategies": items, "count": len(items)}
 
 

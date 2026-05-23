@@ -7638,11 +7638,15 @@ renderResearchConclusionCard();
 return;
 }
 const latest=renderData.latest||{},mean=renderData.mean_24||{},std=renderData.std_24||{};
+const windowConfig=renderData.window_config||renderData.diagnostics?.window_config||{};
+const momWindow=Number(windowConfig.mom_mid_effective||windowConfig.mom_mid||0);
+const momWindowText=momWindow>0?`${momWindow} bars`:'-';
 if(summary){
 summary.innerHTML=`
 <div class="list-item"><span>交易所 / 周期</span><span>${esc(renderData.exchange||'-')} / ${esc(renderData.timeframe||'-')}</span></div>
 <div class="list-item"><span>因子数量 / 有效时间点</span><span>${(renderData.factors||[]).length} / ${Number(renderData.points||0)}</span></div>
 <div class="list-item"><span>币种覆盖</span><span>${(renderData.symbols_used||[]).length} 个</span></div>
+<div class="list-item"><span>MOM窗口</span><span>${esc(momWindowText)}</span></div>
 <div class="list-item"><span>相关性矩阵</span><span>${Object.keys(renderData.correlation||{}).length?'已加载':'无'}</span></div>
 <div class="list-item"><span>说明</span><span>有效时间点=多币种对齐后可计算因子的 bar 数</span></div>
 <div class="list-item"><span>风险提示</span><span>${esc(pending?pendingResearchNote(data,'后台刷新中'):((renderData.warnings||[])[0]||'无'))}</span></div>`;

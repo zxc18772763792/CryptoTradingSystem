@@ -131,7 +131,8 @@ def test_non_manual_update_caps_symbols_when_minute_headroom_is_tighter_than_sym
     monkeypatch.setattr(builder_module, "persist_normalized_rows", lambda **kwargs: pd.DataFrame([{"symbol": "BTC"}]))
     monkeypatch.setattr(builder_module, "persist_symbol_registry", lambda symbols: None)
     monkeypatch.setattr(builder_module, "build_derivatives_snapshot", lambda symbol: None)
-    monkeypatch.setattr(builder_module, "coinglass_minute_headroom", lambda budget_state, manual=False: 3)
+    monkeypatch.setattr(builder_module, "coinglass_minute_headroom", lambda budget_state, manual=False: 4)
+    monkeypatch.setattr(builder_module.settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30, raising=False)
 
     async def fake_record_status(**kwargs):
         return None
@@ -139,7 +140,7 @@ def test_non_manual_update_caps_symbols_when_minute_headroom_is_tighter_than_sym
     async def fake_budget_state():
         class _Budget:
             def to_dict(self):
-                return {"minute_remaining": 3}
+                return {"minute_remaining": 4}
 
         return _Budget()
 
@@ -179,12 +180,11 @@ def test_non_manual_update_caps_symbols_when_minute_headroom_is_tighter_than_sym
     )
 
     assert result["stopped_early"] is True
-    assert result["stop_reason"] == "non_manual_refresh_limited_by_10_per_min_budget"
-    assert result["symbols"] == ["BTC", "ETH"]
+    assert result["stop_reason"] == "non_manual_refresh_limited_by_30_per_min_budget"
+    assert result["symbols"] == ["BTC"]
     assert result["datasets"] == ["open_interest_exchange_list"]
     assert fake_client.calls == [
         ("open_interest_exchange_list", "BTC", False),
-        ("open_interest_exchange_list", "ETH", False),
     ]
 
 
@@ -194,12 +194,13 @@ def test_update_cache_limits_non_manual_refresh_to_minute_headroom(monkeypatch):
     monkeypatch.setattr(builder_module, "persist_normalized_rows", lambda **kwargs: pd.DataFrame([{"symbol": "BTC"}]))
     monkeypatch.setattr(builder_module, "persist_symbol_registry", lambda symbols: None)
     monkeypatch.setattr(builder_module, "build_derivatives_snapshot", lambda symbol: None)
+    monkeypatch.setattr(builder_module.settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30, raising=False)
 
     async def fake_record_status(**kwargs):
         return None
 
     class _Budget:
-        minute_remaining = 5
+        minute_remaining = 8
         daily_remaining = 100
         monthly_remaining = 100
 
@@ -251,9 +252,10 @@ def test_update_cache_limits_non_manual_refresh_to_minute_headroom(monkeypatch):
     )
 
     assert result["stopped_early"] is True
-    assert result["stop_reason"] == "non_manual_refresh_limited_by_10_per_min_budget"
-    assert result["datasets"] == ["open_interest_exchange_list", "open_interest_history"]
+    assert result["stop_reason"] == "non_manual_refresh_limited_by_30_per_min_budget"
+    assert result["datasets"] == ["open_interest_exchange_list", "open_interest_history", "funding_rate_exchange_list"]
     assert fake_client.calls == [
         ("open_interest_exchange_list", False),
         ("open_interest_history", False),
+        ("funding_rate_exchange_list", False),
     ]

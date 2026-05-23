@@ -41,10 +41,10 @@ from core.data.coinglass_registry import (
 )
 
 
-_DEFAULT_WORKER_SYMBOL_LIMIT = 1
+_DEFAULT_WORKER_SYMBOL_LIMIT = 3
 _DEFAULT_OVERVIEW_SYMBOL = "BTC/USDT"
 _STRUCTURED_SOURCE = "coinglass_proxy"
-_NON_MANUAL_DATASET_RESERVE = 1
+_NON_MANUAL_DATASET_RESERVE = 3
 
 
 @dataclass
@@ -1271,7 +1271,8 @@ async def update_coinglass_cache(
             budget_state = await get_coinglass_budget_state()
             headroom = coinglass_minute_headroom(budget_state, manual=False)
         except Exception:
-            headroom = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10) - 2)
+            headroom = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30) - 2)
+        minute_limit = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30))
         effective_capacity = max(0, int(headroom) - _NON_MANUAL_DATASET_RESERVE)
         if effective_capacity <= 0:
             summary["stopped_early"] = True
@@ -1288,7 +1289,7 @@ async def update_coinglass_cache(
             summary["symbols"] = selected_symbols
             summary["datasets"] = selected_datasets
             summary["stopped_early"] = True
-            summary["stop_reason"] = "non_manual_refresh_limited_by_10_per_min_budget"
+            summary["stop_reason"] = f"non_manual_refresh_limited_by_{minute_limit}_per_min_budget"
     stop_reason = ""
     async with CoinglassClient() as client:
         for symbol in selected_symbols:

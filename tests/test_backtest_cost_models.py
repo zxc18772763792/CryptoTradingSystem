@@ -126,6 +126,63 @@ def test_backtest_engine_uses_funding_provider_when_column_missing(tmp_path):
     assert len(funding_trades) > 0
 
 
+def test_backtest_cost_breakdown_counts_funding_once():
+    engine = BacktestEngine(
+        BacktestConfig(
+            initial_capital=10000,
+            position_size_pct=0.1,
+            max_positions=1,
+            leverage=1.0,
+            commission_rate=0.0,
+            slippage=0.0,
+            include_funding=True,
+        )
+    )
+    entry_ts = pd.Timestamp("2026-01-01T00:00:00Z").to_pydatetime()
+    exit_ts = pd.Timestamp("2026-01-01T01:00:00Z").to_pydatetime()
+    signal = Signal(
+        symbol="BTC/USDT",
+        signal_type=SignalType.BUY,
+        price=100.0,
+        timestamp=entry_ts,
+        strategy_name="unit_test",
+        strength=1.0,
+    )
+
+    asyncio.run(engine._execute_buy(signal, current_price=100.0, timestamp=entry_ts, window=None))
+    engine._positions["BTC/USDT"]["funding_pnl"] = -10.0
+    engine._trades.append(
+        engine._trades[-1].__class__(
+            timestamp=entry_ts,
+            symbol="BTC/USDT",
+            side="funding",
+            quantity=0.0,
+            price=100.0,
+            commission=0.0,
+            slippage=0.0,
+            pnl=-10.0,
+            strategy="unit_test",
+            gross_pnl=0.0,
+            fee=0.0,
+            slippage_cost=0.0,
+            funding_pnl=-10.0,
+            net_pnl=-10.0,
+            notional=1000.0,
+            execution_role="funding",
+            trade_stage="funding",
+        )
+    )
+    asyncio.run(engine._close_position("BTC/USDT", 100.0, exit_ts, "long", None, signal))
+
+    result = engine._calculate_result()
+
+    close_trade = [t for t in result.trades if t.trade_stage == "close"][0]
+    assert close_trade.net_pnl == -10.0
+    assert result.cost_breakdown["funding_pnl"] == -10.0
+    assert result.cost_breakdown["net_pnl"] == -10.0
+    assert result.cost_breakdown["realized_total"] == -10.0
+
+
 def test_common_pnl_summary_schema():
     payload = build_common_pnl_summary(
         source="web_quick_backtest",

@@ -402,6 +402,7 @@ class BacktestEngine:
         row = current_data.iloc[-1]
         high_price = self._safe_positive_float(row.get("high")) or current_price
         low_price = self._safe_positive_float(row.get("low")) or current_price
+        open_price = self._safe_positive_float(row.get("open")) or current_price
 
         for pos_symbol, pos in list(self._positions.items()):
             if pos_symbol != symbol:
@@ -415,14 +416,32 @@ class BacktestEngine:
                     exit_hit = {"reason": "time_stop", "price": current_price}
             if exit_hit is None:
                 continue
+            # FIX (P1-gap-through): when the bar opens beyond the stop level, the actual
+            # fill price is the open (the market gapped through). Using the stop price
+            # itself overstates the exit fill quality. For long positions, fill at
+            # min(stop, open) is more pessimistic and realistic; for short, max(stop, open).
+            fill_price = float(exit_hit["price"])
+            side = str(pos.get("side") or "")
+            reason = str(exit_hit["reason"])
+            if reason in {"stop_loss", "trailing_stop"}:
+                if side == "long" and open_price < fill_price:
+                    fill_price = open_price
+                elif side == "short" and open_price > fill_price:
+                    fill_price = open_price
+            elif reason == "take_profit":
+                # TP gap-up for long / gap-down for short: realistic fill at open
+                if side == "long" and open_price > fill_price:
+                    fill_price = open_price
+                elif side == "short" and open_price < fill_price:
+                    fill_price = open_price
             await self._close_position(
                 pos_symbol,
-                float(exit_hit["price"]),
+                fill_price,
                 timestamp,
-                str(pos.get("side") or ""),
+                side,
                 current_data,
                 None,
-                exit_reason=str(exit_hit["reason"]),
+                exit_reason=reason,
             )
 
     @staticmethod
@@ -481,9 +500,12 @@ class BacktestEngine:
         window: Optional[pd.DataFrame],
     ) -> None:
         symbol = signal.symbol
+        # FIX (P2-reversal): on opposite-side signal, previously we only closed the
+        # short and returned. Correct behavior is to close-and-flip: close the short,
+        # then fall through to open a fresh long position in this same call.
         if symbol in self._positions and self._positions[symbol]["side"] == "short":
             await self._close_position(symbol, current_price, timestamp, "short", window, signal, exit_reason="signal_reversal")
-            return
+            # Fall through to open the long (only if close actually removed the position)
         if symbol in self._positions:
             return
         if len(self._positions) >= self.config.max_positions:
@@ -561,9 +583,10 @@ class BacktestEngine:
     ) -> None:
         symbol = signal.symbol
 
+        # FIX (P2-reversal): symmetric with _execute_buy — close long and flip to short.
         if symbol in self._positions and self._positions[symbol]["side"] == "long":
             await self._close_position(symbol, current_price, timestamp, "long", window, signal, exit_reason="signal_reversal")
-            return
+            # Fall through to open short (only if close actually removed the position)
 
         if not self.config.enable_shorting:
             return
@@ -830,15 +853,34 @@ class BacktestEngine:
             sharpe = 0.0
 
         avg_trade_return = float(np.mean([t.net_pnl for t in close_trades])) if close_trades else 0.0
+        # FIX (P1-funding double-count): funding_pnl is accumulated on each funding-stage
+        # trade AND replicated on the close trade as `accrued_funding` (added to net_pnl
+        # there). The previous realized_total summed BOTH close.pnl (which already
+        # includes accrued_funding) AND funding-stage trades' pnl (== funding_cash, same
+        # money). That double-counted funding into the realized total.
+        # Correct rule: funding events are the single source of truth for funding cash
+        # flow. The close trade's net_pnl includes accrued_funding for trade-level P&L
+        # display, but at the portfolio breakdown level we must avoid re-adding it.
+        funding_total = float(
+            sum(float(t.funding_pnl or 0.0) for t in self._trades if t.trade_stage == "funding")
+        )
+        # Realized total: close-stage NET pnl strips funding (subtract accrued_funding)
+        # then we add the funding total exactly once.
+        close_net_ex_funding = float(
+            sum(
+                float((t.net_pnl or 0.0) - (t.funding_pnl or 0.0))
+                for t in self._trades
+                if t.trade_stage == "close"
+            )
+        )
         cost_breakdown = {
             "gross_pnl": float(sum(float(t.gross_pnl or 0.0) for t in self._trades)),
             "fee": float(sum(float(t.fee or t.commission or 0.0) for t in self._trades)),
             "slippage_cost": float(sum(float(t.slippage_cost or 0.0) for t in self._trades)),
-            "funding_pnl": float(sum(float(t.funding_pnl or 0.0) for t in self._trades if t.trade_stage == "funding")),
-            "net_pnl": float(sum(float(t.net_pnl if t.trade_stage != "funding" else 0.0) for t in self._trades if t.trade_stage == "close")),
+            "funding_pnl": funding_total,
+            "net_pnl": close_net_ex_funding + funding_total,
         }
-        # Include funding on close if accrued there; compute realized total more robustly:
-        cost_breakdown["realized_total"] = float(sum(float(t.pnl or 0.0) for t in self._trades if t.trade_stage in {"close", "funding"}))
+        cost_breakdown["realized_total"] = close_net_ex_funding + funding_total
 
         return BacktestResult(
             initial_capital=initial_capital,

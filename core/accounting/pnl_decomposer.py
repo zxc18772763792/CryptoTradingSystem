@@ -2,8 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -87,7 +91,7 @@ class PnLDecomposer:
         """Record a fill. Side is 'buy' or 'sell'."""
         if qty <= 0 or price <= 0:
             return
-        ts = timestamp or datetime.utcnow()
+        ts = timestamp or _utc_now()
         side_lower = side.lower()
         pos = self.positions.get(symbol)
 
@@ -268,11 +272,17 @@ class PnLDecomposer:
         pos.realized.net_pnl = pos.realized.gross_pnl - pos.realized.fee - pos.realized.slippage_cost + pos.realized.funding_pnl
 
         if not pos._lots:
-            # Position fully closed — archive and remove
+            # Position fully closed — archive and remove. Preserve funding_pnl
+            # snapshot so a reverse fill (flip) starts the new position with a
+            # clean funding ledger rather than inheriting the prior period's
+            # accrual.
             record = archive_snapshot or self.position_snapshot(symbol) or {}
             record["realized"] = pos.realized.__dict__.copy()
             record["unrealized_gross"] = 0.0
-            record["closed_at"] = ts.isoformat()
+            close_ts = ts if isinstance(ts, datetime) else _utc_now()
+            if close_ts.tzinfo is None:
+                close_ts = close_ts.replace(tzinfo=timezone.utc)
+            record["closed_at"] = close_ts.isoformat()
             self._closed.append(record)
             del self.positions[symbol]
         else:

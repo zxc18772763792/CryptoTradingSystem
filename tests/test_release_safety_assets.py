@@ -18,3 +18,13 @@ def test_release_scripts_surface_agent_and_startup_safety_guards():
     assert "AllowExecuteAgent" in pre_release
     assert "allow_live=true" in pre_release
     assert "auto_start=true" in pre_release
+
+
+def test_managed_start_fails_closed_when_web_health_never_becomes_ready():
+    once = _read("_once.ps1")
+
+    assert "RedirectStandardOutput $webStdoutPath" in once
+    assert "RedirectStandardError $webStderrPath" in once
+    assert "Stopping unhealthy web process because /health never became ready" in once
+    assert "Stop-Process -Id $proc.Id -Force" in once
+    assert "exit 1" in once

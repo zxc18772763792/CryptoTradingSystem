@@ -163,7 +163,10 @@ class FundFlowStrategy(StrategyBase):
         net_flow = float(self._flow_data.get("net_flow", 0.0))
         inflow = float(self._flow_data.get("exchange_inflow", 0.0))
         outflow = float(self._flow_data.get("exchange_outflow", 0.0))
-        timestamp = self._flow_data.get("timestamp", datetime.now(timezone.utc))
+        # Prefer the current bar time so Signal.timestamp aligns with the
+        # cross-strategy conflict window. Sampling timestamp is the fallback.
+        sample_ts = self._flow_data.get("timestamp", datetime.now(timezone.utc))
+        timestamp = self._bar_time(data, fallback=sample_ts)
 
         current_price = float(data["close"].iloc[-1]) if not data.empty else 0.0
         symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"
@@ -306,7 +309,7 @@ class WhaleActivityStrategy(StrategyBase):
             }
         )
 
-        cutoff = datetime.now(timezone.utc) - pd.Timedelta(hours=float(self.params["lookback_hours"]))
+        cutoff = ts - pd.Timedelta(hours=float(self.params["lookback_hours"]))
         self._whale_transactions = [t for t in self._whale_transactions if t["timestamp"] > cutoff]
 
     @staticmethod

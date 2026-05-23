@@ -2920,6 +2920,8 @@ def _build_factor_library_placeholder(
         "universe_size": 0,
         "universe_quality": "empty",
         "warnings": [str(reason)],
+        "diagnostics": {},
+        "window_config": {},
         "latest": {},
         "mean_24": {},
         "std_24": {},
@@ -3358,6 +3360,12 @@ async def _compute_factor_library_payload(
     warnings: List[str] = []
     if len(used) < 4:
         warnings.append("当前可用币种较少（<4），横截面因子稳定性有限，建议补充更多币种历史数据。")
+    diagnostics = dict(getattr(result, "diagnostics", {}) or {})
+    warnings.extend(
+        str(item)
+        for item in list(diagnostics.get("warnings") or [])
+        if str(item).strip()
+    )
 
     return {
         "exchange": exchange,
@@ -3376,6 +3384,8 @@ async def _compute_factor_library_payload(
         "universe_size": len(used),
         "universe_quality": "low" if len(used) < 4 else "normal",
         "warnings": warnings,
+        "diagnostics": diagnostics,
+        "window_config": dict(diagnostics.get("window_config") or {}),
         "latest": {k: round(float(v), 10) for k, v in latest.items()},
         "mean_24": {k: round(float(v), 10) for k, v in mean_24.items()},
         "std_24": {k: round(float(v), 10) for k, v in std_24.items()},

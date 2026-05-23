@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now. Use as `default=_utcnow` in Column definitions."""
+    return datetime.now(timezone.utc)
 from typing import AsyncGenerator
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, JSON, String, Text, UniqueConstraint, event
@@ -59,7 +64,7 @@ class Trade(Base):
     cost = Column(Float, nullable=False)
     fee = Column(Float, default=0)
     fee_currency = Column(String(20), default="")
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=_utcnow, index=True)
     order_id = Column(String(100), default="")
     status = Column(String(20), default="filled")
     notes = Column(Text, default="")
@@ -83,8 +88,8 @@ class Position(Base):
     leverage = Column(Float, default=1.0)
     liquidation_price = Column(Float, default=0)
     margin = Column(Float, default=0)
-    opened_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    opened_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     is_open = Column(Boolean, default=True, index=True)
 
 
@@ -98,8 +103,8 @@ class Strategy(Base):
     description = Column(Text, default="")
     params = Column(JSON, default={})
     is_active = Column(Boolean, default=True, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class SystemLog(Base):
@@ -111,7 +116,7 @@ class SystemLog(Base):
     module = Column(String(50), nullable=False, index=True)
     message = Column(Text, nullable=False)
     details = Column(JSON, default={})
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=_utcnow, index=True)
 
 
 class Signal(Base):
@@ -126,7 +131,7 @@ class Signal(Base):
     price = Column(Float, nullable=False)
     strength = Column(Float, default=1.0)  # 信号强度 0-1
     params = Column(JSON, default={})
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    timestamp = Column(DateTime, default=_utcnow, index=True)
     is_executed = Column(Boolean, default=False, index=True)
 
 
@@ -135,7 +140,7 @@ class AccountSnapshot(Base):
     __tablename__ = "account_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+    timestamp = Column(DateTime, default=_utcnow, index=True, nullable=False)
     source = Column(String(20), default="portfolio", index=True)  # portfolio/exchange
     exchange = Column(String(20), default="all", index=True)
     total_usd = Column(Float, default=0.0, nullable=False)
@@ -148,7 +153,7 @@ class OperationAudit(Base):
     __tablename__ = "operation_audits"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, index=True, nullable=False)
+    timestamp = Column(DateTime, default=_utcnow, index=True, nullable=False)
     module = Column(String(50), nullable=False, index=True)  # trading/strategy/risk/data/system
     action = Column(String(80), nullable=False, index=True)
     status = Column(String(20), default="success", index=True)  # success/failed
@@ -167,8 +172,8 @@ class NotificationRule(Base):
     params = Column(JSON, default={})
     enabled = Column(Boolean, default=True, index=True)
     cooldown_seconds = Column(Integer, default=300)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
     last_triggered_at = Column(DateTime, nullable=True)
     trigger_count = Column(Integer, default=0)
 
@@ -183,8 +188,8 @@ class ApiUser(Base):
     api_key_hash = Column(String(128), nullable=False, unique=True, index=True)
     is_active = Column(Boolean, default=True, index=True)
     meta_json = Column(JSON, default={})
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class StrategySpec(Base):
@@ -203,8 +208,8 @@ class StrategySpec(Base):
     regime = Column(String(40), default="mixed", index=True)
     rollback_to_version = Column(Integer, nullable=True)
     created_by = Column(String(80), default="system", index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
     __table_args__ = (
         UniqueConstraint("strategy_id", "version", name="uq_strategy_spec_id_ver"),
@@ -224,7 +229,7 @@ class StrategyApproval(Base):
     approved = Column(Boolean, default=True, index=True)
     note = Column(Text, default="")
     meta_json = Column(JSON, default={})
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
 
 
 class RiskConfig(Base):
@@ -236,7 +241,7 @@ class RiskConfig(Base):
     config = Column(JSON, default={})
     is_active = Column(Boolean, default=False, index=True)
     created_by = Column(String(80), default="system", index=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
     activated_at = Column(DateTime, nullable=True)
 
 
@@ -257,8 +262,8 @@ class RiskChangeRequest(Base):
     diff = Column(JSON, default={})
     meta_json = Column(JSON, default={})
     reason = Column(Text, default="")
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 
 
 class AuditRecord(Base):
@@ -275,7 +280,7 @@ class AuditRecord(Base):
     input_hash = Column(String(80), default="", index=True)
     output_hash = Column(String(80), default="", index=True)
     payload_json = Column(JSON, default={})
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
 
 
 class AnalyticsMicrostructureSnapshot(Base):
@@ -283,7 +288,7 @@ class AnalyticsMicrostructureSnapshot(Base):
     __tablename__ = "analytics_microstructure_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=_utcnow, nullable=False, index=True)
     exchange = Column(String(20), nullable=False, index=True)
     symbol = Column(String(40), nullable=False, index=True)
     source_ok = Column(Boolean, default=True, index=True)
@@ -309,7 +314,7 @@ class AnalyticsCommunitySnapshot(Base):
     __tablename__ = "analytics_community_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=_utcnow, nullable=False, index=True)
     exchange = Column(String(20), nullable=False, index=True)
     symbol = Column(String(40), nullable=False, index=True)
     capture_status = Column(String(20), default="ok", index=True)
@@ -330,7 +335,7 @@ class AnalyticsWhaleSnapshot(Base):
     __tablename__ = "analytics_whale_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=_utcnow, nullable=False, index=True)
     exchange = Column(String(20), nullable=False, index=True)
     symbol = Column(String(40), nullable=False, index=True)
     capture_status = Column(String(20), default="ok", index=True)
@@ -349,7 +354,7 @@ class StrategyPerformanceSnapshot(Base):
     __tablename__ = "strategy_performance_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    snapshot_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    snapshot_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
     candidate_id = Column(String(80), nullable=True, index=True)   # AI research candidate ID
     strategy_name = Column(String(120), nullable=False, index=True)
     symbol = Column(String(40), nullable=False, index=True)
@@ -391,7 +396,7 @@ class AnalyticsHistoryIngestStatus(Base):
     rows_written = Column(Integer, default=0)
     started_at = Column(DateTime, nullable=True, index=True)
     finished_at = Column(DateTime, nullable=True, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
     details = Column(JSON, default={})
 
 
@@ -412,7 +417,7 @@ class CoinglassBudgetLedger(Base):
     last_success_at = Column(DateTime, nullable=True, index=True)
     last_http_status = Column(Integer, nullable=True)
     last_error = Column(Text, default="")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False, index=True)
 
 
 class CoinglassIngestStatus(Base):
@@ -432,7 +437,7 @@ class CoinglassIngestStatus(Base):
     last_attempt_at = Column(DateTime, nullable=True, index=True)
     last_success_at = Column(DateTime, nullable=True, index=True)
     fresh_until_at = Column(DateTime, nullable=True, index=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False, index=True)
     details = Column(JSON, default={})
 
 
@@ -441,7 +446,7 @@ class AnalyticsDerivativesSnapshot(Base):
     __tablename__ = "analytics_derivatives_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=_utcnow, nullable=False, index=True)
     exchange = Column(String(20), nullable=False, index=True)
     symbol = Column(String(40), nullable=False, index=True)
     source_key = Column(String(160), nullable=False, index=True)
@@ -484,7 +489,7 @@ class AnalyticsMarketStructureSnapshot(Base):
     __tablename__ = "analytics_market_structure_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    timestamp = Column(DateTime, default=_utcnow, nullable=False, index=True)
     exchange = Column(String(20), nullable=False, index=True)
     symbol = Column(String(40), nullable=False, index=True)
     source_key = Column(String(160), nullable=False, index=True)

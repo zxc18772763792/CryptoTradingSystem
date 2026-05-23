@@ -91,9 +91,20 @@ def _load_research_jobs(path: Path) -> Dict[str, Dict[str, Any]]:
         return {}
 
 
+def _state_path_or_default(app: FastAPI, attr: str, default: Path) -> Path:
+    raw = getattr(app.state, attr, None)
+    if isinstance(raw, (str, Path)):
+        path = Path(raw)
+        if path.name:
+            return path
+    setattr(app.state, attr, default)
+    return default
+
+
 def _persist_research_jobs(app: FastAPI) -> None:
     try:
-        path = Path(getattr(app.state, "ai_research_jobs_path"))
+        base_dir = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai").resolve()
+        path = _state_path_or_default(app, "ai_research_jobs_path", base_dir / "research_jobs.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         data = dict(getattr(app.state, "research_jobs", {}) or {})
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -379,35 +390,28 @@ def _recover_missing_proposals_from_candidates(app: FastAPI) -> int:
 
 def ensure_ai_research_runtime_state(app: FastAPI) -> None:
     base_dir = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai").resolve()
-    if not hasattr(app.state, "ai_research_dir"):
-        app.state.ai_research_dir = base_dir
-    if not hasattr(app.state, "ai_proposal_registry_path"):
-        app.state.ai_proposal_registry_path = base_dir / "proposals.json"
-    if not hasattr(app.state, "ai_experiment_registry_path"):
-        app.state.ai_experiment_registry_path = base_dir / "experiments.json"
-    if not hasattr(app.state, "ai_experiment_run_registry_path"):
-        app.state.ai_experiment_run_registry_path = base_dir / "experiment_runs.json"
-    if not hasattr(app.state, "ai_candidate_registry_path"):
-        app.state.ai_candidate_registry_path = base_dir / "candidates.json"
-    if not hasattr(app.state, "ai_lifecycle_registry_path"):
-        app.state.ai_lifecycle_registry_path = base_dir / "lifecycle.json"
-    if not hasattr(app.state, "ai_research_jobs_path"):
-        app.state.ai_research_jobs_path = base_dir / "research_jobs.json"
+    _state_path_or_default(app, "ai_research_dir", base_dir)
+    proposal_path = _state_path_or_default(app, "ai_proposal_registry_path", base_dir / "proposals.json")
+    experiment_path = _state_path_or_default(app, "ai_experiment_registry_path", base_dir / "experiments.json")
+    experiment_run_path = _state_path_or_default(app, "ai_experiment_run_registry_path", base_dir / "experiment_runs.json")
+    candidate_path = _state_path_or_default(app, "ai_candidate_registry_path", base_dir / "candidates.json")
+    lifecycle_path = _state_path_or_default(app, "ai_lifecycle_registry_path", base_dir / "lifecycle.json")
+    research_jobs_path = _state_path_or_default(app, "ai_research_jobs_path", base_dir / "research_jobs.json")
 
     first_init = not isinstance(getattr(app.state, "ai_proposal_registry", None), ProposalRegistry)
 
     if not isinstance(getattr(app.state, "ai_proposal_registry", None), ProposalRegistry):
-        app.state.ai_proposal_registry = ProposalRegistry(Path(app.state.ai_proposal_registry_path))
+        app.state.ai_proposal_registry = ProposalRegistry(proposal_path)
     if not isinstance(getattr(app.state, "ai_experiment_registry", None), ExperimentRegistry):
-        app.state.ai_experiment_registry = ExperimentRegistry(Path(app.state.ai_experiment_registry_path))
+        app.state.ai_experiment_registry = ExperimentRegistry(experiment_path)
     if not isinstance(getattr(app.state, "ai_experiment_run_registry", None), ExperimentRunRegistry):
-        app.state.ai_experiment_run_registry = ExperimentRunRegistry(Path(app.state.ai_experiment_run_registry_path))
+        app.state.ai_experiment_run_registry = ExperimentRunRegistry(experiment_run_path)
     if not isinstance(getattr(app.state, "ai_candidate_registry", None), CandidateRegistry):
-        app.state.ai_candidate_registry = CandidateRegistry(Path(app.state.ai_candidate_registry_path))
+        app.state.ai_candidate_registry = CandidateRegistry(candidate_path)
     if not isinstance(getattr(app.state, "ai_lifecycle_registry", None), LifecycleRegistry):
-        app.state.ai_lifecycle_registry = LifecycleRegistry(Path(app.state.ai_lifecycle_registry_path))
+        app.state.ai_lifecycle_registry = LifecycleRegistry(lifecycle_path)
     if not isinstance(getattr(app.state, "research_jobs", None), dict):
-        app.state.research_jobs = _load_research_jobs(Path(app.state.ai_research_jobs_path))
+        app.state.research_jobs = _load_research_jobs(research_jobs_path)
     if not isinstance(getattr(app.state, "research_job_tasks", None), dict):
         app.state.research_job_tasks = {}
 

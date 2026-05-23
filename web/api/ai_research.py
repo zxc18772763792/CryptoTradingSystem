@@ -634,10 +634,20 @@ def _candidate_timeframe(candidate: Any, default: str = "1h") -> str:
     timeframe_value = getattr(candidate, "timeframe", None)
     if isinstance(timeframe_value, str) and timeframe_value.strip():
         return timeframe_value.strip()
+    timeframes_value = getattr(candidate, "timeframes", None)
+    if isinstance(timeframes_value, (list, tuple)) and timeframes_value:
+        for item in timeframes_value:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
     meta = getattr(candidate, "metadata", None) or {}
     meta_timeframe = meta.get("timeframe") if isinstance(meta, dict) else None
     if isinstance(meta_timeframe, str) and meta_timeframe.strip():
         return meta_timeframe.strip()
+    meta_timeframes = meta.get("timeframes") if isinstance(meta, dict) else None
+    if isinstance(meta_timeframes, (list, tuple)) and meta_timeframes:
+        for item in meta_timeframes:
+            if isinstance(item, str) and item.strip():
+                return item.strip()
     return str(default or "1h").strip() or "1h"
 
 
@@ -1314,6 +1324,17 @@ def _signal_timeframe_seconds(timeframe: str) -> int:
     return 3600
 
 
+def _signal_stale_threshold_seconds(timeframe: str) -> int:
+    tf_seconds = max(1, _signal_timeframe_seconds(timeframe))
+    if tf_seconds < 60:
+        return max(180, tf_seconds * 12)
+    if tf_seconds <= 15 * 60:
+        return max(3 * tf_seconds, 45 * 60)
+    if tf_seconds <= 3600:
+        return max(2 * tf_seconds, 90 * 60)
+    return max(2 * tf_seconds, 3 * 3600)
+
+
 async def _load_signal_market_data(
     *,
     exchange: str,
@@ -1387,7 +1408,7 @@ async def _load_signal_market_data(
                 0.0,
                 (pd.Timestamp.now(tz=timezone.utc) - last_ts_utc).total_seconds(),
             )
-            stale = age_sec > max(3 * 3600, _signal_timeframe_seconds(resolved_timeframe) * 6)
+            stale = age_sec > _signal_stale_threshold_seconds(resolved_timeframe)
         except Exception as exc:
             stale = True
             if not load_error:
@@ -1402,6 +1423,7 @@ async def _load_signal_market_data(
         "market_data_last_bar_at": last_bar_at,
         "market_data_age_sec": round(float(age_sec), 3) if age_sec is not None else None,
         "market_data_stale": bool(stale),
+        "market_data_stale_threshold_sec": _signal_stale_threshold_seconds(resolved_timeframe),
         "market_data_load_error": load_error,
     }
     return (df.copy() if rows > 0 else pd.DataFrame()), meta
@@ -4002,7 +4024,10 @@ async def get_ai_candidate_lifecycle(request: Request, candidate_id: str, limit:
     return {"candidate_id": candidate_id, "items": rows, "count": len(rows)}
 
 
-@router.get("/candidates/{candidate_id}/param-sensitivity")
+@router.get(
+    "/candidates/{candidate_id}/param-sensitivity",
+    dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))],
+)
 async def get_candidate_param_sensitivity(
     request: Request,
     candidate_id: str,
@@ -4061,7 +4086,8 @@ async def get_candidate_param_sensitivity(
         return {"candidate_id": candidate_id, "items": [], "note": "no market data for sensitivity"}
 
     try:
-        base_result = _run_backtest_core(
+        base_result = await asyncio.to_thread(
+            _run_backtest_core,
             strategy=candidate.strategy,
             df=df,
             timeframe=timeframe,
@@ -4098,7 +4124,8 @@ async def get_candidate_param_sensitivity(
             trial_params = dict(params)
             trial_params[key] = shifted_val
             try:
-                result = _run_backtest_core(
+                result = await asyncio.to_thread(
+                    _run_backtest_core,
                     strategy=candidate.strategy,
                     df=df,
                     timeframe=timeframe,
@@ -4453,13 +4480,18 @@ def _trades_to_returns(trades: list) -> List[float]:
     return returns
 
 
-@router.get("/candidates/{candidate_id}/decay-check")
-async def get_candidate_decay_check(request: Request, candidate_id: str):
+def _build_candidate_decay_payload(
+    request: Request,
+    candidate_id: str,
+    *,
+    persist: bool,
+) -> Dict[str, Any]:
     """Run CUSUM decay detection on the candidate's live/paper trade history.
 
     Reads the risk_manager's in-memory trade history, filters by strategy name,
-    converts to a return series, runs CUSUM, persists summary to candidate
-    metadata, and returns the full CUSUM result dict.
+    converts to a return series, runs CUSUM, and optionally persists summary to
+    candidate metadata. GET callers use the read-only compatibility path; POST
+    callers persist the metadata update.
     """
     from core.monitoring.strategy_monitor import detect_strategy_decay
     from core.risk.risk_manager import risk_manager
@@ -4496,10 +4528,31 @@ async def get_candidate_decay_check(request: Request, candidate_id: str):
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "strategy_name_used": strat_name,
     }
-    cand.metadata["cusum_status"] = status_summary
-    request.app.state.ai_candidate_registry.save(cand)
+    if persist:
+        cand.metadata["cusum_status"] = status_summary
+        request.app.state.ai_candidate_registry.save(cand)
 
-    return {"candidate_id": candidate_id, "cusum": result, "strategy_name": strat_name, "n_trades": len(filtered)}
+    return {
+        "candidate_id": candidate_id,
+        "cusum": result,
+        "strategy_name": strat_name,
+        "n_trades": len(filtered),
+        "persisted": bool(persist),
+        "cusum_status": status_summary,
+    }
+
+
+@router.post(
+    "/candidates/{candidate_id}/decay-check",
+    dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))],
+)
+async def post_candidate_decay_check(request: Request, candidate_id: str):
+    return _build_candidate_decay_payload(request, candidate_id, persist=True)
+
+
+@router.get("/candidates/{candidate_id}/decay-check")
+async def get_candidate_decay_check(request: Request, candidate_id: str):
+    return _build_candidate_decay_payload(request, candidate_id, persist=False)
 
 
 @router.get("/promotions")
@@ -4972,7 +5025,7 @@ async def generate_order_preview(request: Request, candidate_id: str):
     df, market_meta = await _load_signal_market_data(
         exchange=_candidate_exchange(cand),
         symbol=cand_symbol,
-        timeframe="1h",
+        timeframe=_candidate_timeframe(cand),
         limit=120,
     )
 

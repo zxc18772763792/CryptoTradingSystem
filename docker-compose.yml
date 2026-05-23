@@ -1,4 +1,18 @@
-﻿version: '3.8'
+# docker-compose.yml — Compose Spec (no `version:` key required for Compose v2)
+#
+# Required environment variables (fail-fast if unset):
+#   POSTGRES_PASSWORD          Postgres password for the `crypto` user
+#   REDIS_PASSWORD             Redis AUTH password
+#   GRAFANA_ADMIN_PASSWORD     Grafana admin password
+#
+# Optional:
+#   POSTGRES_USER (default: crypto)
+#   POSTGRES_DB   (default: crypto_trading)
+#
+# Network model: services communicate over the internal `crypto_net` network
+# only. No ports are published to the host by default — open SSH/VPN tunnels
+# or add an explicit reverse proxy if external access is required. The single
+# exception is `web`, which publishes 8000 because that is the operator UI.
 
 services:
   web:
@@ -7,72 +21,102 @@ services:
       - "8000:8000"
     environment:
       - TRADING_MODE=paper
-      - DATABASE_URL=postgresql+asyncpg://crypto:crypto@db:5432/crypto_trading
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-crypto}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}@db:5432/${POSTGRES_DB:-crypto_trading}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD env var is required}@redis:6379/0
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./.env:/app/.env
+      - ./.env:/app/.env:ro
     depends_on:
       - db
       - redis
     restart: unless-stopped
+    mem_limit: 1g
+    networks:
+      - crypto_net
 
   news_service:
     build: .
     command: ["python", "-m", "core.news.service.worker"]
     environment:
-      - DATABASE_URL=postgresql+asyncpg://crypto:crypto@db:5432/crypto_trading
-      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-crypto}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}@db:5432/${POSTGRES_DB:-crypto_trading}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD env var is required}@redis:6379/0
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-      - ./.env:/app/.env
+      - ./.env:/app/.env:ro
     depends_on:
       - db
       - redis
     restart: unless-stopped
+    mem_limit: 1g
+    networks:
+      - crypto_net
     profiles:
       - news_service
 
   db:
     image: postgres:15-alpine
     environment:
-      - POSTGRES_USER=crypto
-      - POSTGRES_PASSWORD=crypto
-      - POSTGRES_DB=crypto_trading
+      - POSTGRES_USER=${POSTGRES_USER:-crypto}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}
+      - POSTGRES_DB=${POSTGRES_DB:-crypto_trading}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
+    expose:
+      - "5432"
     restart: unless-stopped
+    mem_limit: 1g
+    networks:
+      - crypto_net
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD env var is required}"]
+    expose:
+      - "6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
+    mem_limit: 1g
+    networks:
+      - crypto_net
 
-  prometheus:
-    image: prom/prometheus:latest
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    profiles:
-      - monitoring
+  # TODO: prometheus.yml is not present at repo root — create it before
+  # enabling this service. Uncomment the block once the config file exists.
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   expose:
+  #     - "9090"
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #   restart: unless-stopped
+  #   mem_limit: 1g
+  #   networks:
+  #     - crypto_net
+  #   profiles:
+  #     - monitoring
 
   grafana:
     image: grafana/grafana:latest
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD env var is required}
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+    mem_limit: 1g
+    networks:
+      - crypto_net
     profiles:
       - monitoring
 
 volumes:
   postgres_data:
   redis_data:
+  grafana_data:
+
+networks:
+  crypto_net:
+    driver: bridge

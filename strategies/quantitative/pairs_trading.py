@@ -89,7 +89,10 @@ class PairsTradingStrategy(StrategyBase):
         if min_hr > max_hr:
             min_hr, max_hr = max_hr, min_hr
         if allow_negative:
-            if min_hr >= 0 < max_hr:
+            # Explicit `and` — Python chained comparison `min_hr >= 0 < max_hr`
+            # parses as `(min_hr >= 0) and (0 < max_hr)`, which silently rewrites
+            # user config whenever max_hr happens to be positive.
+            if min_hr == 0 and max_hr > 0:
                 min_hr = -abs(max_hr)
         else:
             min_hr = max(0.0, min_hr)

@@ -1169,15 +1169,24 @@ class MeanReversionHalfLifeStrategy(FactorStrategyBase):
         entry_z = self.params["zscore_entry"]
         exit_z = self.params["zscore_exit"]
 
+        mean_value = float(mean.iloc[-1]) if pd.notna(mean.iloc[-1]) else float("nan")
+        tp_pct = float(self.params.get("take_profit_pct", 0.05))
+
         # Mean reversion buy: price below mean
         if prev_z < -entry_z and current_z >= -entry_z and current_z < -exit_z:
             signal = self._create_signal(
                 symbol, SignalType.BUY, current_price,
                 strength=min(abs(current_z) / entry_z, 1.0),
-                metadata={"zscore": current_z, "mean": mean.iloc[-1]}
+                metadata={"zscore": current_z, "mean": mean_value}
             )
             signal.stop_loss = current_price * (1 - self.params["stop_loss_pct"])
-            signal.take_profit = mean.iloc[-1]  # Target the mean
+            # Target the mean — but if the mean has already drifted at/below
+            # current price (numerical noise or local trend), the "TP at mean"
+            # would trigger immediately. Fall back to a percentage take_profit.
+            if np.isfinite(mean_value) and mean_value > current_price:
+                signal.take_profit = mean_value
+            else:
+                signal.take_profit = current_price * (1 + tp_pct)
             signals.append(signal)
 
         # Mean reversion sell: price above mean
@@ -1185,10 +1194,14 @@ class MeanReversionHalfLifeStrategy(FactorStrategyBase):
             signal = self._create_signal(
                 symbol, SignalType.SELL, current_price,
                 strength=min(abs(current_z) / entry_z, 1.0),
-                metadata={"zscore": current_z, "mean": mean.iloc[-1]}
+                metadata={"zscore": current_z, "mean": mean_value}
             )
             signal.stop_loss = current_price * (1 + self.params["stop_loss_pct"])
-            signal.take_profit = mean.iloc[-1]  # Target the mean
+            # Symmetric guard: SELL TP must be below current price.
+            if np.isfinite(mean_value) and mean_value < current_price:
+                signal.take_profit = mean_value
+            else:
+                signal.take_profit = current_price * (1 - tp_pct)
             signals.append(signal)
 
         return signals
@@ -1263,8 +1276,12 @@ class HurstExponentStrategy(FactorStrategyBase):
         default_params = {
             "hurst_period": 100,
             "zscore_period": 20,
-            "trending_threshold": 0.55,  # H > 0.55 = trending
-            "mean_revert_threshold": 0.45,  # H < 0.45 = mean reverting
+            # Variance Ratio is the proxy used for Hurst. Neutral is 1.0
+            # (random walk), >1 = trending / persistent, <1 = mean reverting.
+            # Older defaults 0.55/0.45 were on the Hurst-scale and never fired
+            # against the VR-scaled series. Thresholds are now on the VR scale.
+            "trending_threshold": 1.20,
+            "mean_revert_threshold": 0.80,
             "zscore_threshold": 1.5,
             "stop_loss_pct": 0.03,
             "take_profit_pct": 0.06,
@@ -1390,6 +1407,9 @@ class VaRBreakoutStrategy(FactorStrategyBase):
         var = returns.rolling(n).apply(calc_var, raw=False)
 
         current_ret = float(returns.iloc[-1])
+        # Use the last VaR value that was fully known before the current bar.
+        # Including the current return in the quantile contaminates the breakout
+        # threshold and can suppress exactly the tail move this strategy detects.
         current_var = float(var.iloc[-2])
         var_threshold = abs(current_var) * float(self.params["multiplier"])
 
@@ -1566,7 +1586,20 @@ class SortinoRatioStrategy(FactorStrategyBase):
             signals.append(signal)
 
         # Poor risk-adjusted returns
-        elif prev_sortino > -threshold and current_sortino <= -threshold:
+        # Guard: require monotonic deterioration (prev > current, both must be
+        # finite, and crossing must traverse from above -threshold to at/below
+        # -threshold *without* having spent the previous bar already there) AND
+        # a confirming negative trend. Without these guards the branch fires on
+        # numeric noise around -threshold (the original `prev > -threshold` is
+        # true even for very positive prev_sortino like +5.0).
+        elif (
+            np.isfinite(prev_sortino)
+            and np.isfinite(current_sortino)
+            and prev_sortino > -threshold
+            and current_sortino <= -threshold
+            and current_sortino < prev_sortino
+            and trend < 0
+        ):
             signal = self._create_signal(
                 symbol, SignalType.SELL, current_price,
                 strength=min(abs(current_sortino) / threshold, 1.0),

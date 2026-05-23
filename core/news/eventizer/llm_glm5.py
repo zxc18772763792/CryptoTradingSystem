@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import requests
@@ -399,7 +400,31 @@ def _openai_post_with_failover(
 
     last_exc: Optional[BaseException] = None
     total_targets = len(available)
+    # Wall-clock budget: cap total elapsed across all failover attempts at
+    # ``timeout_sec * total_targets + buffer``. Without this, a slow-fail cascade
+    # across N targets can stall the caller for ~N * timeout_sec.
+    _WALL_CLOCK_BUFFER_SEC = 5
+    per_target_timeout_budget = sum(
+        _local_gemma_timeout_sec(timeout_sec)
+        if _is_local_gemma_target(
+            str(target.get("base_url") or "").rstrip("/"),
+            str(target.get("model") or "").strip(),
+        )
+        else timeout_sec
+        for target in available
+    )
+    wall_clock_budget_sec = max(timeout_sec, per_target_timeout_budget + _WALL_CLOCK_BUFFER_SEC)
+    start_ts = time.monotonic()
     for idx, target in enumerate(available):
+        elapsed = time.monotonic() - start_ts
+        if elapsed >= wall_clock_budget_sec:
+            err = RuntimeError(
+                f"{log_prefix}: failover wall-clock budget exhausted "
+                f"({elapsed:.1f}s >= {wall_clock_budget_sec:.1f}s) after {idx}/{total_targets} targets"
+            )
+            if last_exc is not None:
+                raise err from last_exc
+            raise err
         base_url = str(target.get("base_url") or "").rstrip("/")
         api_key = str(target.get("api_key") or "").strip()
         target_model = str(target.get("model") or "").strip()
@@ -410,6 +435,11 @@ def _openai_post_with_failover(
             if _is_local_gemma_target(base_url, target_model)
             else timeout_sec
         )
+        # Clamp per-request timeout to the remaining wall-clock budget so a
+        # final-target call cannot push us far past the cap.
+        remaining_budget = wall_clock_budget_sec - elapsed
+        if remaining_budget > 0:
+            request_timeout_sec = max(1, min(request_timeout_sec, int(remaining_budget) + 1))
         request_chat_payload = None
         if chat_fallback_payload is not None:
             request_chat_payload = dict(chat_fallback_payload)
@@ -688,25 +718,46 @@ def _extract_json_block(text: str) -> Any:
     if not raw:
         raise ValueError("empty LLM response")
 
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?", "", raw, flags=re.IGNORECASE).strip()
-        raw = re.sub(r"```$", "", raw).strip()
+    # Preferred path: find the first fenced code block (```json ... ``` or ``` ... ```)
+    # anywhere in the response. Models sometimes prepend prose before the fence,
+    # so use re.search rather than relying on the response starting with ```.
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]+?)```", raw, re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        block = fence_match.group(1).strip()
+        if block:
+            try:
+                return _safe_json_loads(block)
+            except Exception:
+                # fall through to legacy strategies on the fenced content
+                raw_for_brackets = block
+            else:
+                raw_for_brackets = block
+        else:
+            raw_for_brackets = raw
+    else:
+        # Strip a leading naked fence if the response opens with ``` but has no
+        # closing fence (rare, but observed with truncated streams).
+        if raw.startswith("```"):
+            raw_for_brackets = re.sub(r"^```(?:json)?", "", raw, flags=re.IGNORECASE).strip()
+            raw_for_brackets = re.sub(r"```$", "", raw_for_brackets).strip()
+        else:
+            raw_for_brackets = raw
 
     try:
-        return _safe_json_loads(raw)
+        return _safe_json_loads(raw_for_brackets)
     except Exception:
         pass
 
     candidates: List[str] = []
-    left_bracket = raw.find("[")
-    right_bracket = raw.rfind("]")
+    left_bracket = raw_for_brackets.find("[")
+    right_bracket = raw_for_brackets.rfind("]")
     if left_bracket >= 0 and right_bracket > left_bracket:
-        candidates.append(raw[left_bracket : right_bracket + 1])
+        candidates.append(raw_for_brackets[left_bracket : right_bracket + 1])
 
-    left_brace = raw.find("{")
-    right_brace = raw.rfind("}")
+    left_brace = raw_for_brackets.find("{")
+    right_brace = raw_for_brackets.rfind("}")
     if left_brace >= 0 and right_brace > left_brace:
-        candidates.append(raw[left_brace : right_brace + 1])
+        candidates.append(raw_for_brackets[left_brace : right_brace + 1])
 
     for candidate in candidates:
         try:
@@ -1016,10 +1067,18 @@ def _call_llm_once(
     )
     data = coerce_responses_to_chat_completions(data)
     choices = data.get("choices") if isinstance(data, dict) else None
-    if not choices:
+    if not isinstance(choices, list) or len(choices) == 0:
+        # Raise ValueError so the outer extract loop treats this as a retryable
+        # parse failure (vs an unrecoverable transport error).
         raise ValueError("LLM response missing choices")
 
-    message = choices[0].get("message") or {}
+    try:
+        first_choice = choices[0]
+    except IndexError as exc:  # defensive — list truthy but indexing failed
+        raise ValueError("LLM response choices unexpectedly empty") from exc
+    message = first_choice.get("message") if isinstance(first_choice, dict) else None
+    if not isinstance(message, dict):
+        raise ValueError("LLM response choice missing message dict")
     content = _normalize_llm_content(message.get("content"))
 
     parsed = _extract_json_block(content)

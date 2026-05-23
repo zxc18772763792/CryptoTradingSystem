@@ -1,19 +1,77 @@
+# Version control
 .git
 .gitignore
-.pytest_cache
-.mypy_cache
+.gitattributes
+
+# Python caches and build artefacts
 __pycache__
 *.pyc
 *.pyo
 *.pyd
+*.egg-info
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.pytest_tmp
+.pytest_tmp_broken
+.pytest_tmp*/
+.coverage
+.coverage.*
+htmlcov
+
+# Virtual environments
 .venv
 venv
 env
-logs
-data
+ENV
+
+# Local-only runtime data (never bake into image)
+runtime/
+data/
+logs/
+output/
+reports/
+models/
+tmp/
+MagicMock/
+
+# Logs and databases
+*.log
+*.db
+*.sqlite
+*.sqlite-journal
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+
+# Tests live outside the image
 tests
+
+# Docs (Docker image does not need these)
 *.md
+
+# Secrets — must never be copied in
 keys.txt
 .env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Archives and misc
 *.zip
+*.tar
+*.tar.gz
 nul
+
+# Editor / OS noise
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Node / playwright caches that may exist
+node_modules
+.playwright
+playwright-report
+test-results

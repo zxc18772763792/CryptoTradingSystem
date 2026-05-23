@@ -1,5 +1,5 @@
 param(
-    [int]$LogRetentionDays = 7,
+    [int]$LogRetentionDays = 30,
     [int]$MaxLogFileMB = 50,
     [int]$MaxRotatedLogFiles = 3,
     [switch]$DryRun,

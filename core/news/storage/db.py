@@ -11,6 +11,35 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+
+# Maximum number of rows scanned for the title-bucket dedup window. Bounded to
+# protect SQLite when news_raw grows large; pair with an index on published_at.
+_EXISTING_RECENT_SCAN_LIMIT = 5000
+
+
+def _normalize_url_for_dedup(url: str) -> str:
+    """URL canonicalization aligned with ``MultiSourceNewsCollector._normalize_url``.
+
+    Lowercases scheme/host, strips utm_*/fbclid/gclid/spm query params, drops the
+    URL fragment. Returns the input untouched (after strip) on any parsing error.
+    """
+    text = str(url or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+        query_items = []
+        for k, v in parse_qsl(parts.query, keep_blank_values=False):
+            key = str(k or "").lower()
+            if key.startswith("utm_") or key in {"fbclid", "gclid", "spm"}:
+                continue
+            query_items.append((k, v))
+        query = urlencode(query_items, doseq=True)
+        return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, query, ""))
+    except Exception:
+        return text
 
 from loguru import logger
 from sqlalchemy import and_, case, event, func, insert, or_, select, text
@@ -1130,26 +1159,40 @@ async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[
     async with news_session_scope() as session:
         existing_url_rows = await session.execute(select(NewsRaw.url).where(NewsRaw.url.in_(urls)))
         existing_hash_rows = await session.execute(select(NewsRaw.content_hash).where(NewsRaw.content_hash.in_(hashes)))
+        # Bounded scan: ORDER BY published_at DESC + LIMIT to protect from full
+        # table scans when news_raw is large. Assumes index on published_at.
         existing_recent_rows = await session.execute(
-            select(NewsRaw.title, NewsRaw.published_at).where(and_(NewsRaw.published_at >= min_ts, NewsRaw.published_at <= max_ts))
+            select(NewsRaw.url, NewsRaw.title, NewsRaw.published_at)
+            .where(and_(NewsRaw.published_at >= min_ts, NewsRaw.published_at <= max_ts))
+            .order_by(NewsRaw.published_at.desc())
+            .limit(_EXISTING_RECENT_SCAN_LIMIT)
         )
-        existing_urls = {row[0] for row in existing_url_rows.all()}
+        existing_urls = {_normalize_url_for_dedup(row[0]) for row in existing_url_rows.all() if row and row[0]}
         existing_hashes = {row[0] for row in existing_hash_rows.all()}
+        recent_rows_data = existing_recent_rows.all()
         existing_title_buckets = {
-            _title_bucket_key(row[0], row[1])
-            for row in existing_recent_rows.all()
-            if row and row[0] and row[1]
+            _title_bucket_key(row[1], row[2])
+            for row in recent_rows_data
+            if row and row[1] and row[2]
         }
+        # Add normalized URL form for every recent row so URL dedup also covers
+        # tracking-param variants discovered within the time window.
+        for row in recent_rows_data:
+            if row and row[0]:
+                existing_urls.add(_normalize_url_for_dedup(row[0]))
 
         objects: List[NewsRaw] = []
         rows_to_insert: List[Dict[str, Any]] = []
         deduped_count = local_dup
         for item in normalized:
             title_bucket = _title_bucket_key(item["title"], item["published_at"])
-            if item["url"] in existing_urls or item["content_hash"] in existing_hashes or (title_bucket and title_bucket in existing_title_buckets):
+            item_url_norm = _normalize_url_for_dedup(item.get("url") or "")
+            if item_url_norm in existing_urls or item["content_hash"] in existing_hashes or (title_bucket and title_bucket in existing_title_buckets):
                 deduped_count += 1
                 continue
             rows_to_insert.append(item)
+            if item_url_norm:
+                existing_urls.add(item_url_norm)
             if title_bucket:
                 existing_title_buckets.add(title_bucket)
         if news_engine.dialect.name == "sqlite":
@@ -1411,9 +1454,10 @@ async def save_events(events: List[Dict[str, Any]], model_source: str = "rules")
         existing_rows = await session.execute(select(NewsEvent.event_id).where(NewsEvent.event_id.in_(event_ids)))
         existing = {row[0] for row in existing_rows.all()}
         existing_recent_rows = await session.execute(
-            select(NewsEvent.symbol, NewsEvent.event_type, NewsEvent.sentiment, NewsEvent.ts, NewsEvent.evidence, NewsEvent.impact_score).where(
-                and_(NewsEvent.ts >= min_ts, NewsEvent.ts <= max_ts)
-            )
+            select(NewsEvent.symbol, NewsEvent.event_type, NewsEvent.sentiment, NewsEvent.ts, NewsEvent.evidence, NewsEvent.impact_score)
+            .where(and_(NewsEvent.ts >= min_ts, NewsEvent.ts <= max_ts))
+            .order_by(NewsEvent.ts.desc())
+            .limit(_EXISTING_RECENT_SCAN_LIMIT)
         )
         existing_semantic: Dict[str, Dict[str, Any]] = {}
         for row in existing_recent_rows.all():
@@ -1696,6 +1740,11 @@ async def get_recent_events(symbol: Optional[str], since_minutes: int) -> List[D
 async def set_global_backoff(backoff_until: datetime) -> None:
     """Set a global rate limit backoff that affects all LLM processing.
 
+    NOTE: ``_global_rate_limit_backoff`` is a process-level (in-memory) variable.
+    Multiple workers running in separate processes do NOT share this state — each
+    process maintains its own backoff. For cross-process backoff, persist into the
+    database or use an external store (Redis, etc.).
+
     Args:
         backoff_until: UTC datetime until which all LLM tasks should be paused
     """
@@ -1706,6 +1755,9 @@ async def set_global_backoff(backoff_until: datetime) -> None:
 
 async def get_global_backoff() -> Optional[datetime]:
     """Get the current global rate limit backoff time.
+
+    NOTE: process-level state — see :func:`set_global_backoff` docstring. Multiple
+    workers in separate processes do NOT share this state.
 
     Returns:
         UTC datetime until which LLM processing should be paused, or None

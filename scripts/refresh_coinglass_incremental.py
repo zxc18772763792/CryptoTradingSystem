@@ -18,7 +18,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbols", default="", help="Comma-separated symbols such as BTC/USDT,ETH/USDT")
     parser.add_argument("--datasets", default="", help="Comma-separated CoinGlass dataset names. Defaults to the light core set.")
     parser.add_argument("--manual", action="store_true", help="Use manual refresh budget path.")
-    parser.add_argument("--max-symbols", type=int, default=1, help="Maximum symbols to refresh in this run.")
+    parser.add_argument("--max-symbols", type=int, default=3, help="Maximum symbols to refresh in this run.")
     return parser
 
 
@@ -30,7 +30,7 @@ async def _main() -> None:
         symbols=symbols or None,
         datasets=datasets or None,
         manual=bool(args.manual),
-        max_symbols_per_run=max(1, int(args.max_symbols or 1)),
+        max_symbols_per_run=max(1, int(args.max_symbols or 3)),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

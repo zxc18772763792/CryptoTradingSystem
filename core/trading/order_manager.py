@@ -2,9 +2,12 @@
 Order management module.
 """
 import asyncio
+import re
+import time
+import uuid
 from datetime import datetime, timezone
 import math
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -54,6 +57,11 @@ class OrderRequest:
 
 
 class OrderManager:
+    # Binance newClientOrderId allows A-Za-z0-9_-.|, max length 36.
+    _CLIENT_ORDER_ID_MAX_LEN = 36
+    _CLIENT_ORDER_ID_TTL_SEC = 60.0
+    _CLIENT_ORDER_ID_SAFE_RE = re.compile(r"[^A-Za-z0-9_\-\.]")
+
     def __init__(self):
         self._orders: Dict[str, Order] = {}
         self._pending_orders: Dict[str, OrderRequest] = {}
@@ -62,6 +70,10 @@ class OrderManager:
         self._paper_trading: bool = True
         self._paper_order_seq: int = 0
         self._last_error: str = ""
+        # client_order_id -> created_at monotonic ts; 60s TTL for idempotency dedup.
+        self._client_order_ids: Dict[str, float] = {}
+        self._client_order_seq: int = 0
+        self._client_order_lock = asyncio.Lock()
 
     @staticmethod
     def _normalize_mode(value: Any, default: str = "paper") -> str:
@@ -123,6 +135,15 @@ class OrderManager:
             return max(0.0, out)
         except Exception:
             return float(default)
+
+    @staticmethod
+    def _ts_sort_key(ts: Any) -> datetime:
+        """Coerce a possibly-naive order timestamp into a tz-aware UTC key."""
+        if isinstance(ts, datetime):
+            if ts.tzinfo is None:
+                return ts.replace(tzinfo=timezone.utc)
+            return ts
+        return datetime.min.replace(tzinfo=timezone.utc)
 
     @staticmethod
     def _normalize_leverage(value: Any, default: int = 1) -> int:
@@ -264,12 +285,72 @@ class OrderManager:
         return bool(params.get("governance_prechecked") and params.get("trace_id"))
 
     def _next_paper_order_id(self) -> str:
+        # uuid4 avoids collisions when multiple processes share runtime state
+        # while still being readable enough for logs.
         self._paper_order_seq = (self._paper_order_seq + 1) % 1000000
-        return f"paper_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{self._paper_order_seq:06d}"
+        return f"paper_{uuid.uuid4().hex}"
 
     def _next_rejected_order_id(self) -> str:
         self._paper_order_seq = (self._paper_order_seq + 1) % 1000000
-        return f"rejected_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{self._paper_order_seq:06d}"
+        return f"rejected_{uuid.uuid4().hex}"
+
+    def _prune_expired_client_order_ids(self, now: Optional[float] = None) -> None:
+        ts_now = float(now if now is not None else time.monotonic())
+        expired = [
+            cid for cid, born in self._client_order_ids.items()
+            if ts_now - born > self._CLIENT_ORDER_ID_TTL_SEC
+        ]
+        for cid in expired:
+            self._client_order_ids.pop(cid, None)
+
+    def _sanitize_client_order_prefix(self, strategy: Optional[str]) -> str:
+        text = self._CLIENT_ORDER_ID_SAFE_RE.sub("", str(strategy or "sys"))
+        text = text[:8] or "sys"
+        return text
+
+    async def _allocate_client_order_id(self, strategy: Optional[str]) -> str:
+        """Generate a fresh newClientOrderId and reserve it for 60s idempotency.
+
+        Format: <strategy[:8]>-<ts_ms>-<seq>, truncated to 36 chars to fit
+        Binance's spot/futures clientOrderId limits. The seq counter ensures
+        sub-millisecond collisions cannot reuse an in-flight id.
+        """
+        async with self._client_order_lock:
+            self._prune_expired_client_order_ids()
+            prefix = self._sanitize_client_order_prefix(strategy)
+            now_ms = int(time.time() * 1000)
+            for _ in range(64):
+                self._client_order_seq = (self._client_order_seq + 1) % 1_000_000
+                candidate = f"{prefix}-{now_ms}-{self._client_order_seq:06d}"
+                if len(candidate) > self._CLIENT_ORDER_ID_MAX_LEN:
+                    # Trim the prefix first to keep the unique suffix intact.
+                    overflow = len(candidate) - self._CLIENT_ORDER_ID_MAX_LEN
+                    trimmed_prefix = prefix[: max(1, len(prefix) - overflow)]
+                    candidate = f"{trimmed_prefix}-{now_ms}-{self._client_order_seq:06d}"
+                    candidate = candidate[: self._CLIENT_ORDER_ID_MAX_LEN]
+                if candidate not in self._client_order_ids:
+                    self._client_order_ids[candidate] = time.monotonic()
+                    return candidate
+                # Collision (extremely unlikely): rotate the timestamp slightly.
+                now_ms += 1
+            # Fall back to a uuid suffix if every seq slot is taken in the
+            # same millisecond — should not happen, but stay safe.
+            fallback = f"{prefix}-{uuid.uuid4().hex}"[: self._CLIENT_ORDER_ID_MAX_LEN]
+            self._client_order_ids[fallback] = time.monotonic()
+            return fallback
+
+    def _is_client_order_id_active(self, client_order_id: Optional[str]) -> bool:
+        """Return True if a clientOrderId is already in flight within TTL."""
+        if not client_order_id:
+            return False
+        self._prune_expired_client_order_ids()
+        return str(client_order_id) in self._client_order_ids
+
+    def _release_client_order_id(self, client_order_id: Optional[str]) -> None:
+        """Drop a reservation immediately (used when submit raises before fill)."""
+        if not client_order_id:
+            return
+        self._client_order_ids.pop(str(client_order_id), None)
 
     async def _create_paper_order(self, request: OrderRequest) -> Order:
         order_id = self._next_paper_order_id()
@@ -359,7 +440,7 @@ class OrderManager:
             remaining=0,
             cost=amount * fill_price,
             status=OrderStatus.CLOSED,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             exchange=request.exchange,
         )
 
@@ -408,6 +489,7 @@ class OrderManager:
             logger.error(self._last_error)
             return None
 
+        client_order_id: Optional[str] = None
         try:
             params = dict(request.params or {})
             requested_leverage = self._normalize_leverage(params.get("leverage", 1.0), default=1)
@@ -415,6 +497,31 @@ class OrderManager:
             post_only = bool(params.get("post_only") or params.get("postOnly"))
             if post_only:
                 params["postOnly"] = True
+
+            # Idempotency: inject a fresh newClientOrderId for every live submit and
+            # keep it reserved for 60s. If the caller supplied one (e.g. retry of a
+            # known order), reuse it but reject if still in-flight to prevent
+            # accidental double-fills from upstream retries.
+            supplied_coid = (
+                params.get("newClientOrderId")
+                or params.get("clientOrderId")
+                or params.get("client_order_id")
+            )
+            if supplied_coid:
+                supplied_coid_str = str(supplied_coid)
+                if self._is_client_order_id_active(supplied_coid_str):
+                    self._last_error = (
+                        f"duplicate client_order_id detected within idempotency window: "
+                        f"{supplied_coid_str}"
+                    )
+                    logger.warning(self._last_error)
+                    return None
+                client_order_id = supplied_coid_str
+                self._client_order_ids[client_order_id] = time.monotonic()
+            else:
+                client_order_id = await self._allocate_client_order_id(request.strategy)
+            params["newClientOrderId"] = client_order_id
+            params["clientOrderId"] = client_order_id
             order_price = request.price
             if request.order_type == OrderType.MARKET:
                 order_price = None
@@ -508,6 +615,7 @@ class OrderManager:
                         "type": request.order_type.value.upper(),
                         "quantity": payload_amount,
                         "newOrderRespType": "RESULT",
+                        "newClientOrderId": client_order_id,
                     }
                     if order_price is not None and request.order_type == OrderType.LIMIT:
                         raw_payload["price"] = _fmt("price_to_precision", float(order_price))
@@ -550,12 +658,15 @@ class OrderManager:
                         cost=self._safe_nonnegative_float((raw_order or {}).get("cumQuote"), float(fill_price or 0.0) * float(filled or 0.0)),
                         status=status_map.get(status_text, OrderStatus.OPEN),
                         timestamp=datetime.fromtimestamp(
-                            self._safe_nonnegative_float((raw_order or {}).get("updateTime"), 0.0) / 1000.0
-                        ) if self._safe_nonnegative_float((raw_order or {}).get("updateTime"), 0.0) > 0 else datetime.now(),
+                            self._safe_nonnegative_float((raw_order or {}).get("updateTime"), 0.0) / 1000.0,
+                            tz=timezone.utc,
+                        ) if self._safe_nonnegative_float((raw_order or {}).get("updateTime"), 0.0) > 0 else datetime.now(timezone.utc),
                         exchange=request.exchange,
                     )
                     self._orders[order.id] = order
-                    self._order_meta[order.id] = self._request_meta(request)
+                    meta_payload = self._request_meta(request)
+                    meta_payload["client_order_id"] = client_order_id
+                    self._order_meta[order.id] = meta_payload
                     logger.info(
                         f"Fast Binance futures order created: {order.id} "
                         f"{request.side.value} {request.amount} {request.symbol} "
@@ -576,7 +687,9 @@ class OrderManager:
             )
 
             self._orders[order.id] = order
-            self._order_meta[order.id] = self._request_meta(request)
+            meta_payload = self._request_meta(request)
+            meta_payload["client_order_id"] = client_order_id
+            self._order_meta[order.id] = meta_payload
             logger.info(
                 f"Order created: {order.id} "
                 f"{request.side.value} {request.amount} {request.symbol} "
@@ -587,10 +700,14 @@ class OrderManager:
             return order
         except Exception as e:
             self._last_error = str(e)
+            # Release the clientOrderId reservation when the submit failed
+            # before reaching the exchange — otherwise honest retries would
+            # be wrongly rejected as duplicates.
+            self._release_client_order_id(client_order_id)
             logger.error(
                 f"Failed to create order: exchange={request.exchange} symbol={request.symbol} "
                 f"type={request.order_type.value} side={request.side.value} amount={request.amount} "
-                f"price={order_price} params={params} error={e}"
+                f"price={order_price} error={e}"
             )
             return None
 
@@ -615,7 +732,7 @@ class OrderManager:
             remaining=amount,
             cost=amount * reject_price,
             status=OrderStatus.REJECTED,
-            timestamp=datetime.now(),
+            timestamp=datetime.now(timezone.utc),
             exchange=request.exchange,
         )
 
@@ -735,7 +852,7 @@ class OrderManager:
                     seen.add(key)
                     self._orders[row.id] = row
                     merged.append(row)
-            merged.sort(key=lambda x: x.timestamp or datetime.min, reverse=True)
+            merged.sort(key=lambda x: self._ts_sort_key(x.timestamp), reverse=True)
             return merged
 
         connector = self._resolve_cached_exchange(exchange)
@@ -762,7 +879,7 @@ class OrderManager:
             if (symbol is None or o.symbol == symbol)
             and (exchange is None or o.exchange == exchange)
         ]
-        orders.sort(key=lambda o: o.timestamp or datetime.min, reverse=True)
+        orders.sort(key=lambda o: self._ts_sort_key(o.timestamp), reverse=True)
         return orders[: max(1, limit)]
 
     async def cancel_all_orders(

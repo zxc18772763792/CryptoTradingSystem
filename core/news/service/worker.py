@@ -320,15 +320,15 @@ def _coinglass_rate_limit_per_min() -> int:
     except Exception:
         pass
     try:
-        return max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10))
+        return max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30))
     except Exception:
-        return 10
+        return 30
 
 
 def _coinglass_low_budget_mode() -> bool:
     if os.getenv("NEWS_COINGLASS_LOW_BUDGET_MODE") is not None:
         return _env_bool("NEWS_COINGLASS_LOW_BUDGET_MODE", True)
-    return _coinglass_rate_limit_per_min() <= 10
+    return _coinglass_rate_limit_per_min() < 20
 
 
 def _min_importance() -> int:
@@ -558,10 +558,16 @@ async def _event_processor_loop() -> None:
                     await _process_event_batch(batch)
                     batch.clear()
 
+            except asyncio.CancelledError:
+                # Propagate task cancellation immediately — do not swallow.
+                raise
             except Exception as e:
                 logger.error(f"Event processor error: {e}")
                 await asyncio.sleep(5)  # Back off on error
 
+    except asyncio.CancelledError:
+        logger.info("LLM event processor cancelled")
+        raise
     finally:
         logger.info("LLM event processor stopped")
         if _event_processor_task is asyncio.current_task():

@@ -1629,6 +1629,7 @@ def test_live_signal_snapshot_exposes_aggregated_timestamp(monkeypatch):
             "market_data_last_bar_at": "2026-04-06T00:15:00+00:00",
             "market_data_age_sec": 12.0,
             "market_data_stale": False,
+            "market_data_stale_threshold_sec": 2700,
             "market_data_load_error": None,
         }
 
@@ -1690,3 +1691,69 @@ def test_load_signal_market_data_localizes_naive_bar_timestamp_to_shanghai(monke
 
     assert meta["market_data_last_bar_at"] == "2026-04-06T11:15:00+08:00"
     assert meta["market_data_age_sec"] is not None
+
+
+def test_candidate_timeframe_prefers_list_before_default():
+    from web.api import ai_research as ai_module
+
+    candidate = SimpleNamespace(timeframe="", timeframes=["5m", "1h"], metadata={})
+
+    assert ai_module._candidate_timeframe(candidate) == "5m"
+
+
+def test_signal_stale_threshold_scales_by_timeframe():
+    from web.api import ai_research as ai_module
+
+    assert ai_module._signal_stale_threshold_seconds("15m") == 2700
+    assert ai_module._signal_stale_threshold_seconds("1h") == 7200
+
+
+def test_candidate_decay_check_get_is_read_only_and_post_persists(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    candidate = SimpleNamespace(
+        candidate_id="cand-1",
+        strategy="MAStrategy",
+        metadata={"registered_strategy_name": "demo-strategy"},
+    )
+    saved = []
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            ai_candidate_registry=SimpleNamespace(save=lambda cand: saved.append(cand))
+        )
+    )
+    request = SimpleNamespace(app=app)
+
+    monkeypatch.setattr(ai_module, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_module, "get_candidate", lambda app, candidate_id: candidate)
+
+    from core.risk.risk_manager import risk_manager
+
+    monkeypatch.setattr(
+        risk_manager,
+        "_trade_history",
+        [
+            {"strategy": "demo-strategy", "pnl_pct": 0.01},
+            {"strategy": "other", "pnl_pct": -0.02},
+        ],
+    )
+    monkeypatch.setattr(
+        "core.monitoring.strategy_monitor.detect_strategy_decay",
+        lambda returns: {
+            "triggered": False,
+            "n_bars": len(returns),
+            "decay_pct": 0.0,
+            "threshold": 0.1,
+            "message": "ok",
+        },
+    )
+
+    get_payload = ai_module._build_candidate_decay_payload(request, "cand-1", persist=False)
+    assert get_payload["persisted"] is False
+    assert saved == []
+    assert "cusum_status" not in candidate.metadata
+
+    post_payload = ai_module._build_candidate_decay_payload(request, "cand-1", persist=True)
+    assert post_payload["persisted"] is True
+    assert saved == [candidate]
+    assert candidate.metadata["cusum_status"]["n_bars"] == 1

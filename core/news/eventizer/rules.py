@@ -14,6 +14,8 @@ from core.news.storage.models import EventSchema, parse_any_datetime
 
 DEFAULT_RULES_PATH = Path("config/news_rules.yaml")
 DEFAULT_SYMBOLS_PATH = Path("config/symbols.yaml")
+DEFAULT_RULE_SYMBOL_LIMIT = 3
+GLOBAL_RULE_SYMBOL_LIMIT = 8
 
 
 class SymbolMapper:
@@ -185,7 +187,11 @@ def extract_events_rules(news_items: List[Dict[str, Any]], cfg: Optional[Dict[st
             matched_reason = _as_reason(rule)
             rule_symbols = [mapper.normalize_symbol(s) for s in (rule.get("symbols") or [])]
             symbols = [s for s in rule_symbols if s] or inferred_symbols or [default_symbol]
-            symbols = symbols[: max(1, int(rule.get("max_symbols") or 3))]
+            try:
+                max_symbols = int(rule.get("max_symbols") or DEFAULT_RULE_SYMBOL_LIMIT)
+            except (TypeError, ValueError):
+                max_symbols = DEFAULT_RULE_SYMBOL_LIMIT
+            symbols = symbols[: max(1, min(GLOBAL_RULE_SYMBOL_LIMIT, max_symbols))]
 
             for symbol in symbols:
                 event = {

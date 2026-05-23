@@ -167,6 +167,23 @@ def _touch_runtime_task(task_name: str, *, success: bool = False) -> None:
     runtime_state.touch_task(task_name, success=success)
 
 
+def _sync_guarded_startup_account_mode(decision: StartupModeDecision | None) -> bool:
+    if decision is None or not decision.blocked_persisted_live_restore:
+        return False
+    if decision.effective_mode != "paper":
+        return False
+    try:
+        updated = bool(account_manager.set_mode("main", decision.effective_mode))
+        if updated:
+            logger.warning(
+                "Synchronized main account mode to paper after blocking persisted live-mode restore."
+            )
+        return updated
+    except Exception as exc:
+        logger.warning(f"Failed to synchronize main account mode during guarded startup: {exc}")
+        return False
+
+
 def _safe_json(obj: Any) -> Dict[str, Any]:
     try:
         return json.loads(json.dumps(obj, default=str))
@@ -855,6 +872,11 @@ async def _google_trends_worker(stop_event: asyncio.Event) -> None:
             if result:
                 logger.debug(f"google_trends_worker: updated {list(result.keys())}")
             _touch_runtime_task("google_trends", success=True)
+        except ImportError as exc:
+            # Optional dependency (pytrends) missing — disable worker permanently to avoid wasted loops.
+            logger.info(f"google_trends_worker: dependency missing, disabling worker: {exc}")
+            _touch_runtime_task("google_trends", success=False)
+            return
         except Exception as exc:
             logger.debug(f"google_trends_worker: {exc}")
         for _ in range(INTERVAL):
@@ -875,6 +897,10 @@ async def _macro_cache_worker(stop_event: asyncio.Event) -> None:
             if result:
                 logger.debug(f"macro_cache_worker: updated {list(result.keys())}")
             _touch_runtime_task("macro_cache", success=True)
+        except ImportError as exc:
+            logger.info(f"macro_cache_worker: dependency missing, disabling worker: {exc}")
+            _touch_runtime_task("macro_cache", success=False)
+            return
         except Exception as exc:
             logger.debug(f"macro_cache_worker: {exc}")
         for _ in range(INTERVAL):
@@ -894,6 +920,10 @@ async def _glassnode_worker(stop_event: asyncio.Event) -> None:
             if result:
                 logger.debug(f"glassnode_worker: updated {list(result.keys())}")
             _touch_runtime_task("glassnode", success=True)
+        except ImportError as exc:
+            logger.info(f"glassnode_worker: dependency missing, disabling worker: {exc}")
+            _touch_runtime_task("glassnode", success=False)
+            return
         except Exception as exc:
             logger.debug(f"glassnode_worker: {exc}")
         for _ in range(INTERVAL):
@@ -913,6 +943,10 @@ async def _cryptoquant_worker(stop_event: asyncio.Event) -> None:
             if result:
                 logger.debug(f"cryptoquant_worker: updated {list(result.keys())}")
             _touch_runtime_task("cryptoquant", success=True)
+        except ImportError as exc:
+            logger.info(f"cryptoquant_worker: dependency missing, disabling worker: {exc}")
+            _touch_runtime_task("cryptoquant", success=False)
+            return
         except Exception as exc:
             logger.debug(f"cryptoquant_worker: {exc}")
         for _ in range(INTERVAL):
@@ -961,13 +995,13 @@ async def _kaiko_worker(stop_event: asyncio.Event) -> None:
 
 async def _coinglass_worker(stop_event: asyncio.Event) -> None:
     """Refresh CoinGlass premium cache in the background (no-op when disabled)."""
-    INTERVAL = 300
+    INTERVAL = 180
     await asyncio.sleep(360)  # stagger: 6 min after startup
     while not stop_event.is_set():
         try:
             from core.data.coinglass_feature_builder import update_coinglass_cache  # noqa: PLC0415
 
-            result = await update_coinglass_cache(max_symbols_per_run=1, manual=False)
+            result = await update_coinglass_cache(max_symbols_per_run=3, manual=False)
             if result.get("updated"):
                 logger.debug(
                     "coinglass_worker: updated {} datasets for {}",
@@ -1142,13 +1176,20 @@ async def _data_maintenance_worker(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         started = datetime.now(timezone.utc)
         try:
-            result = await _run_data_maintenance_once()
+            # Hard 5-minute cap; a hung exchange call must not block the entire worker forever.
+            result = await asyncio.wait_for(_run_data_maintenance_once(), timeout=300)
             logger.info(
                 "Background data maintenance done: "
                 f"sync={result.get('market_sync_count', 0)}, "
                 f"duration={result.get('duration_sec', 0)}s"
             )
             _touch_runtime_task("data_maintenance", success=True)
+        except asyncio.TimeoutError:
+            logger.warning("Background data maintenance timed out after 300s")
+            _save_maintenance_snapshot(
+                "maintenance_error",
+                {"timestamp": datetime.now(timezone.utc).isoformat(), "error": "timeout after 300s"},
+            )
         except Exception as e:
             logger.warning(f"Background data maintenance failed: {e}")
             _save_maintenance_snapshot(
@@ -1319,6 +1360,7 @@ async def lifespan(app: FastAPI):
         _startup_mode_decision.effective_mode != "live",
         sync_runtime_state=False,
     )
+    _sync_guarded_startup_account_mode(_startup_mode_decision)
     logger.info(
         "Startup trading mode resolved: effective={}, configured={}, persisted={}, source={}",
         _startup_mode_decision.effective_mode,
@@ -1394,19 +1436,31 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down Crypto Trading System...")
     supervisor: RuntimeTaskSupervisor | None = getattr(app.state, "runtime_supervisor", None)
     if supervisor is not None:
-        await supervisor.stop_all(timeout_sec=6.0)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(supervisor.stop_all(timeout_sec=6.0), timeout=15)
     with contextlib.suppress(Exception):
-        await autonomous_trading_agent.stop()
+        await asyncio.wait_for(autonomous_trading_agent.stop(), timeout=15)
 
-    await strategy_health_monitor.stop()
-    await shutdown_ops_runtime(app, standalone=False)
-    await strategy_manager.stop_all(close_positions=False, reason="service_shutdown")
-    await execution_engine.stop()
-    await runtime_bootstrap.shutdown_shared_runtime(
-        include_news=True,
-        close_exchanges=True,
-        close_database=True,
-    )
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(strategy_health_monitor.stop(), timeout=15)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(shutdown_ops_runtime(app, standalone=False), timeout=15)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            strategy_manager.stop_all(close_positions=False, reason="service_shutdown"),
+            timeout=15,
+        )
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(execution_engine.stop(), timeout=15)
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            runtime_bootstrap.shutdown_shared_runtime(
+                include_news=True,
+                close_exchanges=True,
+                close_database=True,
+            ),
+            timeout=15,
+        )
 
     logger.info("System shutdown complete")
 
@@ -1418,11 +1472,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_allowed_origins: List[str] = []
+try:
+    raw = list(getattr(settings, "WEB_ALLOWED_ORIGINS", []) or [])
+    _allowed_origins = [str(o).strip() for o in raw if str(o).strip() and str(o).strip() != "*"]
+except Exception:
+    _allowed_origins = []
+if not _allowed_origins:
+    _allowed_origins = ["http://localhost:8000", "http://127.0.0.1:8000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -1573,8 +1636,61 @@ async def get_status():
         raise
 
 
+_WS_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+
+def _ws_client_ip(websocket: WebSocket) -> str:
+    try:
+        host = (websocket.client.host if websocket.client else "") or ""
+    except Exception:
+        host = ""
+    text = str(host).strip().lower().strip("[]")
+    if text.startswith("::ffff:"):
+        text = text.split("::ffff:", 1)[1]
+    return text
+
+
+def _ws_is_authorized(websocket: WebSocket) -> bool:
+    """Authorize a WebSocket before accepting.
+
+    Allow when EITHER:
+      - the request bears the local-UI session cookie (`cts_local_ui_session`), OR
+      - the request includes a valid Ops token (header `X-Ops-Token` or `Authorization: Bearer ...`)
+
+    Loopback requests without any credentials are also allowed (legacy local-only UX),
+    but non-loopback requests without credentials are rejected.
+    """
+    try:
+        if websocket.cookies.get("cts_local_ui_session"):
+            return True
+    except Exception:
+        pass
+    try:
+        from core.ops.service.auth import get_ops_token  # noqa: PLC0415
+        expected = str(get_ops_token(required=False) or "").strip()
+    except Exception:
+        expected = ""
+    if expected:
+        header_token = str(websocket.headers.get("x-ops-token") or "").strip()
+        auth_header = str(websocket.headers.get("authorization") or "").strip()
+        bearer = ""
+        if auth_header.lower().startswith("bearer "):
+            bearer = auth_header[7:].strip()
+        if header_token and header_token == expected:
+            return True
+        if bearer and bearer == expected:
+            return True
+    # Loopback fallback: preserve existing local UI experience
+    if _ws_client_ip(websocket) in _WS_LOOPBACK_HOSTS:
+        return True
+    return False
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    if not _ws_is_authorized(websocket):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     queue = await event_bus.subscribe(maxsize=300)
     await websocket.send_json(
@@ -1623,8 +1739,66 @@ async def websocket_endpoint(websocket: WebSocket):
         await event_bus.unsubscribe(queue)
 
 
+@app.get("/livez")
+async def livez_check():
+    """Liveness probe: always returns 200 if the process is up."""
+    return {"status": "alive", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/readyz")
+async def readyz_check():
+    """Readiness probe: 200 only when DB ping + exchanges + strategy manager are usable."""
+    from fastapi.responses import JSONResponse  # noqa: PLC0415
+    checks: Dict[str, Any] = {}
+    overall_ready = True
+    # DB ping
+    try:
+        from config.database import get_session  # noqa: PLC0415
+        with get_session() as session:
+            session.execute("SELECT 1") if hasattr(session, "execute") else None
+        checks["db"] = "ok"
+    except Exception as exc:
+        overall_ready = False
+        checks["db"] = f"error: {exc}"
+    # Exchanges
+    try:
+        connected = getattr(exchange_manager, "connected_exchanges", None)
+        if callable(connected):
+            connected_list = list(connected() or [])
+        else:
+            connected_list = [n for n in ("gate", "binance", "okx")
+                              if bool(getattr(exchange_manager.get_exchange(n), "is_connected", False))]
+        if not connected_list:
+            overall_ready = False
+            checks["exchanges"] = "no connected exchanges"
+        else:
+            checks["exchanges"] = connected_list
+    except Exception as exc:
+        overall_ready = False
+        checks["exchanges"] = f"error: {exc}"
+    # Strategy manager
+    try:
+        sm_running = bool(getattr(strategy_manager, "is_running", True))
+        checks["strategy_manager"] = "ok" if sm_running else "not_running"
+        if not sm_running:
+            overall_ready = False
+    except Exception as exc:
+        overall_ready = False
+        checks["strategy_manager"] = f"error: {exc}"
+
+    body = {
+        "status": "ready" if overall_ready else "not_ready",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+    }
+    if not overall_ready:
+        return JSONResponse(status_code=503, content=body)
+    return body
+
+
 @app.get("/health")
 async def health_check():
+    """Alias of /livez for backwards compatibility. Use /livez or /readyz instead."""
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
 
