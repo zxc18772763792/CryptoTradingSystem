@@ -259,7 +259,19 @@ class TestVaRBreakoutIndex:
         df = _make_ohlcv(shocked, high_offset=0.05, low_offset=0.05)
         strat = VaRBreakoutStrategy(params={"var_period": 20, "confidence": 0.95, "multiplier": 1.5})
         signals = strat.generate_signals(df)
-        assert any(s.signal_type == SignalType.BUY for s in signals)
+        buys = [s for s in signals if s.signal_type == SignalType.BUY]
+        assert buys
+
+        returns = df["close"].pct_change()
+
+        def calc_var(series):
+            r = series.dropna()
+            if len(r) < strat.params["var_period"] // 2:
+                return np.nan
+            return np.percentile(r, (1 - strat.params["confidence"]) * 100)
+
+        var = returns.rolling(strat.params["var_period"]).apply(calc_var, raw=False)
+        assert buys[0].metadata["var"] == pytest.approx(var.iloc[-1])
 
 
 # --------------------------------------------------------------------------- #

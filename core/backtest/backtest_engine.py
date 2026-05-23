@@ -429,11 +429,13 @@ class BacktestEngine:
                 elif side == "short" and open_price > fill_price:
                     fill_price = open_price
             elif reason == "take_profit":
-                # TP gap-up for long / gap-down for short: realistic fill at open
-                if side == "long" and open_price > fill_price:
-                    fill_price = open_price
-                elif side == "short" and open_price < fill_price:
-                    fill_price = open_price
+                # Take-profit orders should not receive favorable gap price
+                # improvement in this conservative simulator. If the open gaps
+                # through the target, the target price remains the fill.
+                if side == "long":
+                    fill_price = min(fill_price, open_price) if open_price > fill_price else fill_price
+                elif side == "short":
+                    fill_price = max(fill_price, open_price) if open_price < fill_price else fill_price
             await self._close_position(
                 pos_symbol,
                 fill_price,

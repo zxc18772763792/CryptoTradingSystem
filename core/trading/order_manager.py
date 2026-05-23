@@ -520,6 +520,10 @@ class OrderManager:
                 self._client_order_ids[client_order_id] = time.monotonic()
             else:
                 client_order_id = await self._allocate_client_order_id(request.strategy)
+                if request.params is None:
+                    request.params = {}
+                request.params["newClientOrderId"] = client_order_id
+                request.params["clientOrderId"] = client_order_id
             params["newClientOrderId"] = client_order_id
             params["clientOrderId"] = client_order_id
             order_price = request.price

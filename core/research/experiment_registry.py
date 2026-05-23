@@ -77,6 +77,16 @@ class _JsonRegistry(Generic[ModelT]):
             self._flush()
         return item
 
+    def save_many(self, rows: List[ModelT]) -> List[ModelT]:
+        if not rows:
+            return []
+        with self._lock:
+            items = self._load()
+            for item in rows:
+                items[str(getattr(item, self.key_field))] = item
+            self._flush()
+        return rows
+
     def get(self, item_id: str) -> Optional[ModelT]:
         with self._lock:
             return self._load().get(str(item_id))

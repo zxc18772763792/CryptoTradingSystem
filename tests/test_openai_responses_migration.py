@@ -1495,6 +1495,86 @@ def test_news_sync_failover_uses_longer_timeout_for_local_gemma(monkeypatch, tmp
     assert captured[1]["timeout"] == 120
 
 
+def test_news_sync_failover_wall_clock_budget_is_not_multiplied_by_targets(monkeypatch, tmp_path):
+    import core.news.eventizer.llm_glm5 as module
+    import core.utils.openai_responses as response_helpers
+
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "openai_failover_state.json"))
+    monkeypatch.setenv("NEWS_LLM_LOCAL_TARGET_TIMEOUT_SEC", "120")
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "primary-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "primary-model", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "local-key,backup-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "http://192.168.1.24:8010/v1,https://backup.test/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "gemma4-local,backup-model", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "", raising=False)
+    response_helpers.reset_openai_target_preferences()
+
+    monotonic_values = [0.0, 0.0, 130.0]
+
+    def _fake_monotonic():
+        if monotonic_values:
+            return monotonic_values.pop(0)
+        return 130.0
+
+    monkeypatch.setattr(module.time, "monotonic", _fake_monotonic)
+    captured_urls: list[str] = []
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        captured_urls.append(url)
+        if len(captured_urls) > 1:
+            raise AssertionError("failover should stop before a second target after wall-clock budget is exhausted")
+        return _SyncResponse({"error": {"message": "temporarily unavailable"}}, status_code=503)
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    with pytest.raises(RuntimeError, match="wall-clock budget exhausted"):
+        module._openai_post_with_failover(
+            cfg={"llm": {"provider": "openai"}},
+            payload={"model": "primary-model", "input": "hello"},
+            timeout_sec=12,
+            log_prefix="test",
+        )
+
+    assert captured_urls == ["https://primary.test/v1/responses"]
+
+
+def test_news_sync_extract_json_block_finds_fenced_json_after_prose():
+    import core.news.eventizer.llm_glm5 as module
+
+    parsed = module._extract_json_block(
+        'Here is the result:\n```json\n{"items":[{"symbol":"BTC","sentiment":"positive"}]}\n```\nDone.'
+    )
+
+    assert parsed == {"items": [{"symbol": "BTC", "sentiment": "positive"}]}
+
+
+def test_news_sync_summary_empty_choices_falls_back(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "sk-news", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://kuaipao.ai", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_FORCE_CHAT_COMPLETIONS", True, raising=False)
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        return _SyncResponse({"choices": []})
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.summarize_title_llm(
+        "BTC trades flat",
+        {"llm": {"provider": "openai", "force_chat_completions": True}},
+        max_length=60,
+    )
+
+    assert result["summary"]
+    assert result["source"] == "fallback_rule"
+
+
 def test_async_glm_client_failover_uses_longer_timeout_for_local_gemma(monkeypatch, tmp_path):
     import core.news.eventizer.async_glm_client as module
     import core.utils.openai_responses as response_helpers
@@ -1604,6 +1684,51 @@ def test_news_sync_summary_uses_openai_mini_source(monkeypatch):
     assert result["source"] == "openai_responses:deepseek-v4-flash"
     assert capture["url"] == "https://example.test/v1/responses"
     assert capture["json"]["model"] == "deepseek-v4-flash"
+
+
+def test_news_sync_extract_json_block_reads_fenced_json_after_prose():
+    import core.news.eventizer.llm_glm5 as module
+
+    parsed = module._extract_json_block(
+        'Here is the result:\n```json\n{"items":[{"idx":0,"summary":"ok","sentiment":"neutral"}]}\n```'
+    )
+
+    assert parsed == {"items": [{"idx": 0, "summary": "ok", "sentiment": "neutral"}]}
+
+
+def test_news_sync_summary_empty_choices_falls_back_safely(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(module, "_openai_post_with_failover", lambda **_kwargs: {"choices": []})
+
+    result = module.summarize_title_glm5("BTC trades flat", {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result["source"] == "fallback_rule"
+    assert result["sentiment"] in {"positive", "negative", "neutral"}
+
+
+def test_news_sync_batch_summary_bad_first_choice_falls_back(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://example.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_MODEL", "gpt-5.4", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+    monkeypatch.setattr(module, "_openai_post_with_failover", lambda **_kwargs: {"choices": [None]})
+
+    result = module.batch_summarize_titles(["BTC trades flat"], {"llm": {"provider": "openai"}}, max_length=60)
+
+    assert result[0]["source"] == "fallback_rule"
 
 
 def test_news_sync_summary_uses_news_deepseek_chat_override(monkeypatch):

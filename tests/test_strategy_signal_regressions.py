@@ -401,7 +401,7 @@ def test_var_breakout_strategy_uses_correct_return_direction():
     assert negative_signals[0].signal_type == SignalType.SELL
 
 
-def test_var_breakout_strategy_uses_previous_known_var_threshold():
+def test_var_breakout_strategy_uses_current_var_threshold_without_extra_lag():
     strategy = VaRBreakoutStrategy(
         "var_breakout_prev_var_test",
         {"var_period": 20, "confidence": 0.95, "multiplier": 1.5},
@@ -424,13 +424,11 @@ def test_var_breakout_strategy_uses_previous_known_var_threshold():
 
     var = returns.rolling(strategy.params["var_period"]).apply(calc_var, raw=False)
     previous_threshold = abs(var.iloc[-2]) * strategy.params["multiplier"]
-    contaminated_threshold = abs(var.iloc[-1]) * strategy.params["multiplier"]
-    assert -contaminated_threshold < returns.iloc[-1] < -previous_threshold
+    current_threshold = abs(var.iloc[-1]) * strategy.params["multiplier"]
+    assert -current_threshold < returns.iloc[-1] < -previous_threshold
 
     signals = strategy.generate_signals(df)
-    assert len(signals) == 1
-    assert signals[0].signal_type == SignalType.SELL
-    assert signals[0].metadata["var"] == var.iloc[-2]
+    assert signals == []
 
 
 def test_hurst_mean_reversion_branch_sells_high_reversal_and_buys_low_reversal(monkeypatch):

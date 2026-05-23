@@ -60,7 +60,7 @@ from core.trading import account_manager, execution_engine, order_manager, posit
 from web.asset_versions import static_asset_url
 from web.api import ai_research
 from web.api import ml
-from web.api.auth import set_local_ui_session_cookie
+from web.api.auth import _has_valid_local_ui_session, set_local_ui_session_cookie
 from web.startup_mode import StartupModeDecision, resolve_startup_trading_mode
 
 _AUTO_SYNC_SYMBOLS = [
@@ -1654,14 +1654,14 @@ def _ws_is_authorized(websocket: WebSocket) -> bool:
     """Authorize a WebSocket before accepting.
 
     Allow when EITHER:
-      - the request bears the local-UI session cookie (`cts_local_ui_session`), OR
+      - the request bears a valid local-UI session cookie (`cts_local_ui_session`), OR
       - the request includes a valid Ops token (header `X-Ops-Token` or `Authorization: Bearer ...`)
 
     Loopback requests without any credentials are also allowed (legacy local-only UX),
     but non-loopback requests without credentials are rejected.
     """
     try:
-        if websocket.cookies.get("cts_local_ui_session"):
+        if _has_valid_local_ui_session(websocket):
             return True
     except Exception:
         pass

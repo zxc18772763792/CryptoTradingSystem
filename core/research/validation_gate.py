@@ -47,6 +47,36 @@ def _inverse_score(value: float, bad_at: float) -> float:
     return _clip_score(100.0 - (float(value) / bad * 100.0))
 
 
+def _average_optimization_trials(result: Dict[str, Any], best: Dict[str, Any]) -> int:
+    best_trials: list[int] = []
+    batch_trials: list[int] = []
+
+    def _collect(row: Any, target: list[int]) -> None:
+        if not isinstance(row, dict):
+            return
+        try:
+            value = int(row.get("optimization_trials", 0) or 0)
+        except Exception:
+            return
+        if value > 0:
+            target.append(value)
+
+    _collect(best, best_trials)
+    for row in result.get("results") or []:
+        _collect(row, batch_trials)
+    for row in result.get("top_results") or []:
+        _collect(row, batch_trials)
+    for row in dict(result.get("best_per_strategy") or {}).values():
+        _collect(row, batch_trials)
+
+    best_trial_count = max(best_trials or [1])
+    if not batch_trials:
+        return best_trial_count
+    # Conservative: never let the best row understate the search depth, but use
+    # average positive trial count when the full batch provides it.
+    return max(best_trial_count, int(_math.ceil(sum(batch_trials) / len(batch_trials))))
+
+
 def _deflated_sharpe_ratio(
     sharpe: float,
     n_trials: int,
@@ -205,7 +235,7 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
     #     (50-pt) when available; fall back to a small heavy-tail prior (skew=-0.2,
     #     kurt=5.0) typical for crypto bar returns.
     runs_count = max(1, runs)
-    opt_trials = int(best.get("optimization_trials", 0) or 0)
+    opt_trials = _average_optimization_trials(result, best)
     # Effective multiple-testing N = runs * trials_per_run (avoid 0; min 1)
     n_trials_for_dsr = max(1, runs_count * max(1, opt_trials))
     _n_bars = int(best.get("n_bars", 0) or 0)
@@ -654,6 +684,10 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
             "wf_stability": wf_stability,
             "robustness_score": robustness_score,
             "dsr_score": round(dsr, 4),
+            "dsr_n_trials": n_trials_for_dsr,
+            "dsr_optimization_trials_per_run": opt_trials,
+            "dsr_skewness": round(skew_est, 6),
+            "dsr_kurtosis": round(kurt_est, 6),
             "wf_consistency": wf_consistency,
             "calibration_prior": calibration_prior,
         },

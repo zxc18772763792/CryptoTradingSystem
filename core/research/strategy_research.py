@@ -3131,6 +3131,10 @@ async def run_strategy_research(
             "oos_sharpe": float(_oos_s) if _oos_s is not None else None,
             "wf_stability": float(_wf_stab) if _wf_stab is not None else None,
             "wf_consistency": float(_wf_con) if _wf_con is not None else None,
+            "best_params": dict(item.get("best_params") or {}),
+            "optimization_trials": int(item.get("optimization_trials", 0) or 0),
+            "opt_method": str(item.get("opt_method") or "none"),
+            "equity_curve_sample": list(item.get("equity_curve_sample") or []),
         }
 
     top_results: List[Dict[str, Any]] = []
@@ -3149,6 +3153,7 @@ async def run_strategy_research(
                     "total_trades": int(row.get("total_trades", 0) or 0),
                     "cost_drag_return_pct": float(row.get("cost_drag_return_pct", 0.0) or 0.0),
                     "quality_flag": str(row.get("quality_flag") or "ok"),
+                    "optimization_trials": int(row.get("optimization_trials", 0) or 0),
                 }
             )
 

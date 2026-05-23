@@ -115,6 +115,27 @@ def test_validation_gate_dsr_trials_include_optimization_trials(monkeypatch: pyt
     assert captured["n_obs"] == 400
 
 
+def test_validation_gate_dsr_trials_use_average_batch_optimization_trials(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_dsr(**kwargs):
+        captured.update(kwargs)
+        return 0.99
+
+    monkeypatch.setattr("core.research.validation_gate._deflated_sharpe_ratio", fake_dsr)
+    result = _result_with_best(total_trades=60, oos_sharpe=2.0, optimization_trials=12, n_bars=400)
+    result["results"] = [
+        {"strategy": "A", "optimization_trials": 12},
+        {"strategy": "B", "optimization_trials": 36},
+        {"strategy": "C", "optimization_trials": 48},
+    ]
+
+    summary = build_validation_summary_from_research_result(result)
+
+    assert captured["n_trials"] == result["runs"] * 32
+    assert summary.metrics["dsr_optimization_trials_per_run"] == 32
+
+
 def test_validation_gate_dsr_uses_equity_curve_moments(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = {}
 

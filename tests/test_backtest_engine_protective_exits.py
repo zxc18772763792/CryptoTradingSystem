@@ -157,6 +157,28 @@ def test_backtest_honors_signal_take_profit_intrabar():
     assert close.price == pytest.approx(110.0)
 
 
+def test_backtest_take_profit_gap_through_uses_conservative_target_price():
+    engine = BacktestEngine(_config())
+    data = _ohlcv(
+        opens=[100.0, 100.0, 100.0, 115.0],
+        highs=[100.0, 100.0, 100.0, 116.0],
+        lows=[100.0, 100.0, 100.0, 114.0],
+        closes=[100.0, 100.0, 100.0, 115.0],
+    )
+
+    result = asyncio.run(
+        engine.run_backtest(
+            OneShotLongStrategy(stop_loss=95.0, take_profit=110.0),
+            data,
+            symbol="BTC/USDT",
+        )
+    )
+
+    close = [trade for trade in result.trades if trade.trade_stage == "close"][0]
+    assert close.exit_reason == "take_profit"
+    assert close.price == pytest.approx(110.0)
+
+
 def test_backtest_honors_trailing_stop_from_signal_metadata():
     engine = BacktestEngine(_config())
     data = _ohlcv(

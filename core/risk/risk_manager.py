@@ -648,7 +648,9 @@ class RiskManager:
         """Return True if an order can pass risk checks."""
         self._check_new_day()
 
-        if self._trading_halted and not allow_close:
+        if self._trading_halted and not (
+            allow_close and self._is_daily_loss_halt_reason(self._halt_reason)
+        ):
             self._add_alert(
                 title="交易被阻止",
                 message=self._halt_reason or "系统处于熔断状态",
@@ -657,7 +659,7 @@ class RiskManager:
             )
             return False
 
-        if self._daily_trades >= self.max_daily_trades and not allow_close:
+        if self._daily_trades >= self.max_daily_trades:
             self._add_alert(
                 title="交易次数超限",
                 message=f"当日交易次数已达上限 {self.max_daily_trades}",
@@ -667,7 +669,7 @@ class RiskManager:
 
         position_manager = _position_manager()
         position_count = position_manager.get_position_count()
-        if position_count >= self.max_open_positions and not allow_close:
+        if position_count >= self.max_open_positions:
             self._add_alert(
                 title="持仓数超限",
                 message=f"当前持仓 {position_count} 超过限制 {self.max_open_positions}",
@@ -675,9 +677,7 @@ class RiskManager:
             )
             return False
 
-        # Closing orders must be able to reduce existing exposure after a
-        # leverage cap reduction. Fresh entries still obey the leverage cap.
-        if leverage > self.max_leverage and not allow_close:
+        if leverage > self.max_leverage:
             self._add_alert(
                 title="杠杆超限",
                 message=f"请求杠杆 {leverage:.2f}x 超过上限 {self.max_leverage:.2f}x",
@@ -759,6 +759,23 @@ class RiskManager:
                         return False
 
         return True
+
+    @staticmethod
+    def _is_daily_loss_halt_reason(reason: str) -> bool:
+        text = str(reason or "").strip().lower()
+        if not text:
+            return False
+        markers = (
+            "daily-loss-halt",
+            "daily_loss_halt",
+            "daily loss halt",
+            "max_daily_drawdown",
+            "max daily drawdown",
+            "daily stop",
+            "daily_stop",
+            "日内止损",
+        )
+        return any(marker in text for marker in markers)
 
     def record_trade(self, trade: Dict[str, Any]) -> None:
         with self._state_lock:
