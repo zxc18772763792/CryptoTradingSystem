@@ -65,3 +65,4 @@ pytrends>=4.9,<5
 
 # News & Sentiment
 feedparser>=6.0,<7
+defusedxml>=0.7,<1
