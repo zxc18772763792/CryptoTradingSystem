@@ -1304,10 +1304,12 @@ class HurstExponentStrategy(FactorStrategyBase):
         n = self.params["hurst_period"]
         returns = close.pct_change()
 
-        # Variance ratio as Hurst proxy
+        # Variance ratio as Hurst proxy. A 5-bar random-walk return should
+        # have about 5x the 1-bar variance, so neutral is 1.0.
+        long_horizon = 5
         var_1 = returns.rolling(n).var()
-        var_long = returns.rolling(n).apply(lambda x: np.var(x[::5]) * 5, raw=False)
-        vr = (var_long / var_1.replace(0, np.nan)).fillna(1)
+        var_long = close.pct_change(long_horizon).rolling(n).var()
+        vr = (var_long / (var_1 * long_horizon).replace(0, np.nan)).fillna(1)
 
         # Z-score for mean reversion signals
         mean = close.rolling(self.params["zscore_period"]).mean()

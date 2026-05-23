@@ -163,6 +163,52 @@ class TestHurstThresholds:
         # Mean-revert threshold must sit below 1.0.
         assert strat.params["mean_revert_threshold"] < 1.0
 
+    def test_mean_reversion_branch_uses_standard_vr_scale(self):
+        # Strongly alternating returns are anti-persistent. The old proxy
+        # sampled every fifth 1-bar return and multiplied by 5, which classified
+        # this series as strongly trending instead of mean-reverting.
+        returns = []
+        ret = 0.02
+        for i in range(100):
+            ret = -0.75 * ret + 0.001 * np.sin(i * 1.7)
+            returns.append(ret)
+
+        closes = [100.0]
+        for ret in returns:
+            closes.append(closes[-1] * (1 + ret))
+
+        closes = np.asarray(closes)
+        recent = closes[:-2][-10:]
+        recent_mean = float(recent.mean())
+        recent_std = float(recent.std(ddof=1))
+        closes[-2] = recent_mean + recent_std
+        closes[-1] = recent_mean
+
+        df = _make_ohlcv(closes, high_offset=0.2, low_offset=0.2)
+        strat = HurstExponentStrategy(
+            params={"hurst_period": 50, "zscore_period": 10, "zscore_threshold": 0.5}
+        )
+
+        returns_series = df["close"].pct_change()
+        var_1 = returns_series.rolling(50).var()
+        legacy_vr = (
+            returns_series.rolling(50).apply(lambda x: np.var(x[::5]) * 5, raw=False)
+            / var_1.replace(0, np.nan)
+        ).fillna(1)
+        standard_vr = (
+            df["close"].pct_change(5).rolling(50).var()
+            / (var_1 * 5).replace(0, np.nan)
+        ).fillna(1)
+        assert legacy_vr.iloc[-1] > strat.params["trending_threshold"]
+        assert standard_vr.iloc[-1] < strat.params["mean_revert_threshold"]
+
+        signals = strat.generate_signals(df)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == SignalType.SELL
+        assert signals[0].metadata["regime"] == "mean_reverting"
+        assert signals[0].metadata["variance_ratio"] == pytest.approx(standard_vr.iloc[-1])
+
 
 # --------------------------------------------------------------------------- #
 # 4. VWAPReversion symmetric SHORT / CLOSE_SHORT
@@ -277,7 +323,26 @@ class TestStochasticEntryWindow:
         df = _make_ohlcv(closes, high_offset=0.2, low_offset=0.2)
         strat = StochasticStrategy(params={"k_period": 14, "d_period": 3, "smooth_k": 1, "oversold": 20.0})
         signals = strat.generate_signals(df)
-        assert any(s.signal_type == SignalType.BUY for s in signals)
+        buys = [s for s in signals if s.signal_type == SignalType.BUY]
+        assert buys
+        assert buys[0].metadata["k"] > strat.params["oversold"]
+        assert buys[0].strength > 0.1
+
+    def test_sell_fires_when_k_prev_was_overbought(self):
+        closes = np.concatenate(
+            [
+                np.linspace(70.0, 100.0, 25),
+                [99.5, 99.7, 99.9, 100.1, 100.3],
+                [90.0],
+            ]
+        )
+        df = _make_ohlcv(closes, high_offset=0.2, low_offset=0.2)
+        strat = StochasticStrategy(params={"k_period": 14, "d_period": 3, "smooth_k": 1, "overbought": 80.0})
+        signals = strat.generate_signals(df)
+        sells = [s for s in signals if s.signal_type == SignalType.SELL]
+        assert sells
+        assert sells[0].metadata["k"] < strat.params["overbought"]
+        assert sells[0].strength > 0.1
 
 
 # --------------------------------------------------------------------------- #
