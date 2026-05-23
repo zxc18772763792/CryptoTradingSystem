@@ -24,6 +24,10 @@ EVENT_TYPES = {
 }
 
 
+def _utc_now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 class NewsBase(DeclarativeBase):
     """Declarative base for news tables."""
 
@@ -39,7 +43,7 @@ class NewsRaw(NewsBase):
     url: Mapped[str] = mapped_column(String(2048), unique=True, index=True, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     published_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False, default=datetime.utcnow)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False, default=_utc_now_naive)
     lang: Mapped[str] = mapped_column(String(32), default="en")
     content_hash: Mapped[str] = mapped_column(String(80), unique=True, index=True, nullable=False)
     symbols: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
@@ -67,7 +71,7 @@ class NewsEvent(NewsBase):
     model_source: Mapped[str] = mapped_column(String(16), index=True, default="rules")
     raw_news_id: Mapped[Optional[int]] = mapped_column(Integer, index=True, nullable=True)
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime, index=True, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, index=True, default=_utc_now_naive)
 
     __table_args__ = (
         Index("ix_news_events_symbol_ts", "symbol", "ts"),
@@ -84,7 +88,7 @@ class NewsSourceState(NewsBase):
     source: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     cursor_type: Mapped[str] = mapped_column(String(24), nullable=False, default="ts")
     cursor_value: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utc_now_naive)
     last_success_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     paused_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -105,8 +109,8 @@ class NewsLLMTask(NewsBase):
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utc_now_naive)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utc_now_naive)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)

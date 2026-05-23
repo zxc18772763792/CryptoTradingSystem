@@ -1835,7 +1835,7 @@ def _apply_public_derivatives_context(payload: Dict[str, Any]) -> Dict[str, Any]
 
 
 def _utc_now_naive() -> datetime:
-    return datetime.utcnow().replace(tzinfo=None)
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _utc_iso(value: Optional[datetime]) -> Optional[str]:

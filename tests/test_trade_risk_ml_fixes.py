@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import importlib
+import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from core.ai.ml_signal import MLSignalModel
+from core.ai.ml_signal import FEATURE_COLS
+from core.ml.pipeline import FEATURE_SET_VERSION
 from core.risk.risk_manager import RiskManager
 
 
@@ -91,3 +95,67 @@ def test_ml_signal_valid_features_still_predicts():
 
     assert result.direction == "LONG"
     assert result.long_prob == pytest.approx(0.9)
+
+
+def test_ml_signal_load_requires_manifest(monkeypatch, tmp_path: Path):
+    model_path = tmp_path / "model.json"
+    model_path.write_text("{}", encoding="utf-8")
+
+    class FakeXGB:
+        class XGBClassifier:
+            def load_model(self, _path):
+                raise AssertionError("model should not load without manifest")
+
+    monkeypatch.setitem(importlib.import_module("sys").modules, "xgboost", FakeXGB)
+
+    model = MLSignalModel(str(model_path))
+    model.load()
+
+    assert model.is_loaded() is False
+
+
+def test_ml_signal_load_rejects_manifest_feature_mismatch(monkeypatch, tmp_path: Path):
+    model_path = tmp_path / "model.json"
+    model_path.write_text("{}", encoding="utf-8")
+    model_path.with_suffix(".manifest.json").write_text(
+        json.dumps({"feature_set_version": FEATURE_SET_VERSION, "feature_columns": ["rsi"]}),
+        encoding="utf-8",
+    )
+
+    class FakeXGB:
+        class XGBClassifier:
+            def load_model(self, _path):
+                raise AssertionError("model should not load with stale manifest")
+
+    monkeypatch.setitem(importlib.import_module("sys").modules, "xgboost", FakeXGB)
+
+    model = MLSignalModel(str(model_path))
+    model.load()
+
+    assert model.is_loaded() is False
+
+
+def test_ml_signal_load_accepts_valid_manifest(monkeypatch, tmp_path: Path):
+    model_path = tmp_path / "model.json"
+    model_path.write_text("{}", encoding="utf-8")
+    model_path.with_suffix(".manifest.json").write_text(
+        json.dumps({"feature_set_version": FEATURE_SET_VERSION, "feature_columns": FEATURE_COLS}),
+        encoding="utf-8",
+    )
+
+    class FakeClassifier:
+        feature_importances_ = np.ones(len(FEATURE_COLS))
+
+        def load_model(self, _path):
+            self.loaded = True
+
+    class FakeXGB:
+        XGBClassifier = FakeClassifier
+
+    monkeypatch.setitem(importlib.import_module("sys").modules, "xgboost", FakeXGB)
+
+    model = MLSignalModel(str(model_path))
+    model.load()
+
+    assert model.is_loaded() is True
+    assert model._feature_names == FEATURE_COLS

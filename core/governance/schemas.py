@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -41,6 +41,10 @@ class RiskChangeRequestPayload(BaseModel):
     proposed_config: RiskConfigPayload
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 _FORBIDDEN_TRADE_TERMS = [
     "买入",
     "卖出",
@@ -76,7 +80,7 @@ class LLMResearchOutput(BaseModel):
     proposed_strategy_changes: List[Dict[str, Any]] = Field(default_factory=list)
     uncertainty: str = ""
     evidence_refs: List[str] = Field(default_factory=list)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=_utc_now)
 
     @model_validator(mode="after")
     def validate_no_direct_trade_instruction(self) -> "LLMResearchOutput":

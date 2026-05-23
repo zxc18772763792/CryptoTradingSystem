@@ -24,6 +24,10 @@ def _from_iso(s: str) -> datetime:
     return datetime.fromisoformat(s)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 @dataclass
 class SecondLevelBackfillTask:
     task_id: str
@@ -43,8 +47,8 @@ class SecondLevelBackfillTask:
     stop_requested: bool = False
     error_count: int = 0
     last_error: str = ""
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utc_now)
+    updated_at: datetime = field(default_factory=_utc_now)
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
