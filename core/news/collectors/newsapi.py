@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -26,6 +27,41 @@ class NewsAPICollector:
             or "(bitcoin OR ethereum OR crypto OR ETF OR SEC OR hack OR liquidation)"
         )
         self.api_key = str(os.getenv("NEWSAPI_KEY") or "").strip()
+        self.retry_attempts = max(1, int(defaults.get("newsapi_retry_attempts") or 3))
+        self.retry_base_sleep_sec = max(0.0, float(defaults.get("newsapi_retry_base_sleep_sec") or 0.5))
+
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response) -> Optional[float]:
+        value = str(getattr(response, "headers", {}).get("Retry-After") or "").strip()
+        if not value:
+            return None
+        try:
+            return max(0.0, float(value))
+        except Exception:
+            return None
+
+    def _get_with_retries(self, *, params: Dict[str, Any], headers: Dict[str, str]) -> requests.Response:
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                response = requests.get(self.endpoint, params=params, headers=headers, timeout=self.timeout_sec)
+                if response.status_code not in {429, 500, 502, 503, 504}:
+                    return response
+                last_exc = requests.HTTPError(f"transient status {response.status_code}", response=response)
+                if attempt >= self.retry_attempts:
+                    return response
+                retry_after = self._retry_after_seconds(response)
+            except requests.RequestException as exc:
+                last_exc = exc
+                if attempt >= self.retry_attempts:
+                    raise
+                retry_after = None
+            sleep_sec = retry_after if retry_after is not None else self.retry_base_sleep_sec * attempt
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("NewsAPI request failed without response")
 
     @staticmethod
     def _parse_ts(value: Any) -> str:
@@ -87,7 +123,7 @@ class NewsAPICollector:
         }
         headers = {"X-Api-Key": self.api_key}
 
-        response = requests.get(self.endpoint, params=params, headers=headers, timeout=self.timeout_sec)
+        response = self._get_with_retries(params=params, headers=headers)
         response.raise_for_status()
         payload = response.json()
 
