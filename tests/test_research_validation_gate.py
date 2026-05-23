@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from core.research.validation_gate import build_validation_summary_from_research_result
 
 
@@ -95,3 +97,55 @@ def test_validation_gate_passing_oos_allows_live_candidate() -> None:
     summary = build_validation_summary_from_research_result(result)
 
     assert summary.decision == "live_candidate"
+
+
+def test_validation_gate_dsr_trials_include_optimization_trials(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_dsr(**kwargs):
+        captured.update(kwargs)
+        return 0.99
+
+    monkeypatch.setattr("core.research.validation_gate._deflated_sharpe_ratio", fake_dsr)
+    result = _result_with_best(total_trades=60, oos_sharpe=2.0, optimization_trials=32, n_bars=400)
+
+    build_validation_summary_from_research_result(result)
+
+    assert captured["n_trials"] == result["runs"] * 32
+    assert captured["n_obs"] == 400
+
+
+def test_validation_gate_dsr_uses_equity_curve_moments(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_dsr(**kwargs):
+        captured.update(kwargs)
+        return 0.99
+
+    monkeypatch.setattr("core.research.validation_gate._deflated_sharpe_ratio", fake_dsr)
+    result = _result_with_best(
+        total_trades=60,
+        oos_sharpe=2.0,
+        equity_curve_sample=[10000.0, 10080.0, 9940.0, 10120.0, 10020.0, 10350.0],
+    )
+
+    build_validation_summary_from_research_result(result)
+
+    assert captured["skewness"] != 0.0
+    assert captured["kurtosis"] != 3.0
+
+
+def test_validation_gate_dsr_uses_heavy_tail_prior_without_equity_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_dsr(**kwargs):
+        captured.update(kwargs)
+        return 0.99
+
+    monkeypatch.setattr("core.research.validation_gate._deflated_sharpe_ratio", fake_dsr)
+    result = _result_with_best(total_trades=60, oos_sharpe=2.0, equity_curve_sample=[])
+
+    build_validation_summary_from_research_result(result)
+
+    assert captured["skewness"] == -0.2
+    assert captured["kurtosis"] == 5.0

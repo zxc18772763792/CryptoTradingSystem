@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import re
 import secrets
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -74,6 +75,58 @@ def _dedupe_keep_order(values: List[str]) -> List[str]:
 def _normalize_timeframes(values: List[str]) -> List[str]:
     cleaned = _dedupe_keep_order([str(item or "").strip() for item in values or []])
     return cleaned or ["15m", "1h"]
+
+
+_DIRECT_TRADE_TERM_PATTERNS = (
+    (re.compile(r"market\s+order", re.IGNORECASE), "execution simulation"),
+    (re.compile(r"limit\s+order", re.IGNORECASE), "passive execution simulation"),
+    (re.compile(r"long", re.IGNORECASE), "upside directional"),
+    (re.compile(r"short", re.IGNORECASE), "downside directional"),
+)
+
+
+def _sanitize_llm_research_output(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _sanitize_llm_research_output(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_llm_research_output(item) for item in value]
+    if isinstance(value, str):
+        text = value
+        for pattern, replacement in _DIRECT_TRADE_TERM_PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
+    return value
+
+
+def _validation_error_summary(exc: BaseException) -> str:
+    detail = str(exc or "").strip().replace("\n", " ")
+    return detail[:180] if detail else exc.__class__.__name__
+
+
+def _validate_llm_research_output_for_planner(
+    raw_output: Dict[str, Any],
+    *,
+    planner_notes: List[str],
+) -> Dict[str, Any]:
+    if not raw_output:
+        return {}
+    try:
+        return LLMResearchOutput.model_validate(raw_output).model_dump(mode="json")
+    except ValueError as exc:
+        sanitized = _sanitize_llm_research_output(raw_output)
+        if sanitized != raw_output:
+            try:
+                validated = LLMResearchOutput.model_validate(sanitized).model_dump(mode="json")
+                planner_notes.append("llm research output contained execution wording; sanitized for proposal planning")
+                return validated
+            except ValueError as sanitized_exc:
+                planner_notes.append(
+                    "llm research output ignored after sanitization failed: "
+                    f"{_validation_error_summary(sanitized_exc)}"
+                )
+                return {}
+        planner_notes.append(f"llm research output ignored by schema: {_validation_error_summary(exc)}")
+        return {}
 
 
 def _category_aliases() -> Dict[str, List[str]]:
@@ -807,8 +860,12 @@ def generate_research_proposal(request: PlannerGenerateRequest, actor: str = "ai
     planner_notes: List[str] = []
     llm_output_validated: Dict[str, Any] = {}
     if request.llm_research_output:
-        llm_output_validated = LLMResearchOutput.model_validate(request.llm_research_output).model_dump(mode="json")
-        planner_notes.append("llm research output schema validated")
+        llm_output_validated = _validate_llm_research_output_for_planner(
+            dict(request.llm_research_output or {}),
+            planner_notes=planner_notes,
+        )
+        if llm_output_validated:
+            planner_notes.append("llm research output schema validated")
     max_templates = max(1, min(int(constraints.get("max_templates", 5) or 5), 12))
     exclude_categories = [str(item) for item in (constraints.get("exclude_categories") or [])]
 

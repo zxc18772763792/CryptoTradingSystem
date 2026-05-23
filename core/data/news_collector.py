@@ -8,12 +8,13 @@ try:
     import feedparser
 except ModuleNotFoundError:
     feedparser = None
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import re
+import hashlib
 
 from loguru import logger
 import pandas as pd
@@ -76,7 +77,7 @@ class NewsCollector:
             "bullish", "surge", "rally", "gain", "rise", "soar", "breakthrough",
             "adoption", "approval", "etf", "institutional", "upgrade", "launch",
             "partnership", "integration", "milestone", "record", "high",
-            "看涨", "暴涨", "突破", "利好", " adoption", "批准", "升级",
+            "看涨", "暴涨", "突破", "利好", "adoption", "批准", "升级",
         ]
 
         self.bearish_keywords = [
@@ -107,11 +108,11 @@ class NewsCollector:
                 try:
                     # 解析发布时间
                     if hasattr(entry, "published_parsed") and entry.published_parsed:
-                        published_at = datetime(*entry.published_parsed[:6])
+                        published_at = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
                     elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
-                        published_at = datetime(*entry.updated_parsed[:6])
+                        published_at = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
                     else:
-                        published_at = datetime.now()
+                        published_at = datetime.now(timezone.utc)
 
                     # 获取摘要
                     summary = ""
@@ -174,7 +175,7 @@ class NewsCollector:
                                 url=item.get("url", ""),
                                 published_at=datetime.fromisoformat(
                                     item.get("published_at", "").replace("Z", "+00:00")
-                                ) if item.get("published_at") else datetime.now(),
+                                ) if item.get("published_at") else datetime.now(timezone.utc),
                             )
                             news_items.append(news_item)
 
@@ -198,12 +199,12 @@ class NewsCollector:
                             return {
                                 "value": int(latest["value"]),
                                 "classification": latest["value_classification"],
-                                "timestamp": datetime.fromtimestamp(int(latest["timestamp"])),
+                                "timestamp": datetime.fromtimestamp(int(latest["timestamp"]), tz=timezone.utc),
                             }
         except Exception as e:
             logger.error(f"获取恐惧贪婪指数失败: {e}")
 
-        return {"value": 50, "classification": "Neutral", "timestamp": datetime.now()}
+        return {"value": 50, "classification": "Neutral", "timestamp": datetime.now(timezone.utc)}
 
     def analyze_sentiment(self, text: str) -> float:
         """简单情感分析（后半段关键词权重1.5x）"""
@@ -288,7 +289,7 @@ class NewsCollector:
         seen_titles = set()
 
         for news in all_news:
-            title_key = news.title.lower()[:50]
+            title_key = hashlib.sha1((news.title or "").lower().encode("utf-8")).hexdigest()[:16]
             if title_key not in seen_titles:
                 seen_titles.add(title_key)
                 unique_news.append(news)

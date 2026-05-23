@@ -2340,6 +2340,8 @@ def _compact_factor_library(data: Dict[str, Any]) -> Dict[str, Any]:
         "universe_size": int(data.get("universe_size") or 0),
         "universe_quality": data.get("universe_quality") or "unknown",
         "warnings": list(data.get("warnings") or []),
+        "diagnostics": dict(data.get("diagnostics") or {}),
+        "window_config": dict(data.get("window_config") or {}),
         "latest": dict(data.get("latest") or {}),
         "mean_24": dict(data.get("mean_24") or {}),
         "std_24": dict(data.get("std_24") or {}),

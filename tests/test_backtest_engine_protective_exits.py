@@ -37,11 +37,40 @@ class OneShotLongStrategy(StrategyBase):
         return {"type": "kline", "min_length": 2}
 
 
-def _ohlcv(*, highs, lows, closes):
+class ShortThenBuyStrategy(StrategyBase):
+    def __init__(self):
+        super().__init__("short_then_buy", {})
+        self._count = 0
+
+    def generate_signals(self, data):
+        if len(data) < 2:
+            return []
+        self._count += 1
+        if self._count == 1:
+            signal_type = SignalType.SELL
+        elif self._count == 2:
+            signal_type = SignalType.BUY
+        else:
+            return []
+        return [
+            Signal(
+                symbol="BTC/USDT",
+                signal_type=signal_type,
+                price=float(data["close"].iloc[-1]),
+                timestamp=datetime.now(timezone.utc),
+                strategy_name=self.name,
+            )
+        ]
+
+    def get_required_data(self):
+        return {"type": "kline", "min_length": 2}
+
+
+def _ohlcv(*, highs, lows, closes, opens=None):
     idx = pd.date_range("2026-01-01", periods=len(closes), freq="h", tz="UTC")
     return pd.DataFrame(
         {
-            "open": closes,
+            "open": opens if opens is not None else closes,
             "high": highs,
             "low": lows,
             "close": closes,
@@ -83,6 +112,28 @@ def test_backtest_honors_signal_stop_loss_intrabar():
     close = [trade for trade in result.trades if trade.trade_stage == "close"][0]
     assert close.exit_reason == "stop_loss"
     assert close.price == pytest.approx(95.0)
+
+
+def test_backtest_stop_loss_gap_through_fills_at_open():
+    engine = BacktestEngine(_config())
+    data = _ohlcv(
+        opens=[100.0, 100.0, 100.0, 92.0],
+        highs=[100.0, 100.0, 100.0, 93.0],
+        lows=[100.0, 100.0, 100.0, 90.0],
+        closes=[100.0, 100.0, 100.0, 91.0],
+    )
+
+    result = asyncio.run(
+        engine.run_backtest(
+            OneShotLongStrategy(stop_loss=95.0, take_profit=110.0),
+            data,
+            symbol="BTC/USDT",
+        )
+    )
+
+    close = [trade for trade in result.trades if trade.trade_stage == "close"][0]
+    assert close.exit_reason == "stop_loss"
+    assert close.price == pytest.approx(92.0)
 
 
 def test_backtest_honors_signal_take_profit_intrabar():
@@ -146,3 +197,18 @@ def test_backtest_honors_time_stop_from_signal_metadata():
     close = [trade for trade in result.trades if trade.trade_stage == "close"][0]
     assert close.exit_reason == "time_stop"
     assert close.price == pytest.approx(100.5)
+
+
+def test_backtest_opposite_buy_closes_short_and_opens_long():
+    engine = BacktestEngine(_config(position_size_pct=0.1, max_positions=1))
+    data = _ohlcv(
+        highs=[100.0, 100.0, 101.0, 102.0],
+        lows=[100.0, 100.0, 99.0, 100.0],
+        closes=[100.0, 100.0, 101.0, 102.0],
+    )
+
+    result = asyncio.run(engine.run_backtest(ShortThenBuyStrategy(), data, symbol="BTC/USDT"))
+
+    assert [trade.trade_stage for trade in result.trades] == ["open", "close", "open"]
+    assert [trade.side for trade in result.trades] == ["sell", "buy", "buy"]
+    assert result.trades[1].exit_reason == "signal_reversal"

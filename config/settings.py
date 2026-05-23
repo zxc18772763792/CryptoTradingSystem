@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     COINGLASS_ENABLED: bool = False
     COINGLASS_BASE_URL: str = "https://www.keystore.com.cn/api/v1/proxy/coinglass"
     COINGLASS_API_KEY: str = ""
-    COINGLASS_RATE_LIMIT_PER_MIN: int = 10
+    COINGLASS_RATE_LIMIT_PER_MIN: int = 30
     COINGLASS_DAILY_BUDGET: int = 50000
     COINGLASS_MONTHLY_BUDGET: int = 500000
     COINGLASS_INCLUDE_AI: bool = True
@@ -241,6 +241,11 @@ class Settings(BaseSettings):
     WEB_PORT: int = 8000
     WEB_SECRET_KEY: str = "change_this_secret_key_in_production"
     OPS_TOKEN: str = ""
+    # CORS whitelist; explicit origins, never "*" when allow_credentials=True
+    WEB_ALLOWED_ORIGINS: List[str] = [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
 
     # Notification
     TELEGRAM_BOT_TOKEN: Optional[str] = None

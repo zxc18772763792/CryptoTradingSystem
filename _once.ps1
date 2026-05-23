@@ -346,11 +346,20 @@ if (-not $AllowPersistedLiveMode) {
     Write-Host "Managed start blocks persisted live-mode restore unless you pass '.\web.bat start -AllowPersistedLiveMode'." -ForegroundColor Yellow
 }
 
+$startupStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$webStdoutPath = Join-Path $PSScriptRoot ("logs\uvicorn_web_{0}.out.log" -f $startupStamp)
+$webStderrPath = Join-Path $PSScriptRoot ("logs\uvicorn_web_{0}.err.log" -f $startupStamp)
+
 $proc = Start-Process `
     -FilePath $pythonExe `
     -ArgumentList @("-m", "uvicorn", "web.main:app", "--host", $BindHost, "--port", "$Port") `
     -WorkingDirectory $PSScriptRoot `
+    -RedirectStandardOutput $webStdoutPath `
+    -RedirectStandardError $webStderrPath `
     -PassThru
+
+Write-Host "Web stdout log: $webStdoutPath"
+Write-Host "Web stderr log: $webStderrPath"
 
 $shouldStartWorker = $StartNewsWorker
 $shouldStartLlmWorker = $StartNewsLlmWorker
@@ -449,9 +458,13 @@ if ($proc.HasExited) {
     if ($lastProbeError) {
         Write-Host ("Last probe error: {0}" -f $lastProbeError) -ForegroundColor Yellow
     }
+    Write-Host "Inspect startup logs:" -ForegroundColor Yellow
+    Write-Host "  stdout: $webStdoutPath" -ForegroundColor Yellow
+    Write-Host "  stderr: $webStderrPath" -ForegroundColor Yellow
     if ($StartAutonomousAgent) {
         Write-Host "Autonomous agent start skipped because the web process exited early." -ForegroundColor Yellow
     }
+    exit 1
 } elseif ($health -and $status) {
     $runtimeStatus = if ($status) { $status.status } else { $health.status }
     $tradingMode = if ($status -and $status.trading_mode) { $status.trading_mode } else { "unknown" }
@@ -478,9 +491,15 @@ if ($proc.HasExited) {
     if ($lastProbeError) {
         Write-Host ("Last probe error: {0}" -f $lastProbeError) -ForegroundColor Yellow
     }
+    Write-Host "Stopping unhealthy web process because /health never became ready inside the startup window." -ForegroundColor Red
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    Write-Host "Inspect startup logs:" -ForegroundColor Yellow
+    Write-Host "  stdout: $webStdoutPath" -ForegroundColor Yellow
+    Write-Host "  stderr: $webStderrPath" -ForegroundColor Yellow
     if ($StartAutonomousAgent) {
         Write-Host "Autonomous agent start skipped because the web health endpoint was not ready yet." -ForegroundColor Yellow
     }
+    exit 1
 }
 
 # 测试数据源 (可选)

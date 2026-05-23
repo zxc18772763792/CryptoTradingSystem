@@ -127,7 +127,11 @@ class DecisionEngine:
             blocked_reason = "kill_switch_enabled"
         elif bool(cfg.get("reduce_only", False)) and not allow_close:
             blocked_reason = "reduce_only_enabled"
-        elif leverage > float(cfg.get("max_leverage", 3.0) or 3.0):
+        elif leverage > float(cfg.get("max_leverage", 3.0) or 3.0) and not allow_close:
+            # Closing/exit orders must always be allowed to reduce existing
+            # exposure even if upstream pre-checks (e.g. position close after
+            # a leverage cap reduction) would otherwise be blocked. The
+            # leverage cap will still bite on any *fresh* entry below.
             blocked_reason = "max_leverage_exceeded"
         elif account_equity > 0 and order_value > account_equity * float(cfg.get("max_position_notional_pct", 0.1) or 0.1) and not allow_close:
             blocked_reason = "max_position_notional_pct_exceeded"

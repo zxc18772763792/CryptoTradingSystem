@@ -18,6 +18,16 @@ def test_explicit_interval_override_wins_under_low_budget(monkeypatch):
     assert worker_module._source_interval("coinglass_articles") == 120
 
 
+def test_default_coinglass_budget_keeps_news_near_realtime(monkeypatch):
+    monkeypatch.setenv("COINGLASS_RATE_LIMIT_PER_MIN", "30")
+    monkeypatch.delenv("NEWS_COINGLASS_LOW_BUDGET_MODE", raising=False)
+    monkeypatch.delenv("NEWS_INTERVAL_COINGLASS_ARTICLES", raising=False)
+    monkeypatch.delenv("NEWS_INTERVAL_COINGLASS_NEWSFLASH", raising=False)
+
+    assert worker_module._source_interval("coinglass_newsflash") == 30
+    assert worker_module._source_interval("coinglass_articles") == 180
+
+
 def test_opennews_default_interval_is_near_realtime(monkeypatch):
     monkeypatch.delenv("NEWS_INTERVAL_OPENNEWS", raising=False)
 

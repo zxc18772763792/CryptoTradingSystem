@@ -1,8 +1,8 @@
 """Cross-sectional crypto factor library."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -47,6 +47,7 @@ FACTOR_CATALOG: List[Dict[str, Any]] = [
 class FactorResult:
     factors: pd.DataFrame
     asset_scores: pd.DataFrame
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 def _safe_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -74,8 +75,13 @@ def _long_short_factor(
             values.append(0.0)
             continue
 
+        metric_values = pd.to_numeric(mrow.loc[valid], errors="coerce").dropna()
+        if len(metric_values) < 2 or float(metric_values.max() - metric_values.min()) <= 1e-12:
+            values.append(0.0)
+            continue
+
         k = max(1, int(len(valid) * quantile))
-        ranked = mrow.loc[valid].sort_values(ascending=True)
+        ranked = metric_values.sort_values(ascending=True)
         low = list(ranked.head(k).index)
         high = list(ranked.tail(k).index)
 
@@ -168,6 +174,56 @@ def _factor_window_config(timeframe: str = "1h", n_obs: int = 0) -> Dict[str, in
     for k, v in list(cfg.items()):
         cfg[k] = int(max(2, min(v, max(3, n - 2))))
     return cfg
+
+
+def _adaptive_change_window(
+    close_df: pd.DataFrame,
+    returns_df: pd.DataFrame,
+    *,
+    target_window: int,
+    candidates: List[int],
+    quantile: float = 0.3,
+    min_recent_nonzero: int = 6,
+    recent_rows: int = 120,
+) -> Tuple[pd.DataFrame, int, bool]:
+    """Choose a momentum horizon that remains informative in the recent tail."""
+    n = int(len(close_df.index))
+    windows: List[int] = []
+    for raw in [target_window, *candidates]:
+        try:
+            window = int(raw)
+        except Exception:
+            continue
+        if window <= 0:
+            continue
+        window = max(1, min(window, max(1, n - 2)))
+        if window not in windows:
+            windows.append(window)
+    if not windows:
+        windows = [1]
+
+    tail_len = max(1, min(int(recent_rows or 120), n))
+    min_rows = max(1, min(int(min_recent_nonzero or 1), tail_len))
+    selected_metric: Optional[pd.DataFrame] = None
+    selected_window = windows[-1]
+    selected_nonzero = -1
+    degraded = False
+
+    for window in windows:
+        metric = close_df / close_df.shift(window) - 1.0
+        factor = _long_short_factor(metric, returns_df, quantile=quantile, long_high=True)
+        nonzero = int((factor.tail(tail_len).abs() > 1e-12).sum()) if not factor.empty else 0
+        selected_metric = metric
+        selected_window = window
+        selected_nonzero = nonzero
+        if nonzero >= min_rows:
+            break
+    else:
+        degraded = True
+
+    if selected_window != int(target_window):
+        degraded = True
+    return selected_metric if selected_metric is not None else pd.DataFrame(index=close_df.index), selected_window, degraded
 
 
 def _zscore_series(series: pd.Series) -> pd.Series:
@@ -263,7 +319,7 @@ def build_factor_library(
 
     common_cols = [c for c in close_df.columns if c in volume_df.columns]
     if not common_cols:
-        return FactorResult(factors=pd.DataFrame(), asset_scores=pd.DataFrame())
+        return FactorResult(factors=pd.DataFrame(), asset_scores=pd.DataFrame(), diagnostics={})
 
     close_df = close_df[common_cols]
     volume_df = volume_df[common_cols]
@@ -277,9 +333,45 @@ def build_factor_library(
     mps = lambda w, floor=4: max(floor, int(w) // 2)  # noqa: E731
 
     metric_size = -np.log(dollar_vol.rolling(cfg["size"], min_periods=mps(cfg["size"], 6)).mean())
-    metric_mom = close_df / close_df.shift(cfg["mom_mid"]) - 1.0
-    metric_mom_fast = close_df / close_df.shift(cfg["mom_fast"]) - 1.0
-    metric_mom_slow = close_df / close_df.shift(cfg["mom_slow"]) - 1.0
+    mom_floor = max(1, min(24, len(close_df) // 8))
+    metric_mom, mom_window, mom_degraded = _adaptive_change_window(
+        close_df,
+        returns_df,
+        target_window=cfg["mom_mid"],
+        candidates=[
+            max(mom_floor, cfg["mom_mid"] // 2),
+            cfg["mom_fast"],
+            max(1, cfg["mom_fast"] // 2),
+            1,
+        ],
+        quantile=quantile,
+        min_recent_nonzero=6,
+        recent_rows=min(240, max(30, len(close_df) // 2)),
+    )
+    metric_mom_fast, mom_fast_window, mom_fast_degraded = _adaptive_change_window(
+        close_df,
+        returns_df,
+        target_window=cfg["mom_fast"],
+        candidates=[max(1, cfg["mom_fast"] // 2), 1],
+        quantile=quantile,
+        min_recent_nonzero=6,
+        recent_rows=min(240, max(30, len(close_df) // 2)),
+    )
+    metric_mom_slow, mom_slow_window, mom_slow_degraded = _adaptive_change_window(
+        close_df,
+        returns_df,
+        target_window=cfg["mom_slow"],
+        candidates=[
+            max(mom_floor, cfg["mom_slow"] // 2),
+            cfg["mom_mid"],
+            max(mom_floor, cfg["mom_mid"] // 2),
+            cfg["mom_fast"],
+            1,
+        ],
+        quantile=quantile,
+        min_recent_nonzero=6,
+        recent_rows=min(240, max(30, len(close_df) // 2)),
+    )
     metric_rev = -returns_df.shift(1)
     metric_rev_fast = -(close_df / close_df.shift(cfg["rev_fast"]) - 1.0)
     metric_vol = -returns_df.rolling(cfg["vol_mid"], min_periods=mps(cfg["vol_mid"], 6)).std()
@@ -359,5 +451,32 @@ def build_factor_library(
     factors["RPOS"] = _long_short_factor(metric_rpos, returns_df, quantile=quantile, long_high=True)
     factors = factors.fillna(0.0)
 
+    diagnostics: Dict[str, Any] = {
+        "window_config": {
+            **cfg,
+            "mom_mid_effective": int(mom_window),
+            "mom_fast_effective": int(mom_fast_window),
+            "mom_slow_effective": int(mom_slow_window),
+        },
+        "degraded_factors": [
+            name
+            for name, degraded in (
+                ("MOM", mom_degraded),
+                ("MOMF", mom_fast_degraded),
+                ("MOMS", mom_slow_degraded),
+            )
+            if degraded
+        ],
+        "warnings": [],
+    }
+    if mom_degraded:
+        diagnostics["warnings"].append(
+            "MOM horizon was shortened because the requested window produced no recent cross-sectional signal."
+        )
+    if mom_fast_degraded or mom_slow_degraded:
+        diagnostics["warnings"].append(
+            "One or more auxiliary momentum horizons were shortened for the available sample."
+        )
+
     asset_scores = _latest_asset_scores(close_df, volume_df, returns_df, market_ret, timeframe=timeframe)
-    return FactorResult(factors=factors, asset_scores=asset_scores)
+    return FactorResult(factors=factors, asset_scores=asset_scores, diagnostics=diagnostics)

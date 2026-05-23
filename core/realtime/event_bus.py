@@ -58,13 +58,30 @@ class RealtimeEventBus:
         async with self._get_lock():
             subscribers = list(self._subscribers)
 
+        # Drop oldest message on full queue but keep subscriber alive.
+        # Only remove subscribers when put fails for unrecoverable reasons.
         stale: List[asyncio.Queue] = []
         for q in subscribers:
             try:
                 if q.full():
-                    _ = q.get_nowait()
-                q.put_nowait(envelope)
+                    # Best-effort drop of the oldest message — keep the subscriber.
+                    try:
+                        _ = q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                    try:
+                        q.put_nowait(envelope)
+                    except asyncio.QueueFull:
+                        # Could not enqueue even after draining one — drop *this* message
+                        # for this subscriber, but do NOT mark subscriber stale.
+                        continue
+                else:
+                    q.put_nowait(envelope)
+            except asyncio.QueueFull:
+                # Treat as transient — keep subscriber.
+                continue
             except Exception:
+                # Only truly unexpected errors mark a subscriber for removal.
                 stale.append(q)
 
         if stale:

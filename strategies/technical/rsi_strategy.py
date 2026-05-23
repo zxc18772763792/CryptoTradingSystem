@@ -231,27 +231,49 @@ class RSIDivergenceStrategy(StrategyBase):
 
     @staticmethod
     def _find_peaks(series: pd.Series, order: int = 5) -> pd.Series:
-        window = int(max(1, order) * 2 + 1)
+        """Non-centered peak detector: a peak at index t is confirmed only after
+        ``order`` subsequent bars. This avoids future-data leakage that centered
+        rolling windows introduce — the resulting series is causal and consistent
+        between backtest and live."""
+        order = int(max(1, order))
         vals = pd.to_numeric(series, errors="coerce")
-        rolling_max = vals.rolling(window=window, center=True, min_periods=window).max()
-        peaks = (vals == rolling_max) & vals.notna()
-        border = int(max(1, order))
-        if len(peaks) > border:
-            peaks.iloc[:border] = False
-            peaks.iloc[-border:] = False
-        return peaks.fillna(False)
+        n = len(vals)
+        peaks = pd.Series(False, index=vals.index)
+        if n <= 2 * order:
+            return peaks
+        arr = vals.values
+        for i in range(order, n - order):
+            v = arr[i]
+            if not np.isfinite(v):
+                continue
+            left = arr[i - order:i]
+            right = arr[i + 1:i + 1 + order]
+            if np.all(np.isfinite(left)) and np.all(np.isfinite(right)):
+                if v >= left.max() and v >= right.max():
+                    peaks.iloc[i] = True
+        return peaks
 
     @staticmethod
     def _find_troughs(series: pd.Series, order: int = 5) -> pd.Series:
-        window = int(max(1, order) * 2 + 1)
+        """Non-centered trough detector: a trough at index t is confirmed only after
+        ``order`` subsequent bars (causal, no look-ahead bias)."""
+        order = int(max(1, order))
         vals = pd.to_numeric(series, errors="coerce")
-        rolling_min = vals.rolling(window=window, center=True, min_periods=window).min()
-        troughs = (vals == rolling_min) & vals.notna()
-        border = int(max(1, order))
-        if len(troughs) > border:
-            troughs.iloc[:border] = False
-            troughs.iloc[-border:] = False
-        return troughs.fillna(False)
+        n = len(vals)
+        troughs = pd.Series(False, index=vals.index)
+        if n <= 2 * order:
+            return troughs
+        arr = vals.values
+        for i in range(order, n - order):
+            v = arr[i]
+            if not np.isfinite(v):
+                continue
+            left = arr[i - order:i]
+            right = arr[i + 1:i + 1 + order]
+            if np.all(np.isfinite(left)) and np.all(np.isfinite(right)):
+                if v <= left.min() and v <= right.min():
+                    troughs.iloc[i] = True
+        return troughs
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         period = int(self.params["period"])

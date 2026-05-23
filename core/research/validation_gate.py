@@ -196,17 +196,48 @@ def build_validation_summary_from_research_result(result: Dict[str, Any]) -> Pro
         metadata={"is_sharpe": is_sharpe, "oos_sharpe": oos_sharpe, "raw_sharpe": sharpe_ratio},
     )
 
-    # DSR: deflated for multiple testing across all runs tested
-    n_trials_for_dsr = max(1, runs)
-    # n_obs should be bar count, not trade count — use n_bars when available,
-    # fall back to total_trades * 5 as a rough proxy (assuming ~20% trade rate)
+    # FIX (P1-DSR effective): DSR previously hard-coded skew=0/kurt=3 (Gaussian) and
+    # ignored hyper-parameter search depth, making the deflation ineffective for
+    # heavy-tailed crypto returns and parameter-tuned strategies. Now:
+    #   - n_trials multiplies by `optimization_trials` (how many param combos were
+    #     screened on IS) — this is the real multiple-testing surface.
+    #   - skewness / excess-kurtosis are estimated from the equity_curve_sample
+    #     (50-pt) when available; fall back to a small heavy-tail prior (skew=-0.2,
+    #     kurt=5.0) typical for crypto bar returns.
+    runs_count = max(1, runs)
+    opt_trials = int(best.get("optimization_trials", 0) or 0)
+    # Effective multiple-testing N = runs * trials_per_run (avoid 0; min 1)
+    n_trials_for_dsr = max(1, runs_count * max(1, opt_trials))
     _n_bars = int(best.get("n_bars", 0) or 0)
     _n_trades = int(best.get("total_trades", 10) or 10)
     n_obs_for_dsr = max(50, _n_bars if _n_bars > 0 else _n_trades * 5)
+
+    skew_est, kurt_est = -0.2, 5.0
+    try:
+        eqc = best.get("equity_curve_sample") or []
+        if isinstance(eqc, (list, tuple)) and len(eqc) >= 5:
+            import numpy as _np
+            _eq = _np.asarray([float(v) for v in eqc], dtype=float)
+            _eq = _eq[_np.isfinite(_eq) & (_eq > 0)]
+            if _eq.size >= 3:
+                _rets = _np.diff(_eq) / _eq[:-1]
+                _rets = _rets[_np.isfinite(_rets)]
+                if _rets.size >= 3 and float(_np.std(_rets)) > 0:
+                    _m = float(_np.mean(_rets))
+                    _s = float(_np.std(_rets))
+                    if _s > 0:
+                        z = (_rets - _m) / _s
+                        skew_est = float(_np.mean(z ** 3))
+                        kurt_est = float(_np.mean(z ** 4))  # raw kurt; DSR func uses raw
+    except Exception:
+        skew_est, kurt_est = -0.2, 5.0  # heavy-tail prior typical for crypto
+
     dsr = _deflated_sharpe_ratio(
         sharpe=effective_sharpe,
         n_trials=n_trials_for_dsr,
         n_obs=n_obs_for_dsr,
+        skewness=skew_est,
+        kurtosis=kurt_est,
     )
 
     return_score = _score_ratio(max(total_return, 0.0), 25.0)

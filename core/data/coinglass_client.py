@@ -358,7 +358,7 @@ def _roll_budget_windows(
 
 
 def _effective_minute_cap(*, manual: bool) -> int:
-    limit = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10))
+    limit = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30))
     if manual:
         return limit
     return max(1, limit - _NON_MANUAL_MINUTE_RESERVE)
@@ -380,7 +380,7 @@ async def _reserve_budget(*, manual: bool) -> CoinglassBudgetState:
         row = await _get_budget_row(session)
         _roll_budget_windows(row)
         minute_limit = max(
-            1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10)
+            1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30)
         )
         daily_limit = max(
             1, int(getattr(settings, "COINGLASS_DAILY_BUDGET", 50000) or 50000)
@@ -439,7 +439,7 @@ async def get_coinglass_budget_state() -> CoinglassBudgetState:
         _roll_budget_windows(row)
         await session.commit()
         minute_limit = max(
-            1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 10) or 10)
+            1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30)
         )
         daily_limit = max(
             1, int(getattr(settings, "COINGLASS_DAILY_BUDGET", 50000) or 50000)

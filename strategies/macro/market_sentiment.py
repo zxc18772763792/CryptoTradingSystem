@@ -149,7 +149,11 @@ class MarketSentimentStrategy(StrategyBase):
         signals: List[Signal] = []
         fgi = int(self._sentiment_data.get("fear_greed_index", 50))
         momentum = float(self._sentiment_data.get("social_sentiment", 0.0) or 0.0)
-        timestamp = self._sentiment_data.get("timestamp", datetime.now(timezone.utc))
+        # Prefer the current bar time so Signal.timestamp aligns with the
+        # cross-strategy conflict window in strategy_manager. Only fall back to
+        # the sampling timestamp (or wall-clock) when no bar index is present.
+        sample_ts = self._sentiment_data.get("timestamp", datetime.now(timezone.utc))
+        timestamp = self._bar_time(data, fallback=sample_ts)
 
         current_price = float(data["close"].iloc[-1]) if not data.empty else 0.0
         symbol = str(data["symbol"].iloc[0]) if "symbol" in data and len(data) else "UNKNOWN"

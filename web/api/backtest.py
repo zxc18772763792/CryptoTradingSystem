@@ -8,15 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-import matplotlib
-matplotlib.use("Agg")
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from loguru import logger
-from matplotlib import pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
+
+from web.api.auth import require_sensitive_ops_permissions
 
 from config.strategy_registry import (
     get_backtest_optimization_grid as registry_backtest_optimization_grid,
@@ -4197,7 +4195,7 @@ async def _load_backtest_inputs(
     return df, None, _normalize_symbol(symbol) or symbol
 
 
-@router.post("/run")
+@router.post("/run", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def run_backtest(
     strategy: str = "MAStrategy",
     symbol: str = "BTC/USDT",
@@ -4253,7 +4251,8 @@ async def run_backtest(
         df = full_df
         auto_expanded_range = True
 
-    result = _run_backtest_core(
+    result = await asyncio.to_thread(
+        _run_backtest_core,
         strategy=strategy,
         df=df,
         timeframe=timeframe,
@@ -4293,7 +4292,7 @@ async def run_backtest(
     return result
 
 
-@router.post("/compare")
+@router.post("/compare", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def compare_backtests(
     strategies: str = (
         "MAStrategy,EMAStrategy,RSIStrategy,RSIDivergenceStrategy,MACDStrategy,MACDHistogramStrategy,"
@@ -4422,7 +4421,8 @@ async def compare_backtests(
                 start_time=parsed_start.to_pydatetime() if parsed_start is not None else None,
                 end_time=parsed_end.to_pydatetime() if parsed_end is not None else None,
             )
-            baseline_metrics = _run_backtest_core(
+            baseline_metrics = await asyncio.to_thread(
+                _run_backtest_core,
                 strategy=strategy,
                 df=loop_df,
                 timeframe=timeframe,
@@ -4488,7 +4488,8 @@ async def compare_backtests(
                 continue
 
             try:
-                opt = _optimize_strategy_on_df(
+                opt = await asyncio.to_thread(
+                    _optimize_strategy_on_df,
                     strategy=entry["strategy"],
                     df=entry["df"],
                     timeframe=timeframe,
@@ -4594,7 +4595,7 @@ async def compare_backtests(
     }, requested_exit_template)
 
 
-@router.post("/run_custom")
+@router.post("/run_custom", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def run_backtest_custom(
     strategy: str = "MAStrategy",
     symbol: str = "BTC/USDT",
@@ -4657,7 +4658,8 @@ async def run_backtest_custom(
     elif len(df) < min_bars:
         raise HTTPException(status_code=400, detail=f"该时间范围K线不足（{len(df)} 根），{timeframe} 至少需要 {min_bars} 根")
 
-    result = _run_backtest_core(
+    result = await asyncio.to_thread(
+        _run_backtest_core,
         strategy=strategy,
         df=df,
         timeframe=timeframe,
@@ -4697,7 +4699,7 @@ async def run_backtest_custom(
     return result
 
 
-@router.post("/optimize")
+@router.post("/optimize", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def optimize_backtest(
     strategy: str = "MAStrategy",
     symbol: str = "BTC/USDT",
@@ -4770,7 +4772,8 @@ async def optimize_backtest(
                 _BACKTEST_OPTIMIZE_MAX_TRIALS,
             ),
         )
-        opt_result = _optimize_strategy_on_df(
+        opt_result = await asyncio.to_thread(
+            _optimize_strategy_on_df,
             strategy=strategy,
             df=df,
             timeframe=timeframe,
@@ -4830,7 +4833,7 @@ async def optimize_backtest(
     return _apply_exit_template_metadata(response, requested_exit_template)
 
 
-@router.get("/export")
+@router.get("/export", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
 async def export_backtest_report(
     strategy: str = "MAStrategy",
     symbol: str = "BTC/USDT",
@@ -4884,7 +4887,8 @@ async def export_backtest_report(
     if df.empty:
         raise HTTPException(status_code=404, detail="该时间范围内无可用数据")
 
-    result = _run_backtest_core(
+    result = await asyncio.to_thread(
+        _run_backtest_core,
         strategy=strategy,
         df=df,
         timeframe=timeframe,
@@ -4948,6 +4952,12 @@ async def export_backtest_report(
         filename = f"backtest_{strategy}_{resolved_symbol.replace('/', '_')}_{timeframe}.csv"
         media_type = "text/csv"
     elif format_lower == "pdf":
+        import matplotlib  # noqa: PLC0415
+
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt  # noqa: PLC0415
+        from matplotlib.backends.backend_pdf import PdfPages  # noqa: PLC0415
+
         output = io.BytesIO()
         with PdfPages(output) as pdf:
             fig = plt.figure(figsize=(11.69, 8.27))

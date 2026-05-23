@@ -228,6 +228,32 @@ def test_factor_library_key_style_factors_are_not_all_zero():
         assert tail[col].abs().sum() > 0, f"{col} should have non-zero signal in recent window"
 
 
+def test_factor_library_adapts_mom_window_when_mid_horizon_is_uninformative():
+    index = pd.date_range("2026-04-01", periods=240, freq="5min", tz="UTC")
+    target_period = 108
+    pattern_x = np.arange(target_period)
+    base_pattern = np.linspace(100.0, 101.0, target_period)
+    repeated = np.resize(base_pattern, len(index))
+    close_df = pd.DataFrame(
+        {
+            "A/USDT": repeated + np.resize(np.sin(pattern_x / 3.0) * 0.8, len(index)),
+            "B/USDT": repeated + np.resize(np.cos(pattern_x / 4.0) * 0.7, len(index)),
+            "C/USDT": repeated - np.resize(np.sin(pattern_x / 5.0) * 0.6, len(index)),
+            "D/USDT": repeated - np.resize(np.cos(pattern_x / 6.0) * 0.5, len(index)),
+        },
+        index=index,
+    )
+    # The 5m/240-row window caps MOM at 108 bars. A 108-bar repeated pattern
+    # makes that horizon uninformative while shorter horizons still move.
+    volume_df = pd.DataFrame(1000.0, index=index, columns=close_df.columns)
+
+    result = build_factor_library(close_df=close_df, volume_df=volume_df, timeframe="5m", quantile=0.3)
+
+    assert result.diagnostics["window_config"]["mom_mid_effective"] < result.diagnostics["window_config"]["mom_mid"]
+    assert "MOM" in result.diagnostics["degraded_factors"]
+    assert result.factors["MOM"].tail(80).abs().sum() > 0
+
+
 def test_fama_factor_strategy_is_supported_in_web_backtest():
     assert is_strategy_backtest_supported("FamaFactorArbitrageStrategy")
 

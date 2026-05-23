@@ -144,7 +144,10 @@ class StochasticStrategy(StrategyBase):
         cross_up = k_prev <= d_prev and k_now > d_now
         cross_down = k_prev >= d_prev and k_now < d_now
 
-        if cross_up and k_now <= oversold:
+        # Entry filter looks at the bar *before* the cross — by the time %K has
+        # crossed above %D it has usually already exited the oversold zone, so
+        # comparing k_now <= oversold drops almost every real crossover.
+        if cross_up and k_prev <= oversold:
             signals.append(
                 Signal(
                     symbol=symbol,
@@ -159,7 +162,7 @@ class StochasticStrategy(StrategyBase):
                 )
             )
 
-        if cross_down and k_now >= overbought:
+        if cross_down and k_prev >= overbought:
             signals.append(
                 Signal(
                     symbol=symbol,
@@ -330,11 +333,42 @@ class VWAPReversionStrategy(StrategyBase):
                     metadata={"vwap": float(vwap.iloc[-1]), "deviation": d_now},
                 )
             )
+        elif d_prev <= entry and d_now > entry:
+            signals.append(
+                Signal(
+                    symbol=symbol,
+                    signal_type=SignalType.SELL,
+                    price=c,
+                    timestamp=now,
+                    strategy_name=self.name,
+                    strength=min(max(abs(d_now) / max(entry * 2, 1e-9), 0.1), 1.0),
+                    stop_loss=c * (1 + float(self.params["stop_loss_pct"])),
+                    take_profit=c * (1 - float(self.params["take_profit_pct"])),
+                    metadata={"vwap": float(vwap.iloc[-1]), "deviation": d_now},
+                )
+            )
         elif d_prev <= -exit_dev and d_now > -exit_dev:
             signals.append(
                 Signal(
                     symbol=symbol,
                     signal_type=SignalType.CLOSE_LONG,
+                    price=c,
+                    timestamp=now,
+                    strategy_name=self.name,
+                    strength=0.7,
+                    metadata={
+                        "vwap": float(vwap.iloc[-1]),
+                        "deviation": d_now,
+                        "close_only": True,
+                        "close_reason": "vwap_mean_reversion_completed",
+                    },
+                )
+            )
+        elif d_prev >= exit_dev and d_now < exit_dev:
+            signals.append(
+                Signal(
+                    symbol=symbol,
+                    signal_type=SignalType.CLOSE_SHORT,
                     price=c,
                     timestamp=now,
                     strategy_name=self.name,

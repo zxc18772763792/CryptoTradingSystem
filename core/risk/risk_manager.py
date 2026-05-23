@@ -481,11 +481,21 @@ class RiskManager:
         breach_ratio = stop_basis_ratio <= -abs(self.max_daily_loss_ratio)
         breach_usd = self.max_daily_loss_usd > 0 and stop_basis_usd <= -abs(self.max_daily_loss_usd)
         breached = bool(breach_ratio or breach_usd)
+        # Catastrophic backstop: if the equity drop is at least 2x the
+        # configured daily loss limit, do NOT honour the "no system trades"
+        # exemption — a 2x breach almost certainly means the system was
+        # trading but its ledger drifted out of sync (e.g. exchange auto-
+        # liquidation, manual override). We treat it as a real loss event.
+        catastrophic = bool(
+            daily_pnl_ratio <= -2.0 * abs(self.max_daily_loss_ratio or 0.0)
+            and self.max_daily_loss_ratio > 0
+        )
         if (
             breached
             and str(getattr(self, "_risk_scope", "paper")) == "live"
             and self._daily_trades <= 0
             and abs(float(self._daily_realized_pnl or 0.0)) < 1e-9
+            and not catastrophic
         ):
             # In live mode, external wallet transfers / manually-held exchange positions can move
             # total equity without going through the system's trade ledger. Those changes should
@@ -507,6 +517,22 @@ class RiskManager:
             )
             self._daily_stop_breach_count = 0
             return
+        if catastrophic and self._daily_trades <= 0 and abs(float(self._daily_realized_pnl or 0.0)) < 1e-9:
+            self._add_alert(
+                title="灾难性权益跌幅触发熔断",
+                message=(
+                    f"权益跌幅 {daily_pnl_ratio * 100:.2f}% 达到日内止损 2× 阈值，"
+                    f"无视系统未记录成交豁免，强制熔断以防失控"
+                ),
+                severity="critical",
+                data={
+                    "daily_pnl_ratio": round(daily_pnl_ratio, 6),
+                    "daily_pnl_usd": round(daily_pnl_usd, 4),
+                    "stop_basis_usd": round(stop_basis_usd, 4),
+                    "stop_basis_ratio": round(stop_basis_ratio, 6),
+                    "max_daily_loss_ratio": float(self.max_daily_loss_ratio or 0.0),
+                },
+            )
         if breached:
             self._daily_stop_breach_count += 1
         else:
@@ -649,7 +675,9 @@ class RiskManager:
             )
             return False
 
-        if leverage > self.max_leverage:
+        # Closing orders must be able to reduce existing exposure after a
+        # leverage cap reduction. Fresh entries still obey the leverage cap.
+        if leverage > self.max_leverage and not allow_close:
             self._add_alert(
                 title="杠杆超限",
                 message=f"请求杠杆 {leverage:.2f}x 超过上限 {self.max_leverage:.2f}x",
@@ -677,7 +705,11 @@ class RiskManager:
 
         # Allow tiny float/quote drift when comparing order notional to risk caps.
         epsilon = max(1e-4, float(equity) * 1e-6, 0.05)
-        if equity > 0 and notional > 0 and not allow_close:
+        # Single-trade notional cap also applies to closes — a forced exit at
+        # a much larger size than the existing position would itself be a
+        # latent open. ``allow_close=True`` only legitimately bypasses the
+        # daily-loss halt and portfolio-/strategy-allocation caps below.
+        if equity > 0 and notional > 0:
             single_limit = equity * self.max_position_size
             if notional > single_limit + epsilon:
                 self._add_alert(
@@ -685,10 +717,13 @@ class RiskManager:
                     message=(
                         f"订单价值 {notional:.2f} USDT 超过单笔上限 {single_limit:.2f} USDT "
                         f"({self.max_position_size * 100:.1f}% 账户权益)"
+                        + ("（平仓单）" if allow_close else "")
                     ),
                     severity="critical",
                 )
                 return False
+
+        if equity > 0 and notional > 0 and not allow_close:
 
             # Portfolio gross exposure cap — prevents N strategies all longing the same asset
             gross_cap = equity * self.max_gross_exposure_ratio

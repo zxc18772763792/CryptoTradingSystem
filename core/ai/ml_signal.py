@@ -1,8 +1,8 @@
 """XGBoost-based ML directional signal model.
 
 The model is a binary classifier that predicts whether price will be
-higher or lower N bars ahead.  It wraps XGBoost and is intentionally
-lenient about missing features (fills with 0).
+higher or lower N bars ahead. It wraps XGBoost and fails closed to FLAT
+when required inference features are missing or invalid.
 
 If xgboost is not installed or the model file does not exist, every
 call to ``predict()`` returns a ``FLAT`` signal with confidence 0.
@@ -176,9 +176,13 @@ class MLSignalModel:
     # ------------------------------------------------------------------
 
     def _align_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Select last row and reindex to the expected feature columns."""
+        """Select last row and require the expected feature columns."""
         row = df.tail(1).copy()
-        for col in self._feature_names:
-            if col not in row.columns:
-                row[col] = 0.0
-        return row[self._feature_names].fillna(0.0)
+        missing = [col for col in self._feature_names if col not in row.columns]
+        if missing:
+            raise ValueError(f"missing ML feature columns: {missing[:8]}")
+        aligned = row[self._feature_names]
+        if aligned.isna().any(axis=None):
+            nan_cols = aligned.columns[aligned.isna().any()].tolist()
+            raise ValueError(f"invalid NaN ML feature columns: {nan_cols[:8]}")
+        return aligned

@@ -42,6 +42,44 @@ def _build_background_run_result(proposal_id: str, job_id: str = "job-1", status
     }
 
 
+def test_generate_ai_proposal_sanitizes_llm_trade_words(tmp_path, monkeypatch):
+    from web.api import ai_research as ai_module
+
+    monkeypatch.setattr(ai_module.settings, "DATA_STORAGE_PATH", tmp_path / "data", raising=False)
+    request = _build_request()
+    payload = ai_module.AIPlannerGenerateRequest(
+        goal="Research BTC trend and volatility filters without direct execution.",
+        market_regime="trend_up",
+        symbols=["BTC/USDT"],
+        timeframes=["1h"],
+        llm_research_output={
+            "hypothesis": "A long breakout and short squeeze regime may explain BTC momentum.",
+            "experiment_plan": ["Compare against a market order style baseline."],
+            "metrics_to_check": ["sharpe_ratio", "max_drawdown"],
+            "expected_failure_modes": ["short squeeze reverses quickly"],
+            "proposed_strategy_changes": [
+                {
+                    "strategy": "MAStrategy",
+                    "name": "Directional breakout draft",
+                    "thesis": "Use long pressure as a research feature.",
+                    "entry_logic": ["long when fast MA crosses above slow MA"],
+                    "exit_logic": ["short pressure invalidates trend"],
+                }
+            ],
+            "uncertainty": "medium",
+            "evidence_refs": ["live_signals"],
+        },
+    )
+
+    result = asyncio.run(ai_module.generate_ai_proposal(request, payload))
+
+    proposal = result["proposal"]
+    assert proposal["proposal_id"].startswith("proposal-")
+    assert proposal["research_mode"] == "hybrid"
+    assert proposal["strategy_drafts"]
+    assert any("sanitized for proposal planning" in note for note in result["planner_notes"])
+
+
 def test_oneclick_research_deploy_queues_background_job(monkeypatch):
     from web.api import ai_research as ai_module
 

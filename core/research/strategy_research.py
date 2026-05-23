@@ -2085,6 +2085,17 @@ def _run_backtest_core(
 
     fee_rate = max(0.0, float(commission_rate or 0.0))
     slip_rate = max(0.0, float(slippage_bps or 0.0)) / 10000.0
+    # FIX (P2-double-side cost): `commission_rate`/`slippage_bps` are documented as
+    # PER-SIDE rates (e.g. 0.04% taker = one fill). `turnover = |position.diff()|`
+    # counts BOTH sides of a round trip (entry + exit = turnover 2). The previous
+    # formula `turnover * (fee+slip)` therefore charged the per-side cost on each
+    # side correctly when interpreted as "cost per unit-of-notional-traded". However,
+    # callers often supply commission/slip as a ROUND-TRIP total (e.g. someone passes
+    # 0.0008 thinking it's the full round trip). To make the semantic unambiguous,
+    # we keep `turnover * total_cost_rate` (treating rate as per-side) but expose a
+    # comment so future readers know to convert if their convention differs.
+    # Mathematical note: turnover=2 with rate=0.0006 -> trade_cost=0.0012, which is
+    # exactly 2 fills' worth of cost = one full round trip (entry + exit).
     total_cost_rate = fee_rate + slip_rate
     trade_cost = turnover * total_cost_rate
 
@@ -2102,7 +2113,13 @@ def _run_backtest_core(
     drawdown = (equity - peak) / peak.replace(0, np.nan)
     max_drawdown = abs(float(drawdown.min() or 0.0)) * 100
 
-    ann = _annual_factor(timeframe)
+    # FIX (P1-Sharpe-blowup): for sub-minute timeframes _annual_factor can produce
+    # values up to 31M (e.g. 1s timeframe). At such high annualization factors,
+    # Sharpe ratios explode and become meaningless (noise sqrt-amplified). Cap at
+    # 252×24 = 6048 (≈ minute-bar 24/7 trading) which is the realistic upper bound
+    # for crypto perpetual venues.
+    _SHARPE_ANN_CAP = 252 * 24  # 6048
+    ann = min(int(_annual_factor(timeframe)), _SHARPE_ANN_CAP)
     std = float(strategy_returns.std() or 0.0)
     sharpe = float(strategy_returns.mean() / std * np.sqrt(ann)) if std > 0 else 0.0
 
@@ -2329,8 +2346,22 @@ def _run_purged_walk_forward(
     slippage_bps: float = 2.0,
     initial_capital: float = 10000.0,
     strategy_programs: Optional[Dict[str, StrategyProgram]] = None,
+    param_grid: Optional[Dict[str, List[Any]]] = None,
 ) -> Dict[str, Any]:
-    """Purged expanding-window walk-forward with embargo gap to prevent data leakage."""
+    """Purged expanding-window walk-forward with embargo gap.
+
+    FIX (P1-walk-forward): the previous implementation only evaluated `params` on
+    the OOS slice of each fold — it was a multi-slice OOS test, NOT a walk-forward.
+    A real WF must train (optimize) parameters on IS for each fold, then evaluate
+    those PER-FOLD parameters on OOS. The embargo gap separates IS end from OOS
+    start so a leakage-prone strategy is penalized.
+
+    Behavior:
+      - If `param_grid` is provided and non-empty: per-fold IS optimization → OOS.
+      - Otherwise: legacy behavior — evaluate `params` on each OOS slice (kept for
+        backward compatibility and for cases where no grid is available).
+    The embargo is materialized between IS-end and OOS-start in both modes.
+    """
     n = len(df)
     min_required = max(50 * int(n_splits), 100)
     if n < min_required:
@@ -2343,12 +2374,15 @@ def _run_purged_walk_forward(
             "consistency": None,
             "n_folds": 0,
             "positive_folds": 0,
+            "fold_params": [],
         }
     embargo_bars = max(1, int(n * embargo_pct))
     min_is = max(50, n // (n_splits + 2))
 
     sharpe_list: List[float] = []
+    fold_params: List[Dict[str, Any]] = []
     positive_folds = 0
+    has_grid = bool(param_grid)
 
     for i in range(1, n_splits + 1):
         is_end = int(n * i / (n_splits + 1))
@@ -2358,14 +2392,44 @@ def _run_purged_walk_forward(
         oos_end = int(n * (i + 1) / (n_splits + 1))
         if oos_start >= oos_end or (oos_end - oos_start) < 50:
             continue
+        # Train/eval slices are non-overlapping with embargo gap:
+        # [0 : is_end]   = IS (expanding window)
+        # [is_end : oos_start] = embargo (discarded)
+        # [oos_start : oos_end] = OOS
+        is_slice = df.iloc[:is_end]
         oos_slice = df.iloc[oos_start:oos_end]
+
+        # --- IS training phase ---
+        fold_best_params = dict(params or {})
+        if has_grid and len(is_slice) >= 50:
+            try:
+                best_p, _trials, _method = _optimize_params_scipy_lhs(
+                    strategy=strategy,
+                    param_grid=param_grid,
+                    is_df=is_slice,
+                    timeframe=timeframe,
+                    commission_rate=commission_rate,
+                    slippage_bps=slippage_bps,
+                    initial_capital=initial_capital,
+                    max_trials=12,  # smaller budget per fold
+                    strategy_programs=strategy_programs,
+                )
+                if best_p:
+                    fold_best_params = best_p
+            except Exception as exc:
+                logger.debug(
+                    f"walk-forward IS optimization fold {i} failed: {exc}; using passed params"
+                )
+        fold_params.append(dict(fold_best_params))
+
+        # --- OOS evaluation phase ---
         try:
             m = _run_backtest_core(
                 strategy=strategy,
                 df=oos_slice,
                 timeframe=timeframe,
                 initial_capital=initial_capital,
-                params=params,
+                params=fold_best_params,
                 commission_rate=commission_rate,
                 slippage_bps=slippage_bps,
                 strategy_programs=strategy_programs,
@@ -2373,11 +2437,11 @@ def _run_purged_walk_forward(
             if m.get("quality_flag") != "invalid":
                 sr = float(m.get("sharpe_ratio", 0.0) or 0.0)
                 sharpe_list.append(sr)
-                if (m.get("sharpe_ratio", 0.0) or 0.0) > 0:
+                if sr > 0:
                     positive_folds += 1
         except Exception as exc:
             logger.debug(
-                f"walk-forward fold {i} failed: strategy={strategy}, "
+                f"walk-forward fold {i} OOS eval failed: strategy={strategy}, "
                 f"oos_bars={oos_end - oos_start}, error={exc}"
             )
 
@@ -2388,6 +2452,7 @@ def _run_purged_walk_forward(
         "consistency": round(consistency, 4) if consistency is not None else None,
         "n_folds": n_folds,
         "positive_folds": positive_folds,
+        "fold_params": fold_params,
     }
 
 
@@ -2930,7 +2995,7 @@ async def run_strategy_research(
                 if payload["is_sharpe"] is None:
                     payload["is_sharpe"] = float(metrics.get("sharpe_ratio", 0.0))
 
-                # ── C: Purged walk-forward stability ──────────────────────
+                # ── C: Purged walk-forward stability (real IS train + OOS eval) ──
                 if can_split:
                     wf_result = _run_purged_walk_forward(
                         strategy=strategy,
@@ -2943,6 +3008,7 @@ async def run_strategy_research(
                         slippage_bps=float(config.slippage_bps),
                         initial_capital=config.initial_capital,
                         strategy_programs=config.strategy_programs,
+                        param_grid=param_grid if param_grid else None,
                     )
                     payload["wf_stability"] = _compute_wf_stability(wf_result)
                     payload["wf_consistency"] = wf_result.get("consistency")
@@ -2974,13 +3040,19 @@ async def run_strategy_research(
                 except Exception:
                     payload["equity_curve_sample"] = []
 
-                # ── Score: OOS-weighted when available ───────────────────
+                # ── Score: pure OOS when available, else IS-only fallback ────
+                # FIX (P1-score-pollution): the previous mix `OOS*0.6 + Full*0.4` blended
+                # Full-data scoring (which already contains the IS bars used for parameter
+                # tuning) back into the headline score — re-introducing optimization bias
+                # that OOS was supposed to gate. Pure OOS removes that leak. When OOS is
+                # unavailable (no can_split) we fall back to the full-data score with a
+                # 0.7 penalty multiplier to discourage in-sample-only candidates rising
+                # above split-validated ones.
                 full_score = _compute_score(metrics)
                 if oos_metrics is not None:
-                    oos_score_raw = _compute_score(oos_metrics)
-                    payload["score"] = oos_score_raw * 0.6 + full_score * 0.4
+                    payload["score"] = _compute_score(oos_metrics)
                 else:
-                    payload["score"] = full_score
+                    payload["score"] = full_score * 0.7
 
             except Exception as e:
                 payload["error"] = str(e)

@@ -1,12 +1,40 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
+import os
 from dataclasses import dataclass
 from typing import Dict, Optional, Set
 
+from loguru import logger
 from sqlalchemy import select
 
 from config.database import ApiUser, async_session_maker
+from config.settings import settings
+
+
+def _get_rbac_pepper() -> str:
+    """Return the RBAC HMAC pepper.
+
+    Order of resolution:
+        1. `settings.RBAC_SECRET` if the Settings model exposes it.
+        2. `RBAC_SECRET` environment variable.
+        3. Empty string with a one-time warning (degrades to keyed-but-unsalted HMAC).
+    """
+    pepper = getattr(settings, "RBAC_SECRET", None)
+    if pepper:
+        return str(pepper)
+    pepper = os.environ.get("RBAC_SECRET", "")
+    if not pepper and not _get_rbac_pepper._warned:  # type: ignore[attr-defined]
+        logger.warning(
+            "RBAC_SECRET not set; using empty pepper, security weakened. "
+            "Set RBAC_SECRET in the environment or config/settings.py."
+        )
+        _get_rbac_pepper._warned = True  # type: ignore[attr-defined]
+    return pepper
+
+
+_get_rbac_pepper._warned = False  # type: ignore[attr-defined]
 
 
 ROLE_PERMISSIONS: Dict[str, Set[str]] = {
@@ -83,7 +111,16 @@ class GovernanceIdentity:
 
 
 def hash_api_key(api_key: str) -> str:
-    return hashlib.sha256(str(api_key or "").encode("utf-8")).hexdigest()
+    """Hash an API key with HMAC-SHA256 using a server-side pepper.
+
+    Using HMAC (vs plain sha256) means an attacker who exfiltrates the
+    `ApiUser.api_key_hash` column cannot brute-force the raw keys without
+    also obtaining the `RBAC_SECRET` pepper. Falls back to keyed-with-empty-
+    pepper HMAC if the secret is unset (with a logged warning).
+    """
+    key = str(api_key or "").encode("utf-8")
+    pepper = _get_rbac_pepper().encode("utf-8")
+    return hmac.new(pepper, key, hashlib.sha256).hexdigest()
 
 
 def permission_set_for_role(role: str) -> Set[str]:

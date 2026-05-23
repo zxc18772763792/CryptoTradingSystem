@@ -82,6 +82,44 @@ def test_generate_research_proposal_captures_autonomy_fields():
     assert draft.params == {"funding_z_threshold": 2.0, "sentiment_gate": 0.15}
 
 
+def test_generate_research_proposal_sanitizes_trade_words_from_llm_context():
+    req = PlannerGenerateRequest(
+        goal="Research BTC trend and volatility filters without direct execution.",
+        market_regime="trend_up",
+        symbols=["BTC/USDT"],
+        timeframes=["1h"],
+        llm_research_output={
+            "hypothesis": "A long breakout and short squeeze regime may explain BTC momentum.",
+            "experiment_plan": ["Compare against a market order style baseline."],
+            "metrics_to_check": ["sharpe_ratio", "max_drawdown"],
+            "expected_failure_modes": ["short squeeze reverses quickly"],
+            "proposed_strategy_changes": [
+                {
+                    "strategy": "MAStrategy",
+                    "name": "Directional breakout draft",
+                    "thesis": "Use long pressure as a research feature, not an order instruction.",
+                    "entry_logic": ["long when fast MA crosses above slow MA"],
+                    "exit_logic": ["short pressure invalidates trend"],
+                    "params": {"fast_period": 8, "slow_period": 21},
+                }
+            ],
+            "uncertainty": "medium",
+            "evidence_refs": ["live_signals"],
+        },
+    )
+
+    out = generate_research_proposal(req, actor="pytest")
+
+    assert out.proposal.proposal_id
+    assert out.proposal.strategy_drafts
+    assert any("sanitized for proposal planning" in note for note in out.planner_notes)
+    stored_output = out.proposal.metadata["llm_research_output"]
+    stored_text = str(stored_output).lower()
+    assert " long " not in stored_text
+    assert "short" not in stored_text
+    assert "market order" not in stored_text
+
+
 def test_build_research_config_uses_draft_template_hint_when_templates_missing():
     now = _now()
     proposal = ResearchProposal(

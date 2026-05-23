@@ -46,7 +46,9 @@ def microstructure_proxies(window: Optional[pd.DataFrame]) -> Dict[str, float]:
         return {"atr_pct": 0.0, "realized_vol": 0.0, "spread_proxy": 0.0}
 
     ret = np.log(close / close.shift(1))
-    realized_vol = float(ret.tail(60).std(ddof=0) or 0.0)
+    # FIX (P2-ddof): use sample std (ddof=1) for realized vol — population std (ddof=0)
+    # systematically under-estimates vol for small windows.
+    realized_vol = float(ret.tail(60).std(ddof=1) or 0.0)
 
     spread_proxy = 0.0
     if high is not None and low is not None and len(high) and len(low):
