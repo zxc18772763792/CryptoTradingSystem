@@ -303,3 +303,24 @@ def test_position_manager_ambiguous_close_raises(tmp_path, monkeypatch):
 
     assert "Ambiguous position close" in manager.get_last_close_error()
     assert len(manager.get_all_positions()) == 2
+
+
+def test_position_to_dict_exposes_gross_and_net_realized_pnl():
+    position = position_module.Position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        current_price=110.0,
+        quantity=1.0,
+        value=110.0,
+        realized_pnl=10.0,
+        metadata={"fee_usd": 0.4, "slippage_cost_usd": 0.1},
+    )
+
+    payload = position.to_dict()
+
+    assert payload["realized_pnl"] == 10.0
+    assert payload["gross_realized_pnl"] == 10.0
+    assert payload["cost_usd"] == pytest.approx(0.5)
+    assert payload["net_realized_pnl"] == pytest.approx(9.5)

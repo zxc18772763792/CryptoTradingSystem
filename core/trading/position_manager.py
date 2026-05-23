@@ -55,6 +55,30 @@ class Position:
     lowest_price: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def cost_usd(self) -> float:
+        """Return known execution cost attached to this position, if any."""
+        meta = self.metadata if isinstance(self.metadata, dict) else {}
+        fee = self._safe_float(meta.get("fee_usd"), 0.0)
+        slippage = self._safe_float(meta.get("slippage_cost_usd"), 0.0)
+        cost = self._safe_float(meta.get("cost_usd"), fee + slippage)
+        if cost <= 0:
+            cost = fee + slippage
+        return max(0.0, float(cost or 0.0))
+
+    def gross_realized_pnl(self) -> float:
+        """PositionManager keeps realized_pnl as gross price PnL for execution compatibility."""
+        return float(self.realized_pnl or 0.0)
+
+    def net_realized_pnl(self) -> float:
+        return self.gross_realized_pnl() - self.cost_usd()
+
     def update_price(self, current_price: float) -> None:
         """更新价格与浮动盈亏。"""
         self.current_price = float(current_price)
@@ -107,6 +131,9 @@ class Position:
             "unrealized_pnl": self.unrealized_pnl,
             "unrealized_pnl_pct": self.unrealized_pnl_pct,
             "realized_pnl": self.realized_pnl,
+            "gross_realized_pnl": self.gross_realized_pnl(),
+            "net_realized_pnl": self.net_realized_pnl(),
+            "cost_usd": self.cost_usd(),
             "leverage": self.leverage,
             "margin": self.margin,
             "opened_at": self.opened_at.isoformat(),
