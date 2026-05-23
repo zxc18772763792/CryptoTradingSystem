@@ -1528,6 +1528,33 @@ def test_cusum_monitor_stateful():
     assert monitor.trigger_count >= 1
 
 
+def test_cusum_monitor_reset_uses_cooldown_bars():
+    """Reset-on-trigger should not fire repeatedly on adjacent bars."""
+    from core.monitoring.strategy_monitor import CUSUMMonitor
+
+    monitor = CUSUMMonitor(
+        strategy_name="TestStrategy",
+        h=1.0,
+        k=0.0,
+        min_bars=2,
+        cooldown_bars=3,
+    )
+
+    first = None
+    for _ in range(20):
+        status = monitor.update(-0.02)
+        if status["triggered"]:
+            first = status
+            break
+
+    assert first is not None
+    assert first["cooldown_bars_remaining"] == 3
+    for _ in range(2):
+        status = monitor.update(-0.02)
+        assert status["triggered"] is False
+        assert status["cooldown_bars_remaining"] > 0
+
+
 def test_cusum_monitor_reset():
     """CUSUMMonitor full_reset should clear all state."""
     from core.monitoring.strategy_monitor import CUSUMMonitor
