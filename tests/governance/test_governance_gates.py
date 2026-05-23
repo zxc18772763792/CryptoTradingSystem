@@ -89,6 +89,43 @@ def test_decision_gate_blocks_reduce_only_open(monkeypatch):
     assert out.reason == "reduce_only_enabled"
 
 
+def test_decision_gate_allows_close_despite_leverage_cap(monkeypatch):
+    monkeypatch.setattr(settings, "GOVERNANCE_ENABLED", True)
+
+    async def _mock_cfg():
+        return {
+            "kill_switch": False,
+            "reduce_only": False,
+            "max_leverage": 3.0,
+            "max_position_notional_pct": 1.0,
+            "max_trade_risk_pct": 1.0,
+            "max_daily_drawdown_pct": 1.0,
+            "spread_limit_bps": 1000.0,
+            "data_staleness_limit_ms": 60_000,
+            "allowed_symbols": [],
+            "allowed_timeframes": [],
+        }
+
+    monkeypatch.setattr(decision_engine, "_load_active_risk_config", _mock_cfg)
+
+    async def _run():
+        return await decision_engine.evaluate_order_intent(
+            symbol="BTC/USDT",
+            side="sell",
+            leverage=10.0,
+            order_value=100.0,
+            account_equity=10000.0,
+            signal_ts=datetime.now(timezone.utc),
+            allow_close=True,
+            spread_bps=5.0,
+            timeframe="1m",
+        )
+
+    out = asyncio.run(_run())
+    assert out.allowed is True
+    assert out.reason == "passed"
+
+
 def test_decision_gate_blocks_spread_and_staleness(monkeypatch):
     monkeypatch.setattr(settings, "GOVERNANCE_ENABLED", True)
     async def _mock_cfg():

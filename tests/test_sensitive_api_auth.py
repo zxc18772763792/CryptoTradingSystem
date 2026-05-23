@@ -453,6 +453,24 @@ def test_ai_research_decay_post_and_param_sensitivity_are_dependency_gated():
     assert expected <= gated
 
 
+def test_ai_research_decay_get_is_read_only_and_post_persists(monkeypatch):
+    calls = []
+
+    def fake_build_payload(request, candidate_id, *, persist):
+        calls.append((candidate_id, persist))
+        return {"candidate_id": candidate_id, "persisted": persist}
+
+    monkeypatch.setattr(ai_research, "_build_candidate_decay_payload", fake_build_payload)
+    request = object()
+
+    post_payload = asyncio.run(ai_research.post_candidate_decay_check(request, "cand-1"))
+    get_payload = asyncio.run(ai_research.get_candidate_decay_check(request, "cand-1"))
+
+    assert post_payload == {"candidate_id": "cand-1", "persisted": True}
+    assert get_payload == {"candidate_id": "cand-1", "persisted": False}
+    assert calls == [("cand-1", True), ("cand-1", False)]
+
+
 def test_strategy_export_routes_are_dependency_gated_and_sanitized():
     expected = {
         ("GET", "/export/{name}"),

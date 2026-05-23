@@ -400,11 +400,11 @@ def _openai_post_with_failover(
 
     last_exc: Optional[BaseException] = None
     total_targets = len(available)
-    # Wall-clock budget: cap total elapsed across all failover attempts at
-    # ``timeout_sec * total_targets + buffer``. Without this, a slow-fail cascade
-    # across N targets can stall the caller for ~N * timeout_sec.
+    # Wall-clock budget: cap total elapsed across all failover attempts to the
+    # largest effective per-target timeout plus a small handoff buffer. Without
+    # this, a slow-fail cascade across N targets silently becomes ~N * timeout.
     _WALL_CLOCK_BUFFER_SEC = 5
-    per_target_timeout_budget = sum(
+    per_target_timeouts = [
         _local_gemma_timeout_sec(timeout_sec)
         if _is_local_gemma_target(
             str(target.get("base_url") or "").rstrip("/"),
@@ -412,8 +412,8 @@ def _openai_post_with_failover(
         )
         else timeout_sec
         for target in available
-    )
-    wall_clock_budget_sec = max(timeout_sec, per_target_timeout_budget + _WALL_CLOCK_BUFFER_SEC)
+    ]
+    wall_clock_budget_sec = max(timeout_sec, max(per_target_timeouts, default=timeout_sec)) + _WALL_CLOCK_BUFFER_SEC
     start_ts = time.monotonic()
     for idx, target in enumerate(available):
         elapsed = time.monotonic() - start_ts

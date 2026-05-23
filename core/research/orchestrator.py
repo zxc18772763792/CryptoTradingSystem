@@ -113,6 +113,26 @@ def _persist_research_jobs(app: FastAPI) -> None:
         pass
 
 
+def _research_finalize_lock(app: FastAPI) -> asyncio.Lock:
+    lock = getattr(app.state, "ai_research_finalize_lock", None)
+    if not isinstance(lock, asyncio.Lock):
+        lock = asyncio.Lock()
+        app.state.ai_research_finalize_lock = lock
+    return lock
+
+
+def _active_candidates_for_correlation(app: FastAPI) -> List[StrategyCandidate]:
+    active_statuses = {"new", "paper_running", "shadow_running", "live_candidate", "live_running"}
+    existing_active: List[StrategyCandidate] = []
+    try:
+        for candidate in app.state.ai_candidate_registry.list(limit=None):
+            if str(candidate.status) in active_statuses:
+                existing_active.append(candidate)
+    except Exception:
+        return []
+    return existing_active
+
+
 def _update_research_job_progress(
     app: FastAPI,
     *,
@@ -433,6 +453,7 @@ def ensure_ai_research_runtime_state(app: FastAPI) -> None:
         app.state.research_job_tasks = {}
     else:
         _prune_finished_research_job_tasks(app)
+    _research_finalize_lock(app)
 
     # D: Job recovery — on first init, fix any stale running/queued proposals
     if first_init:
@@ -1263,16 +1284,6 @@ async def _finalize_research_run(
         },
     )
 
-    # Fetch existing active candidates for cross-batch correlation check
-    existing_active: List[StrategyCandidate] = []
-    try:
-        active_statuses = {"new", "paper_running", "shadow_running", "live_candidate", "live_running"}
-        for _c in app.state.ai_candidate_registry.list(limit=None):
-            if str(_c.status) in active_statuses:
-                existing_active.append(_c)
-    except Exception:
-        pass
-
     progress_total = max(1, len(config.strategies) * len(config.timeframes))
 
     def _on_research_progress(payload: Dict[str, Any]) -> None:
@@ -1296,7 +1307,16 @@ async def _finalize_research_run(
         )
 
     result = await run_strategy_research(config, progress_callback=_on_research_progress)
-    summary, candidates, candidate = _create_candidates_from_result(proposal, experiment, result, existing_candidates=existing_active)
+    async with _research_finalize_lock(app):
+        existing_active = _active_candidates_for_correlation(app)
+        summary, candidates, candidate = _create_candidates_from_result(
+            proposal,
+            experiment,
+            result,
+            existing_candidates=existing_active,
+        )
+        if candidates:
+            app.state.ai_candidate_registry.save_many(candidates)
     promotion = candidate.promotion if candidate else None
 
     # LLM rationale generation — best-effort, non-blocking
@@ -1420,9 +1440,10 @@ async def _finalize_research_run(
             "research_result": result,
         }
 
-    # Save all per-strategy candidates; lifecycle record for each
+    # Batch-save all per-strategy candidates after rationale metadata updates;
+    # initial candidate visibility was already established under finalize lock.
+    app.state.ai_candidate_registry.save_many(candidates)
     for cand in candidates:
-        app.state.ai_candidate_registry.save(cand)
         record_lifecycle(
             app.state.ai_lifecycle_registry,
             object_type="candidate",

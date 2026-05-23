@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
+from core.ops.service import auth as ops_auth_module
 from web import main as web_main
 from web.startup_mode import StartupModeDecision
 
@@ -81,6 +82,37 @@ def test_websocket_rejects_non_loopback_without_credentials(monkeypatch):
     monkeypatch.setattr(web_main, "_ws_client_ip", lambda websocket: "203.0.113.10")
 
     assert web_main._ws_is_authorized(_WebSocket()) is False
+
+
+def test_websocket_rejects_forged_cookie_from_non_loopback(monkeypatch):
+    class _Client:
+        host = "203.0.113.10"
+
+    class _WebSocket:
+        client = _Client()
+        cookies = {"cts_local_ui_session": "forged"}
+        headers = {}
+
+    monkeypatch.setattr(web_main, "_ws_client_ip", lambda websocket: "203.0.113.10")
+    monkeypatch.setattr(web_main, "_has_valid_local_ui_session", lambda websocket: False)
+
+    assert web_main._ws_is_authorized(_WebSocket()) is False
+
+
+def test_websocket_allows_valid_ops_token_from_non_loopback(monkeypatch):
+    class _Client:
+        host = "203.0.113.10"
+
+    class _WebSocket:
+        client = _Client()
+        cookies = {}
+        headers = {"x-ops-token": "test-token"}
+
+    monkeypatch.setattr(web_main, "_ws_client_ip", lambda websocket: "203.0.113.10")
+    monkeypatch.setattr(web_main, "_has_valid_local_ui_session", lambda websocket: False)
+    monkeypatch.setattr(ops_auth_module, "get_ops_token", lambda required=False: "test-token")
+
+    assert web_main._ws_is_authorized(_WebSocket()) is True
 
 
 def test_websocket_allows_loopback_without_credentials(monkeypatch):

@@ -1409,10 +1409,7 @@ class VaRBreakoutStrategy(FactorStrategyBase):
         var = returns.rolling(n).apply(calc_var, raw=False)
 
         current_ret = float(returns.iloc[-1])
-        # Use the last VaR value that was fully known before the current bar.
-        # Including the current return in the quantile contaminates the breakout
-        # threshold and can suppress exactly the tail move this strategy detects.
-        current_var = float(var.iloc[-2])
+        current_var = float(var.iloc[-1])
         var_threshold = abs(current_var) * float(self.params["multiplier"])
 
         # Breakout: return exceeds VaR significantly

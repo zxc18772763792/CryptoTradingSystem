@@ -56,3 +56,22 @@ def test_registry_retries_windows_permission_error_on_replace(tmp_path, monkeypa
 
     assert calls["count"] == 3
     assert registry.get("proposal-retry") is not None
+
+
+def test_registry_save_many_flushes_once(tmp_path, monkeypatch):
+    import core.research.experiment_registry as registry_module
+
+    calls = {"count": 0}
+    original_replace = registry_module.os.replace
+
+    def _counting_replace(src: str, dst: str) -> None:
+        calls["count"] += 1
+        original_replace(src, dst)
+
+    monkeypatch.setattr(registry_module.os, "replace", _counting_replace)
+
+    registry = ProposalRegistry(tmp_path / "proposals.json")
+    registry.save_many([_proposal("proposal-a"), _proposal("proposal-b"), _proposal("proposal-c")])
+
+    assert calls["count"] == 1
+    assert len(registry.list(limit=None)) == 3

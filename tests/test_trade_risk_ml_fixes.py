@@ -14,7 +14,7 @@ from core.ml.pipeline import FEATURE_SET_VERSION
 from core.risk.risk_manager import RiskManager
 
 
-def test_allow_close_bypasses_daily_halt_and_leverage_cap_but_not_size_cap(monkeypatch):
+def test_allow_close_only_bypasses_daily_loss_halt_not_leverage_or_size(monkeypatch):
     risk_module = importlib.import_module("core.risk.risk_manager")
     monkeypatch.setattr(
         risk_module,
@@ -41,7 +41,7 @@ def test_allow_close_bypasses_daily_halt_and_leverage_cap_but_not_size_cap(monke
         strategy_name="s",
         account_equity=1000.0,
         order_value=50.0,
-        leverage=10.0,
+        leverage=2.0,
         allow_close=True,
     ) is True
 
@@ -52,6 +52,59 @@ def test_allow_close_bypasses_daily_halt_and_leverage_cap_but_not_size_cap(monke
         account_equity=1000.0,
         order_value=500.0,
         leverage=10.0,
+        allow_close=True,
+    ) is False
+
+    assert manager.pre_trade_check(
+        symbol="BTC/USDT",
+        side="sell",
+        strategy_name="s",
+        account_equity=1000.0,
+        order_value=50.0,
+        leverage=10.0,
+        allow_close=True,
+    ) is False
+
+
+def test_allow_close_does_not_bypass_non_daily_halt_or_position_count(monkeypatch):
+    risk_module = importlib.import_module("core.risk.risk_manager")
+    monkeypatch.setattr(
+        risk_module,
+        "_position_manager",
+        lambda: type(
+            "PM",
+            (),
+            {
+                "get_position_count": lambda self: 1,
+                "get_all_positions": lambda self: [],
+                "get_positions_by_strategy": lambda self, _strategy: [],
+            },
+        )(),
+    )
+    manager = RiskManager(use_persisted_overlay=False)
+    manager.max_open_positions = 1
+    manager._trading_halted = True
+    manager._halt_reason = "manual-kill-switch"
+
+    assert manager.pre_trade_check(
+        symbol="BTC/USDT",
+        side="sell",
+        strategy_name="s",
+        account_equity=1000.0,
+        order_value=50.0,
+        leverage=1.0,
+        allow_close=True,
+    ) is False
+
+    manager._trading_halted = False
+
+    assert manager.pre_trade_check(
+        symbol="BTC/USDT",
+        side="sell",
+        strategy_name="s",
+        account_equity=1000.0,
+        order_value=50.0,
+        leverage=1.0,
         allow_close=True,
     ) is False
 
