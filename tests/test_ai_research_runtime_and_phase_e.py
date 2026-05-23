@@ -752,6 +752,13 @@ def test_ai_research_live_activation_flow_hooks_present():
     assert "btn-activate-live" in js_text
 
 
+def test_candidate_decay_check_button_uses_post_route():
+    repo_root = Path(__file__).resolve().parents[1]
+    js_text = (repo_root / "web" / "static" / "js" / "ai_research.js").read_text(encoding="utf-8")
+    assert "/decay-check`, {" in js_text
+    assert "method: 'POST',\n            timeoutMs: 15000," in js_text
+
+
 def test_premium_data_status_treats_cached_data_as_available(monkeypatch):
     from web.api import ai_research as ai_module
 

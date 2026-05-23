@@ -4050,7 +4050,10 @@
         decayBtn.textContent = '检测中...';
         decayBtn.disabled = true;
         try {
-          await aiApi(`/candidates/${encodeURIComponent(candidateId)}/decay-check`, { timeoutMs: 15000 });
+          await aiApi(`/candidates/${encodeURIComponent(candidateId)}/decay-check`, {
+            method: 'POST',
+            timeoutMs: 15000,
+          });
           notify('衰减检测完成');
           viewCandidate(candidateId);   // re-render with fresh data
         } catch (err) {
