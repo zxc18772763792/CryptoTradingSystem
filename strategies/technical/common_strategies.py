@@ -155,7 +155,7 @@ class StochasticStrategy(StrategyBase):
                     price=c,
                     timestamp=now,
                     strategy_name=self.name,
-                    strength=min(max((oversold - k_now) / max(oversold, 1e-9), 0.1), 1.0),
+                    strength=min(max((oversold - k_prev) / max(oversold, 1e-9), 0.1), 1.0),
                     stop_loss=c * (1 - float(self.params["stop_loss_pct"])),
                     take_profit=c * (1 + float(self.params["take_profit_pct"])),
                     metadata={"k": k_now, "d": d_now},
@@ -170,7 +170,7 @@ class StochasticStrategy(StrategyBase):
                     price=c,
                     timestamp=now,
                     strategy_name=self.name,
-                    strength=min(max((k_now - overbought) / max(100 - overbought, 1e-9), 0.1), 1.0),
+                    strength=min(max((k_prev - overbought) / max(100 - overbought, 1e-9), 0.1), 1.0),
                     metadata={"k": k_now, "d": d_now},
                 )
             )
