@@ -143,6 +143,22 @@ def test_evaluate_strategy_drawdowns_grouping():
     assert grouped["StratB"]["daily_dd"] == 0.0
 
 
+def test_drawdown_fallback_does_not_dilute_loss_by_notional():
+    ts = datetime.now(timezone.utc)
+    history = [
+        {
+            "strategy": "Levered",
+            "pnl": -500.0,
+            "notional": 50000.0,
+            "timestamp": ts.isoformat(),
+        }
+    ]
+
+    grouped = evaluate_strategy_drawdowns(history)
+
+    assert grouped["Levered"]["daily_dd"] == pytest.approx(1.0)
+
+
 def test_run_checks_trips_breaching_strategy(cb, monkeypatch):
     monkeypatch.setattr(cb_mod, "circuit_breaker", cb)
     history = [

@@ -1,4 +1,5 @@
 import time
+import asyncio
 
 import pytest
 
@@ -38,6 +39,17 @@ def test_acquire_timeout_raises():
         p.acquire("ws_ctrl", cost=1, wait=True, timeout_ms=50)
 
 
+def test_waiting_sync_acquire_is_forbidden_inside_event_loop():
+    p = RateLimitAndReconnectPolicy()
+    p.configure_bucket("ws_ctrl", capacity=1, refill_per_sec=0.1, initial_tokens=0)
+
+    async def run():
+        with pytest.raises(RuntimeError, match="blocks the event loop"):
+            p.acquire("ws_ctrl", cost=1, wait=True, timeout_ms=50)
+
+    asyncio.run(run())
+
+
 def test_reduce_only_mode_lifecycle():
     p = RateLimitAndReconnectPolicy()
     assert p.can_open_positions() is True
@@ -57,4 +69,3 @@ def test_binance_defaults_exist():
     st = p.stats()
     for k in ("rest_weight", "order_1m", "order_10s", "ws_ctrl"):
         assert k in st["buckets"]
-

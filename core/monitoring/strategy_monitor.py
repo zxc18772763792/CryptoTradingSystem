@@ -184,6 +184,7 @@ class CUSUMMonitor:
     k: float = 0.5
     min_bars: int = 20
     reset_on_trigger: bool = True
+    cooldown_bars: int = 5
 
     # Internal state
     _returns: List[float] = field(default_factory=list, repr=False)
@@ -191,6 +192,7 @@ class CUSUMMonitor:
     _triggered: bool = field(default=False, repr=False)
     _trigger_count: int = field(default=0, repr=False)
     _last_trigger_at: Optional[datetime] = field(default=None, repr=False)
+    _cooldown_until_n: int = field(default=0, repr=False)
 
     def update(self, bar_return: float) -> Dict[str, Any]:
         """Feed a new bar return; return current status dict."""
@@ -207,7 +209,8 @@ class CUSUMMonitor:
         self._cusum_low = min(0.0, self._cusum_low + (bar_return - self.target_return + allowance))
 
         newly_triggered = False
-        if n >= self.min_bars and self._cusum_low <= threshold and not self._triggered:
+        in_cooldown = n < int(self._cooldown_until_n or 0)
+        if n >= self.min_bars and not in_cooldown and self._cusum_low <= threshold and not self._triggered:
             self._triggered = True
             self._trigger_count += 1
             self._last_trigger_at = _now_utc()
@@ -215,6 +218,7 @@ class CUSUMMonitor:
             if self.reset_on_trigger:
                 self._cusum_low = 0.0
                 self._triggered = False
+                self._cooldown_until_n = n + max(0, int(self.cooldown_bars or 0))
 
         return {
             "strategy": self.strategy_name,
@@ -226,12 +230,14 @@ class CUSUMMonitor:
             "last_trigger_at": self._last_trigger_at.isoformat() if self._last_trigger_at else None,
             "std_pct": round(std_r * 100.0, 4),
             "bar_return_pct": round(bar_return * 100.0, 4),
+            "cooldown_bars_remaining": max(0, int(self._cooldown_until_n or 0) - n),
         }
 
     def reset(self) -> None:
         """Reset CUSUM state (keep history for std estimation)."""
         self._cusum_low = 0.0
         self._triggered = False
+        self._cooldown_until_n = 0
 
     def full_reset(self) -> None:
         """Reset all state including return history."""
@@ -240,6 +246,7 @@ class CUSUMMonitor:
         self._triggered = False
         self._trigger_count = 0
         self._last_trigger_at = None
+        self._cooldown_until_n = 0
 
     @property
     def n_bars(self) -> int:

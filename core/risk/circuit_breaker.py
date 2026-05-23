@@ -477,7 +477,6 @@ def _drawdown_from_pnl(
     # Anchor curve at 0 so a single losing trade still registers a drawdown
     equity_curve: List[float] = [0.0]
     row_capital: Optional[float] = None
-    max_notional = 0.0
     for row in rows:
         ts = _parse_iso(row.get("timestamp"))
         if ts is None or ts < cutoff:
@@ -489,12 +488,6 @@ def _drawdown_from_pnl(
         cumulative += pnl
         if row_capital is None:
             row_capital = float(row.get("capital_after") or row.get("equity") or 0.0) or None
-        try:
-            notional = float(row.get("notional") or 0.0)
-        except Exception:
-            notional = 0.0
-        if notional > max_notional:
-            max_notional = notional
         equity_curve.append(cumulative)
     if len(equity_curve) <= 1:
         return 0.0
@@ -509,9 +502,11 @@ def _drawdown_from_pnl(
         base = float(base_capital_override)
     elif row_capital and row_capital > 0:
         base = float(row_capital)
-    elif max_notional > 0:
-        base = float(max_notional)
     if base <= 0:
+        # Conservative fallback: without an account/equity snapshot, do not
+        # dilute a realized loss by trade notional. Scale by the PnL span so a
+        # single loss remains a full drawdown signal instead of being hidden by
+        # high leverage / large notional.
         base = max(abs(min(equity_curve)), abs(max(equity_curve)), 1.0)
 
     peak = equity_curve[0]

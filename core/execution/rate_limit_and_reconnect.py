@@ -154,7 +154,15 @@ class RateLimitAndReconnectPolicy:
 
         - `wait=False`: returns bool.
         - `wait=True`: blocks until success or raises `RateLimitExceeded` on timeout.
+          It is forbidden from inside a running event loop; use `acquire_async`.
         """
+        if wait:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError("RateLimitAndReconnectPolicy.acquire(wait=True) blocks the event loop; use acquire_async")
         b = self._bucket(key)
         if b is None:
             return True
@@ -235,4 +243,3 @@ class RateLimitAndReconnectPolicy:
             "global_failures": self._global_failures,
             "buckets": buckets,
         }
-
