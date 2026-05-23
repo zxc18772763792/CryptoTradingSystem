@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from core.ai.proposal_schemas import ResearchProposal
 from core.research.experiment_registry import ExperimentRunRegistry, LifecycleRegistry, ProposalRegistry
 from core.research.experiment_schemas import ExperimentRun
-from core.research.orchestrator import _recover_stale_jobs_on_startup
+from core.research.orchestrator import _prune_finished_research_job_tasks, _recover_stale_jobs_on_startup
 
 
 def test_stale_research_proposal_recovers_to_draft(tmp_path, monkeypatch):
@@ -61,3 +61,25 @@ def test_stale_research_proposal_recovers_to_draft(tmp_path, monkeypatch):
     assert recovered_run.error == "service restart; research job did not complete"
     assert app.state.research_jobs["job-stale"]["status"] == "failed"
     assert app.state.research_jobs["job-stale"]["recovery_reason"] == "service restart; research job did not complete"
+
+
+def test_prune_finished_research_job_tasks_clears_done_entries():
+    class DoneTask:
+        def done(self):
+            return True
+
+    class ActiveTask:
+        def done(self):
+            return False
+
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            research_job_tasks={"done-job": DoneTask(), "active-job": ActiveTask()},
+        )
+    )
+
+    removed = _prune_finished_research_job_tasks(app)
+
+    assert removed == 1
+    assert "done-job" not in app.state.research_job_tasks
+    assert "active-job" in app.state.research_job_tasks

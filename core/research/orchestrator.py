@@ -288,6 +288,23 @@ def _recover_stale_jobs_on_startup(app: FastAPI) -> None:
         pass  # Recovery is best-effort; don't crash startup
 
 
+def _prune_finished_research_job_tasks(app: FastAPI) -> int:
+    tasks = getattr(app.state, "research_job_tasks", None)
+    if not isinstance(tasks, dict):
+        app.state.research_job_tasks = {}
+        return 0
+    removed = 0
+    for job_id, task in list(tasks.items()):
+        try:
+            done = bool(task.done())
+        except Exception:
+            done = True
+        if done:
+            tasks.pop(job_id, None)
+            removed += 1
+    return removed
+
+
 def _proposal_state_from_candidate_status(status: Any) -> str:
     text = str(status or "").strip().lower()
     if text in {"paper_running", "shadow_running", "live_candidate", "live_running", "retired"}:
@@ -414,6 +431,8 @@ def ensure_ai_research_runtime_state(app: FastAPI) -> None:
         app.state.research_jobs = _load_research_jobs(research_jobs_path)
     if not isinstance(getattr(app.state, "research_job_tasks", None), dict):
         app.state.research_job_tasks = {}
+    else:
+        _prune_finished_research_job_tasks(app)
 
     # D: Job recovery — on first init, fix any stale running/queued proposals
     if first_init:
