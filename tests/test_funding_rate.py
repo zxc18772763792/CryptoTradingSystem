@@ -1,13 +1,16 @@
 """Tests for funding-rate models, collectors, and factor helpers."""
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 
 from core.data.funding_rate_collector import FundingRateCollector
 from core.data.funding_rate_models import FundingRate, normalize_symbol
+
+
+FIXED_FUNDING_TIME = datetime(2024, 1, 1, 8, 0, 0, tzinfo=timezone.utc)
 
 
 class TestFundingRateModel:
@@ -29,7 +32,7 @@ class TestFundingRateModel:
             exchange="binance",
             symbol="BTCUSDT",
             funding_rate=0.0001,  # 0.01%
-            funding_time=datetime.now(),
+            funding_time=FIXED_FUNDING_TIME,
         )
 
         # Annualized = 0.0001 * 365 * 3 * 100 = 10.95%
@@ -40,7 +43,7 @@ class TestFundingRateModel:
             exchange="binance",
             symbol="BTCUSDT",
             funding_rate=0.0002,  # 0.02%
-            funding_time=datetime.now(),
+            funding_time=FIXED_FUNDING_TIME,
         )
         assert rate.is_extreme_positive is True
         assert rate.is_extreme_negative is False
@@ -50,7 +53,7 @@ class TestFundingRateModel:
             exchange="binance",
             symbol="BTCUSDT",
             funding_rate=-0.0002,  # -0.02%
-            funding_time=datetime.now(),
+            funding_time=FIXED_FUNDING_TIME,
         )
         assert rate.is_extreme_positive is False
         assert rate.is_extreme_negative is True
@@ -60,7 +63,7 @@ class TestFundingRateModel:
             exchange="binance",
             symbol="BTCUSDT",
             funding_rate=0.001,  # 0.1%
-            funding_time=datetime.now(),
+            funding_time=FIXED_FUNDING_TIME,
         )
         assert rate.sentiment == "long_heavy"
 
@@ -69,7 +72,7 @@ class TestFundingRateModel:
             exchange="binance",
             symbol="BTCUSDT",
             funding_rate=-0.001,  # -0.1%
-            funding_time=datetime.now(),
+            funding_time=FIXED_FUNDING_TIME,
         )
         assert rate.sentiment == "short_heavy"
 
@@ -78,7 +81,7 @@ class TestFundingRateModel:
             exchange="binance",
             symbol="BTCUSDT",
             funding_rate=0.0001,  # 0.01%
-            funding_time=datetime.now(),
+            funding_time=FIXED_FUNDING_TIME,
         )
         assert rate.sentiment == "neutral"
 
