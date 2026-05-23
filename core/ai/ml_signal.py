@@ -15,15 +15,19 @@ Typical usage::
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 from loguru import logger
 
+from core.ml.pipeline import FEATURE_SET_VERSION
 from core.ml.pipeline import FEATURE_COLUMNS as PIPELINE_FEATURE_COLUMNS
 from core.ml.pipeline import build_feature_frame as pipeline_build_feature_frame
+from core.ml.pipeline import MANIFEST_FILE_NAME
 
 
 # Canonical feature column order used during training and inference.
@@ -77,6 +81,7 @@ class MLSignalModel:
         self._threshold = max(0.5, min(1.0, float(threshold)))
         self._model: Optional[Any] = None
         self._feature_names: List[str] = list(FEATURE_COLS)
+        self._manifest: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,12 +103,17 @@ class MLSignalModel:
             return
 
         try:
+            manifest = self._load_manifest()
+            self._validate_manifest(manifest)
             model = xgb.XGBClassifier()
             model.load_model(self._model_path)
             self._model = model
+            self._manifest = dict(manifest)
             # prefer feature names stored in the model
             if hasattr(model, "feature_names_in_") and model.feature_names_in_ is not None:
                 self._feature_names = list(model.feature_names_in_)
+            else:
+                self._feature_names = list(manifest.get("feature_columns") or FEATURE_COLS)
             logger.info(
                 f"MLSignalModel loaded: path={self._model_path}, "
                 f"features={len(self._feature_names)}"
@@ -174,6 +184,51 @@ class MLSignalModel:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _manifest_candidates(self) -> List[Path]:
+        model_path = Path(self._model_path)
+        candidates: List[Path] = []
+        if model_path.is_dir():
+            candidates.append(model_path / MANIFEST_FILE_NAME)
+        else:
+            candidates.append(model_path.with_suffix(".manifest.json"))
+            candidates.append(model_path.parent / MANIFEST_FILE_NAME)
+        seen: set[str] = set()
+        unique: List[Path] = []
+        for path in candidates:
+            key = str(path.resolve())
+            if key not in seen:
+                seen.add(key)
+                unique.append(path)
+        return unique
+
+    def _load_manifest(self) -> Dict[str, Any]:
+        for path in self._manifest_candidates():
+            if not path.exists():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    return payload
+            except Exception as exc:
+                raise ValueError(f"invalid ML manifest at {path}: {exc}") from exc
+        raise ValueError(
+            "missing ML manifest; expected feature_set_version and feature_columns "
+            f"next to {self._model_path}"
+        )
+
+    def _validate_manifest(self, manifest: Dict[str, Any]) -> None:
+        feature_set_version = str(manifest.get("feature_set_version") or "")
+        if feature_set_version != FEATURE_SET_VERSION:
+            raise ValueError(
+                f"ML manifest feature_set_version mismatch: {feature_set_version!r} "
+                f"!= {FEATURE_SET_VERSION!r}"
+            )
+        feature_columns = manifest.get("feature_columns")
+        if not isinstance(feature_columns, list) or not all(isinstance(col, str) for col in feature_columns):
+            raise ValueError("ML manifest feature_columns must be a list of strings")
+        if list(feature_columns) != FEATURE_COLS:
+            raise ValueError("ML manifest feature_columns do not match inference feature columns")
 
     def _align_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Select last row and require the expected feature columns."""

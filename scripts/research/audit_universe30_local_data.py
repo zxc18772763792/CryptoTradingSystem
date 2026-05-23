@@ -211,7 +211,7 @@ async def _fill_one(
     market_type: str = "spot",
     prefer_http: bool = False,
 ) -> Dict[str, object]:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     tf_sec = int(exchange.parse_timeframe(timeframe))
     default_start = now - timedelta(days=max(1, int(days)))
     existing = await data_storage.load_klines_from_parquet(exchange=exchange_name, symbol=symbol, timeframe=timeframe)

@@ -1663,6 +1663,14 @@
 
   function startWorkbenchAutoRefresh() {
     if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+    if (typeof document !== 'undefined' && document.hidden) {
+      state.autoRefreshTimer = null;
+      if (state._countdownTimer) {
+        clearInterval(state._countdownTimer);
+        state._countdownTimer = null;
+      }
+      return;
+    }
     state.autoRefreshTimer = setInterval(() => {
       maybeAutoRefreshWorkbench(false);
     }, WORKBENCH_AUTO_REFRESH_MS);
@@ -1671,6 +1679,20 @@
     state._countdownTimer = setInterval(() => {
       if (isResearchActive()) renderStatusCards();
     }, 60000);
+  }
+
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+        if (state._countdownTimer) clearInterval(state._countdownTimer);
+        state.autoRefreshTimer = null;
+        state._countdownTimer = null;
+      } else if (state.initialized) {
+        startWorkbenchAutoRefresh();
+        maybeAutoRefreshWorkbench(false);
+      }
+    });
   }
 
   function bindAsyncButton(id, handler) {

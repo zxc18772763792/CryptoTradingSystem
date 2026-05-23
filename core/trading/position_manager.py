@@ -21,6 +21,10 @@ class PositionSide(Enum):
     BOTH = "both"
 
 
+class AmbiguousPositionError(RuntimeError):
+    """Raised when a close/update request matches more than one position."""
+
+
 @dataclass
 class Position:
     """单个持仓信息。"""
@@ -546,7 +550,7 @@ class PositionManager:
             )
             logger.error(msg)
             self._last_close_error = msg
-            return None
+            raise AmbiguousPositionError(msg)
         self._last_close_error = ""
         key, position = matches[0]
         if not position:

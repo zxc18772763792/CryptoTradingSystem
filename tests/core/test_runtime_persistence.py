@@ -1,6 +1,8 @@
 from importlib import import_module
 from threading import Thread
 
+import pytest
+
 from core.trading.position_manager import PositionSide
 
 
@@ -270,3 +272,34 @@ def test_position_manager_throttles_open_close_persistence_and_trims_history(tmp
     assert all(force is False for force in writes)
     assert len(manager.get_closed_positions()) == 100
     assert manager.get_closed_positions()[0].symbol == "COIN5/USDT"
+
+
+def test_position_manager_ambiguous_close_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(position_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(position_module.settings, "TRADING_MODE", "paper", raising=False)
+
+    manager = position_module.PositionManager()
+    manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=1.0,
+        strategy="alpha",
+        account_id="acct_A",
+    )
+    manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=101.0,
+        quantity=1.0,
+        strategy="beta",
+        account_id="acct_B",
+    )
+
+    with pytest.raises(position_module.AmbiguousPositionError):
+        manager.close_position(exchange="binance", symbol="BTC/USDT", close_price=102.0)
+
+    assert "Ambiguous position close" in manager.get_last_close_error()
+    assert len(manager.get_all_positions()) == 2

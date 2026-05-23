@@ -155,6 +155,7 @@ async def main_async(args: argparse.Namespace) -> None:
         legacy_model_path = _ROOT / "models" / "ml_signal_xgb.json"
         legacy_model_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(artifact_model_path, legacy_model_path)
+        shutil.copy2(Path(run.artifact_dir) / "manifest.json", legacy_model_path.with_suffix(".manifest.json"))
         logger.info(f"Legacy model path updated: {legacy_model_path}")
     except Exception as exc:
         logger.warning(f"Failed to update legacy model path: {exc}")

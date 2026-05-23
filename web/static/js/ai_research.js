@@ -5461,6 +5461,8 @@ ${confirmHint}`,
 
   function startJobPolling(proposalId, jobId) {
     stopJobPolling(proposalId);
+    if (!state.jobPollingConfigs) state.jobPollingConfigs = {};
+    state.jobPollingConfigs[proposalId] = { jobId, attempts: 0 };
     state.jobPollingTimers[proposalId] = setInterval(
       () => pollJobStatus(proposalId, jobId).catch(err => console.debug('pollJobStatus failed:', err)),
       JOB_POLL_MS,
@@ -5484,9 +5486,20 @@ ${confirmHint}`,
         await loadProposals();
         syncPollingState({ immediate: false, reason: 'job-status-404' });
       } else {
+        const cfg = state.jobPollingConfigs?.[proposalId] || {};
+        cfg.jobId = cfg.jobId || _jobId;
+        cfg.attempts = Number(cfg.attempts || 0) + 1;
+        state.jobPollingConfigs[proposalId] = cfg;
+        if (cfg.attempts >= 20) {
+          stopJobPolling(proposalId);
+          syncPollingState({ immediate: false, reason: 'job-status-max-failures' });
+        }
         console.debug('pollJobStatus failed:', err);
       }
       return;
+    }
+    if (state.jobPollingConfigs?.[proposalId]) {
+      state.jobPollingConfigs[proposalId].attempts = 0;
     }
     const js   = data?.job_status;
     const proposalStatus = String(data?.proposal_status || '');

@@ -32,6 +32,10 @@ def _normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(timezone.utc)
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 ALTCOIN_SCORE_FIELD_MAP = {
     "layout": "layout_score",
     "alert": "alert_score",
@@ -106,8 +110,8 @@ class AlertRule:
     params: Dict[str, Any]
     enabled: bool = True
     cooldown_seconds: int = 300
-    created_at: datetime = field(default_factory=datetime.utcnow)
-    updated_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=_utc_now)
+    updated_at: datetime = field(default_factory=_utc_now)
     last_triggered_at: Optional[datetime] = None
     trigger_count: int = 0
 
