@@ -806,8 +806,10 @@ class ExecutionEngine:
 
         dropped = 0
         if self._signal_queue is not None:
-            with contextlib.suppress(Exception):
+            try:
                 dropped = int(self._signal_queue.qsize())
+            except (RuntimeError, AttributeError) as exc:
+                logger.warning(f"signal_queue.qsize() failed during loop rebind: {exc}")
         if dropped > 0:
             logger.warning(
                 "Execution signal queue rebound to current event loop; "
@@ -5948,9 +5950,11 @@ class ExecutionEngine:
         if self._queue_task and not self._queue_task.done():
             self._queue_task.cancel()
             try:
-                await self._queue_task
+                await asyncio.wait_for(self._queue_task, timeout=5.0)
             except asyncio.CancelledError:
                 pass
+            except asyncio.TimeoutError:
+                logger.warning("Execution queue task did not finish within 5s after cancel")
         self._queue_task = None
         for exchange in exchange_manager.get_connected_exchanges():
             await order_manager.cancel_all_orders(exchange=exchange)

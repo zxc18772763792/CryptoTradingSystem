@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import weakref
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -48,6 +49,35 @@ _NON_MANUAL_MINUTE_RESERVE = 2
 _REQUEST_LOCKS: "weakref.WeakKeyDictionary[Any, asyncio.Lock]" = (
     weakref.WeakKeyDictionary()
 )
+# Global pause timestamp triggered by 429 responses. Until this monotonic time
+# is reached, any new request raises CoinglassError immediately rather than
+# hitting the API and accumulating more 429s (which risks API-Key freeze).
+_PAUSE_UNTIL: float = 0.0
+_PAUSE_LOCK_HOLDER: "weakref.WeakKeyDictionary[Any, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+_RATE_LIMIT_BACKOFF_SEC = 60.0
+
+
+def _pause_lock() -> asyncio.Lock:
+    loop = asyncio.get_event_loop()
+    lock = _PAUSE_LOCK_HOLDER.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _PAUSE_LOCK_HOLDER[loop] = lock
+    return lock
+
+
+def _is_rate_limit_paused() -> bool:
+    return _PAUSE_UNTIL > time.monotonic()
+
+
+def _trigger_rate_limit_pause(reason: str) -> None:
+    global _PAUSE_UNTIL
+    _PAUSE_UNTIL = time.monotonic() + _RATE_LIMIT_BACKOFF_SEC
+    logger.warning(
+        f"coinglass: rate-limit backoff engaged for {_RATE_LIMIT_BACKOFF_SEC:.0f}s (reason={reason})"
+    )
 
 
 def _request_lock() -> asyncio.Lock:
@@ -1741,6 +1771,13 @@ class CoinglassClient:
     ) -> Dict[str, Any]:
         if not coinglass_enabled():
             raise CoinglassError("coinglass_disabled_or_key_missing")
+        # Short-circuit during global rate-limit backoff to avoid hammering
+        # the API while it's already returning 429s.
+        if _is_rate_limit_paused():
+            remaining = max(0.0, _PAUSE_UNTIL - time.monotonic())
+            raise CoinglassError(
+                f"http_429:rate_limit_backoff_active_remaining={remaining:.1f}s"
+            )
         headers = {"X-Api-Key": coinglass_api_key()}
         base_url = (
             _coinglass_root_url()
@@ -1765,6 +1802,8 @@ class CoinglassClient:
                     error_text = _clip_error(
                         payload.get("msg") if isinstance(payload, Mapping) else payload
                     )
+                    if status_code == 429:
+                        _trigger_rate_limit_pause(reason=f"http_429:{error_text}")
                     raise CoinglassError(
                         f"http_{status_code}:{error_text or 'request_failed'}"
                     )

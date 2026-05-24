@@ -395,8 +395,20 @@ def _thinking_cfg(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return {"type": "disabled" if bool(disable) else "enabled"}
 
 
+_JSON_SENTINEL = object()
+
+
 def _safe_json_loads(text: str) -> Any:
-    return json.loads(text)
+    """Parse JSON, returning _JSON_SENTINEL on failure instead of raising.
+
+    Despite the name, the previous implementation directly re-raised
+    JSONDecodeError. Callers caught it broadly with `except Exception`,
+    but the misleading contract hid degradation paths.
+    """
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _JSON_SENTINEL
 
 
 def _extract_json_block(text: str) -> Any:
@@ -408,10 +420,9 @@ def _extract_json_block(text: str) -> Any:
         raw = re.sub(r"^```(?:json)?", "", raw, flags=re.IGNORECASE).strip()
         raw = re.sub(r"```$", "", raw).strip()
 
-    try:
-        return _safe_json_loads(raw)
-    except Exception:
-        pass
+    parsed = _safe_json_loads(raw)
+    if parsed is not _JSON_SENTINEL:
+        return parsed
 
     candidates: List[str] = []
     left_bracket = raw.find("[")
@@ -425,10 +436,9 @@ def _extract_json_block(text: str) -> Any:
         candidates.append(raw[left_brace : right_brace + 1])
 
     for candidate in candidates:
-        try:
-            return _safe_json_loads(candidate)
-        except Exception:
-            continue
+        parsed = _safe_json_loads(candidate)
+        if parsed is not _JSON_SENTINEL:
+            return parsed
 
     raise ValueError("cannot parse JSON from LLM response")
 
