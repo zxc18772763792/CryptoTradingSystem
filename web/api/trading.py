@@ -5453,13 +5453,14 @@ async def cancel_all_orders(
     return {"cancelled": count}
 
 
-async def get_positions():
+async def get_positions(mode: Optional[str] = None):
     now_ts = time.time()
     cached_positions = list(_LIVE_POSITION_DETAILS_CACHE.get("positions") or [])
     cached_diagnostics = _LIVE_POSITION_DETAILS_CACHE.get("diagnostics")
     cached_ts = float(_LIVE_POSITION_DETAILS_CACHE.get("ts") or 0.0)
 
-    local_positions = list(position_manager.get_all_positions())
+    target_mode = _normalize_runtime_mode(mode or execution_engine.get_trading_mode())
+    local_positions = list(position_manager.get_all_positions(scope=target_mode))
     positions = [p.to_dict() for p in local_positions]
     exchange_positions: List[Dict[str, Any]] = []
     diagnostics: Dict[str, Any] = {"fetched_exchanges": [], "skipped_exchanges": []}
@@ -5853,7 +5854,7 @@ async def get_positions():
                 )
             if reconciled_local_positions:
                 diagnostics["reconciled_local_positions"] = reconciled_local_positions
-                local_positions = list(position_manager.get_all_positions())
+                local_positions = list(position_manager.get_all_positions(scope=target_mode))
                 positions = [p.to_dict() for p in local_positions]
                 _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = 0.0
                 _LIVE_POSITION_SNAPSHOT_CACHE["data"] = {}
@@ -7652,11 +7653,13 @@ async def get_analytics_overview(
     calendar_days: int = 30,
     exchange: str = "binance",
     symbol: str = "BTC/USDT",
+    mode: Optional[str] = None,
 ):
+    target_mode = _normalize_runtime_mode(mode or execution_engine.get_trading_mode())
     module_jobs = {
         "performance": _capture_analytics(
             "performance",
-            get_advanced_performance(days=max(1, min(int(days or 90), 720))),
+            get_advanced_performance(days=max(1, min(int(days or 90), 720)), mode=target_mode),
         ),
         "risk_dashboard": _capture_analytics(
             "risk_dashboard",
@@ -7700,9 +7703,10 @@ async def get_analytics_overview(
     }
 
 
-async def get_advanced_performance(days: int = 90):
+async def get_advanced_performance(days: int = 90, mode: Optional[str] = None):
     days = max(1, min(days, 720))
-    records = _iter_trade_records(days=days)
+    target_mode = _normalize_runtime_mode(mode or execution_engine.get_trading_mode())
+    records = _iter_trade_records(days=days, mode=target_mode)
     if not records:
         return {
             "days": days,

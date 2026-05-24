@@ -75,13 +75,14 @@ def test_analytics_overview_route_bridges_to_service(monkeypatch):
     app.include_router(trading_analytics.router, prefix="/api/trading")
     client = TestClient(app)
 
-    async def fake_overview(*, days, lookback, calendar_days, exchange, symbol):
+    async def fake_overview(*, days, lookback, calendar_days, exchange, symbol, mode=None):
         return {
             "days": days,
             "lookback": lookback,
             "calendar_days": calendar_days,
             "exchange": exchange,
             "symbol": symbol,
+            "mode": mode,
             "all_ok": True,
         }
 
@@ -97,6 +98,7 @@ def test_analytics_overview_route_bridges_to_service(monkeypatch):
         "calendar_days": 10,
         "exchange": "okx",
         "symbol": "ETH/USDT",
+        "mode": None,
         "all_ok": True,
     }
 

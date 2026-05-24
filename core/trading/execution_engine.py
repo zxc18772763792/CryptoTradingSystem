@@ -4440,7 +4440,7 @@ class ExecutionEngine:
                         "strength": float(signal.strength or 0.0),
                         "stop_loss": signal.stop_loss,
                         "take_profit": signal.take_profit,
-                        "mode": mode,
+                        "mode": self._resolve_signal_trading_mode(signal),
                         "action": "open_or_add",
                     },
                 )
