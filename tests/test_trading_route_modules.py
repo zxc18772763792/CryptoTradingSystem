@@ -152,6 +152,25 @@ def test_risk_dashboard_route_passes_mode_to_service(monkeypatch):
     assert captured == {"lookback": 180, "mode": "paper"}
 
 
+def test_stoploss_policy_route_passes_mode_to_service(monkeypatch):
+    app = FastAPI()
+    app.include_router(trading_analytics.router, prefix="/api/trading")
+    client = TestClient(app)
+
+    captured = {}
+
+    async def fake_stoploss_policy(*, mode=None):
+        captured["mode"] = mode
+        return {"ok": True, "mode": mode}
+
+    monkeypatch.setattr(trading_api, "get_stoploss_policy", fake_stoploss_policy)
+
+    response = client.get("/api/trading/analytics/stoploss/policy?mode=live")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "mode": "live"}
+    assert captured == {"mode": "live"}
+
+
 def test_analytics_history_status_route_bridges_to_service(monkeypatch):
     app = FastAPI()
     app.include_router(trading_analytics.router, prefix="/api/trading")

@@ -957,7 +957,8 @@ async def _load_autonomous_watchlist_runtime() -> tuple[Dict[str, Any], Dict[str
         except Exception as exc:
             logger.debug(f"live-signals: get_symbol_scan_preview unavailable: {exc}")
             selection = {}
-        return runtime_cfg, selection
+        if selection:
+            return runtime_cfg, selection
 
     full_scan_method = getattr(autonomous_trading_agent, "get_symbol_scan", None)
     if callable(full_scan_method):

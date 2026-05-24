@@ -153,73 +153,81 @@ class BacktestEngine:
 
         logger.info(f"Starting backtest for {symbol} with {len(data)} bars")
 
-        strategy.initialize()
-        strategy.start()
-
-        # Feed the strategy the same fixed-size trailing window the live
-        # runtime uses (StrategyManager._run_strategy_once), so indicators with
-        # unbounded lookback (percentile/Hurst/full-history rolling) produce
-        # the same signals in backtest as in production.
+        result: Optional[BacktestResult] = None
         try:
-            _required = strategy.get_required_data() or {}
-            _min_length = int(_required.get("min_length", 100))
-        except Exception:
-            _min_length = 100
-        live_window = max(120, _min_length + 20)
+            strategy.initialize()
+            strategy.start()
 
-        total_bars = len(data)
-        for i in range(total_bars):
-            self._bar_index = i
-            current_data = data.iloc[: i + 1]
-            row = current_data.iloc[-1]
-            current_price = float(pd.to_numeric(row.get("close"), errors="coerce"))
-            _ct = pd.Timestamp(current_data.index[-1])
-            if _ct.tzinfo is None:
-                _ct = _ct.tz_localize("UTC")
-            current_time = _ct.to_pydatetime()
-            if not np.isfinite(current_price) or current_price <= 0:
-                self._equity_curve.append(self._equity)
-                self._equity_index.append(pd.Timestamp(current_data.index[-1]))
-                continue
-
-            self._apply_funding_for_bar(current_data, current_time)
-            self._update_positions(current_price, symbol)
-            await self._check_position_exits(current_data, current_price, current_time, symbol)
-            self._update_positions(current_price, symbol)
-            # Match generate_signals replay semantics: strategy exits only see
-            # completed bars before the execution bar.
-            await self._check_strategy_exit_signals(
-                strategy,
-                data.iloc[:i].tail(live_window),
-                current_price,
-                current_time,
-                current_data,
-            )
-            self._update_positions(current_price, symbol)
-
+            # Feed the strategy the same fixed-size trailing window the live
+            # runtime uses (StrategyManager._run_strategy_once), so indicators with
+            # unbounded lookback (percentile/Hurst/full-history rolling) produce
+            # the same signals in backtest as in production.
             try:
-                # Pass data EXCLUDING the current bar so strategy cannot use the current
-                # close to decide its own fill price (lookahead bias).  Execution uses
-                # the current bar's price, simulating a fill at or shortly after bar close.
-                signals = strategy.generate_signals(data.iloc[:i].tail(live_window))
-            except Exception as e:
-                logger.error(f"Strategy generate_signals failed at {current_time}: {e}")
-                signals = []
+                _required = strategy.get_required_data() or {}
+                _min_length = int(_required.get("min_length", 100))
+            except Exception:
+                _min_length = 100
+            live_window = max(120, _min_length + 20)
 
-            for signal in signals:
-                await self._execute_signal(signal, current_price, current_time, current_data)
+            total_bars = len(data)
+            for i in range(total_bars):
+                self._bar_index = i
+                current_data = data.iloc[: i + 1]
+                row = current_data.iloc[-1]
+                current_price = float(pd.to_numeric(row.get("close"), errors="coerce"))
+                _ct = pd.Timestamp(current_data.index[-1])
+                if _ct.tzinfo is None:
+                    _ct = _ct.tz_localize("UTC")
+                current_time = _ct.to_pydatetime()
+                if not np.isfinite(current_price) or current_price <= 0:
+                    self._equity_curve.append(self._equity)
+                    self._equity_index.append(pd.Timestamp(current_data.index[-1]))
+                    continue
 
-            self._update_positions(current_price, symbol)
-            self._equity_curve.append(self._equity)
-            bar_ts = pd.Timestamp(current_data.index[-1])
-            self._equity_index.append(bar_ts)
-            self._last_bar_ts = bar_ts
+                self._apply_funding_for_bar(current_data, current_time)
+                self._update_positions(current_price, symbol)
+                await self._check_position_exits(current_data, current_price, current_time, symbol)
+                self._update_positions(current_price, symbol)
+                # Match generate_signals replay semantics: strategy exits only see
+                # completed bars before the execution bar.
+                await self._check_strategy_exit_signals(
+                    strategy,
+                    data.iloc[:i].tail(live_window),
+                    current_price,
+                    current_time,
+                    current_data,
+                )
+                self._update_positions(current_price, symbol)
 
-            if progress_callback and i % 100 == 0:
-                progress_callback(i / max(total_bars, 1))
+                try:
+                    # Pass data EXCLUDING the current bar so strategy cannot use the current
+                    # close to decide its own fill price (lookahead bias).  Execution uses
+                    # the current bar's price, simulating a fill at or shortly after bar close.
+                    signals = strategy.generate_signals(data.iloc[:i].tail(live_window))
+                except Exception as e:
+                    logger.error(f"Strategy generate_signals failed at {current_time}: {e}")
+                    signals = []
 
-        strategy.stop()
-        return self._calculate_result()
+                for signal in signals:
+                    await self._execute_signal(signal, current_price, current_time, current_data)
+
+                self._update_positions(current_price, symbol)
+                self._equity_curve.append(self._equity)
+                bar_ts = pd.Timestamp(current_data.index[-1])
+                self._equity_index.append(bar_ts)
+                self._last_bar_ts = bar_ts
+
+                if progress_callback and i % 100 == 0:
+                    progress_callback(i / max(total_bars, 1))
+
+            result = self._calculate_result()
+        finally:
+            try:
+                strategy.stop()
+            except Exception as exc:
+                logger.warning(f"Strategy stop failed during backtest cleanup for {symbol}: {exc}")
+
+        return result
 
     def _prepare_backtest_data(self, data: pd.DataFrame, symbol: str) -> pd.DataFrame:
         if data is None:

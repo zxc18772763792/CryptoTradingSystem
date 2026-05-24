@@ -684,6 +684,37 @@ def test_load_autonomous_watchlist_runtime_uses_status_cache_before_async_scan(m
     assert full_scan_mock.await_count == 0
 
 
+def test_load_autonomous_watchlist_runtime_falls_back_to_full_scan_when_preview_is_empty(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    preview_mock = AsyncMock(return_value={})
+    full_scan_mock = AsyncMock(
+        return_value={
+            "selected_symbol": "BNB/USDT",
+            "top_n": 4,
+            "top_candidates": [{"rank": 1, "symbol": "BNB/USDT"}],
+        }
+    )
+
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {"exchange": "binance", "selection_top_n": 4},
+    )
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan_preview_snapshot", lambda limit=None: None)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_status", lambda: {})
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan_preview", preview_mock)
+    monkeypatch.setattr(ai_module.autonomous_trading_agent, "get_symbol_scan", full_scan_mock)
+
+    runtime_cfg, selection = asyncio.run(ai_module._load_autonomous_watchlist_runtime())
+
+    assert runtime_cfg["exchange"] == "binance"
+    assert selection["selected_symbol"] == "BNB/USDT"
+    assert selection["top_n"] == 4
+    assert preview_mock.await_count == 1
+    assert full_scan_mock.await_count == 1
+
+
 def test_get_autonomous_agent_learning_memory_reuses_cached_refresh(monkeypatch):
     from web.api import ai_research as ai_module
 
