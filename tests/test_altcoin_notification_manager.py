@@ -163,7 +163,8 @@ def test_cooldown_ok_handles_naive_last_triggered_datetime():
         {"config_key": "cfg-1", "symbol": "AAA/USDT", "threshold": 0.5},
     )
     rule.cooldown_seconds = 300
-    rule.last_triggered_at = datetime.utcnow()
+    # Intentionally use a recent naive datetime to verify the manager promotes it to UTC.
+    rule.last_triggered_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
     assert manager._cooldown_ok(rule) is False
     assert rule.last_triggered_at is not None

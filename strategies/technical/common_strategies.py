@@ -1,5 +1,4 @@
 """Common technical strategies."""
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -199,26 +198,14 @@ class ADXTrendStrategy(StrategyBase):
         super().__init__(name, default)
 
     def _adx(self, data: pd.DataFrame, period: int) -> Dict[str, pd.Series]:
-        high = data["high"]
-        low = data["low"]
-        close = data["close"]
+        """Wilder-smoothed ADX/+DI/-DI.
 
-        up_move = high.diff()
-        down_move = -low.diff()
-        plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=data.index)
-        minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=data.index)
+        Delegated to :func:`core.indicators.wilder_adx`; see that helper for
+        the canonical +DM/-DM/TR construction.
+        """
+        from core.indicators import wilder_adx  # local import to avoid cycles
 
-        tr1 = high - low
-        tr2 = (high - close.shift(1)).abs()
-        tr3 = (low - close.shift(1)).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.ewm(alpha=1 / period, adjust=False).mean()
-
-        plus_di = 100 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr.replace(0, np.nan))
-        minus_di = 100 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr.replace(0, np.nan))
-        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
-        adx = dx.ewm(alpha=1 / period, adjust=False).mean()
-        return {"plus_di": plus_di, "minus_di": minus_di, "adx": adx}
+        return wilder_adx(data, period=period)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         period = int(self.params["period"])

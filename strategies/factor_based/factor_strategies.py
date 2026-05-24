@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import pandas as pd
 import numpy as np
-from loguru import logger
 
+from core.indicators import rolling_mad
 from core.strategies.strategy_base import (
     StrategyBase,
     Signal,
@@ -1399,14 +1399,11 @@ class VaRBreakoutStrategy(FactorStrategyBase):
 
         returns = close.pct_change()
 
-        # Calculate rolling VaR
-        def calc_var(series):
-            r = series.dropna()
-            if len(r) < n // 2:
-                return np.nan
-            return np.percentile(r, (1 - self.params["confidence"]) * 100)
+        # Calculate rolling VaR (vectorised — replaces the slow rolling.apply
+        # lambda; see core.indicators.rolling_var_quantile).
+        from core.indicators import rolling_var_quantile
 
-        var = returns.rolling(n).apply(calc_var, raw=False)
+        var = rolling_var_quantile(returns, n, float(self.params["confidence"]))
 
         current_ret = float(returns.iloc[-1])
         current_var = float(var.iloc[-1])
@@ -1554,18 +1551,11 @@ class SortinoRatioStrategy(FactorStrategyBase):
 
         returns = close.pct_change()
 
-        def calc_sortino(series):
-            r = series.dropna()
-            if len(r) < n // 2:
-                return np.nan
-            mean_ret = r.mean()
-            downside = r[r < 0]
-            if len(downside) < 2:
-                return np.nan
-            downside_std = np.sqrt((downside ** 2).mean())
-            return mean_ret / downside_std if downside_std > 0 else np.nan
+        # Vectorised Sortino — see core.indicators.rolling_sortino for the
+        # mathematical equivalent of the previous rolling.apply lambda.
+        from core.indicators import rolling_sortino
 
-        sortino = returns.rolling(n).apply(calc_sortino, raw=False)
+        sortino = rolling_sortino(returns, n)
 
         current_sortino = sortino.iloc[-1]
         prev_sortino = sortino.iloc[-2]
@@ -1753,7 +1743,7 @@ class CCIStrategy(FactorStrategyBase):
 
         tp = (high + low + close) / 3
         sma = tp.rolling(n).mean()
-        mad = tp.rolling(n).apply(lambda x: np.abs(x - x.mean()).mean())
+        mad = rolling_mad(tp, n)
 
         cci = (tp - sma) / (constant * mad.replace(0, np.nan))
 
@@ -1794,7 +1784,7 @@ class CCIStrategy(FactorStrategyBase):
             high = data["high"]; low = data["low"]; close = data["close"]
             tp = (high + low + close) / 3
             sma = tp.rolling(n).mean()
-            mad = tp.rolling(n).apply(lambda x: np.abs(x - x.mean()).mean())
+            mad = rolling_mad(tp, n)
             cci = (tp - sma) / (constant * mad.replace(0, np.nan))
             return self._oscillator_factor_exit(
                 data, position,

@@ -163,6 +163,14 @@ _MONITOR_EXCHANGE_POSITION_CACHE: Dict[str, Any] = {
     "rows": [],
 }
 
+_BINANCE_USDM_CROSS_SECTION_STRATEGIES = {
+    "ResidualMom48hStrategy",
+    "Ret24hReversalStrategy",
+    "RelRet24hReversalStrategy",
+    "ResidualMom24hStrategy",
+    "CloseLocation48hStrategy",
+}
+
 
 def _recommended_symbols(strategy_type: str) -> List[str]:
     return list(get_strategy_recommended_symbols(strategy_type))
@@ -1357,6 +1365,12 @@ def _build_strategy_register_params(
     user_params: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
     base = _recommended_crypto_defaults(strategy_type=strategy_type, exchange=exchange)
+    policy_exchange = exchange
+    if (
+        str(strategy_type or "").strip() in _BINANCE_USDM_CROSS_SECTION_STRATEGIES
+        and "exchange" not in dict(user_params or {})
+    ):
+        policy_exchange = str(base.get("exchange") or "binance")
     normalized_user = _normalize_strategy_specific_params(
         strategy_type=strategy_type,
         params=dict(user_params or {}),
@@ -1364,7 +1378,7 @@ def _build_strategy_register_params(
     merged = dict(base)
     merged.update(normalized_user)
     normalized = _normalize_strategy_specific_params(strategy_type=strategy_type, params=merged)
-    return _apply_trade_policy_defaults(normalized, exchange)
+    return _apply_trade_policy_defaults(normalized, policy_exchange)
 
 
 class StrategyRegisterRequest(BaseModel):
@@ -2166,7 +2180,7 @@ async def get_strategy_ranking(
         try:
             loop_df = df
             loop_bundle = None
-            if strategy_name == "FamaFactorArbitrageStrategy":
+            if strategy_name == "FamaFactorArbitrageStrategy" or strategy_name in _BINANCE_USDM_CROSS_SECTION_STRATEGIES:
                 loop_df, loop_bundle, _ = await _load_backtest_inputs(
                     strategy=strategy_name,
                     symbol=symbol,

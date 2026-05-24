@@ -114,6 +114,36 @@ def _notification_total_usd_from_balance_payload(payload: Dict[str, Any]) -> flo
     )
 
 
+def _with_live_display_equity(
+    risk_report: Dict[str, Any],
+    *,
+    display_total_usd: float,
+    risk_equity_input: float,
+) -> Dict[str, Any]:
+    """Keep live dashboard display equity aligned with the live wallet snapshot.
+
+    The risk manager may deliberately keep its internal equity at the previous
+    value when a partial exchange fetch fails, to avoid false circuit-breaker
+    trips. The dashboard should still show the live account value returned by
+    the balance snapshot instead of leaking an older paper equity value.
+    """
+    out = copy.deepcopy(risk_report or {})
+    equity = dict(out.get("equity") or {})
+    display_current = trading_api._safe_float(display_total_usd, default=0.0)
+    guarded_current = trading_api._safe_float(equity.get("current"), default=0.0)
+    guarded_input = trading_api._safe_float(risk_equity_input, default=0.0)
+    if display_current > 0:
+        if guarded_current > 0 and abs(guarded_current - display_current) > 1e-6:
+            equity["risk_current"] = round(guarded_current, 4)
+        if guarded_input > 0 and abs(guarded_input - display_current) > 1e-6:
+            equity["risk_equity_input"] = round(guarded_input, 4)
+        equity["current"] = round(display_current, 4)
+        equity["current_source"] = "live_balance_snapshot"
+    out["equity"] = equity
+    out["display_account_type"] = "live"
+    return out
+
+
 async def _build_notification_context_from_balance_payload(
     payload: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -877,6 +907,12 @@ async def _build_all_balances_payload():
         if not is_paper_mode
         else trading_api.risk_manager.get_risk_report()
     )
+    if not is_paper_mode:
+        risk_report = _with_live_display_equity(
+            risk_report,
+            display_total_usd=display_total_usd,
+            risk_equity_input=risk_equity_input,
+        )
     payload = {
         "exchanges": results,
         "distribution": distribution,

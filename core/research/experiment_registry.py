@@ -41,6 +41,16 @@ class _JsonRegistry(Generic[ModelT]):
         self.model_cls = model_cls
         self.key_field = str(key_field)
         self._cache: Optional[Dict[str, ModelT]] = None
+        # NOTE on locking choice: ``threading.RLock`` (not ``asyncio.Lock``).
+        # The registry is invoked from two contexts:
+        #   (1) FastAPI async handlers running in the main event-loop thread, and
+        #   (2) worker threads spawned via ``asyncio.to_thread`` (e.g. the
+        #       backtest pool and research finalize path).
+        # ``threading.RLock`` protects both. The critical sections below contain
+        # no ``await`` points, so the lock is never held across event-loop
+        # suspension — this is what makes the choice safe under cooperative
+        # async concurrency. Do NOT introduce ``await`` inside ``with self._lock:``
+        # or this guarantee breaks.
         self._lock = threading.RLock()  # D: concurrent safety
 
     def _load(self) -> Dict[str, ModelT]:

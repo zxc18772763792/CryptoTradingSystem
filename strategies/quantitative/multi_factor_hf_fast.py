@@ -39,7 +39,6 @@ original per-bar replay path is preserved as the trusted reference.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -50,7 +49,6 @@ from core.factors_ts.registry import compute_factor
 # Reuse exact config-loading semantics so a fast-path run keys off the same
 # YAML/param overrides as the live strategy class.
 from strategies.quantitative.multi_factor_hf import (
-    _default_config,
     _load_yaml_strategy_config,
 )
 

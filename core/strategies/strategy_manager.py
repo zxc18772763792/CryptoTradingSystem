@@ -2011,9 +2011,8 @@ class StrategyManager:
             return {}
 
     def _build_strategy_performance(self) -> Dict[str, Dict[str, Any]]:
-        # Lazy imports avoid circular dependency during module initialization.
+        # Lazy import avoids circular dependency during module initialization.
         from core.risk.risk_manager import risk_manager
-        from core.trading.position_manager import position_manager
 
         risk_report = risk_manager.get_risk_report()
         current_equity = float(((risk_report.get("equity") or {}).get("current") or 0.0))

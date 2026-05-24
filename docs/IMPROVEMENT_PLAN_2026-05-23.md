@@ -80,7 +80,7 @@
 - [ ] [core/trading/position_manager.py:537-549](core/trading/position_manager.py) `Ambiguous position close` 返回 None 静默失败，应抛 `AmbiguousPositionError`
 - [ ] [core/trading/position_manager.py:584-586](core/trading/position_manager.py) `realized_pnl += unrealized_pnl` 是 gross 而非 net，与 risk_manager 的 net 口径不一致，导致 UI 显示混乱
 - [ ] [core/risk/risk_manager.py:485-509](core/risk/risk_manager.py) 当 `_daily_trades=0` 时熔断豁免可被滥用（手动开仓爆仓不熔断），加灾难性后备阈值
-- [ ] [core/risk/circuit_breaker.py:481-526](core/risk/circuit_breaker.py) `_drawdown_from_pnl` fallback 到 `max_notional` 会让单笔大额亏损被低估
+- [x] [core/risk/circuit_breaker.py:481-526](core/risk/circuit_breaker.py) `_drawdown_from_pnl` fallback 到 `max_notional` 会让单笔大额亏损被低估（2026-05-24 已修：无 equity/capital 时不再用 raw notional 稀释大额亏损，小额无基准成本行仍保持 0）
 - [ ] [core/monitoring/strategy_monitor.py:215-217](core/monitoring/strategy_monitor.py) CUSUM `reset_on_trigger=True` 后会立即再次触发，加 cooldown_bars
 
 #### 3.4 ML / 新闻管线

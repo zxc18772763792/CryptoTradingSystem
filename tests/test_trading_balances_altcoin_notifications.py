@@ -216,3 +216,24 @@ def test_trading_balances_timeout_fallback_still_evaluates_altcoin_notifications
         captured["context"]["altcoin"]["scans"]["cfg-1"]["rows"][0]["symbol"]
         == "AAA/USDT"
     )
+
+
+def test_live_display_equity_uses_live_balance_snapshot_when_risk_is_guarded():
+    payload = trading_balances._with_live_display_equity(
+        {
+            "risk_level": "low",
+            "equity": {
+                "current": 9898.2409,
+                "daily_total_pnl_usd": -16.74,
+            },
+        },
+        display_total_usd=5059.45,
+        risk_equity_input=9898.2409,
+    )
+
+    equity = payload["equity"]
+    assert equity["current"] == 5059.45
+    assert equity["risk_current"] == 9898.2409
+    assert equity["risk_equity_input"] == 9898.2409
+    assert equity["current_source"] == "live_balance_snapshot"
+    assert payload["display_account_type"] == "live"

@@ -1,0 +1,72 @@
+# Binance USD-M 5m cross-sectional long/short defaults.
+
+timeframe: "5m"
+exchange: "binance"
+market_type: "future"
+
+universe_symbols:
+  - "BTC/USDT"
+  - "ETH/USDT"
+  - "BNB/USDT"
+  - "SOL/USDT"
+  - "XRP/USDT"
+  - "DOGE/USDT"
+  - "ADA/USDT"
+  - "AVAX/USDT"
+  - "LINK/USDT"
+  - "DOT/USDT"
+  - "TRX/USDT"
+  - "LTC/USDT"
+  - "BCH/USDT"
+  - "NEAR/USDT"
+  - "APT/USDT"
+  - "ARB/USDT"
+  - "OP/USDT"
+  - "INJ/USDT"
+  - "AAVE/USDT"
+  - "SUI/USDT"
+
+rebalance_bars: 288
+rebalance_offset_bars: 0
+long_quantile: 0.2
+short_quantile: 0.2
+max_symbol_weight: 0.10
+max_portfolio_leverage: 1.0
+min_quote_volume: 0.0
+min_universe_size: 5
+allow_long: true
+allow_short: true
+reverse_on_signal: true
+allow_pyramiding: false
+
+fee_bps_per_side: 5.0
+min_slippage_bps_per_side: 2.0
+slippage_range_multiplier: 0.08
+max_slippage_bps_per_side: 20.0
+
+max_abs_return: 0.0
+max_range_bps: 0.0
+funding_abs_threshold: 0.0
+blacklist_symbols: []
+
+strategies:
+  residual_mom_48h:
+    class: "ResidualMom48hStrategy"
+    lookback_bars: 576
+    direction: "low"
+  ret_24h:
+    class: "Ret24hReversalStrategy"
+    lookback_bars: 288
+    direction: "low"
+  rel_ret_24h:
+    class: "RelRet24hReversalStrategy"
+    lookback_bars: 288
+    direction: "low"
+  residual_mom_24h:
+    class: "ResidualMom24hStrategy"
+    lookback_bars: 288
+    direction: "low"
+  close_location_48h:
+    class: "CloseLocation48hStrategy"
+    lookback_bars: 576
+    direction: "high"

@@ -1217,6 +1217,93 @@ def test_build_autonomous_agent_risk_status_merges_risk_and_learning_guards(monk
     }
 
 
+def test_autonomous_agent_risk_status_separates_live_safety_gate(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    monkeypatch.setattr(ai_module.execution_engine, "get_trading_mode", lambda: "live")
+    monkeypatch.setattr(
+        ai_module,
+        "_get_autonomous_agent_learning_memory",
+        lambda: {
+            "summary": {"recent_close_loss_streak_count": 0},
+            "adaptive_risk": {"effective_min_confidence": 0.58},
+            "lessons": [],
+        },
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "_get_autonomous_agent_risk_report",
+        lambda: {
+            "trading_halted": False,
+            "halt_reason": "",
+            "risk_level": "low",
+            "discipline": {
+                "fresh_entry_allowed": True,
+                "reduce_only": False,
+                "degrade_mode": "normal",
+                "reasons": [],
+                "thresholds": {"rolling_3d_drawdown_reduce_only": 0.06},
+            },
+            "equity": {
+                "daily_pnl_ratio": 0.001,
+                "daily_stop_basis_ratio": 0.001,
+                "max_drawdown": 0.01,
+                "rolling_3d_drawdown": 0.01,
+                "rolling_7d_drawdown": 0.01,
+            },
+            "drawdown": {},
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_runtime_config",
+        lambda: {
+            "enabled": True,
+            "mode": "execute",
+            "allow_live": False,
+            "symbol_mode": "auto",
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "timeframe": "1h",
+            "strategy_name": "AI_AutonomousAgent",
+        },
+    )
+    monkeypatch.setattr(
+        ai_module.autonomous_trading_agent,
+        "get_status",
+        lambda: {
+            "running": True,
+            "safety": {
+                "status": "unsafe",
+                "trading_mode": "live",
+                "reason_codes": ["trading_mode_live"],
+                "recommendations": ["switch_trading_mode_to_paper"],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        ai_module,
+        "resolve_runtime_research_context",
+        lambda **kwargs: {
+            "available": False,
+            "reason_codes": ["snapshot_missing"],
+            "selected_eligibility": {},
+        },
+    )
+
+    payload = ai_module._build_autonomous_agent_risk_status()
+
+    assert payload["effective_fresh_entry_allowed"] is True
+    assert payload["fresh_entry_submission_allowed"] is False
+    assert payload["fresh_entry_blockers"] == []
+    assert payload["execution_gate"]["blocked"] is True
+    assert payload["execution_gate"]["code"] == "live_mode_blocked"
+    assert payload["execution_gate"]["source"] == "execution_safety"
+    assert payload["execution_gate"]["trading_mode"] == "live"
+    assert payload["execution_gate"]["allow_live"] is False
+    assert "trading_mode_live" in payload["execution_gate"]["reason_codes"]
+
+
 def test_autonomous_agent_risk_status_endpoint_proxies_payload(monkeypatch):
     from web.api import ai_agent as ai_module
 

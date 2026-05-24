@@ -12,6 +12,7 @@ endpoints that previously had the bug, without spinning up the full app.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import re
 import sys
@@ -173,3 +174,72 @@ class TestKlineFallbackWriters:
         assert not out.empty
         assert str(out.index.tz) == "UTC"
         assert out.index[0].isoformat() == "2026-05-21T06:00:00+00:00"
+
+    def test_normalize_kline_frame_for_compare_strips_aware_utc(self, data_module):
+        idx = pd.date_range("2026-05-23 12:00", periods=2, freq="1h", tz="UTC")
+        frame = pd.DataFrame({"close": [1.0, 2.0]}, index=idx)
+
+        out = data_module._normalize_kline_frame_for_compare(frame)
+        bound = data_module._normalize_query_datetime(datetime(2026, 5, 23, 12, 30, tzinfo=timezone.utc))
+        filtered = out[out.index >= bound]
+
+        assert out.index.tz is None
+        assert list(filtered["close"]) == [2.0]
+
+
+class TestKlineLocalCacheResponse:
+    def test_get_klines_returns_cached_rows_without_blocking_live_refresh(
+        self, data_module, monkeypatch
+    ):
+        idx = pd.date_range("2026-01-01 00:00:00", periods=400, freq="1min")
+        frame = pd.DataFrame(
+            {
+                "open": [100.0] * len(idx),
+                "high": [101.0] * len(idx),
+                "low": [99.0] * len(idx),
+                "close": [100.5] * len(idx),
+                "volume": [1.0] * len(idx),
+            },
+            index=idx,
+        )
+        calls = []
+
+        async def fake_load_klines_from_parquet(**kwargs):
+            return frame if kwargs.get("exchange") == "binance" else pd.DataFrame()
+
+        async def fake_public_fetch(*args, **kwargs):
+            calls.append("public_fetch")
+            return pd.DataFrame()
+
+        async def fake_exchange_call(*args, **kwargs):
+            calls.append("exchange_call")
+            return []
+
+        def fake_schedule(refresh_key, build_coro):
+            calls.append(("schedule", refresh_key))
+            return True
+
+        monkeypatch.setattr(
+            data_module.data_storage,
+            "load_klines_from_parquet",
+            fake_load_klines_from_parquet,
+        )
+        monkeypatch.setattr(data_module, "_fetch_binance_public_klines", fake_public_fetch)
+        monkeypatch.setattr(data_module, "_safe_exchange_call", fake_exchange_call)
+        monkeypatch.setattr(data_module, "_schedule_live_cache_refresh", fake_schedule)
+
+        result = asyncio.run(
+            data_module.get_klines(
+                exchange="binance",
+                symbol="BTC/USDT",
+                timeframe="1m",
+                limit=120,
+                align="tail",
+            )
+        )
+
+        assert result["actual_exchange"] == "binance"
+        assert len(result["data"]) == 120
+        assert any(call[0] == "schedule" for call in calls if isinstance(call, tuple))
+        assert "public_fetch" not in calls
+        assert "exchange_call" not in calls

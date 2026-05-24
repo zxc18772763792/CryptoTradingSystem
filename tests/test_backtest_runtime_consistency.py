@@ -31,6 +31,8 @@ from core.research.strategy_research import RESEARCH_SUPPORTED_STRATEGIES
 from web.api.backtest import (
     _build_backtest_position_series,
     _build_positions,
+    _filter_backtest_frame_by_bounds,
+    _parse_backtest_bound,
     _replay_signal_strategy_position,
     _resolve_backtest_trade_policy,
 )
@@ -99,6 +101,27 @@ def test_backtest_page_position_builder_runs_without_error(
     coerced = pd.to_numeric(pos, errors="coerce")
     assert coerced.notna().all(), f"{name} produced non-numeric positions"
     assert np.isfinite(coerced.to_numpy()).all(), f"{name} produced non-finite positions"
+
+
+def test_backtest_date_bounds_filter_tz_aware_frames_without_crashing():
+    idx = pd.date_range("2026-05-23 12:00", periods=3, freq="1h", tz="UTC")
+    frame = pd.DataFrame(
+        {
+            "open": [1.0, 2.0, 3.0],
+            "high": [1.0, 2.0, 3.0],
+            "low": [1.0, 2.0, 3.0],
+            "close": [1.0, 2.0, 3.0],
+            "volume": [10.0, 20.0, 30.0],
+        },
+        index=idx,
+    )
+    start = _parse_backtest_bound("2026-05-23T12:30:00Z", bound="start_date")
+    end = _parse_backtest_bound("2026-05-23T14:00:00Z", bound="end_date")
+
+    filtered = _filter_backtest_frame_by_bounds(frame, start, end)
+
+    assert filtered.index.tz is None
+    assert list(filtered["close"]) == [2.0, 3.0]
 
 
 @pytest.mark.parametrize("name", _CURATED)

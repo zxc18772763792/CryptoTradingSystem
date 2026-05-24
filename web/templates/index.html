@@ -21,8 +21,18 @@
             };
         })(typeof globalThis !== "undefined" ? globalThis : window);
     </script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+    <!--
+      Third-party libraries pinned to a specific immutable version with SRI
+      integrity hashes. To rotate a version:
+          curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
+      then update both `src` and `integrity`.
+    -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
+            integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC"
+            crossorigin="anonymous"></script>
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"
+            integrity="sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7"
+            crossorigin="anonymous"></script>
 </head>
 <body>
     <div class="container">
