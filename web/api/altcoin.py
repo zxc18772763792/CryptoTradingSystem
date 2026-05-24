@@ -5,6 +5,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -86,6 +87,7 @@ ALTCOIN_RULE_TYPES = {
 }
 _ALTCOIN_SCAN_CACHE: Dict[str, Dict[str, Any]] = {}
 _ALTCOIN_SCAN_LOCKS: Dict[str, asyncio.Lock] = {}
+_ALTCOIN_SCAN_LOCKS_GUARD = threading.Lock()
 _ALTCOIN_SCAN_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
 _PUBLIC_MARKET_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
 _PUBLIC_MARKET_SNAPSHOT_TTL_SEC = 45.0
@@ -277,11 +279,12 @@ def _cache_key(
 
 
 def _cache_lock(cache_key: str) -> asyncio.Lock:
-    lock = _ALTCOIN_SCAN_LOCKS.get(cache_key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _ALTCOIN_SCAN_LOCKS[cache_key] = lock
-    return lock
+    with _ALTCOIN_SCAN_LOCKS_GUARD:
+        lock = _ALTCOIN_SCAN_LOCKS.get(cache_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _ALTCOIN_SCAN_LOCKS[cache_key] = lock
+        return lock
 
 
 def _cache_age_sec(cached_entry: Optional[Mapping[str, Any]], now_ts: Optional[float] = None) -> float:

@@ -3,6 +3,7 @@ Paper trading module.
 """
 
 import asyncio
+import contextlib
 from datetime import datetime
 from typing import Any, Callable, Dict, List
 
@@ -12,6 +13,29 @@ from core.exchanges.exchange_manager import exchange_manager
 from core.strategies import Signal, StrategyBase
 from core.trading.execution_engine import execution_engine
 from core.trading.position_manager import position_manager
+
+
+def _log_task_failure(task: "asyncio.Task[Any]", *, context: str) -> None:
+    """Safely log task failures from a done callback.
+
+    The callback must never raise, and it must treat cancellation as a normal
+    shutdown path. Probing ``task.exception()`` is wrapped so that a callback
+    implementation bug does not hide the underlying task failure.
+    """
+
+    if task.cancelled():
+        return
+
+    exc = None
+    try:
+        with contextlib.suppress(asyncio.CancelledError):
+            exc = task.exception()
+    except Exception as probe_error:
+        logger.error(f"{context} done callback failed while probing task state: {probe_error!r}")
+        return
+
+    if exc is not None:
+        logger.error(f"{context} exited with an error: {exc!r}")
 
 
 class PaperTradingEngine:
@@ -63,9 +87,7 @@ class PaperTradingEngine:
 
         logger.info(f"Paper trading started with capital: ${self._capital:,.2f}")
         self._main_task = asyncio.create_task(self._main_loop())
-        self._main_task.add_done_callback(
-            lambda t: logger.error(f"Paper trading loop exited: {t.exception()}") if not t.cancelled() and t.exception() else None
-        )
+        self._main_task.add_done_callback(lambda task: _log_task_failure(task, context="Paper trading loop"))
 
     async def stop(self) -> None:
         """Stop the paper trading engine."""
