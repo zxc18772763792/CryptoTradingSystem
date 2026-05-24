@@ -57,6 +57,7 @@ class Trade(Base):
     exchange = Column(String(20), nullable=False, index=True)
     symbol = Column(String(20), nullable=False, index=True)
     strategy = Column(String(50), nullable=False, index=True)
+    mode = Column(String(20), default="paper", index=True, nullable=False)
     side = Column(String(10), nullable=False)  # buy/sell
     order_type = Column(String(20), nullable=False)  # market/limit
     price = Column(Float, nullable=False)
@@ -78,6 +79,7 @@ class Position(Base):
     exchange = Column(String(20), nullable=False, index=True)
     symbol = Column(String(20), nullable=False, index=True)
     strategy = Column(String(50), nullable=False, index=True)
+    mode = Column(String(20), default="paper", index=True, nullable=False)
     side = Column(String(10), nullable=False)  # long/short
     entry_price = Column(Float, nullable=False)
     current_price = Column(Float, nullable=False)
@@ -597,6 +599,21 @@ async def close_db():
 
 
 async def _migrate_analytics_history_schema(conn) -> None:
+    trading_mode_columns = {
+        "trades": "idx_trades_mode",
+        "positions": "idx_positions_mode",
+    }
+    for table_name, index_name in trading_mode_columns.items():
+        result = await conn.exec_driver_sql(f"PRAGMA table_info('{table_name}')")
+        existing = {str(row[1]) for row in result.fetchall()}
+        if "mode" not in existing:
+            await conn.exec_driver_sql(
+                f"ALTER TABLE {table_name} ADD COLUMN mode TEXT DEFAULT 'paper' NOT NULL"
+            )
+        await conn.exec_driver_sql(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}(mode)"
+        )
+
     table_columns = {
         "analytics_microstructure_snapshots": [
             ("capture_status", "TEXT DEFAULT 'ok'"),

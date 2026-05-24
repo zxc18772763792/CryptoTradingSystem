@@ -243,7 +243,10 @@ async def promote_candidate(
     )
     strategy_name = _find_existing_ai_runtime_strategy(runtime_fingerprint)
     if not strategy_name:
-        strategy_name = f"{candidate.strategy}_ai_{int(_now_utc().timestamp())}_{secrets.token_hex(2)}"
+        strategy_name = (
+            f"{candidate.strategy}_ai_{decision}_"
+            f"{int(_now_utc().timestamp())}_{secrets.token_hex(2)}"
+        )
     strategy_class = _resolve_strategy_class(candidate.strategy)
     if strategy_class is None:
         raise ValueError(f"unknown strategy class for promotion: {candidate.strategy}")
@@ -251,6 +254,7 @@ async def promote_candidate(
     params = dict(get_strategy_defaults(candidate.strategy))
     params.update(dict(candidate.params or {}))
     params.setdefault("exchange", str(candidate.metadata.get("exchange") or "binance"))
+    params["runtime_mode"] = decision
     params.setdefault("account_id", f"ai_{strategy_name.lower()}")
     strategy_metadata = build_ai_research_strategy_metadata(
         candidate,

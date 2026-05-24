@@ -4440,8 +4440,9 @@ class ExecutionEngine:
                         "strength": float(signal.strength or 0.0),
                         "stop_loss": signal.stop_loss,
                         "take_profit": signal.take_profit,
+                        "mode": mode,
                         "action": "open_or_add",
-                    }
+                    },
                 )
                 await self._record_live_strategy_trade(
                     signal=signal,
@@ -4833,8 +4834,9 @@ class ExecutionEngine:
                     "take_profit": signal.take_profit,
                     "close_reason": close_reason,
                     "close_order_mode": close_order_mode,
+                    "mode": self._resolve_signal_trading_mode(signal),
                     "action": "close",
-                }
+                },
             )
         gross_close_pnl = float(getattr(closed, "realized_pnl", 0.0) or 0.0)
         close_pnl = gross_close_pnl - fee_usd - slippage_cost_usd
@@ -5367,6 +5369,7 @@ class ExecutionEngine:
                 "order_id": order.id,
                 "stop_loss": stop_loss,
                 "take_profit": take_profit,
+                "mode": self._current_trading_mode(),
                 "action": "manual_order",
             }
             if close_reason:

@@ -130,6 +130,77 @@ class RiskManager:
     def _normalize_scope(scope: str) -> str:
         return "live" if str(scope or "").strip().lower() == "live" else "paper"
 
+    def get_account_scope(self) -> str:
+        """Return the active risk-state scope without mutating it."""
+        with self._state_lock:
+            return self._normalize_scope(getattr(self, "_risk_scope", "paper"))
+
+    def _scope_state_copy(self, scope: str) -> Dict[str, Any]:
+        normalized = self._normalize_scope(scope)
+        if normalized == self._risk_scope:
+            state = self._snapshot_runtime_state()
+        else:
+            state = copy.deepcopy(
+                self._scope_states.get(normalized)
+                or self._initial_scope_state(normalized)
+            )
+        return copy.deepcopy(state)
+
+    def _save_scope_state_copy(self, scope: str, state: Dict[str, Any]) -> None:
+        normalized = self._normalize_scope(scope)
+        if normalized == self._risk_scope:
+            self._restore_runtime_state(state)
+        self._scope_states[normalized] = copy.deepcopy(state)
+
+    def _persist_scope_trade_history(self, scope: str, state: Dict[str, Any]) -> None:
+        normalized = self._normalize_scope(scope)
+        if normalized == self._risk_scope:
+            self._persist_trade_history(normalized)
+            return
+        rows = list((state or {}).get("trade_history") or [])
+        path = self._trade_history_path(normalized)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "scope": normalized,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "trade_history": rows[-self._trade_history_limit:],
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2, default=str),
+                encoding="utf-8",
+            )
+            tmp.replace(path)
+        except Exception as exc:
+            logger.warning(
+                f"risk_manager: failed to persist trade history for scope={normalized}: {exc}"
+            )
+
+    @staticmethod
+    def _scope_day_start(ts: datetime) -> datetime:
+        return ts.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def _check_new_day_for_state(self, state: Dict[str, Any]) -> None:
+        now_day = self._scope_day_start(datetime.now(timezone.utc))
+        current_day = state.get("daily_start")
+        if not isinstance(current_day, datetime):
+            current_day = now_day
+        if now_day <= current_day:
+            return
+
+        current_equity = state.get("current_equity")
+        state["daily_start"] = now_day
+        state["daily_trades"] = 0
+        state["daily_realized_pnl"] = 0.0
+        state["alerts"] = []
+        state["day_start_equity"] = (
+            float(current_equity) if current_equity and float(current_equity) > 0 else None
+        )
+        state["trading_halted"] = False
+        state["halt_reason"] = ""
+        state["daily_stop_breach_count"] = 0
+
     def _trade_history_path(self, scope: Optional[str] = None) -> Path:
         normalized = self._normalize_scope(scope or self._risk_scope)
         return self._trade_history_store_root / f"risk_trade_history_{normalized}.json"
@@ -409,8 +480,20 @@ class RiskManager:
         day_start_equity: Optional[float] = None,
         current_unrealized_pnl: Optional[float] = None,
         daily_realized_pnl: Optional[float] = None,
+        scope: Optional[str] = None,
     ) -> None:
         """Feed latest account equity to risk manager for drawdown/volatility checks."""
+        target_scope = self._normalize_scope(scope or self._risk_scope)
+        if target_scope != self._risk_scope:
+            self._update_equity_for_scope(
+                target_scope,
+                total_usd,
+                day_start_equity=day_start_equity,
+                current_unrealized_pnl=current_unrealized_pnl,
+                daily_realized_pnl=daily_realized_pnl,
+            )
+            return
+
         self._check_new_day()
 
         equity = float(total_usd or 0.0)
@@ -459,6 +542,74 @@ class RiskManager:
         self._equity_timeline = self._equity_timeline[-5000:]
 
         self._evaluate_daily_stop()
+
+    def _update_equity_for_scope(
+        self,
+        scope: str,
+        total_usd: float,
+        *,
+        day_start_equity: Optional[float] = None,
+        current_unrealized_pnl: Optional[float] = None,
+        daily_realized_pnl: Optional[float] = None,
+    ) -> None:
+        with self._state_lock:
+            state = self._scope_state_copy(scope)
+            self._check_new_day_for_state(state)
+            equity = float(total_usd or 0.0)
+            if equity <= 0:
+                return
+
+            if day_start_equity is not None:
+                baseline = float(day_start_equity or 0.0)
+                if baseline > 0:
+                    state["day_start_equity"] = baseline
+
+            if state.get("day_start_equity") is None:
+                state["day_start_equity"] = equity
+
+            if current_unrealized_pnl is not None:
+                state["current_unrealized_pnl"] = float(current_unrealized_pnl or 0.0)
+
+            if daily_realized_pnl is not None:
+                state["daily_realized_pnl"] = float(daily_realized_pnl or 0.0)
+
+            last_equity = state.get("last_equity")
+            alerts = list(state.get("alerts") or [])
+            if last_equity and float(last_equity) > 0:
+                change_ratio = (equity - float(last_equity)) / float(last_equity)
+                if abs(change_ratio) >= self.balance_volatility_alert_pct:
+                    direction = "涓婂崌" if change_ratio > 0 else "涓嬮檷"
+                    alerts.append(
+                        {
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "title": "璐︽埛娉㈠姩棰勮",
+                            "message": f"璐︽埛鏉冪泭鐭椂{direction}{abs(change_ratio) * 100:.2f}%",
+                            "severity": "warning",
+                            "data": {
+                                "scope": self._normalize_scope(scope),
+                                "last_equity": round(float(last_equity), 4),
+                                "current_equity": round(equity, 4),
+                                "change_ratio": round(change_ratio, 6),
+                            },
+                        }
+                    )
+                    alerts = alerts[-200:]
+
+            equity_curve = list(state.get("equity_curve") or [])
+            equity_timeline = list(state.get("equity_timeline") or [])
+            equity_curve.append(equity)
+            equity_timeline.append(
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "equity": float(equity),
+                }
+            )
+            state["last_equity"] = equity
+            state["current_equity"] = equity
+            state["alerts"] = alerts
+            state["equity_curve"] = equity_curve[-5000:]
+            state["equity_timeline"] = equity_timeline[-5000:]
+            self._save_scope_state_copy(scope, state)
 
     def _evaluate_daily_stop(self) -> None:
         if self._daily_stop_guard_until and datetime.now(timezone.utc) < self._daily_stop_guard_until:
@@ -777,7 +928,7 @@ class RiskManager:
         )
         return any(marker in text for marker in markers)
 
-    def record_trade(self, trade: Dict[str, Any]) -> None:
+    def record_trade(self, trade: Dict[str, Any], scope: Optional[str] = None) -> None:
         with self._state_lock:
             if self._is_test_stub_trade(trade):
                 logger.warning(
@@ -785,6 +936,34 @@ class RiskManager:
                     f"symbol={trade.get('symbol')} strategy={trade.get('strategy')}"
                 )
                 return
+            target_scope = self._normalize_scope(
+                scope
+                or (trade or {}).get("runtime_mode")
+                or (trade or {}).get("trading_mode")
+                or (trade or {}).get("mode")
+                or self._risk_scope
+            )
+            if target_scope != self._risk_scope:
+                state = self._scope_state_copy(target_scope)
+                self._check_new_day_for_state(state)
+                state["daily_trades"] = int(state.get("daily_trades", 0) or 0) + 1
+                pnl = float(trade.get("pnl", 0.0) or 0.0)
+                state["daily_realized_pnl"] = float(
+                    state.get("daily_realized_pnl", 0.0) or 0.0
+                ) + pnl
+                trade_history = list(state.get("trade_history") or [])
+                trade_history.append(
+                    {
+                        **trade,
+                        "mode": target_scope,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                state["trade_history"] = trade_history[-self._trade_history_limit:]
+                self._save_scope_state_copy(target_scope, state)
+                self._persist_scope_trade_history(target_scope, state)
+                return
+
             self._check_new_day()
             self._daily_trades += 1
 
@@ -794,6 +973,7 @@ class RiskManager:
             self._trade_history.append(
                 {
                     **trade,
+                    "mode": target_scope,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -836,13 +1016,23 @@ class RiskManager:
             ts = ts.replace(tzinfo=timezone.utc)
         return ts.astimezone(timezone.utc)
 
-    def _equity_window_points(self, *, hours: int) -> List[Dict[str, Any]]:
-        if not self._equity_timeline:
+    def _equity_window_points(
+        self,
+        *,
+        hours: int,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        timeline = (
+            list((state or {}).get("equity_timeline") or [])
+            if state is not None
+            else self._equity_timeline
+        )
+        if not timeline:
             return []
         window_hours = max(1, int(hours or 1))
         cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
         points: List[Dict[str, Any]] = []
-        for row in self._equity_timeline:
+        for row in timeline:
             if not isinstance(row, dict):
                 continue
             ts = self._parse_equity_point_timestamp(row.get("timestamp"))
@@ -900,11 +1090,22 @@ class RiskManager:
             "window_end": str(points[-1].get("timestamp") or "") if points else None,
         }
 
-    def get_rolling_drawdown_snapshot(self, *, hours: int) -> Dict[str, Any]:
-        points = self._equity_window_points(hours=hours)
+    def get_rolling_drawdown_snapshot(
+        self,
+        *,
+        hours: int,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        points = self._equity_window_points(hours=hours, state=state)
         return self._drawdown_snapshot_for_points(points, hours=hours)
 
-    def get_risk_metrics(self) -> RiskMetrics:
+    def get_risk_metrics(self, scope: Optional[str] = None) -> RiskMetrics:
+        target_scope = self._normalize_scope(scope or self._risk_scope)
+        if target_scope != self._risk_scope:
+            state = self._scope_state_copy(target_scope)
+            self._check_new_day_for_state(state)
+            return self._risk_metrics_from_state(target_scope, state)
+
         self._check_new_day()
 
         position_manager = _position_manager()
@@ -936,6 +1137,41 @@ class RiskManager:
             max_drawdown=self.calculate_max_drawdown(self._equity_curve),
             risk_level=level,
             trading_halted=self._trading_halted,
+        )
+
+    def _risk_metrics_from_state(self, scope: str, state: Dict[str, Any]) -> RiskMetrics:
+        position_manager = _position_manager()
+        positions = position_manager.get_all_positions(scope=scope)
+        total_exposure = float(sum(float(p.value or 0.0) for p in positions))
+        open_positions = len(positions)
+        day_start = float(state.get("day_start_equity") or 0.0)
+        current = float(state.get("current_equity") or 0.0)
+        daily_realized = float(state.get("daily_realized_pnl", 0.0) or 0.0)
+        current_unrealized = float(state.get("current_unrealized_pnl", 0.0) or 0.0)
+        daily_pnl_usd = current - day_start if day_start > 0 else daily_realized
+        stop_basis_usd = daily_realized + min(0.0, current_unrealized)
+        daily_pnl_ratio = (stop_basis_usd / day_start) if day_start > 0 else 0.0
+
+        if bool(state.get("trading_halted", False)):
+            level = RiskLevel.CRITICAL
+        elif daily_pnl_ratio <= -abs(self.max_daily_loss_ratio) * 0.7:
+            level = RiskLevel.HIGH
+        elif open_positions >= int(self.max_open_positions * 0.7):
+            level = RiskLevel.MEDIUM
+        else:
+            level = RiskLevel.LOW
+
+        return RiskMetrics(
+            total_exposure=total_exposure,
+            daily_pnl_usd=daily_pnl_usd,
+            daily_pnl_ratio=daily_pnl_ratio,
+            daily_trades=int(state.get("daily_trades", 0) or 0),
+            open_positions=open_positions,
+            max_drawdown=self.calculate_max_drawdown(
+                list(state.get("equity_curve") or [])
+            ),
+            risk_level=level,
+            trading_halted=bool(state.get("trading_halted", False)),
         )
 
     def _build_autonomy_discipline_contract(
@@ -1014,28 +1250,48 @@ class RiskManager:
             return list(self._trade_history[-limit:])
         return list(self._load_persisted_trade_history(normalized)[-limit:])
 
-    def get_risk_report(self) -> Dict[str, Any]:
-        metrics = self.get_risk_metrics()
+    def get_risk_report(self, scope: Optional[str] = None) -> Dict[str, Any]:
+        target_scope = self._normalize_scope(scope or self._risk_scope)
+        state = (
+            self._scope_state_copy(target_scope)
+            if target_scope != self._risk_scope
+            else None
+        )
+        metrics = self.get_risk_metrics(scope=target_scope)
         autonomy_thresholds = self.get_autonomy_risk_config()
         position_manager = _position_manager()
-        current_unrealized_pnl = float(position_manager.get_total_pnl() or 0.0)
-        if abs(float(self._current_unrealized_pnl or 0.0)) > 0:
-            current_unrealized_pnl = float(self._current_unrealized_pnl or 0.0)
-        daily_realized_pnl = float(self._daily_realized_pnl or 0.0)
+        if state is None:
+            current_unrealized_pnl = float(position_manager.get_total_pnl() or 0.0)
+            if abs(float(self._current_unrealized_pnl or 0.0)) > 0:
+                current_unrealized_pnl = float(self._current_unrealized_pnl or 0.0)
+            daily_realized_pnl = float(self._daily_realized_pnl or 0.0)
+            current_equity = float(self._current_equity or 0.0)
+            day_start_equity = float(self._day_start_equity or 0.0)
+            last_equity = float(self._last_equity or 0.0)
+            halt_reason = self._halt_reason
+            guard_until = self._daily_stop_guard_until
+            alerts = self.get_recent_alerts(30)
+        else:
+            current_unrealized_pnl = float(state.get("current_unrealized_pnl", 0.0) or 0.0)
+            daily_realized_pnl = float(state.get("daily_realized_pnl", 0.0) or 0.0)
+            current_equity = float(state.get("current_equity") or 0.0)
+            day_start_equity = float(state.get("day_start_equity") or 0.0)
+            last_equity = float(state.get("last_equity") or 0.0)
+            halt_reason = str(state.get("halt_reason", "") or "")
+            guard_until = state.get("daily_stop_guard_until")
+            alerts = list(state.get("alerts") or [])[-30:]
         daily_total_pnl = float(metrics.daily_pnl_usd or 0.0)
         daily_stop_basis = daily_realized_pnl + min(0.0, current_unrealized_pnl)
-        current_equity = float(self._current_equity or 0.0)
-        day_start_equity = float(self._day_start_equity or 0.0)
-        if current_equity <= 0 and float(self._last_equity or 0.0) > 0:
-            current_equity = float(self._last_equity or 0.0)
+        if current_equity <= 0 and last_equity > 0:
+            current_equity = last_equity
         if day_start_equity <= 0 and current_equity > 0:
             day_start_equity = current_equity - daily_total_pnl
         daily_total_pnl_ratio = (daily_total_pnl / day_start_equity) if day_start_equity > 0 else 0.0
         daily_stop_basis_ratio = (daily_stop_basis / day_start_equity) if day_start_equity > 0 else 0.0
         # `daily_total_pnl` is equity-based, so the residual may include funding/fees/transfers.
         daily_unrealized_component = daily_total_pnl - daily_realized_pnl
-        rolling_3d = self.get_rolling_drawdown_snapshot(hours=24 * 3)
-        rolling_7d = self.get_rolling_drawdown_snapshot(hours=24 * 7)
+        rolling_3d = self.get_rolling_drawdown_snapshot(hours=24 * 3, state=state)
+        rolling_7d = self.get_rolling_drawdown_snapshot(hours=24 * 7, state=state)
         discipline = self._build_autonomy_discipline_contract(
             daily_stop_basis_ratio=daily_stop_basis_ratio,
             max_drawdown=float(metrics.max_drawdown or 0.0),
@@ -1044,9 +1300,10 @@ class RiskManager:
         )
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
+            "scope": target_scope,
             "risk_level": metrics.risk_level.value,
             "trading_halted": metrics.trading_halted,
-            "halt_reason": self._halt_reason,
+            "halt_reason": halt_reason,
             "discipline": discipline,
             "drawdown": {
                 "max_drawdown": round(float(metrics.max_drawdown), 6),
@@ -1055,9 +1312,9 @@ class RiskManager:
             },
             "daily_stop_guard_seconds": max(
                 0,
-                int((self._daily_stop_guard_until - datetime.now(timezone.utc)).total_seconds()),
+                int((guard_until - datetime.now(timezone.utc)).total_seconds()),
             )
-            if self._daily_stop_guard_until
+            if isinstance(guard_until, datetime)
             else 0,
             "equity": {
                 "current": round(current_equity, 4),
@@ -1102,7 +1359,7 @@ class RiskManager:
                     metrics.open_positions / self.max_open_positions if self.max_open_positions > 0 else 0
                 ),
             },
-            "alerts": self.get_recent_alerts(30),
+            "alerts": alerts,
         }
 
     def update_parameters(self, params: Dict[str, Any]) -> None:

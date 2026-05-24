@@ -78,6 +78,50 @@ def test_risk_manager_record_trade_is_thread_safe(tmp_path, monkeypatch):
     assert manager.get_risk_metrics().daily_pnl_usd == 100.0
 
 
+def test_risk_manager_record_trade_accepts_explicit_scope(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(risk_module.settings, "TRADING_MODE", "paper", raising=False)
+
+    manager = risk_module.RiskManager(use_persisted_overlay=False)
+    manager.record_trade(
+        {
+            "strategy": "live_alpha",
+            "symbol": "ETH/USDT",
+            "exchange": "binance",
+            "side": "sell",
+            "signal_type": "sell",
+            "fill_price": 3000.0,
+            "quantity": 0.1,
+            "notional": 300.0,
+            "pnl": 7.0,
+        },
+        scope="live",
+    )
+
+    assert manager.get_account_scope() == "paper"
+    assert manager.get_trade_history(limit=10, scope="paper") == []
+    live_history = manager.get_trade_history(limit=10, scope="live")
+    assert len(live_history) == 1
+    assert live_history[0]["mode"] == "live"
+    assert manager.get_risk_metrics(scope="paper").daily_trades == 0
+    assert manager.get_risk_metrics(scope="live").daily_trades == 1
+
+
+def test_risk_manager_update_equity_accepts_explicit_scope(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(risk_module.settings, "TRADING_MODE", "paper", raising=False)
+
+    manager = risk_module.RiskManager(use_persisted_overlay=False)
+    manager.update_equity(1000.0, scope="paper")
+    manager.update_equity(5000.0, scope="live")
+
+    assert manager.get_account_scope() == "paper"
+    assert manager.get_risk_report(scope="paper")["scope"] == "paper"
+    assert manager.get_risk_report(scope="paper")["equity"]["current"] == 1000.0
+    assert manager.get_risk_report(scope="live")["scope"] == "live"
+    assert manager.get_risk_report(scope="live")["equity"]["current"] == 5000.0
+
+
 def test_risk_manager_skips_test_stub_trade_history(tmp_path, monkeypatch):
     monkeypatch.setattr(risk_module.settings, "CACHE_PATH", tmp_path, raising=False)
     monkeypatch.setattr(risk_module.settings, "TRADING_MODE", "live", raising=False)
