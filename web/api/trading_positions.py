@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends
 
 from web.api.auth import require_sensitive_ops_permissions
@@ -10,8 +12,8 @@ router = APIRouter()
 
 
 @router.get("/positions")
-async def get_positions():
-    return await trading_api.get_positions()
+async def get_positions(mode: Optional[str] = None):
+    return await trading_api.get_positions(mode=mode)
 
 
 @router.post("/positions/close", dependencies=[Depends(require_sensitive_ops_permissions("close_positions"))])

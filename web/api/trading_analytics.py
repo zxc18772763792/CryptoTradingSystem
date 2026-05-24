@@ -18,6 +18,7 @@ async def get_analytics_overview(
     calendar_days: int = 30,
     exchange: str = "binance",
     symbol: str = "BTC/USDT",
+    mode: Optional[str] = None,
 ):
     return await trading_api.get_analytics_overview(
         days=days,
@@ -25,12 +26,13 @@ async def get_analytics_overview(
         calendar_days=calendar_days,
         exchange=exchange,
         symbol=symbol,
+        mode=mode,
     )
 
 
 @router.get("/analytics/performance")
-async def get_advanced_performance(days: int = 90):
-    return await trading_api.get_advanced_performance(days=days)
+async def get_advanced_performance(days: int = 90, mode: Optional[str] = None):
+    return await trading_api.get_advanced_performance(days=days, mode=mode)
 
 
 @router.get("/analytics/risk-dashboard")
