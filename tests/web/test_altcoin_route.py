@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -870,6 +871,22 @@ def test_get_altcoin_scan_snapshot_resolves_universe_only_once(monkeypatch):
     assert "预加载警告" in payload["warnings"]
     assert payload["cache"]["hit"] is False
     altcoin_api._clear_altcoin_scan_cache()
+
+
+def test_altcoin_scan_cache_lock_creation_is_thread_safe():
+    cache_key = "race-key"
+    altcoin_api._ALTCOIN_SCAN_LOCKS.pop(cache_key, None)
+
+    def acquire_lock_id() -> int:
+        return id(altcoin_api._cache_lock(cache_key))
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        lock_ids = list(executor.map(lambda _: acquire_lock_id(), range(25)))
+
+    assert len(set(lock_ids)) == 1
+    assert altcoin_api._ALTCOIN_SCAN_LOCKS[cache_key] is altcoin_api._cache_lock(cache_key)
+
+    altcoin_api._ALTCOIN_SCAN_LOCKS.pop(cache_key, None)
 
 
 def test_get_altcoin_scan_snapshot_serves_stale_cache_while_refreshing(monkeypatch):

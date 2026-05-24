@@ -875,7 +875,7 @@ class ExecutionEngine:
             task_loop = getattr(self._queue_task, "_loop", None)
             if task_loop is self._signal_queue_loop:
                 return
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(asyncio.CancelledError):
                 self._queue_task.cancel()
             self._queue_task = None
             logger.warning("Execution signal queue worker rebound to current event loop")
@@ -1349,7 +1349,7 @@ class ExecutionEngine:
             trade_dt: Optional[datetime] = None
             ts_raw = str(row.get("timestamp") or "").strip()
             if ts_raw:
-                with contextlib.suppress(Exception):
+                with contextlib.suppress(ValueError):
                     trade_dt = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
                     if trade_dt.tzinfo is None:
                         trade_dt = trade_dt.replace(tzinfo=timezone.utc)

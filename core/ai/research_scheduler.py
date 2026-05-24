@@ -15,7 +15,6 @@ Usage in lifespan::
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 from typing import Any, Optional
 
@@ -48,24 +47,39 @@ class ResearchScheduler:
         if self._stop_event:
             self._stop_event.set()
         if self._task:
-            self._task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            if not self._task.done():
+                self._task.cancel()
+            try:
                 await self._task
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._task = None
         logger.info("ResearchScheduler stopped")
 
     async def _loop(self) -> None:
-        # brief startup delay so the rest of lifespan can finish first
-        await asyncio.sleep(30)
+        if await self._sleep_until_stopped(30):
+            return
         while not self._is_stopped():
             try:
                 await self._tick()
+            except asyncio.CancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"ResearchScheduler tick error: {exc}")
-            # interruptible sleep
-            for _ in range(self._interval_seconds):
-                if self._is_stopped():
-                    break
-                await asyncio.sleep(1)
+            await self._sleep_until_stopped(self._interval_seconds)
+
+    async def _sleep_until_stopped(self, timeout_seconds: float) -> bool:
+        if self._is_stopped():
+            return True
+        if self._stop_event is None:
+            await asyncio.sleep(timeout_seconds)
+            return False
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            return False
+        return True
 
     def _is_stopped(self) -> bool:
         return bool(self._stop_event and self._stop_event.is_set())
