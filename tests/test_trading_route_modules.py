@@ -103,6 +103,55 @@ def test_analytics_overview_route_bridges_to_service(monkeypatch):
     }
 
 
+def test_analytics_overview_route_passes_mode_to_service(monkeypatch):
+    app = FastAPI()
+    app.include_router(trading_analytics.router, prefix="/api/trading")
+    client = TestClient(app)
+
+    captured = {}
+
+    async def fake_overview(*, days, lookback, calendar_days, exchange, symbol, mode=None):
+        captured["days"] = days
+        captured["lookback"] = lookback
+        captured["calendar_days"] = calendar_days
+        captured["exchange"] = exchange
+        captured["symbol"] = symbol
+        captured["mode"] = mode
+        return {"ok": True, "mode": mode}
+
+    monkeypatch.setattr(trading_api, "get_analytics_overview", fake_overview)
+
+    response = client.get("/api/trading/analytics/overview?mode=live")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "mode": "live"}
+    assert captured["mode"] == "live"
+    assert captured["days"] == 90
+    assert captured["lookback"] == 240
+    assert captured["calendar_days"] == 30
+    assert captured["exchange"] == "binance"
+    assert captured["symbol"] == "BTC/USDT"
+
+
+def test_risk_dashboard_route_passes_mode_to_service(monkeypatch):
+    app = FastAPI()
+    app.include_router(trading_analytics.router, prefix="/api/trading")
+    client = TestClient(app)
+
+    captured = {}
+
+    async def fake_risk_dashboard(*, lookback, mode=None):
+        captured["lookback"] = lookback
+        captured["mode"] = mode
+        return {"ok": True, "lookback": lookback, "mode": mode}
+
+    monkeypatch.setattr(trading_api, "get_risk_dashboard", fake_risk_dashboard)
+
+    response = client.get("/api/trading/analytics/risk-dashboard?lookback=180&mode=paper")
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "lookback": 180, "mode": "paper"}
+    assert captured == {"lookback": 180, "mode": "paper"}
+
+
 def test_analytics_history_status_route_bridges_to_service(monkeypatch):
     app = FastAPI()
     app.include_router(trading_analytics.router, prefix="/api/trading")
@@ -126,6 +175,25 @@ def test_analytics_history_status_route_bridges_to_service(monkeypatch):
         "symbol": "ETH/USDT",
         "collectors": [{"collector": "derivatives", "status": "ok"}],
     }
+
+
+def test_positions_route_passes_mode_to_service(monkeypatch):
+    app = FastAPI()
+    app.include_router(trading_positions.router, prefix="/api/trading")
+    client = TestClient(app)
+
+    captured = {}
+
+    async def fake_positions(*, mode=None):
+        captured["mode"] = mode
+        return {"mode": mode, "ok": True}
+
+    monkeypatch.setattr(trading_api, "get_positions", fake_positions)
+
+    response = client.get("/api/trading/positions?mode=paper")
+    assert response.status_code == 200
+    assert response.json() == {"mode": "paper", "ok": True}
+    assert captured["mode"] == "paper"
 
 
 def test_analytics_history_status_includes_derivatives_coinglass_surface(monkeypatch):

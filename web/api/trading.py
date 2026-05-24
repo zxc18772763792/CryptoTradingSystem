@@ -5464,6 +5464,7 @@ async def get_positions(mode: Optional[str] = None):
     positions = [p.to_dict() for p in local_positions]
     exchange_positions: List[Dict[str, Any]] = []
     diagnostics: Dict[str, Any] = {"fetched_exchanges": [], "skipped_exchanges": []}
+    live_mode = target_mode == "live"
 
     def _canonical_symbol(sym: Any) -> str:
         text = str(sym or "").upper().strip()
@@ -5641,11 +5642,10 @@ async def get_positions(mode: Optional[str] = None):
             "stats": stats,
             "exchange_positions_count": len(exchange_rows),
             "diagnostics": diagnostics_payload
-            if not execution_engine.is_paper_mode()
+            if target_mode == "live"
             else None,
         }
 
-    live_mode = not execution_engine.is_paper_mode()
     cache_age_sec = max(0.0, now_ts - cached_ts)
     if (
         live_mode
@@ -7663,7 +7663,10 @@ async def get_analytics_overview(
         ),
         "risk_dashboard": _capture_analytics(
             "risk_dashboard",
-            get_risk_dashboard(lookback=max(60, min(int(lookback or 240), 2000))),
+            get_risk_dashboard(
+                lookback=max(60, min(int(lookback or 240), 2000)),
+                mode=target_mode,
+            ),
         ),
         "calendar": _capture_analytics(
             "calendar",
@@ -7827,10 +7830,13 @@ async def get_advanced_performance(days: int = 90, mode: Optional[str] = None):
     }
 
 
-async def _build_risk_dashboard_payload(lookback: int = 240) -> Dict[str, Any]:
+async def _build_risk_dashboard_payload(
+    lookback: int = 240, mode: Optional[str] = None
+) -> Dict[str, Any]:
     lookback = max(60, min(int(lookback or 240), 2000))
-    report = risk_manager.get_risk_report()
-    positions = position_manager.get_all_positions()
+    target_mode = _normalize_runtime_mode(mode or execution_engine.get_trading_mode())
+    report = risk_manager.get_risk_report(scope=target_mode)
+    positions = position_manager.get_all_positions(scope=target_mode)
     equity = _safe_float((report.get("equity") or {}).get("current"))
 
     exposure_by_symbol: Dict[str, float] = {}
@@ -7906,7 +7912,7 @@ async def _build_risk_dashboard_payload(lookback: int = 240) -> Dict[str, Any]:
                 avg_abs_corr = statistics.fmean(vals) if vals else 0.0
 
     history = await account_snapshot_manager.get_history(
-        hours=168, exchange="all", limit=1200
+        hours=168, exchange="all", limit=1200, mode=target_mode
     )
     ret = []
     prev = None
@@ -7945,9 +7951,10 @@ async def _build_risk_dashboard_payload(lookback: int = 240) -> Dict[str, Any]:
     }
 
 
-async def get_risk_dashboard(lookback: int = 240):
+async def get_risk_dashboard(lookback: int = 240, mode: Optional[str] = None):
     lookback = max(60, min(int(lookback or 240), 2000))
-    cache_key = f"lookback:{lookback}"
+    target_mode = _normalize_runtime_mode(mode or execution_engine.get_trading_mode())
+    cache_key = f"mode:{target_mode}|lookback:{lookback}"
     cached, cached_age = _cache_get(
         _RISK_DASHBOARD_CACHE,
         cache_key,
@@ -7971,7 +7978,7 @@ async def get_risk_dashboard(lookback: int = 240):
         _schedule_cache_refresh(
             _RISK_DASHBOARD_REFRESH_TASKS,
             cache_key,
-            build_coro=lambda: _build_risk_dashboard_payload(lookback),
+            build_coro=lambda: _build_risk_dashboard_payload(lookback, mode=target_mode),
             cache=_RISK_DASHBOARD_CACHE,
             strip_payload=_strip_risk_dashboard_runtime_fields,
         )
@@ -7984,7 +7991,7 @@ async def get_risk_dashboard(lookback: int = 240):
             stale_reason="background_refresh_scheduled",
         )
 
-    payload = await _build_risk_dashboard_payload(lookback)
+    payload = await _build_risk_dashboard_payload(lookback, mode=target_mode)
     _cache_put(
         _RISK_DASHBOARD_CACHE, cache_key, _strip_risk_dashboard_runtime_fields(payload)
     )

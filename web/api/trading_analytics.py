@@ -36,8 +36,8 @@ async def get_advanced_performance(days: int = 90, mode: Optional[str] = None):
 
 
 @router.get("/analytics/risk-dashboard")
-async def get_risk_dashboard(lookback: int = 240):
-    return await trading_api.get_risk_dashboard(lookback=lookback)
+async def get_risk_dashboard(lookback: int = 240, mode: Optional[str] = None):
+    return await trading_api.get_risk_dashboard(lookback=lookback, mode=mode)
 
 
 @router.get("/analytics/calendar")
