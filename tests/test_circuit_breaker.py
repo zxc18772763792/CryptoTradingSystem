@@ -159,6 +159,32 @@ def test_drawdown_fallback_does_not_dilute_loss_by_notional():
     assert grouped["Levered"]["daily_dd"] == pytest.approx(1.0)
 
 
+def test_drawdown_without_denominator_does_not_create_synthetic_full_loss():
+    ts = datetime.now(timezone.utc)
+    history = [
+        {
+            "strategy": "TinyCostOnly",
+            "pnl": -0.2,
+            "timestamp": ts.isoformat(),
+        }
+    ]
+
+    grouped = evaluate_strategy_drawdowns(history)
+
+    assert grouped["TinyCostOnly"]["daily_dd"] == 0.0
+
+
+def test_evaluate_strategy_drawdowns_filters_to_active_names():
+    history = [
+        _trade("StoppedStrat", -700.0, 1.0, capital=10000.0),
+        _trade("RunningStrat", -50.0, 1.0, capital=10000.0),
+    ]
+
+    grouped = evaluate_strategy_drawdowns(history, active_strategy_names={"RunningStrat"})
+
+    assert set(grouped) == {"RunningStrat"}
+
+
 def test_run_checks_trips_breaching_strategy(cb, monkeypatch):
     monkeypatch.setattr(cb_mod, "circuit_breaker", cb)
     history = [

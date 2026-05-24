@@ -26,7 +26,7 @@ import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from loguru import logger
 
@@ -404,12 +404,30 @@ class CircuitBreaker:
             logger.debug(f"circuit_breaker: asyncio.run fallback failed for {name}: {exc}")
 
     # ── snapshots ──
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self, *, active_strategy_names: Optional[Iterable[Any]] = None) -> Dict[str, Any]:
+        active_names = _normalize_strategy_names(active_strategy_names)
         with self._lock:
+            strategies = {name: state.to_dict() for name, state in self._strategies.items()}
+            active_strategies = None
+            inactive_tripped_count = None
+            if active_names is not None:
+                active_strategies = {
+                    name: state
+                    for name, state in strategies.items()
+                    if name in active_names
+                }
+                inactive_tripped_count = len([
+                    state
+                    for name, state in strategies.items()
+                    if state.get("tripped") and name not in active_names
+                ])
             return {
                 "enabled": self.enabled,
                 "portfolio": self._portfolio.to_dict(),
-                "strategies": {name: state.to_dict() for name, state in self._strategies.items()},
+                "strategies": strategies,
+                "active_strategy_names": sorted(active_names) if active_names is not None else None,
+                "active_strategies": active_strategies,
+                "inactive_tripped_count": inactive_tripped_count,
                 "thresholds": {
                     "strategy_daily_pct": self.strategy_daily_threshold,
                     "strategy_weekly_pct": self.strategy_weekly_threshold,
@@ -457,6 +475,116 @@ def _resolve_account_equity() -> float:
     return 0.0
 
 
+def _normalize_strategy_names(names: Optional[Iterable[Any]]) -> Optional[Set[str]]:
+    if names is None:
+        return None
+    normalized = {str(name or "").strip() for name in names}
+    normalized.discard("")
+    return normalized
+
+
+def _runtime_row_scope(row: Dict[str, Any]) -> str:
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    candidates = [
+        row.get("runtime_mode"),
+        row.get("trading_mode"),
+        row.get("mode"),
+        row.get("scope"),
+        metadata.get("runtime_mode"),
+        metadata.get("trading_mode"),
+        metadata.get("mode"),
+    ]
+    for candidate in candidates:
+        text = str(candidate or "").strip().lower()
+        if text in {"paper", "live"}:
+            return text
+    return ""
+
+
+def _trade_row_is_runtime_eligible(
+    row: Dict[str, Any],
+    *,
+    active_names: Optional[Set[str]] = None,
+    runtime_mode: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Return whether a trade-history row should be allowed to trip runtime CB.
+
+    The risk manager keeps a mixed audit ledger. Backtests, stopped strategy
+    imports, and old paper/live rows can all coexist there, so the circuit
+    breaker must require a known active strategy scope before treating a row as
+    runtime risk.
+    """
+    if not isinstance(row, dict):
+        return False, "not_dict"
+    name = str(row.get("strategy") or row.get("strategy_name") or "").strip()
+    if not name:
+        return False, "missing_strategy"
+    if active_names is not None and name not in active_names:
+        return False, "inactive_strategy"
+    row_scope = _runtime_row_scope(row)
+    if runtime_mode and row_scope and row_scope != runtime_mode:
+        return False, "scope_mismatch"
+    return True, ""
+
+
+def _current_runtime_mode() -> Optional[str]:
+    """Best-effort current execution mode for scoping runtime monitors."""
+    try:
+        from core.trading.execution_engine import execution_engine  # noqa: PLC0415
+
+        for attr in ("_current_trading_mode", "get_trading_mode"):
+            getter = getattr(execution_engine, attr, None)
+            if not callable(getter):
+                continue
+            mode = str(getter() or "").strip().lower()
+            if mode in {"paper", "live"}:
+                return mode
+    except Exception:
+        pass
+    try:
+        from core.runtime.state import runtime_state  # noqa: PLC0415
+
+        mode = str(runtime_state.get_trading_mode() or "").strip().lower()
+        if mode in {"paper", "live"}:
+            return mode
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_active_strategy_names() -> Set[str]:
+    """Return strategies that are currently running or have open exposure."""
+    names: Set[str] = set()
+    runtime_mode = _current_runtime_mode()
+
+    try:
+        from core.strategies.strategy_manager import strategy_manager  # noqa: PLC0415
+
+        if runtime_mode:
+            running = strategy_manager.get_running_strategies(runtime_mode=runtime_mode)
+        else:
+            running = strategy_manager.get_running_strategies()
+        for strategy in running or []:
+            name = str(getattr(strategy, "name", "") or "").strip()
+            if name:
+                names.add(name)
+    except Exception as exc:
+        logger.debug(f"circuit_breaker: failed to resolve running strategies: {exc}")
+
+    try:
+        from core.trading.position_manager import position_manager  # noqa: PLC0415
+
+        positions = position_manager.get_all_positions(scope=runtime_mode) if runtime_mode else position_manager.get_all_positions()
+        for position in positions or []:
+            name = str(getattr(position, "strategy", "") or "").strip()
+            if name:
+                names.add(name)
+    except Exception as exc:
+        logger.debug(f"circuit_breaker: failed to resolve open-position strategies: {exc}")
+
+    return names
+
+
 def _drawdown_from_pnl(
     rows: List[Dict[str, Any]],
     *,
@@ -466,8 +594,9 @@ def _drawdown_from_pnl(
     """Compute peak-to-trough drawdown from a chronological trade list within window.
 
     ``rows`` should be dicts with ``timestamp`` (ISO string) and ``pnl`` numeric.
-    The drawdown denominator is the live account equity if available, with the
-    trade-row ``capital_after`` / ``equity`` / ``notional`` fields as fallbacks.
+    The drawdown denominator is the live account equity if available, with
+    trade-row ``capital_after`` / ``equity`` as fallbacks. Raw trade notional is
+    deliberately not used as a denominator because it can hide leveraged losses.
     Returns drawdown as a *positive* float (e.g. 0.04 for -4%).
     """
     if not rows:
@@ -495,19 +624,19 @@ def _drawdown_from_pnl(
     # Pick the most credible base capital reference. Order:
     # 1. explicit override (caller-supplied / risk_manager equity at call time)
     # 2. row-level capital snapshot
-    # 3. largest notional in the window (caps DD at "one full trade" scale)
-    # 4. abs(cumulative span) — last-resort, will exaggerate single-trade losses
     base: float = 0.0
     if base_capital_override and base_capital_override > 0:
         base = float(base_capital_override)
     elif row_capital and row_capital > 0:
         base = float(row_capital)
     if base <= 0:
-        # Conservative fallback: without an account/equity snapshot, do not
-        # dilute a realized loss by trade notional. Scale by the PnL span so a
-        # single loss remains a full drawdown signal instead of being hidden by
-        # high leverage / large notional.
-        base = max(abs(min(equity_curve)), abs(max(equity_curve)), 1.0)
+        fallback_loss = max(abs(min(equity_curve)), abs(max(equity_curve)))
+        if fallback_loss < 1.0:
+            # Tiny cost-only rows without an equity snapshot should not become
+            # synthetic full drawdowns, but material losses must not be diluted
+            # by high leveraged notional either.
+            return 0.0
+        base = fallback_loss
 
     peak = equity_curve[0]
     worst_dd = 0.0
@@ -525,6 +654,8 @@ def evaluate_strategy_drawdowns(
     trade_history: List[Dict[str, Any]],
     *,
     base_capital: Optional[float] = None,
+    active_strategy_names: Optional[Iterable[Any]] = None,
+    runtime_mode: Optional[str] = None,
 ) -> Dict[str, Dict[str, float]]:
     """Group ``trade_history`` by strategy and return per-strategy daily/weekly drawdowns.
 
@@ -532,12 +663,20 @@ def evaluate_strategy_drawdowns(
     of relying on per-row fields. Typically callers pass
     ``risk_manager._current_equity``.
     """
+    active_names = _normalize_strategy_names(active_strategy_names)
     grouped: Dict[str, List[Dict[str, Any]]] = {}
     for row in trade_history or []:
         if not isinstance(row, dict):
             continue
         name = str(row.get("strategy") or row.get("strategy_name") or "").strip()
         if not name:
+            continue
+        eligible, _ = _trade_row_is_runtime_eligible(
+            row,
+            active_names=active_names,
+            runtime_mode=runtime_mode,
+        )
+        if not eligible:
             continue
         grouped.setdefault(name, []).append(row)
     result: Dict[str, Dict[str, float]] = {}
@@ -569,18 +708,24 @@ def run_circuit_breaker_checks(
     trade_history: Optional[List[Dict[str, Any]]] = None,
     portfolio_drawdown: Optional[Dict[str, float]] = None,
     account_equity: Optional[float] = None,
+    active_strategy_names: Optional[Iterable[Any]] = None,
 ) -> Dict[str, Any]:
     """Single evaluation pass. Returns a report dict.
 
     All inputs are optional so the function is unit-testable with synthetic
     data. When omitted we read from the live risk_manager.
     """
+    history_was_supplied = trade_history is not None
+    runtime_mode = _current_runtime_mode()
     if trade_history is None:
         try:
             from core.risk.risk_manager import risk_manager  # noqa: PLC0415
             trade_history = list(getattr(risk_manager, "_trade_history", []) or [])
         except Exception:
             trade_history = []
+    active_names = _normalize_strategy_names(active_strategy_names)
+    if active_names is None and not history_was_supplied:
+        active_names = _resolve_active_strategy_names()
     if portfolio_drawdown is None:
         portfolio_drawdown = evaluate_portfolio_drawdown()
     if account_equity is None:
@@ -597,12 +742,16 @@ def run_circuit_breaker_checks(
         "strategy_dds": {},
         "portfolio_dd": portfolio_drawdown,
         "account_equity": float(account_equity or 0.0),
+        "active_strategy_names": sorted(active_names) if active_names is not None else None,
+        "runtime_mode": runtime_mode,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 
     strat_dds = evaluate_strategy_drawdowns(
         trade_history,
         base_capital=float(account_equity or 0.0) if account_equity else None,
+        active_strategy_names=active_names,
+        runtime_mode=runtime_mode if not history_was_supplied else None,
     )
     report["strategy_dds"] = strat_dds
     daily_thr = breaker.strategy_daily_threshold

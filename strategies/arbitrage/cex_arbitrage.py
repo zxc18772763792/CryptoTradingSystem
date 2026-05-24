@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -61,20 +62,41 @@ class CEXArbitrageStrategy(StrategyBase):
         return (now - last) >= timedelta(minutes=cooldown_min)
 
     async def update_prices(self, symbol: str) -> Dict[str, Dict[str, float]]:
+        # PERF: fetch tickers from all configured exchanges concurrently rather
+        # than sequentially. With 4 CEX connectors this reduces wall time from
+        # ~4x to ~1x of the slowest connector. Per-connector failures are
+        # isolated via return_exceptions=True so one bad exchange does not
+        # impact the others.
         prices: Dict[str, Dict[str, float]] = {}
+        ready: List[Tuple[str, Any]] = []
         for exchange_name in self.params.get("exchanges", []):
             connector = exchange_manager.get_exchange(exchange_name)
             if not connector or not connector.is_connected:
                 continue
+            ready.append((str(exchange_name), connector))
+        if not ready:
+            self._price_cache[symbol] = prices
+            return prices
+
+        results = await asyncio.gather(
+            *(connector.get_ticker(symbol) for _, connector in ready),
+            return_exceptions=True,
+        )
+        for (exchange_name, _), ticker in zip(ready, results):
+            if isinstance(ticker, BaseException):
+                logger.debug(
+                    f"{self.name} ticker unavailable on {exchange_name}: {ticker}"
+                )
+                continue
             try:
-                ticker = await connector.get_ticker(symbol)
                 bid = float(ticker.bid or 0.0)
                 ask = float(ticker.ask or 0.0)
                 last = float(ticker.last or 0.0)
-                if bid > 0 and ask > 0:
-                    prices[exchange_name] = {"bid": bid, "ask": ask, "last": last}
-            except Exception as e:
-                logger.debug(f"{self.name} ticker unavailable on {exchange_name}: {e}")
+            except Exception as e:  # malformed ticker payload
+                logger.debug(f"{self.name} malformed ticker from {exchange_name}: {e}")
+                continue
+            if bid > 0 and ask > 0:
+                prices[exchange_name] = {"bid": bid, "ask": ask, "last": last}
 
         self._price_cache[symbol] = prices
         return prices

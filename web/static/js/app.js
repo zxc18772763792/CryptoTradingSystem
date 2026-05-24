@@ -2124,7 +2124,8 @@ const mergedEquity=(mergedRisk?.equity||{});
 const livePosCount=Number(displayBalances?.live_position_count||0);
 const statPosCount=Number(s?.positions?.position_count||0);
 document.getElementById('open-positions').textContent=hasStatsSnapshot||hasBalanceSnapshot?((activeType==='live'?livePosCount:statPosCount)||0):'--';
-document.getElementById('open-orders').textContent=hasStatsSnapshot?(s?.orders?.total_orders||0):'--';
+const recentOrderCount=(activeType==='live'&&Array.isArray(state.orders))?state.orders.length:(s?.orders?.total_orders||0);
+document.getElementById('open-orders').textContent=hasStatsSnapshot||activeType==='live'?recentOrderCount:'--';
 const exObj=displayBalances?.exchanges||{},exKeys=Object.keys(exObj),exConnected=exKeys.filter(k=>Boolean(exObj[k]?.connected)).length;
 const exCountEl=document.getElementById('exchange-status-count');
 if(exCountEl)exCountEl.textContent=`${exConnected}/${exKeys.length||0}`;
@@ -2362,6 +2363,8 @@ try{
 async function loadPositions(){return runRequestSingleFlight('positions',async()=>{try{const resp=await api('/trading/positions',{timeoutMs:TRADING_POSITIONS_TIMEOUT_MS});state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:#2f4f7f;">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);const t=document.getElementById('positions-tbody');if(t)t.innerHTML=`<tr><td colspan="6">持仓加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function loadOrders(){return runRequestSingleFlight('orders',async()=>{try{
 state.orders=(await api('/trading/orders?include_history=true&limit=200',{timeoutMs:TRADING_ORDERS_TIMEOUT_MS})).orders||[];
+const summaryOrderEl=document.getElementById('open-orders');
+if(summaryOrderEl&&resolveRuntimeModeSnapshot({statusMode:normalizeRuntimeMode(state?._systemStatusLast?.trading_mode)})==='live')summaryOrderEl.textContent=state.orders.length;
 const t=document.getElementById('orders-tbody');
 if(!t)return;
 const view=document.getElementById('orders-view-filter')?.value||'all';

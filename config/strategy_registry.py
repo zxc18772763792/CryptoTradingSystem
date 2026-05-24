@@ -25,6 +25,73 @@ DEFAULT_START_ALL_STRATEGIES: List[str] = [
     "WhaleActivityStrategy",
 ]
 
+_INTRADAY_CS_UNIVERSE: List[str] = [
+    "BTC/USDT",
+    "ETH/USDT",
+    "BNB/USDT",
+    "SOL/USDT",
+    "XRP/USDT",
+    "DOGE/USDT",
+    "ADA/USDT",
+    "AVAX/USDT",
+    "LINK/USDT",
+    "DOT/USDT",
+    "TRX/USDT",
+    "LTC/USDT",
+    "BCH/USDT",
+    "NEAR/USDT",
+    "APT/USDT",
+    "ARB/USDT",
+    "OP/USDT",
+    "INJ/USDT",
+    "AAVE/USDT",
+    "SUI/USDT",
+]
+
+
+def _intraday_cs_defaults(strategy_id: str, lookback_bars: int, direction: str) -> Dict[str, Any]:
+    return {
+        "strategy_id": strategy_id,
+        "timeframe": "5m",
+        "exchange": "binance",
+        "market_type": "future",
+        "universe_symbols": list(_INTRADAY_CS_UNIVERSE),
+        "max_symbols": 100,
+        "lookback_bars": int(lookback_bars),
+        "rebalance_bars": 288,
+        "rebalance_offset_bars": 0,
+        "long_quantile": 0.2,
+        "short_quantile": 0.2,
+        "direction": direction,
+        "max_symbol_weight": 0.10,
+        "min_quote_volume": 0.0,
+        "min_universe_size": 5,
+        "min_names_per_side": 1,
+        "max_names_per_side": None,
+        "max_portfolio_leverage": 1.0,
+        "allow_long": True,
+        "allow_short": True,
+        "reverse_on_signal": True,
+        "allow_pyramiding": False,
+        "fee_bps_per_side": 5.0,
+        "min_slippage_bps_per_side": 2.0,
+        "slippage_range_multiplier": 0.08,
+        "max_slippage_bps_per_side": 20.0,
+        "max_abs_return": 0.0,
+        "max_range_bps": 0.0,
+        "funding_abs_threshold": 0.0,
+        "blacklist_symbols": [],
+        "use_atr_stops": False,
+    }
+
+
+_INTRADAY_CS_GRID: Dict[str, List[Any]] = {
+    "long_quantile": [0.1, 0.2, 0.3],
+    "short_quantile": [0.1, 0.2, 0.3],
+    "max_symbol_weight": [0.05, 0.10, 0.15],
+    "min_quote_volume": [0.0, 100000.0, 500000.0],
+}
+
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     "MAStrategy": {
@@ -333,6 +400,51 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
         "backtest": {"supported": True, "description": "多因子横截面多空策略", "optimization_grid": {"quantile": [0.2, 0.25, 0.33], "top_n": [4, 6, 8], "min_abs_score": [0.05, 0.10, 0.15], "rebalance_interval_minutes": [30, 60, 120]}},
     },
+    "ResidualMom48hStrategy": {
+        "category": "quantitative",
+        "risk": "high",
+        "usage": "Binance USD-M 5m cross-section residual 48h reversal",
+        "defaults": _intraday_cs_defaults("residual_mom_48h", 576, "low"),
+        "timeframe": "5m",
+        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
+        "backtest": {"supported": True, "description": "48h relative underperformance reversal, long bottom and short top cross-section", "optimization_grid": _INTRADAY_CS_GRID},
+    },
+    "Ret24hReversalStrategy": {
+        "category": "quantitative",
+        "risk": "high",
+        "usage": "Binance USD-M 5m cross-section 24h return reversal",
+        "defaults": _intraday_cs_defaults("ret_24h", 288, "low"),
+        "timeframe": "5m",
+        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
+        "backtest": {"supported": True, "description": "24h short-term cross-section reversal, long bottom and short top", "optimization_grid": _INTRADAY_CS_GRID},
+    },
+    "RelRet24hReversalStrategy": {
+        "category": "quantitative",
+        "risk": "high",
+        "usage": "Binance USD-M 5m cross-section 24h relative-return reversal",
+        "defaults": _intraday_cs_defaults("rel_ret_24h", 288, "low"),
+        "timeframe": "5m",
+        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
+        "backtest": {"supported": True, "description": "24h return minus equal-weight market return reversal", "optimization_grid": _INTRADAY_CS_GRID},
+    },
+    "ResidualMom24hStrategy": {
+        "category": "quantitative",
+        "risk": "high",
+        "usage": "Binance USD-M 5m cross-section residual 24h reversal",
+        "defaults": _intraday_cs_defaults("residual_mom_24h", 288, "low"),
+        "timeframe": "5m",
+        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
+        "backtest": {"supported": True, "description": "24h residual return reversal, currently equal to relative-return residual", "optimization_grid": _INTRADAY_CS_GRID},
+    },
+    "CloseLocation48hStrategy": {
+        "category": "quantitative",
+        "risk": "high",
+        "usage": "Binance USD-M 5m cross-section 48h close-location continuation",
+        "defaults": _intraday_cs_defaults("close_location_48h", 576, "high"),
+        "timeframe": "5m",
+        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
+        "backtest": {"supported": True, "description": "48h rolling close-location mean, long high values and short low values", "optimization_grid": _INTRADAY_CS_GRID},
+    },
     "HurstExponentStrategy": {
         "category": "统计套利",
         "risk": "medium",
@@ -368,6 +480,15 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "timeframe": "1h",
         "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
         "backtest": {"supported": True, "description": "Liquidation/OI 拥挤与清算后反转策略", "optimization_grid": {"crowded_score_enter": [0.70, 0.75, 0.80], "liquidation_burst_enter": [0.75, 0.80, 0.85], "min_signal_strength": [0.55, 0.65, 0.75]}},
+    },
+    "AltcoinDowntrendBounceShortStrategy": {
+        "category": "量化",
+        "risk": "medium",
+        "usage": "山寨币下行趋势反弹衰竭只做空",
+        "defaults": {"fast_sma_period": 20, "slow_sma_period": 100, "distance_threshold": 0.03, "rsi_period": 14, "rsi_threshold": 60.0, "hold_bars": 24, "position_exposure": 0.05, "max_positions": 10, "market_type": "future", "allow_long": False, "allow_short": True, "reverse_on_signal": False, "use_atr_stops": False},
+        "timeframe": "1h",
+        "symbols": ["RENDER/USDT", "ORDI/USDT", "JTO/USDT", "AAVE/USDT", "GALA/USDT", "TIA/USDT", "INJ/USDT", "PENGU/USDT", "NEAR/USDT", "OP/USDT"],
+        "backtest": {"supported": True, "description": "山寨币中期下行趋势中的反弹衰竭只做空策略", "optimization_grid": {"distance_threshold": [0.015, 0.03, 0.045], "rsi_threshold": [60.0, 65.0, 70.0], "hold_bars": [12, 24, 36]}},
     },
     "SupplyEventStrategy": {
         "category": "事件",

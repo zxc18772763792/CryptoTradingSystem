@@ -27,6 +27,11 @@ def isolated_breaker(tmp_path, monkeypatch):
     monkeypatch.setattr(cb_mod.settings, "CB_STRATEGY_WEEKLY_DD_PCT", 0.10, raising=False)
     monkeypatch.setattr(cb_mod.settings, "CB_PORTFOLIO_DAILY_DD_PCT", 0.03, raising=False)
     monkeypatch.setattr(cb_mod.settings, "CB_PORTFOLIO_WEEKLY_DD_PCT", 0.06, raising=False)
+    # Isolate from risk_manager equity state pollution leaking in from other tests
+    # in the broader suite (e.g. another test sets _current_equity to a positive
+    # value, which would then become the drawdown denominator instead of the
+    # per-row notional/capital_after fields).
+    monkeypatch.setattr(cb_mod, "_resolve_account_equity", lambda: 0.0)
     return breaker
 
 
@@ -53,6 +58,106 @@ def test_pnl_trigger_breaches_daily_threshold(isolated_breaker):
     trips = report["strategy_trips"]
     assert any(t["strategy"] == "StratA" for t in trips)
     assert isolated_breaker.check_strategy("StratA").is_close_only
+
+
+def test_pnl_trigger_filters_stopped_historical_strategies(isolated_breaker):
+    history = [
+        _trade("StoppedStrat", -700.0, hours_ago=1.0, capital=10000.0),
+        _trade("RunningStrat", -50.0, hours_ago=1.0, capital=10000.0),
+    ]
+
+    report = run_circuit_breaker_checks(
+        trade_history=history,
+        portfolio_drawdown={"daily_dd": 0.0, "weekly_dd": 0.0},
+        active_strategy_names={"RunningStrat"},
+    )
+
+    assert "StoppedStrat" not in report["strategy_dds"]
+    assert "RunningStrat" in report["strategy_dds"]
+    assert not any(t["strategy"] == "StoppedStrat" for t in report["strategy_trips"])
+    assert isolated_breaker.check_strategy("StoppedStrat").is_allow
+
+
+def test_pnl_trigger_does_not_dilute_loss_by_notional(isolated_breaker):
+    history = [
+        {
+            "strategy": "NotionalStrat",
+            "pnl": -200.0,
+            "notional": 20000.0,
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        }
+    ]
+
+    report = run_circuit_breaker_checks(
+        trade_history=history,
+        portfolio_drawdown={"daily_dd": 0.0, "weekly_dd": 0.0},
+    )
+
+    assert report["strategy_dds"]["NotionalStrat"]["daily_dd"] == pytest.approx(1.0)
+    assert any(t["strategy"] == "NotionalStrat" for t in report["strategy_trips"])
+    assert isolated_breaker.check_strategy("NotionalStrat").is_close_only
+
+
+def test_pnl_trigger_skips_rows_without_drawdown_denominator(isolated_breaker):
+    history = [
+        {
+            "strategy": "NoBaseStrat",
+            "pnl": -0.2,
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        }
+    ]
+
+    report = run_circuit_breaker_checks(
+        trade_history=history,
+        portfolio_drawdown={"daily_dd": 0.0, "weekly_dd": 0.0},
+    )
+
+    assert report["strategy_dds"]["NoBaseStrat"]["daily_dd"] == 0.0
+    assert not report["strategy_trips"]
+    assert isolated_breaker.check_strategy("NoBaseStrat").is_allow
+
+
+def test_runtime_monitor_filters_to_resolved_active_strategy_names(isolated_breaker, monkeypatch):
+    from core.risk.risk_manager import risk_manager
+
+    history = [
+        _trade("StoppedStrat", -700.0, hours_ago=1.0, capital=10000.0),
+        _trade("RunningStrat", -50.0, hours_ago=1.0, capital=10000.0),
+    ]
+    monkeypatch.setattr(risk_manager, "_trade_history", history, raising=False)
+    monkeypatch.setattr(cb_mod, "_resolve_active_strategy_names", lambda: {"RunningStrat"})
+
+    report = run_circuit_breaker_checks(
+        portfolio_drawdown={"daily_dd": 0.0, "weekly_dd": 0.0},
+        account_equity=0.0,
+    )
+
+    assert report["active_strategy_names"] == ["RunningStrat"]
+    assert "StoppedStrat" not in report["strategy_dds"]
+    assert not report["strategy_trips"]
+
+
+def test_runtime_monitor_does_not_trip_active_strategy_without_denominator(isolated_breaker, monkeypatch):
+    from core.risk.risk_manager import risk_manager
+
+    history = [
+        {
+            "strategy": "RunningStrat",
+            "pnl": -0.2,
+            "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        }
+    ]
+    monkeypatch.setattr(risk_manager, "_trade_history", history, raising=False)
+    monkeypatch.setattr(cb_mod, "_resolve_active_strategy_names", lambda: {"RunningStrat"})
+
+    report = run_circuit_breaker_checks(
+        portfolio_drawdown={"daily_dd": 0.0, "weekly_dd": 0.0},
+        account_equity=0.0,
+    )
+
+    assert report["strategy_dds"]["RunningStrat"]["daily_dd"] == 0.0
+    assert not report["strategy_trips"]
+    assert isolated_breaker.check_strategy("RunningStrat").is_allow
 
 
 def test_pnl_trigger_invokes_close_positions_hook(isolated_breaker):

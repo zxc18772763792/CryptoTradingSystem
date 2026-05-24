@@ -24,7 +24,15 @@ class CircuitBreakerResetRequest(BaseModel):
 @router.get("/circuit-breaker")
 async def get_circuit_breaker_state(request: Request):
     """Return current circuit breaker state (read-only, no auth required)."""
-    snap = circuit_breaker.snapshot()
+    try:
+        from core.risk.circuit_breaker import _resolve_active_strategy_names  # noqa: PLC0415
+
+        active_names = _resolve_active_strategy_names()
+    except Exception:
+        active_names = None
+    snap = circuit_breaker.snapshot(active_strategy_names=active_names)
+    if active_names is not None:
+        snap["strategies"] = dict(snap.get("active_strategies") or {})
     return snap
 
 

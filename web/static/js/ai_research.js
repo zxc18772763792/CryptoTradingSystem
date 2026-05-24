@@ -285,77 +285,117 @@
     }
   }
 
+  // ── i18n: legitimate English → 中文 UI labels ──
+  // Translation table for source strings the backend still emits in English.
+  // Long-term these should be moved to a single i18n module; for now this
+  // table is the single source of truth.
+  const UI_TEXT_TRANSLATIONS = [
+    ['Best Params', '最佳参数'],
+    ['CSV:', 'CSV 文件：'],
+    ['Markdown:', 'Markdown 报告：'],
+    ['DSR Score', 'DSR 分数'],
+    ['WF Consistency', '滚动一致性'],
+    ['OHLCV only', '仅 OHLCV'],
+    ['OHLCV + News + Macro', 'OHLCV + 新闻 + 宏观'],
+    ['OHLCV + News', 'OHLCV + 新闻'],
+    ['OHLCV + Macro', 'OHLCV + 宏观'],
+    ['Research Enrichment', '研究增强'],
+    ['Decision Engine', '决策引擎'],
+    ['News Events', '新闻事件'],
+    ['Macro Layer', '宏观层'],
+    ['Funding On', '已启用'],
+    ['Funding Off', '未启用'],
+    ['Replay Mode', '回放模式'],
+    ['Research Artifacts', '研究产物'],
+    ['Experiment ID', '实验 ID'],
+    ['Status:', '状态：'],
+    ['Candidate Lifecycle', '候选生命周期'],
+    ['Proposal Lifecycle', '方案生命周期'],
+    ['No lifecycle records', '暂无生命周期记录'],
+    ['No experiment runs', '暂无实验运行记录'],
+    ['No equity curve sample.', '暂无资金曲线样本。'],
+    ['Effective Sharpe source:', '有效夏普来源：'],
+    ['Validation Decision Trace', '验证决策链路'],
+    ['Decision Trace', '决策链路'],
+    ['Root blocker:', '关键门槛：'],
+    ['Gate ladder', '检查链路'],
+    ['No gates recorded.', '暂无检查记录。'],
+    ['Send to Autonomy Watch', '发送到自治观察'],
+    ['Accepted', '已采纳'],
+    ['Rejected Drafts', '已淘汰草案'],
+    ['Rejected', '已淘汰'],
+    ['Challengers', '挑战方案'],
+    ['Champion:', '主力方案：'],
+    ['Champion', '主力方案'],
+    ['Mutation:', '变体说明：'],
+    ['Critique:', '评审意见：'],
+    ['Base', '基准'],
+    ['trials', '次试验'],
+    ['live_candidate', '实盘候选'],
+    ['paper_running', '纸盘运行'],
+    ['live_running', '实盘运行'],
+    ['shadow_running', '影子跟踪'],
+    ['run:', '运行 ID：'],
+    ['Research:', '回放模式：'],
+    ['News ', '新闻 '],
+  ];
+
+  // ── deprecated mojibake repair table ──
+  // These are UTF-8 byte sequences mistakenly decoded as CP936/GBK, then
+  // re-encoded as UTF-8. They originated from a legacy backend encoding bug
+  // that has since been fixed; as of 2026-05-23 no live response or
+  // persisted data contains these sequences.
+  //
+  // The table is kept as a defensive fallback for two reasons:
+  //   1) Browser cache / older Service Worker snapshots may still serve
+  //      pre-fix payloads to returning users.
+  //   2) Some hand-imported JSON state files (e.g. archived experiments)
+  //      may still contain them.
+  // DELETE this table once we're confident no client / archive needs it
+  // (suggested window: after 2026-09-01).
+  const LEGACY_MOJIBAKE_REPAIRS = [
+    ['鍔犲叆瀵规瘮', '加入对比'],
+    ['瀵规瘮', '对比'],
+    ['鏀剁泭', '收益'],
+    ['鍥炴挙', '回撤'],
+    ['鑳滅巼', '胜率'],
+    ['澶忔櫘', '夏普'],
+    ['鏂伴椈', '新闻'],
+    ['瀹忚', '宏观'],
+    ['鍘婚噸闅愯棌', '去重隐藏'],
+    ['鍥炴斁妯″紡', '回放模式'],
+    ['AI寤鸿', 'AI建议'],
+    ['璇︽儏', '详情'],
+    ['鎼滅储瑙掕壊', '搜索角色'],
+    ['鏈€浼樺弬鏁?', '最佳参数'],
+    ['鍏辫瘯楠?', '共试验 '],
+    ['缁勫弬鏁扮粍鍚?', ' 组参数组合'],
+  ];
+
+  function repairLegacyMojibake(text) {
+    let value = String(text ?? '');
+    for (let i = 0; i < LEGACY_MOJIBAKE_REPAIRS.length; i++) {
+      const [from, to] = LEGACY_MOJIBAKE_REPAIRS[i];
+      if (value.indexOf(from) !== -1) value = value.split(from).join(to);
+    }
+    return value;
+  }
+
+  function applyUiTranslations(text) {
+    let value = String(text ?? '');
+    for (let i = 0; i < UI_TEXT_TRANSLATIONS.length; i++) {
+      const [from, to] = UI_TEXT_TRANSLATIONS[i];
+      if (value.indexOf(from) !== -1) value = value.split(from).join(to);
+    }
+    return value;
+  }
+
   function normalizeUiText(text) {
-    let value = repairUtf8Mojibake(text);
-    const replacements = [
-      ['Best Params', '最佳参数'],
-      ['CSV:', 'CSV 文件：'],
-      ['Markdown:', 'Markdown 报告：'],
-      ['DSR Score', 'DSR 分数'],
-      ['WF Consistency', '滚动一致性'],
-      ['OHLCV only', '仅 OHLCV'],
-      ['OHLCV + News + Macro', 'OHLCV + 新闻 + 宏观'],
-      ['OHLCV + News', 'OHLCV + 新闻'],
-      ['OHLCV + Macro', 'OHLCV + 宏观'],
-      ['Research Enrichment', '研究增强'],
-      ['Decision Engine', '决策引擎'],
-      ['News Events', '新闻事件'],
-      ['Macro Layer', '宏观层'],
-      ['Funding On', '已启用'],
-      ['Funding Off', '未启用'],
-      ['Replay Mode', '回放模式'],
-      ['Research Artifacts', '研究产物'],
-      ['Experiment ID', '实验 ID'],
-      ['Status:', '状态：'],
-      ['Candidate Lifecycle', '候选生命周期'],
-      ['Proposal Lifecycle', '方案生命周期'],
-      ['No lifecycle records', '暂无生命周期记录'],
-      ['No experiment runs', '暂无实验运行记录'],
-      ['No equity curve sample.', '暂无资金曲线样本。'],
-      ['Effective Sharpe source:', '有效夏普来源：'],
-      ['Validation Decision Trace', '验证决策链路'],
-      ['Decision Trace', '决策链路'],
-      ['Root blocker:', '关键门槛：'],
-      ['Gate ladder', '检查链路'],
-      ['No gates recorded.', '暂无检查记录。'],
-      ['Send to Autonomy Watch', '发送到自治观察'],
-      ['Accepted', '已采纳'],
-      ['Rejected Drafts', '已淘汰草案'],
-      ['Rejected', '已淘汰'],
-      ['Challengers', '挑战方案'],
-      ['Champion:', '主力方案：'],
-      ['Champion', '主力方案'],
-      ['Mutation:', '变体说明：'],
-      ['Critique:', '评审意见：'],
-      ['Base', '基准'],
-      ['trials', '次试验'],
-      ['live_candidate', '实盘候选'],
-      ['paper_running', '纸盘运行'],
-      ['live_running', '实盘运行'],
-      ['shadow_running', '影子跟踪'],
-      ['run:', '运行 ID：'],
-      ['Research:', '回放模式：'],
-      ['News ', '新闻 '],
-      ['鍔犲叆瀵规瘮', '加入对比'],
-      ['瀵规瘮', '对比'],
-      ['鏀剁泭', '收益'],
-      ['鍥炴挙', '回撤'],
-      ['鑳滅巼', '胜率'],
-      ['澶忔櫘', '夏普'],
-      ['鏂伴椈', '新闻'],
-      ['瀹忚', '宏观'],
-      ['鍘婚噸闅愯棌', '去重隐藏'],
-      ['鍥炴斁妯″紡', '回放模式'],
-      ['AI寤鸿', 'AI建议'],
-      ['璇︽儏', '详情'],
-      ['鎼滅储瑙掕壊', '搜索角色'],
-      ['鏈€浼樺弬鏁?', '最佳参数'],
-      ['鍏辫瘯楠?', '共试验 '],
-      ['缁勫弬鏁扮粍鍚?', ' 组参数组合'],
-    ];
-    replacements.forEach(([from, to]) => {
-      value = value.split(from).join(to);
-    });
+    // Order: low-level mojibake repair → byte-level UTF-8 repair → i18n.
+    // Each pass is idempotent so re-running normalizeUiText is safe.
+    let value = repairLegacyMojibake(text);
+    value = repairUtf8Mojibake(value);
+    value = applyUiTranslations(value);
     return value;
   }
 

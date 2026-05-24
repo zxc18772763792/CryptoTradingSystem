@@ -1,10 +1,8 @@
 """
 动量策略
 """
-from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import pandas as pd
-import numpy as np
 from loguru import logger
 
 from core.strategies.strategy_base import (
@@ -121,34 +119,15 @@ class TrendFollowingStrategy(StrategyBase):
         super().__init__(name, default_params)
 
     def _calculate_adx(self, data: pd.DataFrame, period: int = 14) -> pd.Series:
-        """计算ADX（平均趋向指数）"""
-        high = data["high"]
-        low = data["low"]
-        close = data["close"]
+        """计算ADX（平均趋向指数）— SMA 平滑变体。
 
-        # 计算+DM和-DM — 缓存原始 up_move/down_move 避免 plus_dm 自引用
-        up_move = high.diff()
-        down_move = -low.diff()
+        Delegated to :func:`core.indicators.sma_adx` for a single source of
+        truth on the +DM / -DM / TR construction (which historically had a
+        subtle self-overwrite bug).
+        """
+        from core.indicators import sma_adx  # local import to avoid cycles
 
-        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0)
-        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0)
-
-        # 计算TR
-        tr1 = high - low
-        tr2 = abs(high - close.shift(1))
-        tr3 = abs(low - close.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-        # 平滑
-        atr = tr.rolling(period).mean()
-        plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
-        minus_di = 100 * (minus_dm.rolling(period).mean() / atr)
-
-        # 计算DX和ADX
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.rolling(period).mean()
-
-        return adx, plus_di, minus_di
+        return sma_adx(data, period=period)
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         """生成交易信号"""

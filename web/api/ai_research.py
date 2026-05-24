@@ -2585,6 +2585,125 @@ def _build_autonomous_agent_risk_config() -> Dict[str, Any]:
     }
 
 
+def _build_autonomous_agent_execution_gate(
+    *,
+    runtime_config: Dict[str, Any],
+    agent_status: Dict[str, Any],
+) -> Dict[str, Any]:
+    cfg = dict(runtime_config or {})
+    status = dict(agent_status or {})
+    trading_mode = _current_trading_mode()
+    agent_mode = str(cfg.get("mode") or "shadow").strip().lower() or "shadow"
+    symbol_mode = str(cfg.get("symbol_mode") or "").strip().lower() or None
+    enabled = bool(cfg.get("enabled"))
+    running = bool(status.get("running"))
+    allow_live = bool(cfg.get("allow_live"))
+    armed_for_execution = agent_mode == "execute"
+
+    safety_payload = _build_autonomous_agent_paper_longrun_safety(
+        runtime_cfg=cfg,
+        status_payload=status,
+        trading_mode=trading_mode,
+    )
+    safety_candidates = [
+        safety_payload,
+        status.get("safety"),
+        cfg.get("safety"),
+        status.get("paper_longrun_safety"),
+        cfg.get("paper_longrun_safety"),
+    ]
+    reason_codes: List[str] = []
+    recommendations: List[str] = []
+    raw_provider_live_restricted = False
+    for candidate in safety_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        reason_codes.extend(str(item) for item in (candidate.get("reason_codes") or []) if item)
+        recommendations.extend(str(item) for item in (candidate.get("recommendations") or []) if item)
+        policy = candidate.get("provider_live_policy")
+        if isinstance(policy, dict):
+            status_text = str(policy.get("status") or "").strip().lower()
+            if bool(policy.get("restricted")) or status_text == "restricted":
+                raw_provider_live_restricted = True
+            if policy.get("reason_code"):
+                reason_codes.append(str(policy.get("reason_code")))
+    reason_codes = list(dict.fromkeys(code for code in reason_codes if code))
+    recommendations = list(dict.fromkeys(item for item in recommendations if item))
+    provider_live_restricted = bool(raw_provider_live_restricted and allow_live)
+
+    blocked = False
+    code = "execution_gate_open"
+    source = "execution_safety"
+    tone = "good"
+    label = "执行安全门禁允许提交"
+    detail = "交易引擎和 agent 执行配置一致；是否开新单继续由风险纪律和学习保护决定。"
+
+    if not enabled:
+        blocked = True
+        code = "agent_disabled"
+        source = "runtime"
+        tone = "warn"
+        label = "代理未启用"
+        detail = "enabled=false，自治代理不会持续决策，也不会自动提交订单。"
+        reason_codes = list(dict.fromkeys([*reason_codes, "agent_disabled"]))
+    elif not armed_for_execution:
+        blocked = True
+        code = "mode_not_execute"
+        source = "runtime"
+        tone = "info"
+        label = "当前只提示不执行"
+        detail = f"agent mode={agent_mode}，需要 execute 模式才会提交订单。"
+        reason_codes = list(dict.fromkeys([*reason_codes, "mode_not_execute"]))
+    elif trading_mode == "live" and not allow_live:
+        blocked = True
+        code = "live_mode_blocked"
+        source = "execution_safety"
+        tone = "warn"
+        label = "实盘安全门禁阻止提交"
+        detail = "当前交易引擎是 live，但 AI 自治代理 allow_live=false；这不是风险纪律挡单，而是实盘安全门禁在阻止提交。"
+        reason_codes = list(dict.fromkeys([*reason_codes, "trading_mode_live", "live_mode_blocked"]))
+        recommendations = list(dict.fromkeys([*recommendations, "switch_trading_mode_to_paper"]))
+    elif trading_mode == "live" and provider_live_restricted:
+        blocked = True
+        code = "provider_live_execution_restricted"
+        source = "execution_safety"
+        tone = "warn"
+        label = "模型供应商不允许实盘执行"
+        detail = "当前 provider 的 autonomous_live_execution 策略受限；需要切换到允许实盘执行的 provider，或回到 paper。"
+        reason_codes = list(dict.fromkeys([*reason_codes, "provider_live_execution_restricted"]))
+    elif not running:
+        tone = "info"
+        label = "提交门禁允许，代理未持续运行"
+        detail = "安全门禁未阻止信号提交；当前只是没有启动持续轮询，手动试跑仍会按相同门禁检查。"
+        reason_codes = []
+        recommendations = []
+    else:
+        reason_codes = []
+        recommendations = []
+
+    return {
+        "blocked": bool(blocked),
+        "submission_allowed": not bool(blocked),
+        "code": code,
+        "source": source,
+        "tone": tone,
+        "label": label,
+        "detail": detail,
+        "trading_mode": trading_mode,
+        "agent_mode": agent_mode,
+        "symbol_mode": symbol_mode,
+        "enabled": enabled,
+        "running": running,
+        "allow_live": allow_live,
+        "armed_for_execution": armed_for_execution,
+        "provider_live_restricted": bool(provider_live_restricted),
+        "safe_for_paper_longrun": bool(safety_payload.get("safe_for_paper_longrun")),
+        "paper_longrun_profile_ready": bool(safety_payload.get("paper_longrun_profile_ready")),
+        "reason_codes": reason_codes,
+        "recommendations": recommendations,
+    }
+
+
 def _build_autonomous_agent_risk_status() -> Dict[str, Any]:
     learning_memory = _get_autonomous_agent_learning_memory()
     learning_summary = dict(learning_memory.get("summary") or {}) if isinstance(learning_memory.get("summary"), dict) else {}
@@ -2645,6 +2764,15 @@ def _build_autonomous_agent_risk_status() -> Dict[str, Any]:
     if bool(risk_view.get("trading_halted")):
         effective_fresh_entry_allowed = False
 
+    close_only_effective = bool(
+        risk_view.get("trading_halted")
+        or ((risk_view.get("discipline") or {}).get("reduce_only"))
+    )
+    execution_gate = _build_autonomous_agent_execution_gate(
+        runtime_config=runtime_config,
+        agent_status=agent_status if isinstance(agent_status, dict) else {},
+    )
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "runtime": {
@@ -2670,11 +2798,14 @@ def _build_autonomous_agent_risk_status() -> Dict[str, Any]:
         },
         "eligibility": eligibility,
         "effective_fresh_entry_allowed": bool(effective_fresh_entry_allowed),
-        "close_only_effective": bool(
-            risk_view.get("trading_halted")
-            or ((risk_view.get("discipline") or {}).get("reduce_only"))
+        "fresh_entry_submission_allowed": bool(
+            effective_fresh_entry_allowed
+            and not close_only_effective
+            and bool(execution_gate.get("submission_allowed"))
         ),
+        "close_only_effective": close_only_effective,
         "fresh_entry_blockers": blockers,
+        "execution_gate": execution_gate,
     }
 
 

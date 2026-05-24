@@ -34,6 +34,7 @@ from core.data import (
     second_level_backfill_manager,
     download_binance_1s_daily_archive,
 )
+from core.data.data_storage import _normalize_parquet_frame_index
 from core.data.coinglass_altcoin import (
     build_exchange_altcoin_universe,
     is_alt_candidate_symbol,
@@ -83,16 +84,18 @@ _RESEARCH_SYMBOLS_TIMEOUT_SEC = 8.0
 
 _SUB_MINUTE_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
 _RESAMPLE_RULES = {
-    "1s": "1S",
-    "5s": "5S",
-    "10s": "10S",
-    "30s": "30S",
-    "1m": "1T",
-    "5m": "5T",
-    "15m": "15T",
-    "30m": "30T",
-    "1h": "1H",
-    "4h": "4H",
+    # Use modern pandas frequency aliases. 'T' (minute) and 'H' (hour) were
+    # deprecated in pandas 2.2 and now emit FutureWarnings.
+    "1s": "1s",
+    "5s": "5s",
+    "10s": "10s",
+    "30s": "30s",
+    "1m": "1min",
+    "5m": "5min",
+    "15m": "15min",
+    "30m": "30min",
+    "1h": "1h",
+    "4h": "4h",
     "1d": "1D",
     "1w": "1W",
     "1M": "1MS",
@@ -348,6 +351,11 @@ def _normalize_query_datetime(dt: Optional[datetime]) -> Optional[datetime]:
     # Convert incoming tz-aware query bounds to UTC before stripping tz so the
     # data page filters on the same clock as the strategy/backtest pipeline.
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _normalize_kline_frame_for_compare(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize API-loaded kline indexes to UTC-naive before time filters."""
+    return _normalize_parquet_frame_index(df)
 
 
 def _safe_iso_timestamp(value: Any) -> Optional[str]:
@@ -1280,8 +1288,7 @@ async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd
     target = _parquet_path(exchange, symbol, timeframe)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    merged = df.copy()
-    merged.index = pd.to_datetime(merged.index)
+    merged = _normalize_kline_frame_for_compare(df)
     merged = merged.sort_index()
 
     for symbol_root in candidate_symbol_dirs(Path(settings.DATA_STORAGE_PATH), exchange, symbol):
@@ -1289,7 +1296,7 @@ async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd
         if not existing_path.exists():
             continue
         existing = pd.read_parquet(existing_path)
-        existing.index = pd.to_datetime(existing.index)
+        existing = _normalize_kline_frame_for_compare(existing)
         merged = pd.concat([existing, merged])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
 
@@ -1442,7 +1449,7 @@ async def _fetch_binance_public_klines(symbol: str, timeframe: str, limit: int =
 
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).set_index("timestamp").sort_index()
+    return _normalize_kline_frame_for_compare(pd.DataFrame(rows).set_index("timestamp").sort_index())
 
 
 def _trades_to_ohlcv(trades: List[Dict[str, Any]], timeframe: str) -> pd.DataFrame:
@@ -1980,6 +1987,7 @@ async def _load_symbol_df(
         start_time=start_time,
         end_time=end_time,
     )
+    df = _normalize_kline_frame_for_compare(df)
     if start_time:
         df = df[df.index >= start_time]
     if end_time:
@@ -3666,7 +3674,7 @@ async def get_klines(
             raise TimeoutError(f"{ex_name} get_klines timeout/cancelled") from e
         if not klines:
             return pd.DataFrame()
-        return pd.DataFrame(
+        live_df = pd.DataFrame(
             [
                 {
                     "timestamp": k.timestamp,
@@ -3679,6 +3687,7 @@ async def get_klines(
                 for k in klines
             ]
         ).set_index("timestamp")
+        return _normalize_kline_frame_for_compare(live_df)
 
     # Prefer local data first, and fallback across exchanges.
     for ex in candidates:
@@ -3703,7 +3712,7 @@ async def get_klines(
                 live_df = await _fetch_live_df(ex, live_limit=limit)
                 if live_df.empty:
                     continue
-                df = live_df
+                df = _normalize_kline_frame_for_compare(live_df)
                 actual_exchange = ex
                 await _save_df_to_parquet(actual_exchange, symbol, timeframe, df)
                 break
@@ -3747,7 +3756,17 @@ async def get_klines(
                         - last_local_ts.to_pydatetime().replace(tzinfo=None)
                     ).total_seconds(),
                 )
-            should_block_for_refresh = stale_seconds > stale_threshold
+            # Data-page first paint should not be held hostage by slow exchange
+            # refreshes when we already have enough local candles to render.
+            # Schedule a refresh in the background and let the next poll merge
+            # fresh bars.
+            enough_local_rows = len(df.index) >= max(10, min(limit, 300))
+            should_block_for_refresh = stale_seconds > stale_threshold and not enough_local_rows
+            if stale_seconds > stale_threshold and enough_local_rows:
+                _schedule_live_cache_refresh(
+                    live_refresh_key,
+                    lambda: _refresh_cache_from_live(actual_exchange, live_limit),
+                )
             used_public_fallback = False
             if should_block_for_refresh and actual_exchange == "binance" and timeframe not in _SUB_MINUTE_TIMEFRAMES:
                 try:
@@ -3762,6 +3781,7 @@ async def get_klines(
                     if not public_df.empty:
                         await _save_df_to_parquet(actual_exchange, symbol, timeframe, public_df)
                         df = pd.concat([df, public_df])
+                        df = _normalize_kline_frame_for_compare(df)
                         df = df[~df.index.duplicated(keep="last")].sort_index()
                         used_public_fallback = True
                 except Exception as public_err:
@@ -3775,6 +3795,7 @@ async def get_klines(
                     if not live_df.empty:
                         await _save_df_to_parquet(actual_exchange, symbol, timeframe, live_df)
                         df = pd.concat([df, live_df])
+                        df = _normalize_kline_frame_for_compare(df)
                         df = df[~df.index.duplicated(keep="last")].sort_index()
                 except (asyncio.TimeoutError, asyncio.CancelledError) as live_err:
                     logger.debug(f"live refresh timeout/cancelled: {live_err}")

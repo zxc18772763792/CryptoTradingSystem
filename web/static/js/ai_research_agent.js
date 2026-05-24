@@ -77,10 +77,10 @@
     }
 
     const viewportHeight = Number(window.innerHeight || 0);
-    const fallbackHeight = Math.min(1040, Math.max(760, viewportHeight - 120));
+    const fallbackHeight = Math.min(620, Math.max(420, viewportHeight * 0.5));
     const summaryHeight = Math.ceil(summaryEl.getBoundingClientRect().height || 0);
     const targetHeight = summaryHeight > 280
-      ? Math.min(summaryHeight, fallbackHeight)
+      ? Math.min(Math.max(420, summaryHeight), fallbackHeight)
       : fallbackHeight;
     workspace.style.setProperty('--ai-agent-review-history-height', `${targetHeight}px`);
   }
@@ -1285,6 +1285,24 @@
     return String(item.code || item.source || '--');
   }
 
+  function executionGateLabel(gate = {}) {
+    const code = String(gate?.code || '').trim().toLowerCase();
+    if (code === 'execution_gate_open') return '执行安全门禁打开';
+    if (code === 'live_mode_blocked') return '实盘安全门禁阻止提交';
+    if (code === 'provider_live_execution_restricted') return 'Provider 不允许实盘提交';
+    if (code === 'mode_not_execute') return 'Agent 只提示不执行';
+    if (code === 'agent_disabled') return 'Agent 未启用';
+    return String(gate?.label || gate?.code || '执行门禁未知');
+  }
+
+  function executionGateDetail(gate = {}) {
+    const detail = String(gate?.detail || '').trim();
+    if (detail) return detail;
+    const modeText = `${tradingModeLabel(gate?.trading_mode)} / ${decisionModeLabel(gate?.agent_mode)}`;
+    if (gate?.blocked) return `${modeText}，当前执行安全门禁未放行提交。`;
+    return `${modeText}，执行安全门禁未阻止提交。`;
+  }
+
   function buildEligibilityRefreshText(eligibility = {}) {
     const generatedAt = eligibility?.generated_at ? fmtAgentTs(eligibility.generated_at) : '--';
     const refreshAge = eligibility?.refresh_age_sec != null ? formatAgeSeconds(eligibility.refresh_age_sec) : '--';
@@ -1580,18 +1598,35 @@
     const primaryBlocker = blockers[0] || null;
     const closeOnly = Boolean(riskStatus?.close_only_effective);
     const freshEntryAllowed = Boolean(riskStatus?.effective_fresh_entry_allowed);
+    const executionGate = riskStatus?.execution_gate && typeof riskStatus.execution_gate === 'object'
+      ? riskStatus.execution_gate
+      : {};
+    const executionGateBlocked = Boolean(executionGate?.blocked);
+    const submissionAllowed = Boolean(
+      riskStatus?.fresh_entry_submission_allowed
+      ?? (freshEntryAllowed && !closeOnly && !executionGateBlocked)
+    );
     const runtimeAccountRisk = lastStatusSnapshot?.last_diagnostics?.account_risk
       && typeof lastStatusSnapshot.last_diagnostics.account_risk === 'object'
       ? lastStatusSnapshot.last_diagnostics.account_risk
       : {};
     const budgetConfig = resolveAgentBudgetConfig(lastConfigSnapshot || {}, runtimeAccountRisk);
-    const primaryTone = closeOnly ? (risk?.trading_halted ? 'danger' : 'warn') : (freshEntryAllowed ? 'good' : 'warn');
-    const primaryLabel = closeOnly
-      ? (risk?.trading_halted ? '当前只允许平仓 / 熔断中' : '当前处于 reduce-only')
-      : (freshEntryAllowed ? '当前允许新开仓' : '当前禁止新开仓');
-    const primaryDetail = primaryBlocker?.detail
-      || (discipline?.reasons && discipline.reasons[0])
-      || (freshEntryAllowed ? '账户纪律与复盘记忆都没有阻止新单。' : '当前有纪律闸门正在阻止新单。');
+    let primaryTone = submissionAllowed ? 'good' : 'warn';
+    if (risk?.trading_halted || (executionGateBlocked && String(executionGate?.tone || '') === 'danger')) {
+      primaryTone = 'danger';
+    }
+    const primaryLabel = submissionAllowed
+      ? '当前可提交新单'
+      : (executionGateBlocked
+        ? executionGateLabel(executionGate)
+        : (closeOnly
+          ? (risk?.trading_halted ? '当前只允许平仓 / 熔断中' : '当前处于 reduce-only')
+          : '当前禁止新开仓'));
+    const primaryDetail = executionGateBlocked
+      ? executionGateDetail(executionGate)
+      : (primaryBlocker?.detail
+        || (discipline?.reasons && discipline.reasons[0])
+        || (freshEntryAllowed ? '风险纪律与复盘记忆都没有阻止新单；执行安全门禁也未阻止提交。' : '当前有风险纪律或学习保护正在阻止新单。'));
     const blockerList = blockers.length
       ? `<div class="ai-agent-reason-section">
           <div class="ai-agent-reason-section-title">当前阻止新单的来源</div>
@@ -1630,12 +1665,32 @@
     const eligibilityExpiryText = eligibilitySelected?.expires_at
       ? `到期 ${fmtAgentTs(eligibilitySelected.expires_at)}${eligibilitySelected?.is_expired ? ' / 已过期' : ''}`
       : (eligibilitySelected?.is_expired ? '当前 eligibility 已过期' : '未提供 expires_at');
+    const safetyReasonText = Array.isArray(executionGate?.reason_codes) && executionGate.reason_codes.length
+      ? executionGate.reason_codes.slice(0, 4).join(' / ')
+      : '无安全门禁 reason code';
+    const safetyRecommendationText = Array.isArray(executionGate?.recommendations) && executionGate.recommendations.length
+      ? executionGate.recommendations.slice(0, 3).join(' / ')
+      : (executionGateBlocked ? '请按执行门禁提示调整交易模式或 agent live 授权' : '无需处理');
 
     el.innerHTML = `
       <div class="ai-agent-reason-primary ${toneClass(primaryTone)}">
-        <div class="ai-agent-reason-primary-kicker">自治纪律</div>
+        <div class="ai-agent-reason-primary-kicker">新单提交总闸</div>
         <div class="ai-agent-reason-primary-label">${esc(primaryLabel)}</div>
         <div class="ai-agent-reason-primary-detail">${esc(primaryDetail)}</div>
+      </div>
+      <div class="ai-agent-gate-lane">
+        <div class="ai-agent-gate-step ${toneClass(freshEntryAllowed && !closeOnly ? 'good' : (risk?.trading_halted ? 'danger' : 'warn'))}">
+          <span>1 风险纪律</span>
+          <strong>${esc(closeOnly ? 'Close-only' : (freshEntryAllowed ? '允许新单' : '暂停新单'))}</strong>
+        </div>
+        <div class="ai-agent-gate-step ${toneClass(blockers.some((item) => item?.source === 'learning_memory') ? 'warn' : 'good')}">
+          <span>2 学习保护</span>
+          <strong>${esc(blockers.some((item) => item?.source === 'learning_memory') ? '保护中' : '未阻止')}</strong>
+        </div>
+        <div class="ai-agent-gate-step ${toneClass(executionGateBlocked ? (executionGate?.tone || 'warn') : 'good')}">
+          <span>3 执行安全</span>
+          <strong>${esc(executionGateBlocked ? '阻止提交' : '允许提交')}</strong>
+        </div>
       </div>
       <div class="ai-agent-diagnostic-meta">
         <div class="ai-agent-diagnostic-item">
@@ -1643,12 +1698,20 @@
           <strong>${esc(String(risk?.risk_level || '--').toUpperCase())}</strong>
         </div>
         <div class="ai-agent-diagnostic-item">
-          <span>新单权限</span>
-          <strong class="${toneClass(freshEntryAllowed ? 'good' : 'warn')}">${esc(freshEntryAllowed ? '允许' : '禁止')}</strong>
+          <span>风险新单纪律</span>
+          <strong class="${toneClass(freshEntryAllowed && !closeOnly ? 'good' : 'warn')}">${esc(freshEntryAllowed && !closeOnly ? '允许' : '限制')}</strong>
         </div>
         <div class="ai-agent-diagnostic-item">
-          <span>执行约束</span>
-          <strong class="${toneClass(closeOnly ? 'warn' : 'info')}">${esc(closeOnly ? 'Reduce-only / Close-first' : '正常')}</strong>
+          <span>执行安全门禁</span>
+          <strong class="${toneClass(executionGateBlocked ? (executionGate?.tone || 'warn') : 'good')}">${esc(executionGateBlocked ? '阻止' : '放行')}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>交易 / Agent 模式</span>
+          <strong>${esc(`${tradingModeLabel(executionGate?.trading_mode)} / ${decisionModeLabel(executionGate?.agent_mode)}`)}</strong>
+        </div>
+        <div class="ai-agent-diagnostic-item">
+          <span>allow_live</span>
+          <strong class="${toneClass(executionGate?.allow_live ? 'danger' : 'info')}">${esc(executionGate?.allow_live ? '开' : '关')}</strong>
         </div>
         <div class="ai-agent-diagnostic-item">
           <span>日内 stop basis</span>
@@ -1663,23 +1726,23 @@
           <strong>${esc(`${formatPct(risk?.rolling_3d_drawdown, 2)} / ${formatPct(risk?.rolling_7d_drawdown, 2)}`)}</strong>
         </div>
         <div class="ai-agent-diagnostic-item">
-          <span>学习阈值</span>
-          <strong>${esc(formatRatio(riskStatus?.learning?.effective_min_confidence, 3))}</strong>
-        </div>
-        <div class="ai-agent-diagnostic-item">
-          <span>最近连亏</span>
-          <strong>${esc(Number(riskStatus?.learning?.recent_close_loss_streak_count || 0))}</strong>
+          <span>学习阈值 / 连亏</span>
+          <strong>${esc(`${formatRatio(riskStatus?.learning?.effective_min_confidence, 3)} / ${Number(riskStatus?.learning?.recent_close_loss_streak_count || 0)}`)}</strong>
         </div>
         <div class="ai-agent-diagnostic-item">
           <span>Eligibility</span>
-          <strong class="${toneClass(eligibility?.available && eligibilitySelected?.eligible_for_autonomy ? 'good' : 'warn')}">${esc(eligibilityState)}</strong>
-        </div>
-        <div class="ai-agent-diagnostic-item">
-          <span>快照刷新</span>
-          <strong>${esc(eligibility?.refresh_age_sec != null ? formatAgeSeconds(eligibility.refresh_age_sec) : '--')}</strong>
+          <strong class="${toneClass(eligibility?.available && eligibilitySelected?.eligible_for_autonomy ? 'good' : 'warn')}">${esc(`${eligibilityState} / ${eligibility?.refresh_age_sec != null ? formatAgeSeconds(eligibility.refresh_age_sec) : '--'}`)}</strong>
         </div>
       </div>
       <div class="ai-agent-note-grid">
+        <div class="ai-agent-note-card">
+          <div class="ai-agent-note-label">执行安全解释</div>
+          <div class="ai-agent-note-body">${esc(executionGateDetail(executionGate))}</div>
+        </div>
+        <div class="ai-agent-note-card">
+          <div class="ai-agent-note-label">安全门禁 code</div>
+          <div class="ai-agent-note-body">${esc(`${executionGate?.code || '--'} / ${safetyReasonText} / ${safetyRecommendationText}`)}</div>
+        </div>
         <div class="ai-agent-note-card">
           <div class="ai-agent-note-label">当前配置阈值</div>
           <div class="ai-agent-note-body">${esc(thresholdText)}</div>
@@ -1701,8 +1764,8 @@
           <div class="ai-agent-note-body">${esc(`${buildEligibilityRefreshText(eligibility)} / ${eligibilityCandidateText} / ${eligibilityExpiryText}`)}</div>
         </div>
       </div>
-      <div class="ai-agent-empty">${esc(buildEligibilityReasonText(eligibility))}</div>
-      ${blockerList || '<div class="ai-agent-empty">当前没有 fresh-entry blocker，新单纪律正常。</div>'}
+      <div class="ai-agent-empty">${esc(`Eligibility: ${buildEligibilityReasonText(eligibility)}`)}</div>
+      ${blockerList || '<div class="ai-agent-empty">当前没有风险纪律或学习记忆 blocker；若仍不能提交，请看上方“执行安全门禁”。</div>'}
     `;
     normalizeElementHtml(el);
     syncAgentRiskConfigForm(riskConfigPayload);

@@ -19,6 +19,10 @@ from core.exchange_adapters.base import (
 
 
 def _to_dt_ms(ms: Any) -> Optional[datetime]:
+    """Parse an exchange timestamp (s/ms/us/ns) into a tz-aware UTC datetime.
+
+    Returns None for invalid/non-positive inputs.
+    """
     try:
         if ms is None:
             return None
@@ -29,7 +33,8 @@ def _to_dt_ms(ms: Any) -> Optional[datetime]:
             v = v // 1_000_000
         elif v >= 10**14:
             v = v // 1_000
-        return datetime.utcfromtimestamp(v / 1000.0 if v >= 10**11 else v)
+        seconds = v / 1000.0 if v >= 10**11 else float(v)
+        return datetime.fromtimestamp(seconds, tz=timezone.utc)
     except Exception:
         return None
 

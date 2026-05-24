@@ -1359,6 +1359,41 @@ def _attach_research_enrichment(
     return out
 
 
+# Module-level Booster cache keyed by (resolved_path, mtime_ns). The research
+# loop calls _build_positions many times per (strategy, timeframe, params)
+# combination; reloading the same model JSON on every call costs significant
+# disk I/O and tree-deserialisation. The mtime component guarantees a stale
+# Booster is evicted if the file is retrained while the process is running.
+_XGB_BOOSTER_CACHE: Dict[tuple, Any] = {}
+
+
+def _load_xgb_booster_cached(model_path: str) -> Any:
+    import xgboost as xgb  # noqa: PLC0415
+
+    try:
+        mtime_ns = Path(model_path).stat().st_mtime_ns
+    except OSError:
+        # Fall back to a non-cached load if we can't stat the file.
+        booster = xgb.Booster()
+        booster.load_model(model_path)
+        return booster
+
+    cache_key = (str(Path(model_path).resolve()), int(mtime_ns))
+    cached = _XGB_BOOSTER_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    booster = xgb.Booster()
+    booster.load_model(model_path)
+    # Evict any prior entry for this resolved path (the mtime differs) before
+    # inserting, so the cache does not grow unbounded across retrains.
+    stale_keys = [k for k in _XGB_BOOSTER_CACHE if k[0] == cache_key[0]]
+    for k in stale_keys:
+        _XGB_BOOSTER_CACHE.pop(k, None)
+    _XGB_BOOSTER_CACHE[cache_key] = booster
+    return booster
+
+
 def _build_positions(
     strategy: str,
     df: pd.DataFrame,
@@ -2019,8 +2054,12 @@ def _build_positions(
                 "MLXGBoostStrategy: model file not found. "
                 "Run: python scripts/train_ml_signal.py --symbol BTC/USDT --timeframe 1h"
             )
-        booster = xgb.Booster()
-        booster.load_model(model_path)
+        # PERF: cache Booster by (path, mtime). The research loop calls
+        # _build_positions many times per timeframe across LHS trials and
+        # walk-forward folds; reloading the JSON+deserialising tree on every
+        # call costs significant I/O. mtime invalidates the cache when the
+        # model file is retrained.
+        booster = _load_xgb_booster_cached(model_path)
         threshold_ml = float(params.get("threshold", 0.55))
         dtest = xgb.DMatrix(feat_df.values, feature_names=list(feat_df.columns))
         long_probs = booster.predict(dtest)

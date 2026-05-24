@@ -3,7 +3,6 @@ DEX套利策略
 """
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
-import asyncio
 from decimal import Decimal
 from loguru import logger
 
