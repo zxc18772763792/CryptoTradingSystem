@@ -512,10 +512,10 @@ async def _news_refresh_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
             logger.debug(f"background news refresh failed: {e}")
             sleep_seconds = max(_NEWS_PULL_INTERVAL_SEC, 300)
 
-        for _ in range(sleep_seconds):
-            if stop_event.is_set():
-                break
-            await asyncio.sleep(1)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=sleep_seconds)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _news_llm_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
@@ -557,10 +557,10 @@ async def _news_llm_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
             }
             logger.warning(f"background news llm worker failed: {e}")
 
-        for _ in range(_NEWS_LLM_INTERVAL_SEC):
-            if stop_event.is_set():
-                break
-            await asyncio.sleep(1)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=_NEWS_LLM_INTERVAL_SEC)
+        except asyncio.TimeoutError:
+            pass
 
 
 async def _analytics_history_worker(
@@ -605,10 +605,10 @@ async def _analytics_history_worker(
             sleep_span += 7
         elif collector == "whales":
             sleep_span += 13
-        for _ in range(sleep_span):
-            if stop_event.is_set():
-                break
-            await asyncio.sleep(1)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=sleep_span)
+        except asyncio.TimeoutError:
+            pass
 
 
 def _maintenance_snapshot_path(kind: str) -> Path:

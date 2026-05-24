@@ -151,6 +151,19 @@ class Position:
         }
 
 
+def _log_task_exception(task: "asyncio.Task") -> None:
+    """Done-callback that surfaces exceptions from fire-and-forget tasks.
+
+    Without this, asyncio.create_task(...) swallows exceptions silently when
+    no one awaits the task — making monitoring callbacks fail without trace.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(f"position_manager fire-and-forget task failed: {exc!r}")
+
+
 class PositionManager:
     """持仓管理器。"""
 
@@ -537,7 +550,8 @@ class PositionManager:
 
         try:
             asyncio.get_running_loop()
-            asyncio.create_task(self._notify_callbacks(position, "opened"))
+            _task = asyncio.create_task(self._notify_callbacks(position, "opened"))
+            _task.add_done_callback(_log_task_exception)
         except RuntimeError:
             pass
         return position
@@ -606,7 +620,8 @@ class PositionManager:
 
             try:
                 asyncio.get_running_loop()
-                asyncio.create_task(self._notify_callbacks(position, "partial_close"))
+                _task = asyncio.create_task(self._notify_callbacks(position, "partial_close"))
+                _task.add_done_callback(_log_task_exception)
             except RuntimeError:
                 pass
             self._dirty = True
@@ -629,7 +644,8 @@ class PositionManager:
 
         try:
             asyncio.get_running_loop()
-            asyncio.create_task(self._notify_callbacks(position, "closed"))
+            _task = asyncio.create_task(self._notify_callbacks(position, "closed"))
+            _task.add_done_callback(_log_task_exception)
         except RuntimeError:
             pass
         return position

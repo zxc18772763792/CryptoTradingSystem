@@ -597,12 +597,20 @@ class StrategyManager:
         # return only the slice this caller asked for.
         result = df.tail(fetch_limit).copy()
         result["symbol"] = symbol
-        self._market_data_cache[cache_key] = (result, time.monotonic(), len(result))
-        # Evict cache entries older than 2x TTL to prevent unbounded growth
-        if len(self._market_data_cache) > 200:
-            cutoff = time.monotonic() - self._market_data_cache_max_ttl * 2
-            stale = [k for k, (_, t, _rows) in self._market_data_cache.items() if t < cutoff]
-            for k in stale:
+        now = time.monotonic()
+        self._market_data_cache[cache_key] = (result, now, len(result))
+        # Evict stale entries on every put (TTL = 2× max_ttl).
+        cutoff = now - self._market_data_cache_max_ttl * 2
+        stale = [k for k, (_, t, _rows) in self._market_data_cache.items() if t < cutoff]
+        for k in stale:
+            del self._market_data_cache[k]
+        # Hard size cap with LRU-by-timestamp eviction to bound memory growth.
+        max_entries = 100
+        if len(self._market_data_cache) > max_entries:
+            sorted_by_age = sorted(
+                self._market_data_cache.items(), key=lambda kv: kv[1][1]
+            )
+            for k, _ in sorted_by_age[: len(self._market_data_cache) - max_entries]:
                 del self._market_data_cache[k]
         return result.tail(int(limit)).copy()
 

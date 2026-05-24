@@ -22,6 +22,31 @@
 
 ---
 
+## 0.5. 执行进度（2026-05-25 更新）
+
+### Wave 1 ✅ 全部完成（commit c83000a 之后）
+
+| ID | 项 | 状态 | Commit |
+|---|---|---|---|
+| **R-C5** | 信号队列 `suppress(Exception)` 精确化 | ✅ Done | [execution_engine.py:807-813](../core/trading/execution_engine.py#L807) |
+| **P-C3** | `_market_data_cache` 改 TTL eviction + 100 上限 | ✅ Done | [strategy_manager.py:600-617](../core/strategies/strategy_manager.py#L600) |
+| **R-C1** | `position_manager` 3 处 `create_task` + `done_callback` | ✅ Done | [position_manager.py:540, 609, 632](../core/trading/position_manager.py#L540) + 辅助 `_log_task_exception` |
+| **E-C1** | `_safe_json_loads` 真 safe（sentinel pattern） | ✅ Done | [async_glm_client.py:398-446](../core/news/eventizer/async_glm_client.py#L398) |
+| **R-M3** | `execution_engine.stop()` cancel 后 `wait_for(timeout=5)` | ✅ Done | [execution_engine.py:5947-5959](../core/trading/execution_engine.py#L5947) |
+| **P-C4** | news worker 心跳改 `stop_event.wait(timeout=N)` | ✅ Done | [web/main.py:515, 560, 608](../web/main.py#L515) 3 处 |
+| **E-C3** | Coinglass 429 触发 60s 全局 backoff | ✅ Done | [coinglass_client.py:47-80, 1739-1796](../core/data/coinglass_client.py#L47) |
+
+**测试**：430 trading/news/coinglass/position/execution/worker 相关测试全过；20 LLM/JSON 测试全过；30 paper/live 隔离测试全过。
+
+### Wave 2-4 待启动
+
+下一步可选方向（按文档第 6 节排序）：
+- Wave 2 架构铺垫：A1 lazy-create 单例装饰器、A2 TaskRegistry、A5 异常分类抽象
+- Wave 3 性能与外部集成深改：P-C1/C2/C5、E-C2、E-M1、R-M10
+- Wave 4 MINOR + 运维基础设施
+
+---
+
 ## 1. 优先级总览（速读版）
 
 ### 🔴 5 项最该先修（CRITICAL 中的 Top 5）
