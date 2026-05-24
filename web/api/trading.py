@@ -7690,7 +7690,7 @@ async def get_analytics_overview(
         ),
         "stoploss_policy": _capture_analytics(
             "stoploss_policy",
-            get_stoploss_policy(),
+            get_stoploss_policy(mode=target_mode),
         ),
     }
     module_names = list(module_jobs.keys())
@@ -8507,10 +8507,11 @@ async def get_behavior_report(days: int = 7):
     }
 
 
-async def get_stoploss_policy():
+async def get_stoploss_policy(mode: Optional[str] = None):
+    target_mode = _normalize_runtime_mode(mode or execution_engine.get_trading_mode())
     policy = _load_stoploss_policy()
     suggestions = []
-    for pos in position_manager.get_all_positions()[:50]:
+    for pos in position_manager.get_all_positions(scope=target_mode)[:50]:
         symbol = str(getattr(pos, "symbol", "") or "")
         atr = await _estimate_atr_for_symbol(
             symbol, period=int(((policy.get("atr") or {}).get("period") or 14))

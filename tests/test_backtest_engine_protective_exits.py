@@ -66,6 +66,29 @@ class ShortThenBuyStrategy(StrategyBase):
         return {"type": "kline", "min_length": 2}
 
 
+class FailingStartStrategy(StrategyBase):
+    def __init__(self):
+        super().__init__("failing_start", {})
+        self.stop_called = False
+
+    def initialize(self):
+        super().initialize()
+
+    def start(self):
+        super().start()
+        raise RuntimeError("start failed")
+
+    def stop(self):
+        self.stop_called = True
+        super().stop()
+
+    def generate_signals(self, data):
+        return []
+
+    def get_required_data(self):
+        return {"type": "kline", "min_length": 2}
+
+
 def _ohlcv(*, highs, lows, closes, opens=None):
     idx = pd.date_range("2026-01-01", periods=len(closes), freq="h", tz="UTC")
     return pd.DataFrame(
@@ -234,3 +257,19 @@ def test_backtest_opposite_buy_closes_short_and_opens_long():
     assert [trade.trade_stage for trade in result.trades] == ["open", "close", "open"]
     assert [trade.side for trade in result.trades] == ["sell", "buy", "buy"]
     assert result.trades[1].exit_reason == "signal_reversal"
+
+
+def test_backtest_cleans_up_strategy_when_start_fails():
+    engine = BacktestEngine(_config())
+    data = _ohlcv(
+        highs=[100.0, 100.0, 101.0],
+        lows=[100.0, 99.0, 100.0],
+        closes=[100.0, 100.0, 101.0],
+    )
+    strategy = FailingStartStrategy()
+
+    with pytest.raises(RuntimeError, match="start failed"):
+        asyncio.run(engine.run_backtest(strategy, data, symbol="BTC/USDT"))
+
+    assert strategy.stop_called is True
+    assert strategy.state.name == "STOPPED"

@@ -75,8 +75,8 @@ async def get_behavior_report(days: int = 7):
 
 
 @router.get("/analytics/stoploss/policy")
-async def get_stoploss_policy():
-    return await trading_api.get_stoploss_policy()
+async def get_stoploss_policy(mode: Optional[str] = None):
+    return await trading_api.get_stoploss_policy(mode=mode)
 
 
 @router.post(
