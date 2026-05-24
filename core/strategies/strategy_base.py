@@ -178,13 +178,29 @@ class StrategyBase(ABC):
         self,
         name: str,
         params: Optional[Dict[str, Any]] = None,
+        runtime_mode: Optional[str] = None,
     ):
         self.name = name
         self.params = params or {}
+        self._runtime_mode = self._normalize_runtime_mode(
+            runtime_mode
+            or self.params.get("runtime_mode")
+            or self.params.get("trading_mode")
+            or self.params.get("mode")
+            or "paper"
+        )
         self.state = StrategyState.IDLE
         self.positions: Dict[str, Position] = {}
         self.signals_history: List[Signal] = []
         self._data: pd.DataFrame = pd.DataFrame()
+
+    @staticmethod
+    def _normalize_runtime_mode(value: Any) -> str:
+        return "live" if str(value or "").strip().lower() == "live" else "paper"
+
+    @property
+    def runtime_mode(self) -> str:
+        return self._runtime_mode
 
     @abstractmethod
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:

@@ -91,6 +91,20 @@ def test_strategy_manager_keeps_strategy_runtime_mode_isolated(monkeypatch):
     assert set(manager.get_all_strategies("paper").keys()) == {"paper_alpha"}
     assert set(manager.get_all_strategies("live").keys()) == {"live_beta"}
     assert accounts[manager.get_strategy_runtime("live_beta")["account_id"]]["mode"] == "live"
+    assert manager.get_strategy("paper_alpha").runtime_mode == "paper"
+    assert manager.get_strategy("live_beta").runtime_mode == "live"
+
+    accounts[manager.get_strategy_runtime("live_beta")["account_id"]]["mode"] = "paper"
+    accounts["main"]["mode"] = "paper"
+    assert manager.get_strategy_runtime_mode("live_beta") == "live"
+
+
+def test_strategy_base_runtime_mode_is_bound_at_construction():
+    strategy = _NoopStrategy("mode_bound", params={"runtime_mode": "paper"})
+
+    strategy.params["runtime_mode"] = "live"
+
+    assert strategy.runtime_mode == "paper"
 
 
 def test_collect_exit_signals_uses_strategy_runtime_scope(monkeypatch):

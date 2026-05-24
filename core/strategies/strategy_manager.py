@@ -770,6 +770,10 @@ class StrategyManager:
     def get_strategy_runtime_mode(self, name: str) -> str:
         from core.trading.account_manager import account_manager
 
+        strategy = self._strategies.get(name)
+        if strategy is not None and hasattr(strategy, "runtime_mode"):
+            return self._normalize_runtime_mode(getattr(strategy, "runtime_mode"))
+
         cfg = self._configs.get(name)
         params = dict((cfg.params if cfg else {}) or {})
         metadata = dict((cfg.metadata if cfg else {}) or {})
@@ -1274,8 +1278,24 @@ class StrategyManager:
             params = dict(params or {})
             params.setdefault("account_id", self._default_strategy_account_id(name))
             metadata = dict(metadata or {})
+            runtime_mode = self._resolve_strategy_runtime_mode(
+                name,
+                params=params,
+                metadata=metadata,
+            )
+            params.setdefault("runtime_mode", runtime_mode)
+            metadata.setdefault("runtime_mode", runtime_mode)
             self._sync_strategy_account(name, params, metadata)
-            strategy = strategy_class(name=name, params=params)
+            try:
+                strategy = strategy_class(
+                    name=name,
+                    params=params,
+                    runtime_mode=runtime_mode,
+                )
+            except TypeError as exc:
+                if "runtime_mode" not in str(exc):
+                    raise
+                strategy = strategy_class(name=name, params=params)
 
             config = StrategyConfig(
                 name=name,

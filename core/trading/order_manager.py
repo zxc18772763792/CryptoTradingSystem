@@ -224,6 +224,8 @@ class OrderManager:
         return min(fee_rate, 1.0), min(slippage_bps, 10000.0)
 
     def set_paper_trading(self, enabled: bool) -> None:
+        if self._paper_trading == enabled:
+            return
         self._paper_trading = enabled
         logger.info(f"Paper trading mode: {enabled}")
 

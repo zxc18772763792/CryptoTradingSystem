@@ -1143,11 +1143,12 @@ def _safe_strategy_name_fragment(value: str, default: str = "strategy") -> str:
     return text or default
 
 
-def _build_candidate_strategy_name(candidate: Any) -> str:
+def _build_candidate_strategy_name(candidate: Any, target_mode: str = "paper") -> str:
     meta = getattr(candidate, "metadata", None) or {}
     custom_name = meta.get("display_name") if isinstance(meta, dict) else None
     symbol = _candidate_primary_symbol(candidate).replace("/", "")
     timeframe = str(getattr(candidate, "timeframe", "") or "1h").strip() or "1h"
+    mode_fragment = "live" if str(target_mode or "").strip().lower() == "live" else "paper"
     hint = (
         str(custom_name).strip()
         if isinstance(custom_name, str) and custom_name.strip()
@@ -1155,7 +1156,7 @@ def _build_candidate_strategy_name(candidate: Any) -> str:
     )
     safe_hint = _safe_strategy_name_fragment(hint, default="ai_strategy")
     candidate_suffix = _safe_strategy_name_fragment(str(getattr(candidate, "candidate_id", "") or "")[:6], default="cand")
-    return f"{safe_hint}_{int(datetime.now(timezone.utc).timestamp())}_{candidate_suffix}"
+    return f"{safe_hint}_{mode_fragment}_{int(datetime.now(timezone.utc).timestamp())}_{candidate_suffix}"
 
 
 async def _ensure_candidate_runtime_strategy(
@@ -1191,7 +1192,7 @@ async def _ensure_candidate_runtime_strategy(
             )
             if inferred_fingerprint == runtime_fingerprint:
                 strategy_name = str(item.get("name") or "").strip()
-    strategy_name = strategy_name or _build_candidate_strategy_name(candidate)
+    strategy_name = strategy_name or _build_candidate_strategy_name(candidate, resolved_mode)
     strategy_class = _resolve_strategy_class(_candidate_strategy_name(candidate))
     if strategy_class is None:
         raise RuntimeError(f"unknown strategy class for candidate: {_candidate_strategy_name(candidate)}")
@@ -1199,6 +1200,7 @@ async def _ensure_candidate_runtime_strategy(
     params = dict(get_strategy_defaults(_candidate_strategy_name(candidate)))
     params.update(dict(getattr(candidate, "params", {}) or {}))
     params.setdefault("exchange", _candidate_exchange(candidate))
+    params["runtime_mode"] = resolved_mode
     params.setdefault("account_id", f"ai_{_safe_strategy_name_fragment(strategy_name.lower(), default='strategy')}")
 
     promotion = getattr(candidate, "promotion", None)

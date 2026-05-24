@@ -231,9 +231,7 @@ async def _build_all_balances_payload():
     total_unpriced_assets = 0
     mode_name = trading_api.execution_engine.get_trading_mode()
     is_paper_mode = trading_api.execution_engine.is_paper_mode()
-    trading_api.risk_manager.set_account_scope(
-        "paper" if is_paper_mode else "live", reset_baseline=False
-    )
+    risk_scope = trading_api.risk_manager.get_account_scope()
     paper_account: Optional[Dict[str, Any]] = None
 
     async def _collect_exchange(exchange_name: str):
@@ -644,7 +642,7 @@ async def _build_all_balances_payload():
             distribution_map[ccy] = distribution_map.get(ccy, 0.0) + float(val or 0.0)
 
     market_total_usd = float(total_usd or 0.0)
-    risk_report_before = trading_api.risk_manager.get_risk_report()
+    risk_report_before = trading_api.risk_manager.get_risk_report(scope=mode_name)
     prev_equity = float(
         ((risk_report_before.get("equity") or {}).get("current") or 0.0)
     )
@@ -778,6 +776,7 @@ async def _build_all_balances_payload():
 
     trading_api.risk_manager.update_equity(
         risk_equity_input,
+        scope=mode_name,
         day_start_equity=(
             live_day_start_equity
             if (not is_paper_mode and live_day_start_equity > 0)
@@ -897,7 +896,7 @@ async def _build_all_balances_payload():
         )
     risk_report = (
         trading_api._apply_live_snapshot_to_risk_report(
-            trading_api.risk_manager.get_risk_report(),
+            trading_api.risk_manager.get_risk_report(scope=mode_name),
             live_position_snapshot,
             live_daily_total_pnl=live_daily_total_pnl,
             live_day_start_equity=live_day_start_equity,
@@ -905,7 +904,7 @@ async def _build_all_balances_payload():
             live_daily_realized_source=live_daily_realized_source,
         )
         if not is_paper_mode
-        else trading_api.risk_manager.get_risk_report()
+        else trading_api.risk_manager.get_risk_report(scope=mode_name)
     )
     if not is_paper_mode:
         risk_report = _with_live_display_equity(
@@ -927,6 +926,7 @@ async def _build_all_balances_payload():
         if is_paper_mode
         else None,
         "active_account_type": "paper" if is_paper_mode else "live",
+        "risk_scope": risk_scope,
         "active_account_usd_estimate": round(display_total_usd, 2),
         "inactive_account_usd_estimate": (
             round(market_total_usd, 2)
