@@ -3538,13 +3538,32 @@ try{
   if(btn){btn.disabled=false;btn.textContent=prevText;}
 }
 }
+// Static fallback list — kept in sync with ALTCOIN_WATCHLIST in
+// core/research/altcoin_radar_universe.py. Used when the API call fails so the
+// user can still drive a download batch (10s timeouts have happened during
+// server cold-start while the altcoin module's transitive imports load).
+const ALTCOIN_WATCHLIST_FALLBACK=[
+  'SOL/USDT','AVAX/USDT','NEAR/USDT','APT/USDT','SUI/USDT','INJ/USDT','SEI/USDT','TIA/USDT',
+  'ORDI/USDT','SATS/USDT','RATS/USDT','STX/USDT',
+  'PEPE/USDT','FLOKI/USDT','BONK/USDT','WIF/USDT','BOME/USDT','MEME/USDT','NEIRO/USDT','TURBO/USDT','POPCAT/USDT','MEW/USDT','PNUT/USDT','GOAT/USDT',
+  'TAO/USDT','FET/USDT','AGIX/USDT','RENDER/USDT','AKT/USDT','OCEAN/USDT','WLD/USDT','AI16Z/USDT','VIRTUAL/USDT','ARKM/USDT',
+  'ONDO/USDT','HNT/USDT','IOTX/USDT','GRT/USDT','POL/USDT',
+  'GMX/USDT','GNS/USDT','JOE/USDT','AAVE/USDT','UNI/USDT','MKR/USDT','CRV/USDT','PENDLE/USDT','DYDX/USDT','ENA/USDT','ETHFI/USDT',
+  'AXS/USDT','SAND/USDT','MANA/USDT','GALA/USDT','IMX/USDT','BEAM/USDT','PIXEL/USDT',
+  'PYTH/USDT','JTO/USDT','JUP/USDT','W/USDT','KMNO/USDT','DRIFT/USDT',
+  'BGB/USDT','GT/USDT','OKB/USDT','BNB/USDT',
+  'ARB/USDT','OP/USDT','STRK/USDT','MANTA/USDT','ALT/USDT','ZETA/USDT','ZK/USDT','BLAST/USDT',
+  'PYUSD/USDT','EIGEN/USDT','REZ/USDT','IO/USDT','ZRO/USDT','OMNI/USDT','USUAL/USDT','MOVE/USDT','ME/USDT','VANA/USDT',
+];
 async function fillDownloadBatchFromAltcoinWatchlist({btn=null}={}){
 const ex=String(document.getElementById('download-exchange')?.value||'binance').trim()||'binance';
 const prevText=btn?btn.textContent:'';
 const label='雷达 Watchlist';
 try{
   if(btn){btn.disabled=true;btn.textContent='读取中...';}
-  const resp=await api('/altcoin/radar/watchlist',{timeoutMs:10000});
+  // Bumped 10s→20s: the altcoin module pulls in ~7K-line web.api.data plus
+  // CoinGlass/DB deps; first-request cold start was hitting the 10s wall.
+  const resp=await api('/altcoin/radar/watchlist',{timeoutMs:20000});
   const symbols=Array.isArray(resp?.symbols)?resp.symbols:[];
   const filled=setDownloadBatchSymbols(symbols,{
     label,
@@ -3554,10 +3573,25 @@ try{
   notify(`已填入${label}: ${filled.length} 个币种`);
   return filled;
 }catch(err){
-  const downloadOut=getDownloadOutputEl();
-  if(downloadOut)downloadOut.textContent=`填入${label}失败: ${err.message}`;
-  notify(`填入${label}失败: ${err.message}`,true);
-  throw err;
+  // Fallback: even with a 20s timeout, transient outages shouldn't strand the
+  // user. Use the bundled static list so a download batch can still be filed,
+  // and surface the API error so they know to retry/refresh later.
+  const fallbackSymbols=ALTCOIN_WATCHLIST_FALLBACK.slice();
+  try{
+    const filled=setDownloadBatchSymbols(fallbackSymbols,{
+      label:`${label}（离线兜底）`,
+      exchange:ex,
+      source:'altcoin_radar_watchlist_static_fallback',
+      warning:`实时接口失败 (${err.message})，已使用本地静态币池兜底。请稍后刷新页面再试以拿到最新管理结果。`,
+    });
+    notify(`接口失败，已用本地兜底列表填入 ${filled.length} 个币种`,true);
+    return filled;
+  }catch(fallbackErr){
+    const downloadOut=getDownloadOutputEl();
+    if(downloadOut)downloadOut.textContent=`填入${label}失败: ${err.message}`;
+    notify(`填入${label}失败: ${err.message}`,true);
+    throw err;
+  }
 }finally{
   if(btn){btn.disabled=false;btn.textContent=prevText;}
 }

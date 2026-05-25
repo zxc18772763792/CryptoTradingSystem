@@ -31,43 +31,21 @@
     'IMX/USDT',
     'CRV/USDT',
   ];
+  // Keep in sync with ALTCOIN_WATCHLIST in
+  // core/research/altcoin_radar_universe.py — used as offline fallback when the
+  // /altcoin/radar/watchlist API call fails (cold-start, network blip).
   const DEFAULT_WATCHLIST = [
-    'ORDI/USDT',
-    'SATS/USDT',
-    'RATS/USDT',
-    'PEPE/USDT',
-    'FLOKI/USDT',
-    'BONK/USDT',
-    'WIF/USDT',
-    'BOME/USDT',
-    'MEME/USDT',
-    'NEIRO/USDT',
-    'TURBO/USDT',
-    'TAO/USDT',
-    'FET/USDT',
-    'AGIX/USDT',
-    'RENDER/USDT',
-    'AKT/USDT',
-    'OCEAN/USDT',
-    'GMX/USDT',
-    'GNS/USDT',
-    'JOE/USDT',
-    'AXS/USDT',
-    'SAND/USDT',
-    'MANA/USDT',
-    'GALA/USDT',
-    'IMX/USDT',
-    'PYTH/USDT',
-    'JTO/USDT',
-    'W/USDT',
-    'JUP/USDT',
-    'BGB/USDT',
-    'GT/USDT',
-    'OKB/USDT',
-    'STRK/USDT',
-    'MANTA/USDT',
-    'ALT/USDT',
-    'ZETA/USDT',
+    'SOL/USDT', 'AVAX/USDT', 'NEAR/USDT', 'APT/USDT', 'SUI/USDT', 'INJ/USDT', 'SEI/USDT', 'TIA/USDT',
+    'ORDI/USDT', 'SATS/USDT', 'RATS/USDT', 'STX/USDT',
+    'PEPE/USDT', 'FLOKI/USDT', 'BONK/USDT', 'WIF/USDT', 'BOME/USDT', 'MEME/USDT', 'NEIRO/USDT', 'TURBO/USDT', 'POPCAT/USDT', 'MEW/USDT', 'PNUT/USDT', 'GOAT/USDT',
+    'TAO/USDT', 'FET/USDT', 'AGIX/USDT', 'RENDER/USDT', 'AKT/USDT', 'OCEAN/USDT', 'WLD/USDT', 'AI16Z/USDT', 'VIRTUAL/USDT', 'ARKM/USDT',
+    'ONDO/USDT', 'HNT/USDT', 'IOTX/USDT', 'GRT/USDT', 'POL/USDT',
+    'GMX/USDT', 'GNS/USDT', 'JOE/USDT', 'AAVE/USDT', 'UNI/USDT', 'MKR/USDT', 'CRV/USDT', 'PENDLE/USDT', 'DYDX/USDT', 'ENA/USDT', 'ETHFI/USDT',
+    'AXS/USDT', 'SAND/USDT', 'MANA/USDT', 'GALA/USDT', 'IMX/USDT', 'BEAM/USDT', 'PIXEL/USDT',
+    'PYTH/USDT', 'JTO/USDT', 'JUP/USDT', 'W/USDT', 'KMNO/USDT', 'DRIFT/USDT',
+    'BGB/USDT', 'GT/USDT', 'OKB/USDT', 'BNB/USDT',
+    'ARB/USDT', 'OP/USDT', 'STRK/USDT', 'MANTA/USDT', 'ALT/USDT', 'ZETA/USDT', 'ZK/USDT', 'BLAST/USDT',
+    'PYUSD/USDT', 'EIGEN/USDT', 'REZ/USDT', 'IO/USDT', 'ZRO/USDT', 'OMNI/USDT', 'USUAL/USDT', 'MOVE/USDT', 'ME/USDT', 'VANA/USDT',
   ];
 
   const PRESET_BY_KIND = {
@@ -769,9 +747,18 @@
 
   async function loadWatchlist() {
     const apiFetch = requireApi();
-    const resp = await apiFetch('/altcoin/radar/watchlist', { timeoutMs: 10000 });
-    const symbols = normalizeSymbols(resp?.symbols || []);
-    state.watchlist = symbols.length ? symbols : DEFAULT_WATCHLIST.slice();
+    // Bumped 10s→20s: cold-start of /altcoin/* on first hit can take >10s while
+    // FastAPI imports the chain (web.api.data ~7K lines + CoinGlass/DB deps).
+    // On hard failure we fall back to the bundled DEFAULT_WATCHLIST instead of
+    // leaving the dashboard with an empty rail.
+    try {
+      const resp = await apiFetch('/altcoin/radar/watchlist', { timeoutMs: 20000 });
+      const symbols = normalizeSymbols(resp?.symbols || []);
+      state.watchlist = symbols.length ? symbols : DEFAULT_WATCHLIST.slice();
+    } catch (err) {
+      state.watchlist = DEFAULT_WATCHLIST.slice();
+      try { console.warn('[altcoin-radar] watchlist API failed, using static fallback:', err); } catch (_) {}
+    }
     renderWatchlist();
     return state.watchlist;
   }
