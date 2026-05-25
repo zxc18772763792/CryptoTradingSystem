@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from core.exchange_adapters.base import ExchangeAdapter, ExchangeOrderRequest
+from core.execution.rate_limit_and_reconnect import (
+    RateLimitAndReconnectPolicy,
+    RateLimitExceeded,
+)
 from core.strategies.strategy_base import Signal
 
 
@@ -23,8 +27,24 @@ class OrderIntent:
 class OrderIntentRouter:
     """Bridge `Signal` -> `ExchangeOrderRequest` without touching current execution engine."""
 
-    def __init__(self, adapter: ExchangeAdapter):
+    # Buckets we consult before submitting an order. Exchange protections fire on
+    # both per-minute and 10-second windows, so we acquire both — whichever is
+    # tighter wins. Buckets are looked up by name; missing buckets return True
+    # (no limit), so callers that haven't configured a policy stay functional.
+    _DEFAULT_ORDER_BUCKETS = ("order_10s", "order_1m")
+
+    def __init__(
+        self,
+        adapter: ExchangeAdapter,
+        policy: Optional[RateLimitAndReconnectPolicy] = None,
+        *,
+        order_buckets: Optional[tuple[str, ...]] = None,
+        acquire_timeout_ms: int = 2_000,
+    ):
         self.adapter = adapter
+        self.policy = policy
+        self.order_buckets = tuple(order_buckets or self._DEFAULT_ORDER_BUCKETS)
+        self.acquire_timeout_ms = int(max(0, acquire_timeout_ms))
 
     def build_order_intent(self, signal: Signal, context: Optional[Dict[str, Any]] = None) -> OrderIntent:
         context = dict(context or {})
@@ -42,6 +62,18 @@ class OrderIntentRouter:
             metadata={"signal": signal.to_dict(), **context},
         )
 
+    async def _acquire_rate_limit(self) -> None:
+        if self.policy is None:
+            return
+        # `reduce_only` orders are risk-reducing; the cooldown gate only blocks NEW
+        # exposure, so we let exits through even when the bot is in reduce_only mode.
+        # That decision is left to higher layers (we don't see reduce_only here).
+        # Acquire each configured order bucket. `acquire_async` raises
+        # RateLimitExceeded on timeout — let it bubble so the caller sees the
+        # bucket name and retry-after.
+        for bucket in self.order_buckets:
+            await self.policy.acquire_async(bucket, cost=1.0, timeout_ms=self.acquire_timeout_ms)
+
     async def submit_intent(self, intent: OrderIntent):
         if not bool(getattr(self.adapter, "supports_execution", False)):
             exchange = str(getattr(self.adapter, "exchange", "unknown") or "unknown")
@@ -57,5 +89,20 @@ class OrderIntentRouter:
             reduce_only=intent.reduce_only,
             params={"strategy_name": intent.strategy_name, **dict(intent.metadata or {})},
         )
-        # TODO: add rate-limit policy + state machine hooks
-        return await self.adapter.create_order(req)
+        await self._acquire_rate_limit()
+        try:
+            result = await self.adapter.create_order(req)
+        except RateLimitExceeded:
+            # Surface upstream — caller decides whether to backoff/retry.
+            raise
+        except Exception:
+            if self.policy is not None:
+                # Failures (network/server-side rejection) tighten our backoff so
+                # the next attempt doesn't pile on. Penalize each bucket we used.
+                for bucket in self.order_buckets:
+                    self.policy.record_failure(bucket)
+            raise
+        if self.policy is not None:
+            for bucket in self.order_buckets:
+                self.policy.record_success(bucket)
+        return result

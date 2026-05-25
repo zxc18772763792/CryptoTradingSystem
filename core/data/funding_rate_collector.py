@@ -248,10 +248,10 @@ class FundingRateCollector:
                     exchange="bybit",
                     symbol=symbol,
                     funding_rate=float(latest["fundingRate"]),
-                    funding_time=datetime.fromtimestamp(int(latest["fundingRateTimestamp"]) / 1000),
+                    funding_time=datetime.fromtimestamp(int(latest["fundingRateTimestamp"]) / 1000, tz=timezone.utc),
                     timestamp=datetime.now(timezone.utc),
                 )
-                
+
         except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as e:
             logger.error(f"Bybit funding rate fetch error: {e}")
             return None
@@ -300,7 +300,7 @@ class FundingRateCollector:
                         exchange="bybit",
                         symbol=symbol,
                         funding_rate=float(item["fundingRate"]),
-                        funding_time=datetime.fromtimestamp(int(item["fundingRateTimestamp"]) / 1000),
+                        funding_time=datetime.fromtimestamp(int(item["fundingRateTimestamp"]) / 1000, tz=timezone.utc),
                         timestamp=datetime.now(timezone.utc),
                     ))
                     
@@ -352,7 +352,7 @@ class FundingRateCollector:
                     exchange="okx",
                     symbol=symbol,
                     funding_rate=float(latest["fundingRate"]),
-                    funding_time=datetime.fromtimestamp(int(latest["fundingTime"]) / 1000),
+                    funding_time=datetime.fromtimestamp(int(latest["fundingTime"]) / 1000, tz=timezone.utc),
                     timestamp=datetime.now(timezone.utc),
                     mark_price=float(latest.get("markPx", 0)) or None,
                     index_price=float(latest.get("idxPx", 0)) or None,

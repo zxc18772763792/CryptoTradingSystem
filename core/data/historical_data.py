@@ -38,6 +38,11 @@ def _as_utc_naive(value: datetime) -> datetime:
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _utc_now_naive() -> datetime:
+    """Current UTC time as a naive datetime — matches `_as_utc_naive` output for stored timestamps."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 @dataclass
 class DownloadProgress:
     """Tracks the state of one historical download."""
@@ -135,14 +140,14 @@ class HistoricalDataManager:
             return []
 
         if end_time is None:
-            end_time = datetime.now()
+            end_time = _utc_now_naive()
         if start_time is None:
             start_time = end_time - timedelta(days=365)
         start_time = _as_utc_naive(start_time)
         end_time = _as_utc_naive(end_time)
 
         task_id = f"{exchange}_{symbol}_{timeframe}"
-        started_at = datetime.now()
+        started_at = _utc_now_naive()
         progress = DownloadProgress(
             exchange=exchange,
             symbol=symbol,
@@ -181,7 +186,7 @@ class HistoricalDataManager:
 
                 if not klines:
                     progress.current_time = min(current_time, end_time)
-                    progress.updated_at = datetime.now()
+                    progress.updated_at = _utc_now_naive()
                     progress.last_error = ""
                     progress.message = "上游未返回更多K线，下载结束"
                     await self._emit_progress(progress_callback, progress)
@@ -200,7 +205,7 @@ class HistoricalDataManager:
                 ]
                 all_klines.extend(filtered_klines)
 
-                now = datetime.now()
+                now = _utc_now_naive()
                 progress.downloaded_candles += len(filtered_klines)
                 progress.current_time = min(last_timestamp, end_time)
                 progress.pages_fetched += 1
@@ -233,7 +238,7 @@ class HistoricalDataManager:
                 await asyncio.sleep(0.5)
 
             except Exception as e:
-                now = datetime.now()
+                now = _utc_now_naive()
                 if _is_non_retryable_download_error(e):
                     progress.last_error = str(e)
                     progress.status = "failed"
@@ -280,7 +285,7 @@ class HistoricalDataManager:
                 timeframe,
             )
 
-        finished_at = datetime.now()
+        finished_at = _utc_now_naive()
         progress.is_complete = True
         progress.total_candles = len(unique_klines)
         progress.downloaded_candles = len(unique_klines)
@@ -368,7 +373,7 @@ class HistoricalDataManager:
             symbol=symbol,
             timeframe=timeframe,
             start_time=start_time,
-            end_time=datetime.now(),
+            end_time=_utc_now_naive(),
         )
 
         return len(new_klines)

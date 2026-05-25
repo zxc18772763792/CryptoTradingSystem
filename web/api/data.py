@@ -1155,7 +1155,7 @@ def _scan_parquet_files(file_paths: List[Path]) -> Dict[str, Any]:
     return {
         "rows": rows,
         "size_bytes": size_bytes,
-        "modified_at": datetime.fromtimestamp(modified_at).isoformat() if modified_at else None,
+        "modified_at": datetime.fromtimestamp(modified_at, tz=timezone.utc).isoformat() if modified_at else None,
         "start": _safe_iso_timestamp(start_ts),
         "end": _safe_iso_timestamp(end_ts),
         "read_errors": read_errors[:5],
@@ -1754,13 +1754,13 @@ def _read_research_universe_summary() -> Dict[str, Any]:
         return {
             "exists": True,
             "path": str(path),
-            "updated_at": _safe_iso_timestamp(datetime.fromtimestamp(path.stat().st_mtime)),
+            "updated_at": _safe_iso_timestamp(datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)),
             "error": str(exc),
         }
     return {
         "exists": True,
         "path": str(path),
-        "updated_at": _safe_iso_timestamp(datetime.fromtimestamp(path.stat().st_mtime)),
+        "updated_at": _safe_iso_timestamp(datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)),
         "status": payload.get("status") or "unknown",
         "timestamp": payload.get("timestamp"),
         "timeframes": payload.get("timeframes") or [],
@@ -1817,7 +1817,7 @@ def _get_research_universe_refresh_status_sync() -> Dict[str, Any]:
     task_payload["log_path"] = str(_RESEARCH_UNIVERSE_LOG_PATH)
     if _RESEARCH_UNIVERSE_LOG_PATH.exists():
         task_payload["log_updated_at"] = _safe_iso_timestamp(
-            datetime.fromtimestamp(_RESEARCH_UNIVERSE_LOG_PATH.stat().st_mtime)
+            datetime.fromtimestamp(_RESEARCH_UNIVERSE_LOG_PATH.stat().st_mtime, tz=timezone.utc)
         )
 
     return {

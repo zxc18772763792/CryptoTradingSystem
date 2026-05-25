@@ -3,7 +3,7 @@
 支持从多个交易所采集K线、行情等数据
 """
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -12,6 +12,11 @@ from loguru import logger
 from core.exchanges import Kline, Ticker
 from core.exchanges.exchange_manager import exchange_manager
 from config.settings import settings
+
+
+def _utc_now() -> datetime:
+    """tz-aware UTC now — matches Kline.timestamp (tz-aware) used elsewhere on `task.last_collected`."""
+    return datetime.now(timezone.utc)
 
 
 class DataType(Enum):
@@ -114,7 +119,7 @@ class DataCollector:
             return []
 
         try:
-            since = task.last_collected or datetime.now() - timedelta(days=1)
+            since = task.last_collected or _utc_now() - timedelta(days=1)
             klines = await exchange.get_klines(
                 symbol=task.symbol,
                 timeframe=task.timeframe,
@@ -139,7 +144,7 @@ class DataCollector:
 
         try:
             ticker = await exchange.get_ticker(task.symbol)
-            task.last_collected = datetime.now()
+            task.last_collected = _utc_now()
             return ticker
 
         except Exception as e:
@@ -154,7 +159,7 @@ class DataCollector:
 
         try:
             orderbook = await exchange.get_order_book(task.symbol)
-            task.last_collected = datetime.now()
+            task.last_collected = _utc_now()
             return orderbook
 
         except Exception as e:
@@ -177,7 +182,7 @@ class DataCollector:
                 snapshot = dict((overview or {}).get("snapshot") or {})
                 funding_rate = snapshot.get("funding_rate") or snapshot.get("funding_rate_oi_weighted")
                 if funding_rate is not None:
-                    task.last_collected = datetime.now()
+                    task.last_collected = _utc_now()
                     return {
                         "source": "coinglass_cache",
                         "symbol": task.symbol,
@@ -193,7 +198,7 @@ class DataCollector:
             
             # 获取所有交易所的资金费率
             rates = await self._funding_rate_collector.fetch_all(task.symbol)
-            task.last_collected = datetime.now()
+            task.last_collected = _utc_now()
             return rates
 
         except Exception as e:
@@ -209,7 +214,7 @@ class DataCollector:
                 self._fear_greed_collector = FearGreedCollector()
             
             index = await self._fear_greed_collector.fetch_current()
-            task.last_collected = datetime.now()
+            task.last_collected = _utc_now()
             return index
 
         except Exception as e:
@@ -259,7 +264,7 @@ class DataCollector:
                 if task.last_collected is None:
                     tasks_to_run.append(self._process_task(task_id))
                 else:
-                    elapsed = (datetime.now() - task.last_collected).total_seconds()
+                    elapsed = (_utc_now() - task.last_collected).total_seconds()
                     if elapsed >= task.interval:
                         tasks_to_run.append(self._process_task(task_id))
 

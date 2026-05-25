@@ -4,7 +4,7 @@ Paper trading module.
 
 import asyncio
 import contextlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
 from loguru import logger
@@ -155,7 +155,7 @@ class PaperTradingEngine:
             self._trade_history.append(
                 {
                     **result,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
             await self._notify_callbacks("trade", result)

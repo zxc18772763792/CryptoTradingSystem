@@ -634,9 +634,13 @@ def test_risk_dashboard_uses_recent_stale_cache_without_blocking(monkeypatch):
 
     module._RISK_DASHBOARD_CACHE.clear()
     module._RISK_DASHBOARD_REFRESH_TASKS.clear()
+    # Cache key must match `get_risk_dashboard`'s `f"mode:{target_mode}|lookback:{lookback}"`
+    # — paper/live mode plumbing changed the key from the legacy `lookback:240` form.
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    cache_key = "mode:paper|lookback:240"
     module._cache_put(
         module._RISK_DASHBOARD_CACHE,
-        "lookback:240",
+        cache_key,
         {
             "timestamp": _recent_ts(),
             "risk_level": "low",
@@ -645,7 +649,7 @@ def test_risk_dashboard_uses_recent_stale_cache_without_blocking(monkeypatch):
             "var": {"var95_pct": 1.4, "sample_points": 120},
         },
     )
-    module._RISK_DASHBOARD_CACHE["lookback:240"]["ts"] = time.time() - (
+    module._RISK_DASHBOARD_CACHE[cache_key]["ts"] = time.time() - (
         module._RISK_DASHBOARD_CACHE_TTL_SEC + 5
     )
 

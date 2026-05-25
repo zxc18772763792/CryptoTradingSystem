@@ -95,7 +95,11 @@ class GateConnector(BaseExchange):
             client = await self._ensure_client()
             ticker = await client.fetch_ticker(symbol)
             ts = ticker.get("timestamp")
-            timestamp = datetime.fromtimestamp(ts / 1000) if ts else datetime.now()
+            timestamp = (
+                datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                if ts
+                else datetime.now(timezone.utc)
+            )
             return Ticker(
                 symbol=symbol,
                 last=float(ticker.get("last", 0) or 0),
@@ -149,7 +153,7 @@ class GateConnector(BaseExchange):
             return {
                 "bids": orderbook.get("bids", []),
                 "asks": orderbook.get("asks", []),
-                "timestamp": datetime.now(),
+                "timestamp": datetime.now(timezone.utc),
             }
         except Exception as e:
             self._handle_error(e, f"get_order_book({symbol})")

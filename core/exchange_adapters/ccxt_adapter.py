@@ -222,14 +222,82 @@ class CCXTExchangeAdapter(ExchangeAdapter):
                 continue
         return out
 
-    async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
-        raise NotImplementedError("TODO: wire to ccxt create_order (defer until state-machine integration)")
+    @staticmethod
+    def _order_to_snapshot(raw: Dict[str, Any], *, fallback_symbol: str = "") -> ExchangeOrderSnapshot:
+        """Map a raw ccxt order dict into ExchangeOrderSnapshot.
 
-    async def cancel_order(self, symbol: str, order_id: str, params: Optional[Dict[str, Any]] = None) -> ExchangeOrderSnapshot:
-        raise NotImplementedError("TODO: wire to ccxt cancel_order (defer until state-machine integration)")
+        Mirrors the field mapping in ``fetch_open_orders`` so all ccxt-sourced
+        order rows surface identically regardless of which call produced them.
+        """
+        amt = float(raw.get("amount") or 0.0)
+        filled = float(raw.get("filled") or 0.0)
+        fee_obj = raw.get("fee") if isinstance(raw.get("fee"), dict) else None
+        fee_cost = (fee_obj or {}).get("cost") if fee_obj else None
+        return ExchangeOrderSnapshot(
+            order_id=str(raw.get("id") or ""),
+            client_order_id=raw.get("clientOrderId"),
+            symbol=_normalize_symbol(str(raw.get("symbol") or fallback_symbol or "")),
+            status=str(raw.get("status") or "unknown"),
+            side=str(raw.get("side") or ""),
+            order_type=str(raw.get("type") or ""),
+            amount=amt,
+            filled=filled,
+            remaining=float(
+                raw.get("remaining") if raw.get("remaining") is not None else max(0.0, amt - filled)
+            ),
+            price=(float(raw.get("price")) if raw.get("price") is not None else None),
+            avg_price=(float(raw.get("average")) if raw.get("average") is not None else None),
+            fee=(float(fee_cost) if fee_cost is not None else None),
+            fee_currency=(fee_obj.get("currency") if fee_obj else None),
+            timestamp=_to_dt_ms(raw.get("timestamp")),
+            raw=raw,
+        )
+
+    async def create_order(self, request: ExchangeOrderRequest) -> ExchangeOrderSnapshot:
+        if not bool(getattr(self, "supports_execution", False)):
+            # Defense in depth: even though OrderIntentRouter blocks this earlier,
+            # a direct caller bypassing the router must not silently flip into live.
+            raise RuntimeError(
+                f"CCXT adapter {self.exchange} not enabled for order execution (supports_execution=False)"
+            )
+        symbol = _normalize_symbol(request.symbol)
+        params = dict(request.params or {})
+        if request.client_order_id and "clientOrderId" not in params:
+            params["clientOrderId"] = request.client_order_id
+        if request.reduce_only and "reduceOnly" not in params:
+            # Most futures venues accept lowercase but a few (eg Bybit) prefer
+            # snake_case. Set both for safety; ccxt unifies into the venue param.
+            params["reduceOnly"] = True
+        order_type = str(request.order_type or "market").lower()
+        price = request.price if order_type == "limit" else None
+        raw = await self._call(
+            "create_order",
+            symbol,
+            order_type,
+            str(request.side or "").lower(),
+            float(request.amount or 0.0),
+            price,
+            params,
+        )
+        return self._order_to_snapshot(raw or {}, fallback_symbol=symbol)
+
+    async def cancel_order(
+        self, symbol: str, order_id: str, params: Optional[Dict[str, Any]] = None
+    ) -> ExchangeOrderSnapshot:
+        if not bool(getattr(self, "supports_execution", False)):
+            raise RuntimeError(
+                f"CCXT adapter {self.exchange} not enabled for order execution (supports_execution=False)"
+            )
+        sym = _normalize_symbol(symbol)
+        raw = await self._call("cancel_order", str(order_id), sym, dict(params or {}))
+        return self._order_to_snapshot(raw or {}, fallback_symbol=sym)
 
     async def fetch_order(self, symbol: str, order_id: str) -> ExchangeOrderSnapshot:
-        raise NotImplementedError("TODO: wire to ccxt fetch_order (defer until state-machine integration)")
+        # fetch_order is read-only — allow it regardless of supports_execution so
+        # callers can reconcile order state without flipping the live gate.
+        sym = _normalize_symbol(symbol)
+        raw = await self._call("fetch_order", str(order_id), sym)
+        return self._order_to_snapshot(raw or {}, fallback_symbol=sym)
 
     async def fetch_open_orders(self, symbol: Optional[str] = None) -> List[ExchangeOrderSnapshot]:
         has_fetch_open = bool((getattr(self._client, "has", {}) or {}).get("fetchOpenOrders"))
@@ -240,27 +308,7 @@ class CCXTExchangeAdapter(ExchangeAdapter):
         out: List[ExchangeOrderSnapshot] = []
         for o in raw_orders or []:
             try:
-                amt = float(o.get("amount") or 0.0)
-                filled = float(o.get("filled") or 0.0)
-                out.append(
-                    ExchangeOrderSnapshot(
-                        order_id=str(o.get("id") or ""),
-                        client_order_id=o.get("clientOrderId"),
-                        symbol=_normalize_symbol(str(o.get("symbol") or sym or "")),
-                        status=str(o.get("status") or "unknown"),
-                        side=str(o.get("side") or ""),
-                        order_type=str(o.get("type") or ""),
-                        amount=amt,
-                        filled=filled,
-                        remaining=float(o.get("remaining") if o.get("remaining") is not None else max(0.0, amt - filled)),
-                        price=(float(o.get("price")) if o.get("price") is not None else None),
-                        avg_price=(float(o.get("average")) if o.get("average") is not None else None),
-                        fee=(float((o.get("fee") or {}).get("cost")) if isinstance(o.get("fee"), dict) and (o.get("fee") or {}).get("cost") is not None else None),
-                        fee_currency=((o.get("fee") or {}).get("currency") if isinstance(o.get("fee"), dict) else None),
-                        timestamp=_to_dt_ms(o.get("timestamp")),
-                        raw=o,
-                    )
-                )
+                out.append(self._order_to_snapshot(o, fallback_symbol=sym or ""))
             except Exception:
                 continue
         return out

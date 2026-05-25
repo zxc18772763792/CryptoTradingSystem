@@ -179,7 +179,7 @@ class OKXConnector(BaseExchange):
             return {
                 "bids": orderbook.get("bids", []),
                 "asks": orderbook.get("asks", []),
-                "timestamp": datetime.now(),
+                "timestamp": datetime.now(timezone.utc),
             }
         except Exception as e:
             self._handle_error(e, f"get_order_book({symbol})")
