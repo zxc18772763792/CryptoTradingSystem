@@ -184,8 +184,26 @@ async def _balance_response_fallback_with_notifications(
     mode_name: str, note: str
 ) -> Dict[str, Any]:
     payload = _balance_response_fallback(mode_name, note)
+    # Notification eval can fan out into altcoin scans + cross-exchange ticker
+    # fetches when rules are configured. The outer endpoint already took the
+    # 18s `_BALANCE_RESPONSE_TIMEOUT_SEC` hit before deciding to enter
+    # fallback — we must NOT let the notification chain re-do slow work that
+    # would push the total response time past the client's 18-25s budget.
+    # Cap at 2s; if it doesn't finish, return the stale payload anyway and
+    # let the next /balances request (which will likely hit the warm cache)
+    # re-evaluate notifications.
     try:
-        await _evaluate_notifications_for_balance_payload(payload)
+        await asyncio.wait_for(
+            _evaluate_notifications_for_balance_payload(payload),
+            timeout=2.0,
+        )
+    except asyncio.TimeoutError:
+        # Mark the payload so the UI can surface that notifications are stale
+        # rather than silently dropping the warning.
+        existing = dict(payload.get("notifications") or {})
+        existing.setdefault("eval_deferred", True)
+        existing.setdefault("eval_deferred_reason", "balance_fallback_path_skipped_to_stay_under_budget")
+        payload["notifications"] = existing
     except Exception:
         pass
     return payload
