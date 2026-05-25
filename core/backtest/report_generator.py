@@ -1,7 +1,7 @@
 """
 报告生成器模块
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 import json
 from pathlib import Path
@@ -140,7 +140,7 @@ class ReportGenerator:
         return {
             "meta": {
                 "strategy_name": strategy_name,
-                "generated_at": datetime.now().isoformat(),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
             },
             "returns": {
                 "initial_capital": result.initial_capital,

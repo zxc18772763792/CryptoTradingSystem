@@ -3289,7 +3289,7 @@ class ExecutionEngine:
             return
         self._last_live_reconcile_at = now
 
-        now_ts = datetime.now().timestamp()
+        now_ts = now.timestamp()
         grouped: Dict[Tuple[str, str], List[Any]] = {}
         active_local_keys: set[Tuple[str, str, str, str]] = set()
         for pos in local_positions:
@@ -4481,7 +4481,7 @@ class ExecutionEngine:
                     "slippage_reference_price": cost_details.get("slippage_reference_price"),
                 },
                 "executed_quantity": float(exec_amount or 0.0),
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             execution_event = "order_executed" if exec_amount > 0 else "order_submitted"
             result_status = "executed" if exec_amount > 0 else "submitted"
@@ -4750,7 +4750,7 @@ class ExecutionEngine:
                             "signal": signal.to_dict(),
                             "order": None,
                             "reason": "exchange_no_position_reduce_only_rejected",
-                            "timestamp": datetime.now().isoformat(),
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
                         }
                         self._signal_diagnostics["last_result"] = {
                             "status": "reconciled",
@@ -4893,7 +4893,7 @@ class ExecutionEngine:
                 "slippage_reference_price": cost_details.get("slippage_reference_price"),
                 "close_order_mode": close_order_mode,
             },
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
         if executed_close_qty > 0:
             try:

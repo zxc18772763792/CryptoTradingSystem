@@ -761,9 +761,16 @@ def test_candidate_decay_check_button_uses_post_route():
 
 def test_premium_data_status_treats_cached_data_as_available(monkeypatch):
     from web.api import ai_research as ai_module
+    from core.news.storage import db as news_db
 
     monkeypatch.setattr("core.data.glassnode_collector.load_glassnode_snapshot", lambda: {"sopr": 1.02, "mvrv_z": None})
     monkeypatch.setattr("core.data.glassnode_collector._api_key", lambda: "")
+    # `_build_sources_health_payload` performs real news_db queries which can hang on
+    # a locked SQLite file during concurrent live ingestion. Stub them out so this
+    # premium-data assertion does not depend on news ingestion state.
+    monkeypatch.setattr(news_db, "summarize_news_raw_coverage", AsyncMock(return_value={}))
+    monkeypatch.setattr(news_db, "list_source_states", AsyncMock(return_value=[]))
+    monkeypatch.setattr(news_db, "get_llm_queue_stats", AsyncMock(return_value={"counts": {}, "total": 0}))
 
     result = asyncio.run(ai_module.get_premium_data_status())
     source = result["sources"]["glassnode"]

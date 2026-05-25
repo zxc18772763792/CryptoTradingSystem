@@ -657,7 +657,9 @@ class StrategyManager:
                 continue
             rows.append(
                 {
-                    "timestamp": datetime.fromtimestamp(float(ts) / 1000.0),
+                    # Naive UTC: matches _df_from_klines convention so trades-derived
+                    # OHLCV concatenates cleanly with kline-derived OHLCV downstream.
+                    "timestamp": datetime.fromtimestamp(float(ts) / 1000.0, tz=timezone.utc).replace(tzinfo=None),
                     "price": float(price),
                     "amount": float(amount),
                 }
@@ -1992,7 +1994,7 @@ class StrategyManager:
             "stale_running_count": len(stale_running),
             "stale_running_by_mode": stale_running_by_mode,
             "refresh_hint_seconds": 5,
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
     @staticmethod

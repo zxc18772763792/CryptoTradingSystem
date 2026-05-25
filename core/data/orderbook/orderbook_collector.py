@@ -6,10 +6,14 @@
 """
 import asyncio
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass, field
 from loguru import logger
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -38,7 +42,7 @@ class OrderBookSnapshot:
     exchange: str
     bids: List[PriceLevel]
     asks: List[PriceLevel]
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
     
     @property
     def best_bid(self) -> Optional[PriceLevel]:
@@ -224,7 +228,7 @@ class OrderBookCollector:
                     exchange="binance",
                     bids=self._parse_levels(data.get("bids", []), is_bid=True),
                     asks=self._parse_levels(data.get("asks", []), is_bid=False),
-                    timestamp=datetime.now(),
+                    timestamp=_utc_now(),
                 )
                 
         except Exception as e:
@@ -276,7 +280,7 @@ class OrderBookCollector:
                     exchange="bybit",
                     bids=self._parse_levels(bids, is_bid=True),
                     asks=self._parse_levels(asks, is_bid=False),
-                    timestamp=datetime.now(),
+                    timestamp=_utc_now(),
                 )
                 
         except Exception as e:
@@ -318,7 +322,7 @@ class OrderBookCollector:
                     exchange="okx",
                     bids=self._parse_levels(bids, is_bid=True),
                     asks=self._parse_levels(asks, is_bid=False),
-                    timestamp=datetime.now(),
+                    timestamp=_utc_now(),
                 )
                 
         except Exception as e:
@@ -354,7 +358,7 @@ class OrderBookCollector:
                     exchange="gate",
                     bids=self._parse_levels(bids, is_bid=True),
                     asks=self._parse_levels(asks, is_bid=False),
-                    timestamp=datetime.now(),
+                    timestamp=_utc_now(),
                 )
                 
         except Exception as e:

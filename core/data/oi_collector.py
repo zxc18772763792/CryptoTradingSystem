@@ -6,10 +6,14 @@
 """
 import asyncio
 import aiohttp
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict
 from dataclasses import dataclass, field
 from loguru import logger
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 @dataclass
@@ -26,7 +30,7 @@ class OpenInterest:
     exchange: str
     value: float  # USDT
     volume: float  # 数量
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_utc_now)
     
     @property
     def value_millions(self) -> float:
@@ -131,7 +135,7 @@ class OICollector:
                     exchange="binance",
                     value=float(data.get("notionalValue", 0)),
                     volume=float(data.get("openInterest", 0)),
-                    timestamp=datetime.now(),
+                    timestamp=_utc_now(),
                 )
                 
         except Exception as e:
@@ -163,7 +167,7 @@ class OICollector:
                 history = []
                 for item in data:
                     history.append({
-                        "timestamp": datetime.fromtimestamp(item["timestamp"] / 1000),
+                        "timestamp": datetime.fromtimestamp(item["timestamp"] / 1000, tz=timezone.utc),
                         "value": float(item["sumOpenInterestValue"]),
                         "volume": float(item["sumOpenInterest"]),
                     })
@@ -211,7 +215,7 @@ class OICollector:
                     exchange="bybit",
                     value=float(result.get("openInterestValue", 0)),
                     volume=float(result.get("openInterest", 0)),
-                    timestamp=datetime.now(),
+                    timestamp=_utc_now(),
                 )
                 
         except Exception as e:
@@ -245,7 +249,7 @@ class OICollector:
                     exchange="okx",
                     value=float(item.get("oiUsd", 0)),
                     volume=float(item.get("oi", 0)),
-                    timestamp=datetime.now(),
+                    timestamp=_utc_now(),
                 )
                 
         except Exception as e:
@@ -273,7 +277,7 @@ class OICollector:
                     exchange="gate",
                     value=float(data.get("position_size", 0)) * float(data.get("last_price", 1)),
                     volume=float(data.get("position_size", 0)),
-                    timestamp=datetime.now(),
+                    timestamp=_utc_now(),
                 )
                 
         except Exception as e:

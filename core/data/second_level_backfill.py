@@ -273,7 +273,7 @@ class SecondLevelBackfillManager:
                 continue
             rows.append(
                 {
-                    "timestamp": datetime.fromtimestamp(float(ts) / 1000),
+                    "timestamp": datetime.fromtimestamp(float(ts) / 1000, tz=timezone.utc),
                     "price": float(price),
                     "amount": float(amount),
                 }
