@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
@@ -24,11 +25,21 @@ from config.settings import settings
 # Adjust over time without changing calling code.
 
 ALTCOIN_WATCHLIST: List[str] = [
-    # Ordinals / BTC ecosystem
+    # ── L1 majors (anchors so radar always has the high-volume references) ──
+    "SOL/USDT",
+    "AVAX/USDT",
+    "NEAR/USDT",
+    "APT/USDT",
+    "SUI/USDT",
+    "INJ/USDT",
+    "SEI/USDT",
+    "TIA/USDT",
+    # ── Ordinals / BTC ecosystem ──
     "ORDI/USDT",
     "SATS/USDT",
     "RATS/USDT",
-    # Meme / community
+    "STX/USDT",
+    # ── Meme / community ──
     "PEPE/USDT",
     "FLOKI/USDT",
     "BONK/USDT",
@@ -37,51 +48,116 @@ ALTCOIN_WATCHLIST: List[str] = [
     "MEME/USDT",
     "NEIRO/USDT",
     "TURBO/USDT",
-    # AI narrative
+    "POPCAT/USDT",
+    "MEW/USDT",
+    "PNUT/USDT",
+    "GOAT/USDT",
+    # ── AI narrative ──
     "TAO/USDT",
     "FET/USDT",
     "AGIX/USDT",
-    "RNDR/USDT",
+    "RENDER/USDT",
     "AKT/USDT",
     "OCEAN/USDT",
-    # DeFi / real yield
+    "WLD/USDT",
+    "AI16Z/USDT",
+    "VIRTUAL/USDT",
+    "ARKM/USDT",
+    # ── DePIN / RWA ──
+    "ONDO/USDT",
+    "HNT/USDT",
+    "IOTX/USDT",
+    "GRT/USDT",
+    "POL/USDT",
+    # ── DeFi / real yield ──
     "GMX/USDT",
     "GNS/USDT",
     "JOE/USDT",
-    # Gaming / Metaverse
+    "AAVE/USDT",
+    "UNI/USDT",
+    "MKR/USDT",
+    "CRV/USDT",
+    "PENDLE/USDT",
+    "DYDX/USDT",
+    "ENA/USDT",
+    "ETHFI/USDT",
+    # ── Gaming / Metaverse ──
     "AXS/USDT",
     "SAND/USDT",
     "MANA/USDT",
     "GALA/USDT",
     "IMX/USDT",
-    # Infrastructure
+    "BEAM/USDT",
+    "PIXEL/USDT",
+    # ── Solana ecosystem infra ──
     "PYTH/USDT",
     "JTO/USDT",
-    "W/USDT",
     "JUP/USDT",
-    # Exchange / CEX tokens
+    "W/USDT",
+    "KMNO/USDT",
+    "DRIFT/USDT",
+    # ── Exchange / CEX tokens ──
     "BGB/USDT",
     "GT/USDT",
     "OKB/USDT",
-    # L2 / modular
+    "BNB/USDT",
+    # ── L2 / modular ──
+    "ARB/USDT",
+    "OP/USDT",
     "STRK/USDT",
     "MANTA/USDT",
     "ALT/USDT",
     "ZETA/USDT",
+    "ZK/USDT",
+    "BLAST/USDT",
+    # ── Newer narrative / 2025 listings ──
+    "PYUSD/USDT",
+    "EIGEN/USDT",
+    "REZ/USDT",
+    "IO/USDT",
+    "ZRO/USDT",
+    "OMNI/USDT",
+    "USUAL/USDT",
+    "MOVE/USDT",
+    "ME/USDT",
+    "VANA/USDT",
 ]
 
-_WATCHLIST_LOCK = threading.Lock()
+# Reentrant: ``universe_meta`` re-enters ``get_watchlist_symbols`` while the API
+# layer holds it in the same call chain. A plain Lock would deadlock per coroutine.
+_WATCHLIST_LOCK = threading.RLock()
 _WATCHLIST_STORAGE_PATH = settings.BASE_DIR / "data" / "config" / "altcoin_radar_watchlist.json"
 _WATCHLIST_SYMBOL_ALIASES: Dict[str, str] = {
     # RNDR was migrated to RENDER on major venues. Keep old persisted entries usable.
     "RNDR/USDT": "RENDER/USDT",
+    "MATIC/USDT": "POL/USDT",
 }
 
-# Boards / sectors used in narrative scoring (symbol → sector label)
+# Tiny in-memory cache so a burst of API calls (radar dashboard hits this on
+# every tab focus) doesn't repeatedly stat + read the JSON file. TTL kept
+# short so admin mutations propagate to listeners within one render tick.
+_WATCHLIST_CACHE_TTL_SEC = 5.0
+_WATCHLIST_CACHE: Dict[str, object] = {"value": None, "expires_at": 0.0}
+
+# Boards / sectors used in narrative scoring (symbol → sector label).
+# Keep keys sorted by sector for easier upkeep when narratives shift.
 SECTOR_MAP: Dict[str, str] = {
+    # ── L1 ──
+    "SOL/USDT": "l1",
+    "AVAX/USDT": "l1",
+    "NEAR/USDT": "l1",
+    "APT/USDT": "l1",
+    "SUI/USDT": "l1",
+    "INJ/USDT": "l1",
+    "SEI/USDT": "l1",
+    "TIA/USDT": "l1",
+    "MOVE/USDT": "l1",
+    # ── Ordinals / BTC eco ──
     "ORDI/USDT": "ordinals",
     "SATS/USDT": "ordinals",
     "RATS/USDT": "ordinals",
+    "STX/USDT": "ordinals",
+    # ── Meme ──
     "PEPE/USDT": "meme",
     "FLOKI/USDT": "meme",
     "BONK/USDT": "meme",
@@ -90,6 +166,11 @@ SECTOR_MAP: Dict[str, str] = {
     "MEME/USDT": "meme",
     "NEIRO/USDT": "meme",
     "TURBO/USDT": "meme",
+    "POPCAT/USDT": "meme",
+    "MEW/USDT": "meme",
+    "PNUT/USDT": "meme",
+    "GOAT/USDT": "meme",
+    # ── AI ──
     "TAO/USDT": "ai",
     "FET/USDT": "ai",
     "AGIX/USDT": "ai",
@@ -97,33 +178,67 @@ SECTOR_MAP: Dict[str, str] = {
     "RENDER/USDT": "ai",
     "AKT/USDT": "ai",
     "OCEAN/USDT": "ai",
+    "WLD/USDT": "ai",
+    "AI16Z/USDT": "ai",
+    "VIRTUAL/USDT": "ai",
+    "ARKM/USDT": "ai",
+    # ── DePIN / RWA ──
+    "ONDO/USDT": "rwa",
+    "HNT/USDT": "depin",
+    "IOTX/USDT": "depin",
+    "GRT/USDT": "depin",
+    "POL/USDT": "infra",
+    # ── DeFi ──
     "GMX/USDT": "defi",
     "GNS/USDT": "defi",
     "JOE/USDT": "defi",
     "AAVE/USDT": "defi",
     "UNI/USDT": "defi",
     "MKR/USDT": "defi",
+    "CRV/USDT": "defi",
+    "PENDLE/USDT": "defi",
+    "DYDX/USDT": "defi",
+    "ENA/USDT": "defi",
+    "ETHFI/USDT": "defi",
+    # ── Gaming ──
     "AXS/USDT": "gaming",
     "SAND/USDT": "gaming",
     "MANA/USDT": "gaming",
     "GALA/USDT": "gaming",
     "IMX/USDT": "gaming",
+    "BEAM/USDT": "gaming",
+    "PIXEL/USDT": "gaming",
+    # ── Solana ecosystem infra ──
     "PYTH/USDT": "infra",
     "JTO/USDT": "infra",
     "W/USDT": "infra",
     "JUP/USDT": "infra",
+    "KMNO/USDT": "infra",
+    "DRIFT/USDT": "infra",
+    "ME/USDT": "infra",
+    # ── CEX tokens ──
+    "BGB/USDT": "cex",
+    "GT/USDT": "cex",
+    "OKB/USDT": "cex",
+    "BNB/USDT": "cex",
+    # ── L2 / modular ──
     "ARB/USDT": "l2",
     "OP/USDT": "l2",
     "STRK/USDT": "l2",
     "MANTA/USDT": "l2",
     "ALT/USDT": "l2",
     "ZETA/USDT": "l2",
-    "SOL/USDT": "l1",
-    "AVAX/USDT": "l1",
-    "NEAR/USDT": "l1",
-    "APT/USDT": "l1",
-    "SUI/USDT": "l1",
-    "INJ/USDT": "l1",
+    "ZK/USDT": "l2",
+    "BLAST/USDT": "l2",
+    # ── Restaking / new narratives ──
+    "EIGEN/USDT": "restaking",
+    "REZ/USDT": "restaking",
+    "IO/USDT": "depin",
+    "ZRO/USDT": "infra",
+    "OMNI/USDT": "l2",
+    "USUAL/USDT": "rwa",
+    "PYUSD/USDT": "rwa",
+    "VANA/USDT": "ai",
 }
 
 MAX_EXPANDED = 100
@@ -216,13 +331,29 @@ def get_sector(symbol: str) -> str:
     return SECTOR_MAP.get(key, "")
 
 
+def _invalidate_watchlist_cache() -> None:
+    _WATCHLIST_CACHE["value"] = None
+    _WATCHLIST_CACHE["expires_at"] = 0.0
+
+
 def get_watchlist_symbols() -> List[str]:
-    """Return current hardcoded watchlist."""
+    """Return the active watchlist (persisted overlay if present, else built-in).
+
+    Cached for ``_WATCHLIST_CACHE_TTL_SEC`` to absorb radar dashboard bursts
+    (every tab focus calls this) without re-reading the JSON file. Cache is
+    invalidated on every mutation.
+    """
     with _WATCHLIST_LOCK:
+        now = time.monotonic()
+        cached_value = _WATCHLIST_CACHE.get("value")
+        if isinstance(cached_value, list) and float(_WATCHLIST_CACHE.get("expires_at") or 0.0) > now:
+            # Return a copy so callers can't accidentally mutate the cached list.
+            return list(cached_value)
         persisted = _load_watchlist_from_disk()
-        if persisted:
-            return persisted
-        return _normalize(ALTCOIN_WATCHLIST)
+        resolved = persisted if persisted else _normalize(ALTCOIN_WATCHLIST)
+        _WATCHLIST_CACHE["value"] = list(resolved)
+        _WATCHLIST_CACHE["expires_at"] = now + _WATCHLIST_CACHE_TTL_SEC
+        return list(resolved)
 
 
 def add_watchlist_symbol(symbol: str) -> List[str]:
@@ -233,7 +364,9 @@ def add_watchlist_symbol(symbol: str) -> List[str]:
         current = _load_watchlist_from_disk()
         if current is None:
             current = _normalize(ALTCOIN_WATCHLIST)
-        return _persist_watchlist(current + normalized_symbol)
+        result = _persist_watchlist(current + normalized_symbol)
+        _invalidate_watchlist_cache()
+        return result
 
 
 def remove_watchlist_symbol(symbol: str) -> List[str]:
@@ -246,7 +379,9 @@ def remove_watchlist_symbol(symbol: str) -> List[str]:
         if current is None:
             current = _normalize(ALTCOIN_WATCHLIST)
         current = [item for item in current if item != target]
-        return _persist_watchlist(current)
+        result = _persist_watchlist(current)
+        _invalidate_watchlist_cache()
+        return result
 
 
 def universe_meta(
