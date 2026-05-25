@@ -5661,8 +5661,43 @@ softRefreshTimer=setTimeout(()=>{
 }
 function setWsBadge(connected){state.wsConnected=!!connected;const st=document.getElementById('system-status');if(st)st.textContent=connected?'运行中(WS在线)':'运行中(轮询)';}
 function applyMarketTick(payload){try{const ex=marketDataState.exchange||document.getElementById('data-exchange')?.value,sym=marketDataState.symbol||document.getElementById('data-symbol')?.value,tf=marketDataState.timeframe||document.getElementById('data-timeframe')?.value||'1m';if(!ex||!sym||!marketDataState.bars?.length)return;const t=payload?.[ex]?.[sym];if(!t)return;const px=Number(t.last||0);if(px<=0)return;const tfSec=timeframeSeconds(tf);const nowMs=Date.now();const bucketMs=Math.floor(nowMs/(tfSec*1000))*(tfSec*1000);const bars=marketDataState.bars;const last=bars[bars.length-1];const lastMs=klineToMs(last?.timestamp);if(!Number.isFinite(lastMs))return;const lastBucket=Math.floor(lastMs/(tfSec*1000))*(tfSec*1000);if(lastBucket===bucketMs){last.high=Math.max(Number(last.high||px),px);last.low=Math.min(Number(last.low||px),px);if(!Number.isFinite(last.low))last.low=px;if(!Number.isFinite(last.high))last.high=px;last.close=px;}else if(bucketMs>lastBucket){if(isSubMinuteTf(tf)){return;}const openPx=Number(last.close||px);bars.push({timestamp:klineUtcIso(bucketMs),open:openPx,high:Math.max(openPx,px),low:Math.min(openPx,px),close:px,volume:0});marketDataState.bars=cropBars(mergeBars([],bars));}const renderThrottle=isSubMinuteTf(tf)?900:450;const now=Date.now();if(now-lastTickRenderAt>=renderThrottle){lastTickRenderAt=now;renderKlineChart(true);}}catch(e){console.error(e);}}
+// WS reconnect uses exponential backoff (2s→30s) so we don't hammer the
+// server when it's already overloaded. Reset on successful open.
+const WS_RECONNECT_BASE_MS=2000;
+const WS_RECONNECT_MAX_MS=30000;
+// Client-side heartbeat: send ping every 25s, expect a pong within 10s.
+// Without this, a dead intermediate proxy can keep the socket "open" while
+// no events flow, leaving the UI permanently stale.
+const WS_HEARTBEAT_INTERVAL_MS=25000;
+const WS_HEARTBEAT_TIMEOUT_MS=10000;
+let wsReconnectAttempt=0;
+let wsHeartbeatTimer=0;
+let wsHeartbeatDeadlineTimer=0;
+let wsLastPongAt=0;
+function _ws_clearHeartbeat(){
+if(wsHeartbeatTimer){clearTimeout(wsHeartbeatTimer);wsHeartbeatTimer=0;}
+if(wsHeartbeatDeadlineTimer){clearTimeout(wsHeartbeatDeadlineTimer);wsHeartbeatDeadlineTimer=0;}
+}
+function _ws_scheduleHeartbeat(socket){
+_ws_clearHeartbeat();
+if(!socket||socket.readyState!==WebSocket.OPEN)return;
+wsHeartbeatTimer=setTimeout(()=>{
+  try{
+    if(!socket||socket.readyState!==WebSocket.OPEN)return;
+    socket.send('ping');
+    // Arm a deadline: if no pong within window, force-close so onclose
+    // triggers a reconnect with backoff. Without this, a half-open TCP
+    // can stay alive for minutes.
+    wsHeartbeatDeadlineTimer=setTimeout(()=>{
+      try{console.warn('[ws] heartbeat timeout, closing socket');}catch{}
+      try{socket.close();}catch{}
+    },WS_HEARTBEAT_TIMEOUT_MS);
+  }catch{}
+},WS_HEARTBEAT_INTERVAL_MS);
+}
 function closeWebSocketClient(){
 if(wsRetryTimer){clearTimeout(wsRetryTimer);wsRetryTimer=null;}
+_ws_clearHeartbeat();
 if(!wsClient){setWsBadge(false);return;}
 try{
   wsClient.onopen=null;
@@ -5682,9 +5717,53 @@ if(wsClient)closeWebSocketClient();
 const proto=location.protocol==='https:'?'wss':'ws';
 const socket=new WebSocket(`${proto}://${location.host}/ws`);
 wsClient=socket;
-socket.onopen=()=>{if(wsClient===socket)setWsBadge(true);};
-socket.onmessage=e=>{try{const m=JSON.parse(e.data||'{}');const ev=m.event||'';if(['order_event','position_event','execution_event','mode_changed','runtime_snapshot','strategy_signal'].includes(ev)){softRefresh(120);}if(ev==='mode_changed'){notify(`交易模式已切换: ${m?.payload?.mode||'-'}`);}if(ev==='order_event'){const o=m?.payload?.order||{};notify(`订单更新: ${o.symbol||''} ${mapOrderStatus(o.status||'')}`);}if(ev==='strategy_signal'){pushRealtimeSignal(m?.payload||{});}if(ev==='market_tick'){applyMarketTick(m?.payload||{});} }catch{}};
-socket.onclose=()=>{if(wsClient===socket)wsClient=null;setWsBadge(false);if(document.hidden)return;if(wsRetryTimer)clearTimeout(wsRetryTimer);wsRetryTimer=setTimeout(()=>initWebSocket(),2000);};
+socket.onopen=()=>{
+  if(wsClient===socket){
+    setWsBadge(true);
+    wsReconnectAttempt=0;  // healthy connect → reset backoff
+    wsLastPongAt=Date.now();
+    _ws_scheduleHeartbeat(socket);
+  }
+};
+socket.onmessage=e=>{try{
+  const m=JSON.parse(e.data||'{}');
+  const ev=m.event||'';
+  // CRITICAL: only refresh on events that actually change data.
+  // runtime_snapshot fires every 2s as a heartbeat — refreshing on it
+  // caused a 9-call burst every 2s on the trading tab (~330 req/min).
+  // strategy_signal is informational only; it goes into the realtime feed
+  // but does not change tables — no refresh needed.
+  if(['order_event','position_event','execution_event','mode_changed'].includes(ev)){
+    // Bigger debounce on trading tab — collapses bursts (e.g. cancel-all)
+    // into a single refresh cycle rather than firing 9 calls per event.
+    softRefresh(getActiveTabName()==='trading'?500:120);
+  }
+  if(ev==='pong'){
+    wsLastPongAt=Date.now();
+    if(wsHeartbeatDeadlineTimer){clearTimeout(wsHeartbeatDeadlineTimer);wsHeartbeatDeadlineTimer=0;}
+    _ws_scheduleHeartbeat(socket);
+  }
+  if(ev==='hello'){
+    // Server hello arrives once per (re)connect. It's not a data-change
+    // event — do not trigger refresh. Tab data is already loaded from
+    // initial GET calls or will load on tab activation.
+  }
+  if(ev==='mode_changed'){notify(`交易模式已切换: ${m?.payload?.mode||'-'}`);}
+  if(ev==='order_event'){const o=m?.payload?.order||{};notify(`订单更新: ${o.symbol||''} ${mapOrderStatus(o.status||'')}`);}
+  if(ev==='strategy_signal'){pushRealtimeSignal(m?.payload||{});}
+  if(ev==='market_tick'){applyMarketTick(m?.payload||{});}
+}catch{}};
+socket.onclose=()=>{
+  if(wsClient===socket)wsClient=null;
+  setWsBadge(false);
+  _ws_clearHeartbeat();
+  if(document.hidden)return;
+  // Exponential backoff: 2s, 4s, 8s, 16s, 30s (cap).
+  const delay=Math.min(WS_RECONNECT_MAX_MS,WS_RECONNECT_BASE_MS*Math.pow(2,wsReconnectAttempt));
+  wsReconnectAttempt=Math.min(wsReconnectAttempt+1,5);
+  if(wsRetryTimer)clearTimeout(wsRetryTimer);
+  wsRetryTimer=setTimeout(()=>initWebSocket(),delay);
+};
 socket.onerror=()=>{setWsBadge(false);};
 }catch{setWsBadge(false);}
 }
