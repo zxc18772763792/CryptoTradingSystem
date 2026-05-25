@@ -187,6 +187,18 @@ class ExecutionEngine:
         self._live_reconcile_absence_threshold = 3
         self._live_reconcile_absence_min_age_seconds = 10.0 * 60.0
         self._real_order_timeout_seconds = 30.0
+        # Reduce-only rejection bookkeeping. Binance returns -2022 when there's
+        # no exchange position to reduce — usually meaning local state has
+        # diverged from the venue. The self-heal path verifies via
+        # `_exchange_has_side_position`, but that call ALSO depends on the same
+        # exchange that's struggling, so when the venue is slow we can't get a
+        # definitive "no position" answer and we'd otherwise retry forever,
+        # consuming the worker. After this many consecutive failures for the
+        # same (account, exchange, symbol, side), we treat the local position
+        # as confirmed-stale and force-close it locally regardless of whether
+        # we could verify. Re-tested every restart.
+        self._reduce_only_failure_counts: Dict[Tuple[str, str, str, str], int] = {}
+        self._reduce_only_force_close_threshold = 3
         self._live_review_root = Path("./data/cache/live_review")
         self._live_trade_journal_path = self._live_review_root / "strategy_trade_journal.jsonl"
         self._live_trade_counts_path = self._live_review_root / "strategy_trade_counts.json"
@@ -4717,6 +4729,37 @@ class ExecutionEngine:
                     side=position_side,
                     min_qty=close_qty * 0.5,
                 )
+                # Track consecutive failures so we don't get stuck retrying the
+                # same close forever when verification itself is degraded.
+                fail_key = (
+                    str(account_id or "main"),
+                    str(exchange or "").lower(),
+                    self._canonical_symbol(signal.symbol),
+                    position_side.value,
+                )
+                if checked and has_exchange_pos:
+                    # Exchange confirmed a position exists; reset the counter so
+                    # transient -2022 (timing race) doesn't accumulate to force-close.
+                    self._reduce_only_failure_counts.pop(fail_key, None)
+                else:
+                    current = int(self._reduce_only_failure_counts.get(fail_key, 0) or 0) + 1
+                    self._reduce_only_failure_counts[fail_key] = current
+                    if (not checked) and current >= self._reduce_only_force_close_threshold:
+                        # Verification keeps failing AND -2022 keeps coming back.
+                        # That's the stale-local-position pattern. Force a local
+                        # close so the retry storm stops eating the worker.
+                        logger.warning(
+                            f"reduce-only rejected {current}x in a row but exchange-side verification "
+                            f"unavailable; forcing local close of stale position. "
+                            f"strategy={signal.strategy_name} symbol={signal.symbol} "
+                            f"side={position_side.value} account_id={account_id}"
+                        )
+                        # Synthesize a `checked=True, has_exchange_pos=False` outcome
+                        # so the existing reconcile branch (below) handles cleanup
+                        # via position_manager.close_position + audit + callbacks.
+                        checked = True
+                        has_exchange_pos = False
+                        self._reduce_only_failure_counts.pop(fail_key, None)
                 if checked and not has_exchange_pos:
                     close_price = float(quote_price or signal.price or position.current_price or position.entry_price or 0.0)
                     if close_price <= 0:
