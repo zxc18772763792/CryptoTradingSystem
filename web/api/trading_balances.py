@@ -738,11 +738,40 @@ async def _build_all_balances_payload():
             if key and val > 0:
                 distribution_map[key] = distribution_map.get(key, 0.0) + val
 
+    # If risk_manager's cached `current_equity` is obviously stale/corrupt
+    # (much smaller than today's known day_start baseline), DO NOT use it as
+    # the comparison point for abnormal-cashflow detection. Otherwise a real
+    # successful balance fetch (e.g. 5062 USDT) gets rejected as an "abnormal
+    # transfer" against a phantom 1.15 prev value, and the UI stays at 1.15
+    # forever. Observed live 2026-05-25.
+    sanity_baseline = trading_api._safe_float(
+        live_day_start_equity, default=0.0
+    )
+    # `prev_equity` is unreliable when (a) it's < $10 absolute (almost
+    # certainly not a real account value) or (b) it's < 10% of a positive
+    # day_start baseline. In either case fall back to the baseline.
+    prev_equity_unreliable = (
+        prev_equity > 0
+        and (
+            prev_equity < 10.0
+            or (sanity_baseline > 0 and prev_equity < sanity_baseline * 0.1)
+        )
+    )
+    if prev_equity_unreliable:
+        trading_api.logger.warning(
+            f"Discarding stale risk equity (prev={prev_equity:.4f}) — "
+            f"day_start_baseline={sanity_baseline:.4f}. Will use baseline as "
+            f"reference for cashflow sanity check."
+        )
+        prev_equity_for_check = sanity_baseline if sanity_baseline > 0 else 0.0
+    else:
+        prev_equity_for_check = prev_equity
+
     if (
         (not is_paper_mode)
-        and prev_equity > 0
+        and prev_equity_for_check > 0
         and risk_equity_input > 0
-        and risk_equity_input < prev_equity * 0.6
+        and risk_equity_input < prev_equity_for_check * 0.6
         and (
             total_unpriced_assets > 0
             or balance_warning_present
@@ -750,15 +779,15 @@ async def _build_all_balances_payload():
         )
     ):
         trading_api.logger.warning(
-            f"Skip abnormal equity drop for risk update: prev={prev_equity:.4f}, "
+            f"Skip abnormal equity drop for risk update: prev={prev_equity_for_check:.4f}, "
             f"new={risk_equity_input:.4f}, unpriced_assets={total_unpriced_assets}, "
             f"balance_warning_present={balance_warning_present}"
         )
-        risk_equity_input = prev_equity
+        risk_equity_input = prev_equity_for_check
 
-    if (not is_paper_mode) and prev_equity > 0 and risk_equity_input > 0:
-        delta_usd = risk_equity_input - prev_equity
-        move_ratio = abs(delta_usd) / max(prev_equity, 1e-6)
+    if (not is_paper_mode) and prev_equity_for_check > 0 and risk_equity_input > 0:
+        delta_usd = risk_equity_input - prev_equity_for_check
+        move_ratio = abs(delta_usd) / max(prev_equity_for_check, 1e-6)
         live_unrealized_abs = abs(
             float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0)
         )
@@ -766,11 +795,11 @@ async def _build_all_balances_payload():
         if move_ratio >= 0.55 and (not pnl_explained):
             trading_api.logger.warning(
                 "Skip abnormal equity move likely transfer/cashflow: "
-                f"prev={prev_equity:.4f}, new={risk_equity_input:.4f}, "
+                f"prev={prev_equity_for_check:.4f}, new={risk_equity_input:.4f}, "
                 f"delta={delta_usd:.4f}, live_unrealized={live_unrealized_abs:.4f}, "
                 f"warnings={balance_warning_present}, unpriced={total_unpriced_assets}"
             )
-            risk_equity_input = prev_equity
+            risk_equity_input = prev_equity_for_check
 
     if (
         (not is_paper_mode)

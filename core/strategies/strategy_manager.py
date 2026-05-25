@@ -777,6 +777,51 @@ class StrategyManager:
                 return self._sanitize_account_id(str(raw))
         return self._default_strategy_account_id(name)
 
+    def sync_runtime_mode_to_global(self, new_global_mode: str) -> int:
+        """Push the global mode into every already-registered strategy that did
+        NOT explicitly request its own mode.
+
+        Symptom this fixes: operator switches the system from paper to live via
+        /trading/mode/confirm, but signals from existing strategies keep routing
+        to the paper queue because each strategy instance's ``_runtime_mode``
+        was set at registration time and is never refreshed.
+
+        Returns the number of strategies whose mode was updated.
+        """
+        target = self._normalize_runtime_mode(new_global_mode)
+        updated = 0
+        for name, strategy in self._strategies.items():
+            cfg = self._configs.get(name)
+            params = dict((cfg.params if cfg else {}) or {})
+            metadata = dict((cfg.metadata if cfg else {}) or {})
+            # If the operator deliberately pinned this strategy to a specific
+            # mode (via params or metadata at registration time), respect it.
+            pinned = (
+                params.get("runtime_mode")
+                or params.get("trading_mode")
+                or params.get("mode")
+                or metadata.get("runtime_mode")
+                or metadata.get("trading_mode")
+                or metadata.get("mode")
+            )
+            if pinned and self._normalize_runtime_mode(pinned) != target:
+                continue
+            current_strategy_mode = getattr(strategy, "runtime_mode", None)
+            if self._normalize_runtime_mode(current_strategy_mode) == target:
+                continue
+            try:
+                strategy._runtime_mode = target  # type: ignore[attr-defined]
+                updated += 1
+                logger.info(
+                    f"strategy_manager: synced {name} runtime_mode -> {target} "
+                    f"(was {current_strategy_mode!r}, global mode now {target})"
+                )
+            except Exception as exc:
+                logger.warning(f"strategy_manager: failed to sync {name} to {target}: {exc}")
+        if updated:
+            logger.info(f"strategy_manager: {updated} strategies synced to global mode {target}")
+        return updated
+
     def get_strategy_runtime_mode(self, name: str) -> str:
         from core.trading.account_manager import account_manager
 
@@ -1288,13 +1333,29 @@ class StrategyManager:
             params = dict(params or {})
             params.setdefault("account_id", self._default_strategy_account_id(name))
             metadata = dict(metadata or {})
+            # IMPORTANT: do NOT setdefault `runtime_mode` into ``params``/``metadata``
+            # unconditionally. Doing so freezes whatever the global mode was at
+            # registration time into the persisted strategy record. When the
+            # operator later switches the system to live, those frozen 'paper'
+            # values get re-loaded on restart and ``_resolve_signal_trading_mode``
+            # treats them as an explicit per-strategy override that wins over
+            # the new global mode — so signals keep routing to paper despite
+            # the global setting. (Reproduced live 2026-05-25 across 22 saved
+            # strategies.) Only persist a mode override if the caller explicitly
+            # supplied one.
+            user_explicit_mode = (
+                (params.get("runtime_mode") or params.get("trading_mode") or params.get("mode"))
+                or (metadata.get("runtime_mode") or metadata.get("trading_mode") or metadata.get("mode"))
+            )
             runtime_mode = self._resolve_strategy_runtime_mode(
                 name,
                 params=params,
                 metadata=metadata,
             )
-            params.setdefault("runtime_mode", runtime_mode)
-            metadata.setdefault("runtime_mode", runtime_mode)
+            if user_explicit_mode:
+                # Caller asked for a specific mode — keep it.
+                params.setdefault("runtime_mode", runtime_mode)
+                metadata.setdefault("runtime_mode", runtime_mode)
             self._sync_strategy_account(name, params, metadata)
             try:
                 strategy = strategy_class(
