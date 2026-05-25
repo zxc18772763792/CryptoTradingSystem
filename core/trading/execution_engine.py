@@ -347,6 +347,22 @@ class ExecutionEngine:
         set_account_scope = getattr(risk_manager, "set_account_scope", None)
         if callable(set_account_scope):
             set_account_scope(resolved, reset_baseline=reset_baseline)
+        # Push the new global mode into every already-registered strategy
+        # whose mode wasn't explicitly pinned. Without this, switching the
+        # system from paper→live (or vice versa) updates order/position/risk
+        # state but leaves each strategy instance's ``_runtime_mode`` at its
+        # registration-time value — and ``_resolve_signal_trading_mode``
+        # treats that as a per-strategy override, so signals keep routing to
+        # the old mode. Imported locally to avoid a circular import at module load.
+        try:
+            from core.strategies.strategy_manager import strategy_manager as _strategy_manager  # noqa: PLC0415
+            sync = getattr(_strategy_manager, "sync_runtime_mode_to_global", None)
+            if callable(sync):
+                sync(resolved)
+        except Exception as exc:
+            logger.warning(
+                f"execution_engine: failed to sync strategy modes to {resolved}: {exc}"
+            )
 
     @contextlib.asynccontextmanager
     async def _mode_guard(self, mode: str, *, reset_baseline: bool = False):
