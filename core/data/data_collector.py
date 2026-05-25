@@ -57,10 +57,16 @@ class DataCollector:
             DataType.FEAR_GREED: [],
         }
         self._collected_data: Dict[str, List[Any]] = {}
-        
+
         # 子采集器实例
         self._funding_rate_collector = None
         self._fear_greed_collector = None
+
+        # The collection loop task. Saved as an attribute (not just a local) so
+        # the asyncio event loop won't garbage-collect it mid-execution — see
+        # https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task
+        # ("Important: Save a reference to the result of this function...").
+        self._loop_task: Optional[asyncio.Task] = None
 
     def add_task(
         self,
@@ -281,12 +287,25 @@ class DataCollector:
         self._running = True
         logger.info("Data collector started")
 
-        # 启动采集循环
-        asyncio.create_task(self._run_collection_loop())
+        # 启动采集循环 — keep a reference so GC doesn't kill the loop.
+        self._loop_task = asyncio.create_task(
+            self._run_collection_loop(), name="data_collector_loop"
+        )
 
     async def stop(self) -> None:
         """停止数据采集"""
         self._running = False
+        task = self._loop_task
+        self._loop_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                # CancelledError is expected; any other exception is the loop's
+                # exit error which we already logged. Don't propagate here so
+                # the rest of shutdown can proceed.
+                pass
         logger.info("Data collector stopped")
 
     def get_collected_data(self, task_id: str) -> List[Any]:
