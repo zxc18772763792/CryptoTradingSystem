@@ -1595,6 +1595,138 @@ input[type="datetime-local"]::-webkit-inner-spin-button {
     width: auto;
 }
 
+.backtest-mode-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin: 10px 0 8px;
+}
+
+.backtest-mode-tab {
+    min-height: 38px;
+    border: 1px solid #2f445d;
+    border-radius: 8px;
+    background: #111d2b;
+    color: #9fb1c9;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.backtest-mode-tab:hover {
+    border-color: #426284;
+    color: #dbe7f5;
+}
+
+.backtest-mode-tab.active {
+    background: #1b3148;
+    border-color: #3aa6ff;
+    color: #eef6ff;
+}
+
+.backtest-mode-note {
+    margin-bottom: 12px;
+    padding: 8px 10px;
+    border: 1px solid #27394f;
+    border-radius: 8px;
+    background: rgba(10, 16, 24, 0.36);
+    color: #9fb1c9;
+    font-size: 12px;
+}
+
+.backtest-mode-panel[hidden] {
+    display: none !important;
+}
+
+.backtest-mode-panel:not([hidden]) {
+    display: block;
+}
+
+.factor-template-spec {
+    display: grid;
+    gap: 8px;
+    margin: 8px 0 12px;
+}
+
+.factor-template-spec-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(136px, 1fr));
+    gap: 8px;
+}
+
+.factor-template-spec-card {
+    min-height: 66px;
+    padding: 10px;
+    border: 1px solid #293b52;
+    border-radius: 8px;
+    background: #111a26;
+}
+
+.factor-template-spec-card .label {
+    color: #8ea7c5;
+    font-size: 11px;
+}
+
+.factor-template-spec-card .value {
+    margin-top: 4px;
+    color: #eef6ff;
+    font-size: 14px;
+    font-weight: 700;
+    word-break: break-word;
+}
+
+.factor-template-spec .list-item {
+    align-items: flex-start;
+}
+
+.factor-template-spec .list-item span:last-child {
+    text-align: right;
+    white-space: normal;
+    word-break: break-word;
+}
+
+.factor-template-spec details {
+    border: 1px solid #293b52;
+    border-radius: 8px;
+    background: #0f1826;
+    padding: 8px 10px;
+}
+
+.factor-template-spec summary {
+    cursor: pointer;
+    color: #b7c9e2;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.factor-template-spec pre {
+    margin: 8px 0 0;
+    color: #bcd1eb;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 220px;
+    overflow: auto;
+}
+
+.factor-batch-output {
+    margin-top: 2px;
+    max-height: 320px;
+    overflow: auto;
+    white-space: normal;
+}
+
+.factor-batch-output pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.form-help-inline {
+    color: #7e92b2;
+    font-size: 11px;
+    font-weight: 400;
+}
+
 #analytics-overview-summary,
 #research-quick-summary {
     max-height: 220px;
@@ -10691,7 +10823,7 @@ input[type="radio"] {
 
 #ai-agent .ai-agent-decision-strip .ai-agent-scroll-shell-ranking {
     flex: 1 1 auto;
-    min-height: 0;
+    min-height: clamp(180px, 24vh, 260px);
     max-height: none;
     margin-top: 2px;
     padding: 12px;
@@ -10699,7 +10831,8 @@ input[type="radio"] {
     background: var(--ai-agent-subsection-shell);
     border-color: rgba(96, 165, 250, 0.16);
     box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.04);
-    overflow: hidden;
+    overflow-y: auto;
+    overflow-x: hidden;
 }
 
 #ai-agent .ai-agent-panel-ranking .ai-agent-config-grid {
@@ -15029,7 +15162,7 @@ body:has(#ai-agent.active) .container {
 
 #ai-agent {
     --ai-agent-main-gap: 14px;
-    --ai-agent-decision-panel-height: clamp(660px, 64vh, 720px);
+    --ai-agent-decision-panel-height: clamp(820px, 76vh, 920px);
     --ai-agent-journal-panel-height: clamp(500px, 52vh, 560px);
     --ai-agent-journal-log-height: clamp(360px, 44vh, 480px);
     --ai-agent-review-log-height: clamp(420px, 50vh, 620px);

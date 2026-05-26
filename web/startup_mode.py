@@ -25,7 +25,7 @@ def resolve_startup_trading_mode(
     *,
     configured_mode: Any,
     persisted_account: Mapping[str, Any] | None,
-    allow_persisted_live_mode_start: bool = False,
+    allow_persisted_live_mode_start: bool = True,
 ) -> StartupModeDecision:
     configured = normalize_trading_mode(configured_mode, fallback="paper")
     persisted = normalize_trading_mode(

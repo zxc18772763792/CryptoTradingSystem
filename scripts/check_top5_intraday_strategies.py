@@ -1,4 +1,4 @@
-"""Self-check for the five 5m cross-sectional Binance USD-M strategies."""
+"""Self-check for the core 5m cross-sectional Binance USD-M strategies."""
 from __future__ import annotations
 
 import sys
@@ -18,6 +18,14 @@ from strategies.quantitative.intraday_cross_section import (
     build_ohlcv_panels,
 )
 from web.api.backtest import _run_backtest_core
+
+CORE_INTRADAY_STRATEGIES = [
+    "ResidualMom48hStrategy",
+    "Ret24hReversalStrategy",
+    "RelRet24hReversalStrategy",
+    "ResidualMom24hStrategy",
+    "CloseLocation48hStrategy",
+]
 
 
 def _frames(rows: int = 620, assets: int = 6) -> dict[str, pd.DataFrame]:
@@ -47,7 +55,8 @@ def main() -> int:
     frames = _frames()
     panels = build_ohlcv_panels(frames)
     symbols = list(frames)
-    for class_name, spec in INTRADAY_CROSS_SECTION_SPECS.items():
+    for class_name in CORE_INTRADAY_STRATEGIES:
+        spec = INTRADAY_CROSS_SECTION_SPECS[class_name]
         params = {
             **get_strategy_defaults(class_name),
             "universe_symbols": symbols,
@@ -72,7 +81,7 @@ def main() -> int:
             f"long={latest['long_symbols']} short={latest['short_symbols']} "
             f"final_capital={result['final_capital']} trades={result['total_trades']}"
         )
-    print("top5 intraday cross-section self-check passed")
+    print(f"core intraday cross-section self-check passed: {len(CORE_INTRADAY_STRATEGIES)} strategies")
     return 0
 
 

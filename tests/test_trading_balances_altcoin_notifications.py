@@ -21,7 +21,7 @@ def _configure_common_runtime(monkeypatch) -> None:
     monkeypatch.setattr(
         trading_api.risk_manager,
         "get_risk_report",
-        lambda: {"risk_level": "low", "equity": {"current": 1234.5}},
+        lambda *args, **kwargs: {"risk_level": "low", "equity": {"current": 1234.5}},
     )
     monkeypatch.setattr(trading_api.position_manager, "get_position_count", lambda: 0)
     monkeypatch.setattr(
@@ -75,7 +75,7 @@ def _patch_altcoin_notification_context(monkeypatch) -> None:
     )
 
 
-def test_trading_balances_route_passes_altcoin_context_into_notification_evaluation(
+def test_trading_balances_route_defers_altcoin_context_notification_evaluation(
     monkeypatch,
 ):
     client = _build_test_client()
@@ -114,14 +114,11 @@ def test_trading_balances_route_passes_altcoin_context_into_notification_evaluat
     payload = response.json()
 
     assert payload["notifications"]["triggered_count"] == 0
-    assert "altcoin" in captured["context"]
-    assert (
-        captured["context"]["altcoin"]["scans"]["cfg-1"]["rows"][0]["symbol"]
-        == "AAA/USDT"
-    )
+    assert payload["notifications"]["eval_deferred"] is True
+    assert captured == {}
 
 
-def test_trading_balances_cached_response_still_evaluates_altcoin_notifications(
+def test_trading_balances_cached_response_defers_altcoin_notifications(
     monkeypatch,
 ):
     client = _build_test_client()
@@ -162,17 +159,14 @@ def test_trading_balances_cached_response_still_evaluates_altcoin_notifications(
     payload = response.json()
 
     assert payload["from_cache"] is True
-    assert payload["notifications"]["triggered_count"] == 1
-    assert "altcoin" in captured["context"]
-    assert (
-        captured["context"]["altcoin"]["scans"]["cfg-1"]["rows"][0]["symbol"]
-        == "AAA/USDT"
-    )
+    assert payload["notifications"]["triggered_count"] == 0
+    assert payload["notifications"]["eval_deferred"] is True
+    assert captured == {}
 
     trading_balances._BALANCE_RESPONSE_CACHE.clear()
 
 
-def test_trading_balances_timeout_fallback_still_evaluates_altcoin_notifications(
+def test_trading_balances_timeout_fallback_defers_altcoin_notifications(
     monkeypatch,
 ):
     client = _build_test_client()
@@ -210,12 +204,9 @@ def test_trading_balances_timeout_fallback_still_evaluates_altcoin_notifications
     payload = response.json()
 
     assert payload["stale"] is True
-    assert payload["notifications"]["triggered_count"] == 1
-    assert "altcoin" in captured["context"]
-    assert (
-        captured["context"]["altcoin"]["scans"]["cfg-1"]["rows"][0]["symbol"]
-        == "AAA/USDT"
-    )
+    assert payload["notifications"]["triggered_count"] == 0
+    assert payload["notifications"]["eval_deferred"] is True
+    assert captured == {}
 
 
 def test_live_display_equity_uses_live_balance_snapshot_when_risk_is_guarded():

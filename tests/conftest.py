@@ -57,6 +57,15 @@ def _isolate_runtime_side_effect_paths(tmp_path: Path, monkeypatch: pytest.Monke
             manager._ensure_default()
             manager._save()
 
+    cb_module = sys.modules.get("core.risk.circuit_breaker")
+    if cb_module is not None:
+        cb = getattr(cb_module, "circuit_breaker", None)
+        if cb is not None:
+            cb._store_path = tmp_path / "cache" / "runtime_state" / "circuit_breaker.json"
+            with cb._lock:
+                cb._portfolio = cb_module._PortfolioState()
+                cb._strategies = {}
+
     ai_module = sys.modules.get("web.api.ai_research")
     if ai_module is not None and hasattr(ai_module, "_reset_operating_mode_cache_for_tests"):
         ai_module._reset_operating_mode_cache_for_tests()

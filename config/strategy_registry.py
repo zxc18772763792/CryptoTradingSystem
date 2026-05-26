@@ -49,28 +49,53 @@ _INTRADAY_CS_UNIVERSE: List[str] = [
 ]
 
 
-def _intraday_cs_defaults(strategy_id: str, lookback_bars: int, direction: str) -> Dict[str, Any]:
+def _intraday_execution_permissions(execution_mode: str) -> tuple[bool, bool]:
+    mode = str(execution_mode or "spread_low_minus_high").strip().lower()
+    if mode.startswith("short_"):
+        return False, True
+    if mode.startswith("long_"):
+        return True, False
+    return True, True
+
+
+def _intraday_cs_defaults(
+    strategy_id: str,
+    lookback_bars: int,
+    direction: str,
+    *,
+    timeframe: str = "5m",
+    rebalance_bars: int = 288,
+    horizon_bars: int | None = None,
+    execution_mode: str = "spread_low_minus_high",
+    family: str = "cross_section",
+    live_verdict: str = "priority",
+) -> Dict[str, Any]:
+    allow_long, allow_short = _intraday_execution_permissions(execution_mode)
     return {
         "strategy_id": strategy_id,
-        "timeframe": "5m",
+        "timeframe": str(timeframe or "5m"),
         "exchange": "binance",
         "market_type": "future",
         "universe_symbols": list(_INTRADAY_CS_UNIVERSE),
         "max_symbols": 100,
         "lookback_bars": int(lookback_bars),
-        "rebalance_bars": 288,
+        "rebalance_bars": int(rebalance_bars),
         "rebalance_offset_bars": 0,
+        "horizon_bars": int(horizon_bars if horizon_bars is not None else rebalance_bars),
         "long_quantile": 0.2,
         "short_quantile": 0.2,
         "direction": direction,
+        "execution_mode": str(execution_mode or "spread_low_minus_high"),
+        "family": str(family or "cross_section"),
+        "live_verdict": str(live_verdict or "priority"),
         "max_symbol_weight": 0.10,
         "min_quote_volume": 0.0,
         "min_universe_size": 5,
         "min_names_per_side": 1,
         "max_names_per_side": None,
         "max_portfolio_leverage": 1.0,
-        "allow_long": True,
-        "allow_short": True,
+        "allow_long": allow_long,
+        "allow_short": allow_short,
         "reverse_on_signal": True,
         "allow_pyramiding": False,
         "fee_bps_per_side": 5.0,
@@ -91,6 +116,51 @@ _INTRADAY_CS_GRID: Dict[str, List[Any]] = {
     "max_symbol_weight": [0.05, 0.10, 0.15],
     "min_quote_volume": [0.0, 100000.0, 500000.0],
 }
+
+_FACTOR_TEMPLATE_LOCKED_FIELDS = [
+    "strategy_id",
+    "timeframe",
+    "lookback_bars",
+    "rebalance_bars",
+    "horizon_bars",
+    "direction",
+    "execution_mode",
+]
+
+
+def _intraday_cs_registry_entry(
+    *,
+    strategy_id: str,
+    lookback_bars: int,
+    direction: str,
+    usage: str,
+    description: str,
+    timeframe: str = "5m",
+    rebalance_bars: int = 288,
+    horizon_bars: int | None = None,
+    execution_mode: str = "spread_low_minus_high",
+    family: str = "cross_section",
+    live_verdict: str = "priority",
+) -> Dict[str, Any]:
+    return {
+        "category": "quantitative",
+        "risk": "high",
+        "usage": usage,
+        "defaults": _intraday_cs_defaults(
+            strategy_id,
+            lookback_bars,
+            direction,
+            timeframe=timeframe,
+            rebalance_bars=rebalance_bars,
+            horizon_bars=horizon_bars,
+            execution_mode=execution_mode,
+            family=family,
+            live_verdict=live_verdict,
+        ),
+        "timeframe": timeframe,
+        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
+        "backtest": {"supported": True, "description": description, "optimization_grid": _INTRADAY_CS_GRID},
+    }
 
 
 STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
@@ -440,7 +510,7 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "category": "quantitative",
         "risk": "high",
         "usage": "Binance USD-M 5m cross-section 48h close-location continuation",
-        "defaults": _intraday_cs_defaults("close_location_48h", 576, "high"),
+        "defaults": _intraday_cs_defaults("close_location_48h", 576, "high", execution_mode="spread_high_minus_low"),
         "timeframe": "5m",
         "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
         "backtest": {"supported": True, "description": "48h rolling close-location mean, long high values and short low values", "optimization_grid": _INTRADAY_CS_GRID},
@@ -594,6 +664,203 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
 }
 
+STRATEGY_REGISTRY.update(
+    {
+        "ReturnEntropy4hStrategy": _intraday_cs_registry_entry(
+            strategy_id="return_entropy_4h",
+            lookback_bars=4,
+            direction="low",
+            usage="Binance USD-M 1h cross-section return entropy 4h spread",
+            description="4h binary return entropy; long low-entropy tapes and short high-entropy chop.",
+            timeframe="1h",
+            rebalance_bars=24,
+            horizon_bars=48,
+            family="nonparametric_chop",
+        ),
+        "FalseBreakoutSupply24hStrategy": _intraday_cs_registry_entry(
+            strategy_id="false_breakout_supply_24h",
+            lookback_bars=24,
+            direction="low",
+            usage="Binance USD-M 1h cross-section false-breakout supply short-low",
+            description="24h failed new-high supply pressure, traded as a short-low basket.",
+            timeframe="1h",
+            rebalance_bars=24,
+            horizon_bars=72,
+            execution_mode="short_low",
+            family="liquidity_rejection",
+            live_verdict="candidate",
+        ),
+        "RangeAsymmetry48hStrategy": _intraday_cs_registry_entry(
+            strategy_id="range_asymmetry_48h",
+            lookback_bars=576,
+            direction="low",
+            usage="Binance USD-M 5m cross-section 48h range asymmetry spread",
+            description="48h intrabar upside-vs-downside range asymmetry.",
+            family="intrabar_range_shape",
+        ),
+        "SessionAsiaFlow24hStrategy": _intraday_cs_registry_entry(
+            strategy_id="session_asia_flow_24h",
+            lookback_bars=288,
+            direction="low",
+            usage="Binance USD-M 5m cross-section Asia session flow spread",
+            description="24h UTC 00-08 volume-weighted directional flow.",
+            family="session_flow",
+        ),
+        "SessionFlowRotation24hStrategy": _intraday_cs_registry_entry(
+            strategy_id="session_flow_rotation_24h",
+            lookback_bars=288,
+            direction="low",
+            usage="Binance USD-M 5m cross-section session flow rotation spread",
+            description="24h Asia-session flow minus US-session flow rotation.",
+            family="session_flow",
+        ),
+        "VolumeWeightedReturn24hStrategy": _intraday_cs_registry_entry(
+            strategy_id="volume_weighted_return_24h",
+            lookback_bars=288,
+            direction="low",
+            usage="Binance USD-M 5m cross-section volume-weighted return spread",
+            description="24h volume-weighted return pressure.",
+            family="volume_confirmed_pressure",
+        ),
+        "WickImbalance48hStrategy": _intraday_cs_registry_entry(
+            strategy_id="wick_imbalance_48h",
+            lookback_bars=576,
+            direction="low",
+            usage="Binance USD-M 5m cross-section wick imbalance short-low",
+            description="48h lower-wick minus upper-wick liquidity rejection imbalance.",
+            execution_mode="short_low",
+            family="liquidity_rejection",
+        ),
+        "TurnoverEntropy48hStrategy": _intraday_cs_registry_entry(
+            strategy_id="turnover_entropy_48h",
+            lookback_bars=192,
+            direction="high",
+            usage="Binance USD-M 15m cross-section turnover entropy short-high",
+            description="48h turnover concentration entropy on 15m bars.",
+            timeframe="15m",
+            rebalance_bars=96,
+            horizon_bars=192,
+            execution_mode="short_high",
+            family="attention_structure",
+        ),
+        "BodyVolumeCorr24hStrategy": _intraday_cs_registry_entry(
+            strategy_id="body_volume_corr_24h",
+            lookback_bars=288,
+            direction="low",
+            usage="Binance USD-M 5m cross-section body-volume correlation spread",
+            description="24h rolling correlation between candle body returns and log dollar volume.",
+            family="activity_direction_confirmation",
+        ),
+        "CorrBreakdown24h72hStrategy": _intraday_cs_registry_entry(
+            strategy_id="corr_breakdown_24h_72h",
+            lookback_bars=864,
+            direction="high",
+            usage="Binance USD-M 5m cross-section correlation breakdown short-high",
+            description="24h market-correlation minus 72h market-correlation breakdown.",
+            execution_mode="short_high",
+            family="market_relation_shift",
+        ),
+        "ExtremeRecency48hStrategy": _intraday_cs_registry_entry(
+            strategy_id="extreme_recency_48h",
+            lookback_bars=576,
+            direction="high",
+            usage="Binance USD-M 5m cross-section extreme recency short-high",
+            description="48h recency of rolling high versus rolling low.",
+            execution_mode="short_high",
+            family="breakout_timing",
+            live_verdict="watchlist",
+        ),
+        "UpDownBetaSpread24h72hStrategy": _intraday_cs_registry_entry(
+            strategy_id="up_down_beta_spread_24h_72h",
+            lookback_bars=864,
+            direction="low",
+            usage="Binance USD-M 5m cross-section up/down beta spread",
+            description="72h up-market beta minus down-market beta asymmetry.",
+            family="asymmetric_market_beta",
+        ),
+        "DirectionalRangeEfficiency48hStrategy": _intraday_cs_registry_entry(
+            strategy_id="directional_range_efficiency_48h",
+            lookback_bars=576,
+            direction="low",
+            usage="Binance USD-M 5m cross-section directional range efficiency",
+            description="48h signed range expansion per dollar-volume liquidity.",
+            family="liquidity_impact",
+        ),
+        "CrossSectionalStress4hStrategy": _intraday_cs_registry_entry(
+            strategy_id="cross_sectional_stress_4h",
+            lookback_bars=4,
+            direction="low",
+            usage="Binance USD-M 1h cross-section 4h dispersion stress spread",
+            description="4h move extremity relative to same-timestamp cross-sectional dispersion.",
+            timeframe="1h",
+            rebalance_bars=24,
+            horizon_bars=72,
+            family="relative_shock",
+            live_verdict="candidate",
+        ),
+        "SignImbalance4hStrategy": _intraday_cs_registry_entry(
+            strategy_id="sign_imbalance_4h",
+            lookback_bars=4,
+            direction="high",
+            usage="Binance USD-M 1h cross-section sign imbalance long-high",
+            description="4h non-parametric up/down bar sign imbalance.",
+            timeframe="1h",
+            rebalance_bars=24,
+            horizon_bars=48,
+            execution_mode="long_high",
+            family="nonparametric_trend",
+            live_verdict="candidate",
+        ),
+        "VWAPSlope24hStrategy": _intraday_cs_registry_entry(
+            strategy_id="vwap_slope_24h",
+            lookback_bars=288,
+            direction="low",
+            usage="Binance USD-M 5m cross-section VWAP slope spread",
+            description="24h short-VWAP versus long-VWAP slope.",
+            family="volume_price_inventory",
+            live_verdict="watchlist",
+        ),
+        "VWAPGap48hStrategy": _intraday_cs_registry_entry(
+            strategy_id="vwap_gap_48h",
+            lookback_bars=576,
+            direction="low",
+            usage="Binance USD-M 5m cross-section VWAP gap spread",
+            description="48h close-to-volume-weighted-inventory gap.",
+            family="volume_price_inventory",
+            live_verdict="watchlist",
+        ),
+        "RelativeVolShock24hStrategy": _intraday_cs_registry_entry(
+            strategy_id="relative_vol_shock_24h",
+            lookback_bars=288,
+            direction="low",
+            usage="Binance USD-M 5m cross-section relative volatility shock short-low",
+            description="24h realized-volatility shock versus cross-sectional peers.",
+            rebalance_bars=144,
+            horizon_bars=144,
+            execution_mode="short_low",
+            family="relative_volatility",
+        ),
+        "LeadMarketResponse24h72hStrategy": _intraday_cs_registry_entry(
+            strategy_id="lead_market_response_24h_72h",
+            lookback_bars=864,
+            direction="low",
+            usage="Binance USD-M 5m cross-section lead-market response spread",
+            description="72h rolling correlation of lagged asset returns with current market returns.",
+            family="lead_lag",
+            live_verdict="candidate",
+        ),
+        "BreakCountBalance24hStrategy": _intraday_cs_registry_entry(
+            strategy_id="break_count_balance_24h",
+            lookback_bars=288,
+            direction="low",
+            usage="Binance USD-M 5m cross-section break-count balance spread",
+            description="24h repeated high-break count minus low-break count balance.",
+            family="breakout_frequency",
+            live_verdict="candidate",
+        ),
+    }
+)
+
 
 _STRATEGY_META_OVERRIDES: Dict[str, Dict[str, Any]] = {
     "FamaFactorArbitrageStrategy": {
@@ -638,11 +905,13 @@ def get_strategy_registry_entry(name: str) -> Dict[str, Any]:
 
 def get_strategy_library_meta(name: str) -> Dict[str, Any]:
     item = get_strategy_registry_entry(name)
-    return {
+    meta = {
         k: item.get(k)
         for k in ("category", "risk", "usage", "family", "decision_engine", "ai_driven")
         if k in item
     }
+    meta.update(get_strategy_backtest_surface_meta(name, item=item))
+    return meta
 
 
 def get_strategy_defaults(name: str) -> Dict[str, Any]:
@@ -665,6 +934,56 @@ def get_strategy_recommended_symbols(name: str) -> List[str]:
     if (not syms or syms == ["BTC/USDT"]) and item.get("category", "") in _MULTI_SYMBOL_CATEGORIES:
         return list(_COMMON_SYMBOLS)
     return list(syms) if syms else ["BTC/USDT"]
+
+
+def _factor_template_spec_from_item(item: Dict[str, Any]) -> Dict[str, Any]:
+    defaults = dict(item.get("defaults") or {})
+    strategy_id = str(defaults.get("strategy_id") or "").strip()
+    execution_mode = str(defaults.get("execution_mode") or "").strip()
+    if not strategy_id or not execution_mode or "rebalance_bars" not in defaults:
+        return {}
+
+    timeframe = str(defaults.get("timeframe") or item.get("timeframe") or "5m").strip() or "5m"
+    return {
+        "strategy_id": strategy_id,
+        "timeframe": timeframe,
+        "lookback_bars": int(defaults.get("lookback_bars") or 0),
+        "rebalance_bars": int(defaults.get("rebalance_bars") or 0),
+        "horizon_bars": int(defaults.get("horizon_bars") or defaults.get("rebalance_bars") or 0),
+        "direction": str(defaults.get("direction") or ""),
+        "execution_mode": execution_mode,
+        "long_quantile": float(defaults.get("long_quantile", 0.2) or 0.2),
+        "short_quantile": float(defaults.get("short_quantile", 0.2) or 0.2),
+        "max_symbol_weight": float(defaults.get("max_symbol_weight", 0.10) or 0.10),
+        "min_universe_size": int(defaults.get("min_universe_size", 5) or 5),
+        "fee_bps_per_side": float(defaults.get("fee_bps_per_side", 5.0) or 5.0),
+        "min_slippage_bps_per_side": float(defaults.get("min_slippage_bps_per_side", 2.0) or 2.0),
+        "max_slippage_bps_per_side": float(defaults.get("max_slippage_bps_per_side", 20.0) or 20.0),
+    }
+
+
+def get_strategy_backtest_surface_meta(name: str, item: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    entry = deepcopy(item) if item is not None else get_strategy_registry_entry(name)
+    spec = _factor_template_spec_from_item(entry)
+    if not spec:
+        return {
+            "strategy_kind": "classic",
+            "template_locked": False,
+            "locked_fields": [],
+            "factor_family": "",
+            "live_verdict": "",
+            "template_spec": {},
+        }
+
+    defaults = dict(entry.get("defaults") or {})
+    return {
+        "strategy_kind": "factor_template",
+        "template_locked": True,
+        "locked_fields": list(_FACTOR_TEMPLATE_LOCKED_FIELDS),
+        "factor_family": str(defaults.get("family") or entry.get("family") or "cross_section"),
+        "live_verdict": str(defaults.get("live_verdict") or "priority"),
+        "template_spec": spec,
+    }
 
 
 def _mlxgboost_model_candidates() -> List[Path]:
@@ -711,11 +1030,13 @@ def get_backtest_strategy_catalog(names: List[str] | None = None) -> List[Dict[s
         item = STRATEGY_REGISTRY.get(str(name), {})
         bt = dict(item.get("backtest") or {})
         supported, reason = _resolve_backtest_support(name)
+        surface_meta = get_strategy_backtest_surface_meta(str(name), item=get_strategy_registry_entry(str(name)))
         rows.append(
             {
                 "name": str(name),
                 "description": str(bt.get("description") or item.get("usage") or name),
                 "backtest_supported": supported,
+                **surface_meta,
                 **({"reason": reason} if reason else {}),
             }
         )
@@ -723,7 +1044,7 @@ def get_backtest_strategy_catalog(names: List[str] | None = None) -> List[Dict[s
 
 
 def get_backtest_strategy_info(name: str) -> Dict[str, Any]:
-    item = STRATEGY_REGISTRY.get(str(name), {})
+    item = get_strategy_registry_entry(str(name))
     bt = dict(item.get("backtest") or {})
     if not item:
         return {}
@@ -732,6 +1053,7 @@ def get_backtest_strategy_info(name: str) -> Dict[str, Any]:
         "name": str(name),
         "description": str(bt.get("description") or item.get("usage") or name),
         "backtest_supported": supported,
+        **get_strategy_backtest_surface_meta(str(name), item=item),
         **({"reason": reason} if reason else {}),
     }
 

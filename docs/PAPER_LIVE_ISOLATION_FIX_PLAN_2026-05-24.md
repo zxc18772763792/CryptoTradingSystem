@@ -59,7 +59,7 @@
 
 剩余真正需要补的：
 
-1. **S2-3 残留**（约 1 小时）：trading.py 里几个 `_iter_trade_records` / `get_all_positions` 调用补 scope 参数
+1. **S2-3 残留**（约 1 小时）：trading.py 里几个 `_iter_trade_records` / `get_all_positions` 调用补 scope 参数。2026-05-26 已补 `/api/trading/balances` paper 分支的持仓读取、浮盈和数量统计 scope 过滤，并用 `tests/test_trading_balance_routes.py::test_paper_balances_use_scoped_positions` 覆盖。
 2. **跑测试验证** Stage 1+2 改动没回归
 3. **commit** 当前所有改动
 

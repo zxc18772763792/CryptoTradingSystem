@@ -1286,8 +1286,9 @@ def _build_intraday_cross_section_backtest_components(
     spec = INTRADAY_CROSS_SECTION_SPECS.get(str(strategy or ""))
     if spec is None:
         raise HTTPException(status_code=400, detail=f"Unknown intraday cross-section strategy: {strategy}")
-    if str(timeframe or "").strip().lower() != "5m":
-        raise HTTPException(status_code=400, detail=f"{strategy} requires 5m timeframe")
+    required_timeframe = str(spec.timeframe or "5m").strip().lower()
+    if str(timeframe or "").strip().lower() != required_timeframe:
+        raise HTTPException(status_code=400, detail=f"{strategy} requires {required_timeframe} timeframe")
     if not market_bundle:
         raise HTTPException(status_code=400, detail=f"{strategy} backtest requires cross-sectional OHLCV data")
 
@@ -1329,6 +1330,9 @@ def _build_intraday_cross_section_backtest_components(
         "long_quantile": float(params.get("long_quantile", 0.2) or 0.2),
         "short_quantile": float(params.get("short_quantile", 0.2) or 0.2),
         "strategy_id": spec.strategy_id,
+        "timeframe": required_timeframe,
+        "execution_mode": str(params.get("execution_mode") or spec.execution_mode),
+        "family": spec.family,
         "lookback_bars": int(components.get("lookback_bars") or lookback_bars),
         "factor": components["factor"],
         "rebalance_count": int(len(components.get("rebalance_rows") or [])),
@@ -4005,6 +4009,8 @@ def _run_backtest_core(
     elif strategy in _INTRADAY_CROSS_SECTION_BACKTEST_STRATEGIES and cross_section_components:
         result["portfolio_mode"] = "intraday_cross_section_long_short"
         result["strategy_id"] = str(cross_section_components.get("strategy_id") or "")
+        result["execution_mode"] = str(cross_section_components.get("execution_mode") or "")
+        result["factor_family"] = str(cross_section_components.get("family") or "")
         result["benchmark_symbol"] = cross_section_components.get("benchmark_symbol")
         result["universe_size"] = int(cross_section_components.get("universe_size") or 0)
         result["long_quantile"] = float(cross_section_components.get("long_quantile") or 0.0)
@@ -4065,16 +4071,21 @@ def _run_backtest_core(
         if len(series_df) > max_points:
             step = int(np.ceil(len(series_df) / max_points))
             sampled_df = series_df.iloc[::step]
+            boundary_rows = series_df.iloc[[0, -1]]
             trade_ts = _trade_point_timestamp_keys(points)
             if trade_ts:
                 trade_rows = series_df[series_df["timestamp"].map(lambda value: _utc_naive_timestamp(value) in trade_ts)]
                 series_df = (
-                    pd.concat([sampled_df, trade_rows])
+                    pd.concat([sampled_df, boundary_rows, trade_rows])
                     .drop_duplicates(subset=["timestamp"], keep="first")
                     .sort_values("timestamp")
                 )
             else:
-                series_df = sampled_df
+                series_df = (
+                    pd.concat([sampled_df, boundary_rows])
+                    .drop_duplicates(subset=["timestamp"], keep="first")
+                    .sort_values("timestamp")
+                )
 
         rendered_series = []
         for _, row in series_df.iterrows():
@@ -4119,7 +4130,7 @@ async def _load_backtest_df(
         timeframe,
         start_time=start_time,
         end_time=end_time,
-        exchanges=["binance", "gate", "okx"],
+        exchanges=["binance"],
     )
 
 
@@ -4160,7 +4171,7 @@ async def _load_backtest_df_from_exchanges(
     end_time: Optional[datetime] = None,
 ) -> pd.DataFrame:
     tf = str(timeframe or "1h")
-    exchange_list = _normalize_backtest_exchanges(exchanges) or ["binance", "gate", "okx"]
+    exchange_list = _normalize_backtest_exchanges(exchanges) or ["binance"]
     best = pd.DataFrame()
     best_exchange = ""
     target_min = _min_required_bars(tf)
@@ -4240,6 +4251,84 @@ async def _load_backtest_df_for_strategy(
     return await _load_backtest_df(symbol, timeframe, start_time=start_time, end_time=end_time)
 
 
+def _intraday_cross_section_universe(
+    symbol: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    params = dict(params or {})
+    requested = _normalize_symbol(symbol) or "BTC/USDT"
+    universe_raw = list(params.get("universe_symbols") or _default_intraday_cs_universe(requested))
+    universe: List[str] = []
+    seen: set[str] = set()
+    max_symbols = max(4, int(params.get("max_symbols", 40) or 40))
+    for item in [requested, *universe_raw]:
+        sym = _normalize_symbol(item)
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        universe.append(sym)
+    return universe[:max_symbols]
+
+
+def _intraday_cross_section_min_rows(
+    strategy: str,
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> int:
+    params = dict(params or {})
+    spec = INTRADAY_CROSS_SECTION_SPECS.get(str(strategy or ""))
+    default_lookback = getattr(spec, "lookback_bars", 288)
+    lookback_bars = int(params.get("lookback_bars", default_lookback) or default_lookback)
+    return max(_min_required_bars(timeframe), lookback_bars + 2)
+
+
+def _filter_intraday_cross_section_market_bundle(
+    raw_bundle: Dict[str, pd.DataFrame],
+    *,
+    strategy: str,
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, pd.DataFrame]:
+    min_rows = _intraday_cross_section_min_rows(strategy, timeframe, params=params)
+    bundle: Dict[str, pd.DataFrame] = {}
+    for sym, df in (raw_bundle or {}).items():
+        if df is None or df.empty or len(df) < min_rows:
+            continue
+        bundle[sym] = df.copy()
+    return bundle
+
+
+async def _load_intraday_cross_section_raw_market_bundle(
+    strategy: str,
+    symbol: str,
+    timeframe: str,
+    params: Optional[Dict[str, Any]] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> Dict[str, pd.DataFrame]:
+    params = dict(params or {})
+    universe = _intraday_cross_section_universe(symbol, params=params)
+    loaded_frames = await asyncio.gather(
+        *[
+            _load_backtest_df_for_strategy(
+                sym,
+                timeframe,
+                strategy=strategy,
+                params=params,
+                start_time=start_time,
+                end_time=end_time,
+            )
+            for sym in universe
+        ]
+    )
+    bundle: Dict[str, pd.DataFrame] = {}
+    for sym, df in zip(universe, loaded_frames):
+        if df is None or df.empty:
+            continue
+        bundle[sym] = df.copy()
+    return bundle
+
+
 async def _load_fama_market_bundle(
     symbol: str,
     timeframe: str,
@@ -4292,41 +4381,20 @@ async def _load_intraday_cross_section_market_bundle(
     end_time: Optional[datetime] = None,
 ) -> Dict[str, pd.DataFrame]:
     params = dict(params or {})
-    requested = _normalize_symbol(symbol) or "BTC/USDT"
-    universe_raw = list(params.get("universe_symbols") or _default_intraday_cs_universe(requested))
-    universe: List[str] = []
-    seen: set[str] = set()
-    max_symbols = max(4, int(params.get("max_symbols", 40) or 40))
-    for item in [requested, *universe_raw]:
-        sym = _normalize_symbol(item)
-        if not sym or sym in seen:
-            continue
-        seen.add(sym)
-        universe.append(sym)
-    universe = universe[:max_symbols]
-
-    spec = INTRADAY_CROSS_SECTION_SPECS.get(str(strategy or ""))
-    lookback_bars = int(params.get("lookback_bars", getattr(spec, "lookback_bars", 288)) or getattr(spec, "lookback_bars", 288))
-    min_rows = max(_min_required_bars(timeframe), lookback_bars + 2)
-    loaded_frames = await asyncio.gather(
-        *[
-            _load_backtest_df_for_strategy(
-                sym,
-                timeframe,
-                strategy=strategy,
-                params=params,
-                start_time=start_time,
-                end_time=end_time,
-            )
-            for sym in universe
-        ]
+    raw_bundle = await _load_intraday_cross_section_raw_market_bundle(
+        strategy=strategy,
+        symbol=symbol,
+        timeframe=timeframe,
+        params=params,
+        start_time=start_time,
+        end_time=end_time,
     )
-    bundle: Dict[str, pd.DataFrame] = {}
-    for sym, df in zip(universe, loaded_frames):
-        if df.empty or len(df) < min_rows:
-            continue
-        bundle[sym] = df.copy()
-    return bundle
+    return _filter_intraday_cross_section_market_bundle(
+        raw_bundle,
+        strategy=strategy,
+        timeframe=timeframe,
+        params=params,
+    )
 
 
 async def _load_backtest_inputs(
@@ -4526,12 +4594,23 @@ async def compare_backtests(
     pre_optimize: bool = True,
     optimize_objective: str = "total_return",
     optimize_max_trials: int = _BACKTEST_COMPARE_DEFAULT_TRIALS,
+    params_json: Optional[str] = None,
     exit_template: Optional[str] = _DEFAULT_BACKTEST_EXIT_TEMPLATE,
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
 ):
     requested_exit_template = _normalize_requested_exit_template(exit_template)
+    shared_params: Dict[str, Any] = {}
+    if params_json:
+        try:
+            parsed_params = json.loads(params_json)
+        except Exception:
+            raise HTTPException(status_code=400, detail="params_json 不是合法JSON")
+        if not isinstance(parsed_params, dict):
+            raise HTTPException(status_code=400, detail="params_json 必须是对象JSON")
+        shared_params = parsed_params
+
     strategy_list = [s.strip() for s in strategies.split(",") if s.strip()]
     if not strategy_list:
         raise HTTPException(status_code=400, detail="至少需要一个策略")
@@ -4598,6 +4677,46 @@ async def compare_backtests(
         )
         return out
 
+    intraday_cs_raw_bundle_cache: Dict[tuple, Dict[str, pd.DataFrame]] = {}
+
+    async def _load_compare_intraday_cross_section_inputs(
+        *,
+        strategy: str,
+        base_params: Dict[str, Any],
+    ) -> tuple[pd.DataFrame, Optional[Dict[str, pd.DataFrame]], str]:
+        universe = _intraday_cross_section_universe(symbol, params=base_params)
+        cache_key = (
+            str(timeframe or "").strip(),
+            tuple(universe),
+            tuple(_resolve_backtest_exchange_scope(strategy, params=base_params)),
+            str(_utc_naive_timestamp(parsed_start) or ""),
+            str(_utc_naive_timestamp(parsed_end) or ""),
+        )
+        raw_bundle = intraday_cs_raw_bundle_cache.get(cache_key)
+        if raw_bundle is None:
+            raw_bundle = await _load_intraday_cross_section_raw_market_bundle(
+                strategy=strategy,
+                symbol=symbol,
+                timeframe=timeframe,
+                params=base_params,
+                start_time=_utc_naive_datetime(parsed_start),
+                end_time=_utc_naive_datetime(parsed_end),
+            )
+            intraday_cs_raw_bundle_cache[cache_key] = raw_bundle
+
+        bundle = _filter_intraday_cross_section_market_bundle(
+            raw_bundle,
+            strategy=strategy,
+            timeframe=timeframe,
+            params=base_params,
+        )
+        if not bundle:
+            return pd.DataFrame(), None, _normalize_symbol(symbol) or "BTC/USDT"
+        resolved_symbol = _normalize_symbol(symbol) or next(iter(bundle.keys()))
+        if resolved_symbol not in bundle:
+            resolved_symbol = next(iter(bundle.keys()))
+        return bundle[resolved_symbol].copy(), bundle, resolved_symbol
+
     compare_entries: List[Dict[str, Any]] = []
     for strategy in strategy_list:
         entry: Dict[str, Any] = {
@@ -4613,16 +4732,26 @@ async def compare_backtests(
             loop_bundle = None
             resolved_loop_symbol = _normalize_symbol(symbol) or symbol
             base_params = _with_backtest_request_overrides(strategy, pair_symbol=pair_symbol)
+            if shared_params:
+                base_params.update(shared_params)
+                if pair_symbol and strategy == "PairsTradingStrategy":
+                    base_params["pair_symbol"] = _normalize_symbol(pair_symbol)
             entry["base_params"] = base_params
             if strategy in {"FamaFactorArbitrageStrategy", "PairsTradingStrategy"} or strategy in _INTRADAY_CROSS_SECTION_BACKTEST_STRATEGIES:
-                loop_df, loop_bundle, resolved_loop_symbol = await _load_backtest_inputs(
-                    strategy=strategy,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    params=base_params,
-                    start_time=_utc_naive_datetime(parsed_start),
-                    end_time=_utc_naive_datetime(parsed_end),
-                )
+                if strategy in _INTRADAY_CROSS_SECTION_BACKTEST_STRATEGIES:
+                    loop_df, loop_bundle, resolved_loop_symbol = await _load_compare_intraday_cross_section_inputs(
+                        strategy=strategy,
+                        base_params=base_params,
+                    )
+                else:
+                    loop_df, loop_bundle, resolved_loop_symbol = await _load_backtest_inputs(
+                        strategy=strategy,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        params=base_params,
+                        start_time=_utc_naive_datetime(parsed_start),
+                        end_time=_utc_naive_datetime(parsed_end),
+                    )
                 if loop_df.empty and strategy == "FamaFactorArbitrageStrategy":
                     raise HTTPException(status_code=404, detail="Fama 回测缺少可用横截面数据")
             loop_df = await _attach_backtest_enrichment_if_needed(
@@ -4801,6 +4930,7 @@ async def compare_backtests(
         "use_stop_take": bool(use_stop_take),
         "stop_loss_pct": _safe_positive_pct(stop_loss_pct),
         "take_profit_pct": _safe_positive_pct(take_profit_pct),
+        "custom_params": shared_params,
         "results": results,
         "best": ranked[0] if ranked else None,
     }, requested_exit_template)

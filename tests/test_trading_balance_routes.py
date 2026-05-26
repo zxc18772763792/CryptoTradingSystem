@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
@@ -119,3 +120,74 @@ def test_all_balances_payload_does_not_switch_risk_scope(monkeypatch):
     equity_calls = [call for call in calls if call[0] == "update_equity"]
     assert equity_calls
     assert equity_calls[-1][2]["scope"] == "live"
+
+
+def test_paper_balances_use_scoped_positions(monkeypatch):
+    calls = []
+    paper_position = SimpleNamespace(
+        side="long",
+        symbol="BTC/USDT",
+        quantity=0.1,
+        current_price=50000.0,
+        entry_price=49000.0,
+        unrealized_pnl=100.0,
+    )
+    live_position = SimpleNamespace(
+        side="long",
+        symbol="ETH/USDT",
+        quantity=10.0,
+        current_price=3000.0,
+        entry_price=2900.0,
+        unrealized_pnl=1000.0,
+    )
+
+    def fake_get_all_positions(*, scope=None):
+        calls.append(("get_all_positions", scope))
+        return [paper_position] if scope == "paper" else [live_position]
+
+    monkeypatch.setattr(trading_api.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(trading_api.execution_engine, "is_paper_mode", lambda: True)
+    monkeypatch.setattr(
+        trading_api.execution_engine,
+        "get_account_equity_snapshot",
+        AsyncMock(return_value=10000.0),
+    )
+    monkeypatch.setattr(trading_api.risk_manager, "get_account_scope", lambda: "live")
+    monkeypatch.setattr(
+        trading_api.risk_manager,
+        "get_risk_report",
+        lambda *args, **kwargs: {
+            "scope": kwargs.get("scope") or "live",
+            "equity": {"current": 10000.0},
+            "risk_level": "low",
+            "trading_halted": False,
+        },
+    )
+    monkeypatch.setattr(
+        trading_api.risk_manager,
+        "update_equity",
+        lambda *args, **kwargs: calls.append(("update_equity", kwargs)),
+    )
+    monkeypatch.setattr(
+        trading_api.position_manager,
+        "get_all_positions",
+        fake_get_all_positions,
+    )
+    monkeypatch.setattr(trading_api.exchange_manager, "get_exchange", lambda exchange: None)
+    monkeypatch.setattr(
+        trading_api.account_snapshot_manager,
+        "record_snapshot",
+        AsyncMock(return_value=None),
+    )
+    trading_api._BALANCE_SNAPSHOT_CACHE.clear()
+
+    payload = asyncio.run(trading_balances._build_all_balances_payload())
+
+    currencies = {row["currency"] for row in payload["paper_account"]["balances"]}
+    assert "BTC" in currencies
+    assert "ETH" not in currencies
+    assert payload["live_position_count"] == 1
+    assert ("get_all_positions", "paper") in calls
+    equity_calls = [call for call in calls if call[0] == "update_equity"]
+    assert equity_calls[-1][1]["scope"] == "paper"
+    assert equity_calls[-1][1]["current_unrealized_pnl"] == 100.0

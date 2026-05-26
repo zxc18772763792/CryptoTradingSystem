@@ -11,9 +11,10 @@ from web.api import trading as trading_api
 
 
 router = APIRouter()
-_BALANCE_RESPONSE_CACHE_TTL_SEC = 10.0
-_BALANCE_RESPONSE_STALE_TTL_SEC = 90.0
-_BALANCE_RESPONSE_TIMEOUT_SEC = 18.0
+_BALANCE_RESPONSE_CACHE_TTL_SEC = 45.0
+_BALANCE_RESPONSE_STALE_TTL_SEC = 180.0
+_BALANCE_RESPONSE_TIMEOUT_SEC = 5.0
+_BALANCE_NOTIFICATION_TIMEOUT_SEC = 2.0
 _BALANCE_RESPONSE_CACHE: Dict[str, Dict[str, Any]] = {}
 _BALANCE_RESPONSE_TASKS: Dict[str, asyncio.Task] = {}
 
@@ -46,7 +47,7 @@ def _minimal_balance_payload(mode_name: str, note: str) -> Dict[str, Any]:
         .lower()
     )
     is_paper_mode = resolved_mode == "paper"
-    risk_report = trading_api.risk_manager.get_risk_report()
+    risk_report = trading_api.risk_manager.get_risk_report(scope=resolved_mode)
     exchanges = {}
     for exchange_name in ["gate", "binance", "okx"]:
         connector = trading_api.exchange_manager.get_exchange(exchange_name)
@@ -74,8 +75,8 @@ def _minimal_balance_payload(mode_name: str, note: str) -> Dict[str, Any]:
         "live_day_start_equity": None,
         "live_daily_total_pnl_usd": None,
         "live_unrealized_pnl_usd": 0.0,
-        "live_position_count": int(
-            trading_api.position_manager.get_position_count() or 0
+        "live_position_count": len(
+            trading_api.position_manager.get_all_positions(scope=resolved_mode)
         )
         if is_paper_mode
         else 0,
@@ -112,6 +113,53 @@ def _notification_total_usd_from_balance_payload(payload: Dict[str, Any]) -> flo
         or safe_payload.get("total_usd_estimate")
         or 0.0
     )
+
+
+async def _latest_account_equity_from_history(mode_name: str) -> float:
+    try:
+        rows = await trading_api.account_snapshot_manager.get_history(
+            hours=168,
+            exchange="all",
+            limit=1,
+            mode=str(mode_name or "").strip().lower() or None,
+        )
+    except Exception:
+        return 0.0
+    if not rows:
+        return 0.0
+    try:
+        return float((rows[-1] or {}).get("total_usd") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _apply_display_equity_fallback(
+    payload: Dict[str, Any],
+    *,
+    equity: float,
+    source: str,
+) -> None:
+    if not isinstance(payload, dict):
+        return
+    numeric = float(equity or 0.0)
+    if numeric <= 0:
+        return
+    for key in (
+        "total_usd_estimate",
+        "active_account_usd_estimate",
+        "risk_equity_input",
+    ):
+        payload[key] = round(numeric, 2)
+    if str(payload.get("active_account_type") or payload.get("mode") or "") == "live":
+        payload["real_account_usd_estimate"] = round(numeric, 2)
+    payload["display_equity_fallback_source"] = source
+    risk_report = payload.get("risk_report")
+    if isinstance(risk_report, dict):
+        equity_payload = dict(risk_report.get("equity") or {})
+        if float(equity_payload.get("current") or 0.0) <= 0:
+            equity_payload["current"] = round(numeric, 4)
+            equity_payload["current_source"] = source
+            risk_report["equity"] = equity_payload
 
 
 def _with_live_display_equity(
@@ -180,10 +228,90 @@ async def _evaluate_notifications_for_balance_payload(
     return rule_eval
 
 
+async def _evaluate_notifications_for_balance_payload_budgeted(
+    payload: Dict[str, Any],
+    *,
+    timeout_sec: float = _BALANCE_NOTIFICATION_TIMEOUT_SEC,
+) -> Dict[str, Any]:
+    try:
+        return await asyncio.wait_for(
+            _evaluate_notifications_for_balance_payload(payload),
+            timeout=max(0.1, float(timeout_sec or _BALANCE_NOTIFICATION_TIMEOUT_SEC)),
+        )
+    except asyncio.TimeoutError:
+        existing = dict(payload.get("notifications") or {})
+        existing.setdefault("eval_deferred", True)
+        existing.setdefault("eval_deferred_reason", "notification_eval_timeout")
+        payload["notifications"] = existing
+    except Exception:
+        pass
+    return dict(payload.get("notifications") or {})
+
+
+def _store_balance_response(mode_name: str, payload: Dict[str, Any]) -> None:
+    if not isinstance(payload, dict):
+        return
+    key = str(mode_name or "").strip().lower()
+    if not key:
+        return
+    _BALANCE_RESPONSE_CACHE[key] = {
+        "ts": time.time(),
+        "payload": copy.deepcopy(payload),
+    }
+
+
+def _mark_notification_eval_deferred(payload: Dict[str, Any], reason: str) -> None:
+    if not isinstance(payload, dict):
+        return
+    existing = dict(payload.get("notifications") or {})
+    existing.setdefault("eval_deferred", True)
+    existing.setdefault("eval_deferred_reason", reason)
+    payload["notifications"] = existing
+
+
+def _consume_balance_response_task(mode_name: str, task: asyncio.Task) -> None:
+    try:
+        payload = task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        trading_api.logger.warning(f"balance response refresh task failed: {exc}")
+        return
+    finally:
+        if _BALANCE_RESPONSE_TASKS.get(mode_name) is task:
+            _BALANCE_RESPONSE_TASKS.pop(mode_name, None)
+    _store_balance_response(mode_name, payload)
+
+
+def _ensure_balance_response_task(mode_name: str) -> asyncio.Task:
+    key = str(mode_name or "").strip().lower()
+    existing = _BALANCE_RESPONSE_TASKS.get(key)
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(_build_all_balances_payload())
+    _BALANCE_RESPONSE_TASKS[key] = task
+    task.add_done_callback(
+        lambda done_task, task_mode=key: _consume_balance_response_task(
+            task_mode, done_task
+        )
+    )
+    return task
+
+
 async def _balance_response_fallback_with_notifications(
     mode_name: str, note: str
 ) -> Dict[str, Any]:
     payload = _balance_response_fallback(mode_name, note)
+    if (
+        str(mode_name or "").strip().lower() == "live"
+        and float(payload.get("active_account_usd_estimate") or 0.0) <= 0
+    ):
+        latest_equity = await _latest_account_equity_from_history(mode_name)
+        _apply_display_equity_fallback(
+            payload,
+            equity=latest_equity,
+            source="account_snapshot_cache",
+        )
     # Notification eval can fan out into altcoin scans + cross-exchange ticker
     # fetches when rules are configured. The outer endpoint already took the
     # 18s `_BALANCE_RESPONSE_TIMEOUT_SEC` hit before deciding to enter
@@ -192,20 +320,7 @@ async def _balance_response_fallback_with_notifications(
     # Cap at 2s; if it doesn't finish, return the stale payload anyway and
     # let the next /balances request (which will likely hit the warm cache)
     # re-evaluate notifications.
-    try:
-        await asyncio.wait_for(
-            _evaluate_notifications_for_balance_payload(payload),
-            timeout=2.0,
-        )
-    except asyncio.TimeoutError:
-        # Mark the payload so the UI can surface that notifications are stale
-        # rather than silently dropping the warning.
-        existing = dict(payload.get("notifications") or {})
-        existing.setdefault("eval_deferred", True)
-        existing.setdefault("eval_deferred_reason", "balance_fallback_path_skipped_to_stay_under_budget")
-        payload["notifications"] = existing
-    except Exception:
-        pass
+    _mark_notification_eval_deferred(payload, "balance_response_fast_path")
     return payload
 
 
@@ -813,6 +928,19 @@ async def _build_all_balances_payload():
         )
         risk_equity_input = prev_equity
 
+    if (
+        (not is_paper_mode)
+        and risk_equity_input <= 0
+        and (balance_warning_present or binance_balance_issue)
+    ):
+        latest_equity = await _latest_account_equity_from_history(mode_name)
+        if latest_equity > 0:
+            trading_api.logger.warning(
+                "Use latest persisted live account snapshot while private balances are unavailable: "
+                f"equity={latest_equity:.4f}"
+            )
+            risk_equity_input = float(latest_equity)
+
     display_total_usd = (
         risk_equity_input
         if (is_paper_mode and risk_equity_input > 0)
@@ -820,6 +948,12 @@ async def _build_all_balances_payload():
     )
     if (not is_paper_mode) and display_total_usd <= 0 and risk_equity_input > 0:
         display_total_usd = risk_equity_input
+
+    paper_positions = (
+        list(trading_api.position_manager.get_all_positions(scope=mode_name))
+        if is_paper_mode
+        else []
+    )
 
     trading_api.risk_manager.update_equity(
         risk_equity_input,
@@ -832,7 +966,10 @@ async def _build_all_balances_payload():
         current_unrealized_pnl=(
             float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0)
             if not is_paper_mode
-            else float(trading_api.position_manager.get_total_pnl() or 0.0)
+            else sum(
+                float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+                for pos in paper_positions
+            )
         ),
         daily_realized_pnl=live_daily_realized_pnl if not is_paper_mode else None,
     )
@@ -840,7 +977,7 @@ async def _build_all_balances_payload():
     if is_paper_mode:
         asset_map: Dict[str, Dict[str, float]] = {}
         long_value_sum = 0.0
-        for pos in trading_api.position_manager.get_all_positions():
+        for pos in paper_positions:
             side_name = str(
                 getattr(getattr(pos, "side", None), "value", getattr(pos, "side", ""))
                 or ""
@@ -996,7 +1133,7 @@ async def _build_all_balances_payload():
         "live_position_count": (
             int(live_position_snapshot.get("position_count") or 0)
             if not is_paper_mode
-            else int(trading_api.position_manager.get_position_count() or 0)
+            else len(paper_positions)
         ),
         "unpriced_assets": total_unpriced_assets,
         "connected_exchanges": trading_api.exchange_manager.get_connected_exchanges(),
@@ -1010,7 +1147,7 @@ async def _build_all_balances_payload():
             "triggered_count": 0,
         },
     }
-    await _evaluate_notifications_for_balance_payload(payload)
+    _mark_notification_eval_deferred(payload, "balance_response_fast_path")
     return payload
 
 
@@ -1027,7 +1164,9 @@ async def get_all_balances(force_refresh: bool = False):
             mode_name, max_age_sec=_BALANCE_RESPONSE_CACHE_TTL_SEC
         )
         if fresh_payload is not None:
-            await _evaluate_notifications_for_balance_payload(fresh_payload)
+            _mark_notification_eval_deferred(
+                fresh_payload, "balance_response_cache_hit"
+            )
             return fresh_payload
 
         in_flight = _BALANCE_RESPONSE_TASKS.get(mode_name)
@@ -1038,12 +1177,15 @@ async def get_all_balances(force_refresh: bool = False):
                 stale_note="资产快照刷新中，已先返回最近缓存。",
             )
             if stale_payload is not None:
-                await _evaluate_notifications_for_balance_payload(stale_payload)
+                _mark_notification_eval_deferred(
+                    stale_payload, "balance_response_stale_cache"
+                )
                 return stale_payload
             try:
                 return copy.deepcopy(
                     await asyncio.wait_for(
-                        asyncio.shield(in_flight), timeout=_BALANCE_RESPONSE_TIMEOUT_SEC
+                        asyncio.shield(in_flight),
+                        timeout=_BALANCE_RESPONSE_TIMEOUT_SEC,
                     )
                 )
             except asyncio.CancelledError:
@@ -1052,19 +1194,14 @@ async def get_all_balances(force_refresh: bool = False):
             except Exception:
                 pass
 
-    task = asyncio.create_task(_build_all_balances_payload())
-    _BALANCE_RESPONSE_TASKS[mode_name] = task
+    task = _ensure_balance_response_task(mode_name)
     try:
         payload = await asyncio.wait_for(
             asyncio.shield(task), timeout=_BALANCE_RESPONSE_TIMEOUT_SEC
         )
-        _BALANCE_RESPONSE_CACHE[mode_name] = {
-            "ts": time.time(),
-            "payload": copy.deepcopy(payload),
-        }
+        _store_balance_response(mode_name, payload)
         return payload
     except asyncio.TimeoutError:
-        task.cancel()
         return await _balance_response_fallback_with_notifications(
             mode_name, "资产快照刷新超时，正在后台重试。"
         )
@@ -1078,10 +1215,6 @@ async def get_all_balances(force_refresh: bool = False):
         return await _balance_response_fallback_with_notifications(
             mode_name, f"资产快照刷新失败: {exc}"
         )
-    finally:
-        if _BALANCE_RESPONSE_TASKS.get(mode_name) is task:
-            _BALANCE_RESPONSE_TASKS.pop(mode_name, None)
-
 
 @router.get("/balances/history")
 async def get_balance_history(

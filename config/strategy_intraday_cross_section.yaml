@@ -1,4 +1,4 @@
-# Binance USD-M 5m cross-sectional long/short defaults.
+# Binance USD-M cross-sectional long/short defaults.
 
 timeframe: "5m"
 exchange: "binance"
@@ -70,3 +70,121 @@ strategies:
     class: "CloseLocation48hStrategy"
     lookback_bars: 576
     direction: "high"
+    execution_mode: "spread_high_minus_low"
+  return_entropy_4h:
+    class: "ReturnEntropy4hStrategy"
+    timeframe: "1h"
+    lookback_bars: 4
+    rebalance_bars: 24
+    horizon_bars: 48
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  false_breakout_supply_24h:
+    class: "FalseBreakoutSupply24hStrategy"
+    timeframe: "1h"
+    lookback_bars: 24
+    rebalance_bars: 24
+    horizon_bars: 72
+    direction: "low"
+    execution_mode: "short_low"
+  range_asymmetry_48h:
+    class: "RangeAsymmetry48hStrategy"
+    lookback_bars: 576
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  session_asia_flow_24h:
+    class: "SessionAsiaFlow24hStrategy"
+    lookback_bars: 288
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  session_flow_rotation_24h:
+    class: "SessionFlowRotation24hStrategy"
+    lookback_bars: 288
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  volume_weighted_return_24h:
+    class: "VolumeWeightedReturn24hStrategy"
+    lookback_bars: 288
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  wick_imbalance_48h:
+    class: "WickImbalance48hStrategy"
+    lookback_bars: 576
+    direction: "low"
+    execution_mode: "short_low"
+  turnover_entropy_48h:
+    class: "TurnoverEntropy48hStrategy"
+    timeframe: "15m"
+    lookback_bars: 192
+    rebalance_bars: 96
+    horizon_bars: 192
+    direction: "high"
+    execution_mode: "short_high"
+  body_volume_corr_24h:
+    class: "BodyVolumeCorr24hStrategy"
+    lookback_bars: 288
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  corr_breakdown_24h_72h:
+    class: "CorrBreakdown24h72hStrategy"
+    lookback_bars: 864
+    direction: "high"
+    execution_mode: "short_high"
+  extreme_recency_48h:
+    class: "ExtremeRecency48hStrategy"
+    lookback_bars: 576
+    direction: "high"
+    execution_mode: "short_high"
+  up_down_beta_spread_24h_72h:
+    class: "UpDownBetaSpread24h72hStrategy"
+    lookback_bars: 864
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  directional_range_efficiency_48h:
+    class: "DirectionalRangeEfficiency48hStrategy"
+    lookback_bars: 576
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  cross_sectional_stress_4h:
+    class: "CrossSectionalStress4hStrategy"
+    timeframe: "1h"
+    lookback_bars: 4
+    rebalance_bars: 24
+    horizon_bars: 72
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  sign_imbalance_4h:
+    class: "SignImbalance4hStrategy"
+    timeframe: "1h"
+    lookback_bars: 4
+    rebalance_bars: 24
+    horizon_bars: 48
+    direction: "high"
+    execution_mode: "long_high"
+  vwap_slope_24h:
+    class: "VWAPSlope24hStrategy"
+    lookback_bars: 288
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  vwap_gap_48h:
+    class: "VWAPGap48hStrategy"
+    lookback_bars: 576
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  relative_vol_shock_24h:
+    class: "RelativeVolShock24hStrategy"
+    lookback_bars: 288
+    rebalance_bars: 144
+    horizon_bars: 144
+    direction: "low"
+    execution_mode: "short_low"
+  lead_market_response_24h_72h:
+    class: "LeadMarketResponse24h72hStrategy"
+    lookback_bars: 864
+    direction: "low"
+    execution_mode: "spread_low_minus_high"
+  break_count_balance_24h:
+    class: "BreakCountBalance24hStrategy"
+    lookback_bars: 288
+    direction: "low"
+    execution_mode: "spread_low_minus_high"

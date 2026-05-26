@@ -214,6 +214,29 @@ def test_compare_backtests_keeps_pairs_strategy_when_primary_matches_default_pai
     assert rows["PairsTradingStrategy"]["pair_symbol"] == "BTC/USDT"
 
 
+def test_default_backtest_loader_only_uses_binance(monkeypatch):
+    from web.api import backtest as backtest_api
+
+    calls = []
+
+    async def fake_load_klines_from_parquet(
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        start_time=None,
+        end_time=None,
+    ):
+        calls.append(str(exchange))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(backtest_api.data_storage, "load_klines_from_parquet", fake_load_klines_from_parquet)
+
+    df = asyncio.run(backtest_api._load_backtest_df("AAA/USDT", "1h"))
+
+    assert df.empty
+    assert set(calls) == {"binance"}
+
+
 def test_run_backtest_custom_pairs_strategy_respects_explicit_exchange_scope(monkeypatch):
     from web.api import backtest as backtest_api
 

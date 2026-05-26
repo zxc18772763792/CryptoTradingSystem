@@ -111,7 +111,7 @@ _MODULE_TIMEOUT_SEC = {
     "onchain": 30.0,
     "discipline": 5.0,
 }
-_MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC = 20 * 60
+_MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC = 5 * 60
 _MARKET_STATE_NEWS_TIMEOUT_SEC = 12.0
 _MARKET_STATE_PUBLIC_MARKET_TIMEOUT_SEC = 9.0
 _COINGLASS_PREFERRED_MAX_AGE_SEC = 5 * 60
@@ -3106,7 +3106,7 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
             symbol=profile.primary_symbol,
             whale_threshold_btc=10.0,
             chain="auto",
-            refresh=False,
+            refresh=True,
         ),
         8.0,
     )

@@ -181,7 +181,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "window.CTS_UI_TIMEZONE" in ai_js
     assert "window.CTS_UI_TIMEZONE_LABEL" in ai_js
     assert "const TIME_ZONE='Asia/Shanghai';" in app_js
-    assert "const TRADING_STATS_TIMEOUT_MS=25000;" in app_js
+    assert "const TRADING_STATS_TIMEOUT_MS=35000;" in app_js
     assert "const TRADING_POSITIONS_TIMEOUT_MS=30000;" in app_js
     assert "const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;" in app_js
     assert "modules.agent?.refresh?.({includeDetails:activeTab==='ai-agent'})" in app_js

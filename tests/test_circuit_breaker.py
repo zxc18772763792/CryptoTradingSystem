@@ -174,6 +174,28 @@ def test_drawdown_without_denominator_does_not_create_synthetic_full_loss():
     assert grouped["TinyCostOnly"]["daily_dd"] == 0.0
 
 
+def test_live_drawdown_ignores_paper_order_ids():
+    ts = datetime.now(timezone.utc)
+    history = [
+        {
+            "strategy": "LiveStrat",
+            "pnl": -0.38,
+            "order_id": "paper_abc123",
+            "mode": "live",
+            "timestamp": ts.isoformat(),
+        }
+    ]
+
+    grouped = evaluate_strategy_drawdowns(
+        history,
+        base_capital=1.1574,
+        active_strategy_names={"LiveStrat"},
+        runtime_mode="live",
+    )
+
+    assert grouped == {}
+
+
 def test_evaluate_strategy_drawdowns_filters_to_active_names():
     history = [
         _trade("StoppedStrat", -700.0, 1.0, capital=10000.0),
@@ -220,3 +242,58 @@ def test_run_checks_does_not_trip_under_threshold(cb, monkeypatch):
     assert report["portfolio_trip"] is None
     assert cb.check_portfolio().is_allow
     assert cb.check_strategy("StratA").is_allow
+
+
+def test_run_checks_does_not_auto_clear_false_trip_by_default(cb, monkeypatch):
+    monkeypatch.setattr(cb_mod, "circuit_breaker", cb)
+    cb.trip_portfolio("24h_dd 0.9998 >= 0.0300", daily_dd=0.9998, weekly_dd=0.9998)
+    cb.trip_strategy("LiveStrat", "24h_dd 0.3280 >= 0.0500", daily_dd=0.3280, weekly_dd=0.3280)
+    history = [
+        {
+            "strategy": "LiveStrat",
+            "pnl": -0.38,
+            "order_id": "paper_abc123",
+            "mode": "live",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    ]
+
+    report = run_circuit_breaker_checks(
+        trade_history=history,
+        portfolio_drawdown={"daily_dd": 0.0025, "weekly_dd": 0.0025},
+        account_equity=5038.0,
+        active_strategy_names={"LiveStrat"},
+    )
+
+    assert report["portfolio_auto_clear"] is None
+    assert report["strategy_auto_clears"] == []
+    assert cb.check_portfolio().is_close_only
+    assert cb.check_strategy("LiveStrat").is_close_only
+
+
+def test_run_checks_auto_clear_false_trip_requires_explicit_opt_in(cb, monkeypatch):
+    monkeypatch.setattr(cb_mod, "circuit_breaker", cb)
+    cb.trip_portfolio("24h_dd 0.9998 >= 0.0300", daily_dd=0.9998, weekly_dd=0.9998)
+    cb.trip_strategy("LiveStrat", "24h_dd 0.3280 >= 0.0500", daily_dd=0.3280, weekly_dd=0.3280)
+    history = [
+        {
+            "strategy": "LiveStrat",
+            "pnl": -0.38,
+            "order_id": "paper_abc123",
+            "mode": "live",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    ]
+
+    report = run_circuit_breaker_checks(
+        trade_history=history,
+        portfolio_drawdown={"daily_dd": 0.0025, "weekly_dd": 0.0025},
+        account_equity=5038.0,
+        active_strategy_names={"LiveStrat"},
+        auto_clear_false_trips=True,
+    )
+
+    assert report["portfolio_auto_clear"] is not None
+    assert report["strategy_auto_clears"][0]["strategy"] == "LiveStrat"
+    assert cb.check_portfolio().is_allow
+    assert cb.check_strategy("LiveStrat").is_allow

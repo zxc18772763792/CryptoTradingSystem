@@ -1351,8 +1351,7 @@ async def lifespan(app: FastAPI):
     if _startup_mode_decision.blocked_persisted_live_restore:
         logger.warning(
             "Blocked persisted live-mode restore during startup. "
-            "Managed start now falls back to paper unless ALLOW_PERSISTED_LIVE_MODE_START=true "
-            "or TRADING_MODE=live is set explicitly."
+            "Set ALLOW_PERSISTED_LIVE_MODE_START=true or TRADING_MODE=live to allow live startup."
         )
 
     runtime_state.initialize_mode(_startup_mode_decision.effective_mode, reason="lifespan.startup")
