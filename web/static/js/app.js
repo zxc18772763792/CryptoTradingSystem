@@ -2,7 +2,7 @@
 const state={positions:[],orders:[],strategies:[],availableStrategyTypes:[],strategyLibraryRows:[],strategyCatalogRows:[],summary:{running:[],recent_signals:[],runtime:{}},notifyRules:{},wsConnected:false,modeToken:'',bootCompleted:false,bootFailed:false,strategyHealth:null,lastHealthAlertKey:'',selectedStrategyName:'',closingPositions:{},lastSummarySnapshot:null,lastWsBackfillAtByTab:{}};
 const researchState={lastFactorLibrary:null,lastMultiAsset:null,lastSentiment:null,lastAnalytics:null,lastOnchain:null,lastFama:null,lastOverview:null,pendingTimers:{},lastSentimentReqId:0};
 const arbitrageState={catalog:[],selectedStrategy:'PairsTradingStrategy',initialized:false,lastSpec:null,pairRanking:null,pairRankingKey:'',pairRankingNote:'等待筛选：确认周期后点击“一键筛选前十”',readiness:null,readinessKey:'',readinessLoading:false,readinessError:'',readinessSeq:0,readinessTimer:null};
-const backtestUIState={lastOptimize:null,lastCompare:null,lastRenderedBacktest:null,defaultCompareStrategies:[]};
+const backtestUIState={mode:'classic',lastOptimize:null,lastCompare:null,lastRenderedBacktest:null,defaultCompareStrategies:[],factorTemplateRows:[],factorBatchSelection:new Set(),factorBatchSelectionInitialized:false};
 const mlWorkflowState={models:[],features:[],loadedAt:0,featuresLoadedAt:0,lastTrainResult:null};
 const dataHealthState={last:null};
 const dataAnalyticsHealthState={last:null};
@@ -16,7 +16,7 @@ ReversalOnly:'ReversalOnly（仅信号反转）',
 Original:'Original（旧版离场）',
 };
 const DEFAULT_BACKTEST_EXIT_TEMPLATE='SignalPlusTimeStop';
-const summaryFetchState={statsTask:null,balancesTask:null,statsTaskStartedAt:0,balancesTaskStartedAt:0};
+const summaryFetchState={statsTask:null,balancesTask:null,statsTaskStartedAt:0,balancesTaskStartedAt:0,statsTaskLastResult:null,balancesTaskLastResult:null,statsTaskLastResultAt:0,balancesTaskLastResultAt:0};
 const RESEARCH_DEFAULT_SYMBOLS=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
 const DEFAULT_STRATEGY_ALLOCATION=0.15;
 let equityChart=null;
@@ -26,11 +26,12 @@ let summaryLoadPromise=null;
 let dashboardSecondaryTimer=null;
 let dashboardSlowHintTimer=null;
 let tradingSecondaryTimer=null;
-const TRADING_STATS_TIMEOUT_MS=25000;
-const SUMMARY_STATS_SETTLE_TIMEOUT_MS=5000;
-const SUMMARY_BALANCES_SETTLE_TIMEOUT_MS=6500;
-const SUMMARY_BALANCES_TIMEOUT_MS=22000;
-const SUMMARY_TASK_REUSE_MAX_AGE_MS=12000;
+const TRADING_STATS_TIMEOUT_MS=35000;
+const SUMMARY_STATS_SETTLE_TIMEOUT_MS=8000;
+const SUMMARY_BALANCES_SETTLE_TIMEOUT_MS=9000;
+const SUMMARY_BALANCES_TIMEOUT_MS=35000;
+const SUMMARY_TASK_REUSE_MAX_AGE_MS=45000;
+const SUMMARY_RESULT_CACHE_MAX_AGE_MS=90000;
 const KNOWN_STRATEGY_CATEGORIES=['趋势','震荡','动量','均值回归','突破','成交量','波动率','风险','统计套利','Fama因子','微观结构','套利','量化','ML','宏观','其他'];
 const STRATEGY_CATEGORY_ALIASES={机器学习:'ML',量化因子:'量化',量化多因子:'量化',多因子:'量化'};
 const BACKTEST_GROUP_ORDER=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','Fama因子类','微观结构类','套利类','量化类','ML类','宏观类','其他'];
@@ -158,6 +159,15 @@ window.CTS_UI_TIMEZONE=TIME_ZONE;
 window.CTS_UI_TIMEZONE_LABEL=TIME_ZONE_LABEL;
 }
 const BACKTEST_COMPARE_PRESET_KEY='cts_backtest_compare_presets_v1';
+const BACKTEST_FACTOR_NAME_HINTS=[
+'ResidualMom48hStrategy','Ret24hReversalStrategy','RelRet24hReversalStrategy','ResidualMom24hStrategy',
+'CloseLocation48hStrategy','ReturnEntropy4hStrategy','FalseBreakoutSupply24hStrategy','RangeAsymmetry48hStrategy',
+'SessionAsiaFlow24hStrategy','SessionFlowRotation24hStrategy','VolumeWeightedReturn24hStrategy','WickImbalance48hStrategy',
+'TurnoverEntropy48hStrategy','BodyVolumeCorr24hStrategy','CorrBreakdown24h72hStrategy','ExtremeRecency48hStrategy',
+'UpDownBetaSpread24h72hStrategy','DirectionalRangeEfficiency48hStrategy','CrossSectionalStress4hStrategy',
+'SignImbalance4hStrategy','VWAPSlope24hStrategy','VWAPGap48hStrategy','RelativeVolShock24hStrategy',
+'LeadMarketResponse24h72hStrategy','BreakCountBalance24hStrategy'
+];
 const TS_TZ_SUFFIX_RE=/(?:[zZ]|[+-]\d{2}:?\d{2})$/;
 function normalizeTimestampInput(value){
 if(value instanceof Date)return Number.isFinite(value.getTime())?value.toISOString():'';
@@ -322,6 +332,11 @@ const normalized=(Array.isArray(rows)?rows:[]).map(row=>{
     family:String(row?.family||existing.family||'traditional'),
     decisionEngine:String(row?.decision_engine||existing.decisionEngine||'rule'),
     aiDriven:!!(row?.ai_driven ?? existing.aiDriven),
+    strategyKind:String(row?.strategy_kind||existing.strategyKind||'classic'),
+    templateLocked:!!(row?.template_locked ?? existing.templateLocked),
+    factorFamily:String(row?.factor_family||existing.factorFamily||''),
+    liveVerdict:String(row?.live_verdict||existing.liveVerdict||''),
+    templateSpec:(row?.template_spec&&typeof row.template_spec==='object')?row.template_spec:(existing.templateSpec||{}),
     backtestSupported:!!row?.backtest_supported,
     backtestReason:String(row?.backtest_reason||existing.backtestReason||''),
     defaultStart:!!row?.default_start,
@@ -337,6 +352,12 @@ const normalized=(Array.isArray(rows)?rows:[]).map(row=>{
     family:String(row?.family||existing.family||'traditional'),
     decision_engine:String(row?.decision_engine||existing.decisionEngine||'rule'),
     ai_driven:!!(row?.ai_driven ?? existing.aiDriven),
+    strategy_kind:String(row?.strategy_kind||existing.strategyKind||'classic'),
+    template_locked:!!(row?.template_locked ?? existing.templateLocked),
+    locked_fields:Array.isArray(row?.locked_fields)?row.locked_fields:[],
+    factor_family:String(row?.factor_family||existing.factorFamily||''),
+    live_verdict:String(row?.live_verdict||existing.liveVerdict||''),
+    template_spec:(row?.template_spec&&typeof row.template_spec==='object')?row.template_spec:{},
     backtest_supported:!!row?.backtest_supported,
     backtest_reason:String(row?.backtest_reason||existing.backtestReason||''),
     default_start:!!row?.default_start,
@@ -418,6 +439,7 @@ if(!sel._btMetaBound){
 }
 // Only sync recommended meta on first load or when the selected strategy actually changes.
 if(!prev || prev!==sel.value)syncBacktestStrategyMeta(sel.value);
+if(typeof renderFactorTemplateOptions==='function')renderFactorTemplateOptions();
 }
 async function ensureBacktestStrategySelect(force=false){
 const rows=await ensureStrategyCatalog(force);
@@ -855,6 +877,400 @@ const timeoutMs=
 return Math.max(60000,Math.min(20*60*1000,timeoutMs));
 }
 
+const BACKTEST_MODE_NOTES={
+classic:'自由选择策略、交易对、周期、退出模板和优化参数。',
+factor_template:'按因子模板的固定周期、rebalance、horizon 和执行方式运行单个组合回测。',
+factor_batch:'按周期分组批量运行因子模板，用排名表先筛选，再点入单个模板详情。',
+};
+const FACTOR_BACKTEST_DEFAULT_UNIVERSE_LIMIT=20;
+const FACTOR_BACKTEST_DEFAULT_BATCH_LIMIT=6;
+function isFactorTemplateRow(row){
+if(!row||row.backtest_supported===false)return false;
+const name=String(row?.name||row?.value||'').trim();
+const spec=(row?.template_spec&&typeof row.template_spec==='object')?row.template_spec:{};
+const defaults=(row?.defaults&&typeof row.defaults==='object')?row.defaults:{};
+const family=String(row.factor_family||row.family||defaults.family||'').toLowerCase();
+const hay=[name,row.usage,row.description,row.strategy_kind,family,spec.strategy_id,spec.execution_mode].map(v=>String(v||'').toLowerCase()).join(' ');
+const hasTemplateMeta=String(row.strategy_kind||'')==='factor_template'||row.template_locked||spec.strategy_id||defaults.strategy_id;
+const metaSaysCrossSection=hasTemplateMeta&&(family.includes('cross_section')||family.includes('cross-section')||hay.includes('cross_section')||hay.includes('cross-section')||hay.includes('intraday'));
+const nameSaysCrossSection=/intraday|cross[_\-\s]?section/i.test(name)||BACKTEST_FACTOR_NAME_HINTS.includes(name);
+return !!(metaSaysCrossSection||nameSaysCrossSection);
+}
+function getFactorTemplateRows(){
+const catalogRows=Array.isArray(state.strategyCatalogRows)?state.strategyCatalogRows:[];
+let rows=catalogRows.filter(isFactorTemplateRow);
+if(!rows.length){
+  const catalog=getBacktestStrategyCatalogFromSelect();
+  rows=(catalog.items||[]).filter(isFactorTemplateRow).map(it=>({
+    name:it.value,
+    usage:it.label,
+    category:it.groupLabel,
+    strategy_kind:'factor_template',
+    template_locked:true,
+    factor_family:'cross_section',
+    backtest_supported:true,
+    recommended_timeframe:'5m',
+    recommended_symbols:RESEARCH_DEFAULT_SYMBOLS.slice(0,20),
+    template_spec:{strategy_id:it.value.replace(/Strategy$/,''),timeframe:'5m',execution_mode:'name_fallback'}
+  }));
+}
+backtestUIState.factorTemplateRows=rows;
+return rows;
+}
+function getFactorTemplateRow(name=''){
+const key=String(name||'').trim();
+return getFactorTemplateRows().find(row=>String(row?.name||'').trim()===key)||null;
+}
+function factorTemplateUniverse(row){
+const defaults=(row?.defaults&&typeof row.defaults==='object')?row.defaults:{};
+const fromDefaults=Array.isArray(defaults.universe_symbols)?defaults.universe_symbols:[];
+const fromRecommended=Array.isArray(row?.recommended_symbols)?row.recommended_symbols:[];
+return [...new Set([...fromDefaults,...fromRecommended].map(v=>String(v||'').trim()).filter(Boolean))];
+}
+function getFactorTemplateSelectedSymbols(id,row=null){
+const selected=[...(document.getElementById(id)?.selectedOptions||[])].map(opt=>String(opt.value||'').trim()).filter(Boolean);
+if(selected.length)return selected;
+const rec=factorTemplateUniverse(row);
+return rec.length?rec.map(v=>String(v||'').trim()).filter(Boolean):['BTC/USDT','ETH/USDT','SOL/USDT','BNB/USDT'];
+}
+function syncFactorUniverseSelect(id,symbols=[],selected=null){
+const el=document.getElementById(id);
+if(!(el instanceof HTMLSelectElement))return;
+const unique=[...new Set((Array.isArray(symbols)?symbols:[]).map(v=>String(v||'').trim()).filter(Boolean))];
+const picked=new Set((Array.isArray(selected)?selected:unique).map(v=>String(v||'').trim()).filter(Boolean));
+el.innerHTML=unique.map(sym=>`<option value="${esc(sym)}" ${picked.has(sym)?'selected':''}>${esc(sym)}</option>`).join('');
+}
+function factorTemplateSpec(row){
+const explicit=(row?.template_spec&&typeof row.template_spec==='object')?row.template_spec:{};
+if(Object.keys(explicit).length)return explicit;
+const defaults=(row?.defaults&&typeof row.defaults==='object')?row.defaults:{};
+const strategyId=String(defaults.strategy_id||'').trim();
+const executionMode=String(defaults.execution_mode||'').trim();
+if(!strategyId||!executionMode)return {};
+return {
+  strategy_id:strategyId,
+  timeframe:String(defaults.timeframe||row?.recommended_timeframe||'5m').trim()||'5m',
+  lookback_bars:defaults.lookback_bars,
+  rebalance_bars:defaults.rebalance_bars,
+  horizon_bars:defaults.horizon_bars||defaults.rebalance_bars,
+  direction:defaults.direction,
+  execution_mode:executionMode,
+  long_quantile:defaults.long_quantile,
+  short_quantile:defaults.short_quantile,
+  max_symbol_weight:defaults.max_symbol_weight,
+  min_universe_size:defaults.min_universe_size,
+  fee_bps_per_side:defaults.fee_bps_per_side,
+  min_slippage_bps_per_side:defaults.min_slippage_bps_per_side,
+  max_slippage_bps_per_side:defaults.max_slippage_bps_per_side,
+};
+}
+function factorTemplateTimeframe(row){
+return String(factorTemplateSpec(row).timeframe||row?.recommended_timeframe||'5m').trim()||'5m';
+}
+function toDatetimeLocalValue(date){
+const d=date instanceof Date?date:new Date(date);
+if(!Number.isFinite(d.getTime()))return'';
+const pad=n=>String(n).padStart(2,'0');
+return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function applyFactorSamplePreset(prefix,force=false){
+const preset=String(document.getElementById(`${prefix}-sample-preset`)?.value||'').trim();
+const startEl=document.getElementById(`${prefix}-start-date`);
+const endEl=document.getElementById(`${prefix}-end-date`);
+if(!(startEl instanceof HTMLInputElement)||!(endEl instanceof HTMLInputElement))return;
+if(preset==='form_range'){
+  if(force||!startEl.value)startEl.value=String(document.getElementById('backtest-start-date')?.value||'');
+  if(force||!endEl.value)endEl.value=String(document.getElementById('backtest-end-date')?.value||'');
+  return;
+}
+const days=({recent_30d:30,recent_90d:90,recent_180d:180})[preset];
+if(!days)return;
+const end=new Date();
+const start=new Date(end.getTime()-days*86400000);
+if(force||!startEl.value)startEl.value=toDatetimeLocalValue(start);
+if(force||!endEl.value)endEl.value=toDatetimeLocalValue(end);
+}
+function renderFactorTemplateSpec(row){
+const host=document.getElementById('factor-template-spec');
+if(!host)return;
+const tfPreview=document.getElementById('factor-template-timeframe-preview');
+if(!row){
+  host.innerHTML='<div class="list-item"><span>模板规格</span><span>请选择因子模板</span></div>';
+  if(tfPreview)tfPreview.value='等待模板';
+  return;
+}
+const spec=factorTemplateSpec(row);
+if(tfPreview)tfPreview.value=factorTemplateTimeframe(row);
+[
+  ['factor-template-long-quantile',spec.long_quantile],
+  ['factor-template-short-quantile',spec.short_quantile],
+  ['factor-template-max-weight',spec.max_symbol_weight],
+  ['factor-template-min-volume',row?.defaults?.min_quote_volume],
+].forEach(([id,value])=>{const el=document.getElementById(id);if(el&&value!==undefined&&value!==null&&String(el.value||'')==='')el.value=String(value);});
+const cards=[
+  ['周期',factorTemplateTimeframe(row)],
+  ['lookback',spec.lookback_bars||'-'],
+  ['rebalance',spec.rebalance_bars||'-'],
+  ['horizon',spec.horizon_bars||'-'],
+  ['执行模板',spec.execution_mode||'-'],
+  ['方向',spec.direction||'-'],
+  ['family',row.factor_family||row?.defaults?.family||'-'],
+  ['状态',row.live_verdict||row?.defaults?.live_verdict||'-'],
+];
+host.innerHTML=`<div class="factor-template-spec-grid">${cards.map(([label,value])=>`<div class="factor-template-spec-card"><div class="label">${esc(label)}</div><div class="value">${esc(value)}</div></div>`).join('')}</div><details><summary>模板原始规格</summary><pre>${esc(JSON.stringify(spec,null,2))}</pre></details>`;
+}
+function renderFactorTemplateOptions(){
+const rows=getFactorTemplateRows();
+const sel=document.getElementById('factor-template-strategy');
+if(sel instanceof HTMLSelectElement){
+  const prev=String(sel.value||'').trim();
+  sel.innerHTML=rows.length
+    ? rows.map(row=>`<option value="${esc(row.name)}">${esc(strategyTypeShortName(row.name))} - ${esc(row.usage||row.description||'')}</option>`).join('')
+    : '<option value="">暂无因子模板</option>';
+  if(prev&&rows.some(row=>String(row.name)===prev))sel.value=prev;
+  else if(rows[0])sel.value=String(rows[0].name||'');
+}
+const row=getFactorTemplateRow(sel?.value||'')||rows[0]||null;
+const rowUniverse=factorTemplateUniverse(row);
+const seed=[...rowUniverse,...RESEARCH_DEFAULT_SYMBOLS];
+const defaultUniverse=rowUniverse.length?rowUniverse.slice(0,FACTOR_BACKTEST_DEFAULT_UNIVERSE_LIMIT):seed.slice(0,FACTOR_BACKTEST_DEFAULT_UNIVERSE_LIMIT);
+syncFactorUniverseSelect('factor-template-universe',seed,defaultUniverse);
+syncFactorUniverseSelect('factor-batch-universe',seed,defaultUniverse);
+renderFactorTemplateSpec(row);
+renderFactorBatchList();
+}
+function buildFactorTemplateParams(row,prefix='factor-template'){
+const params={...(row?.defaults&&typeof row.defaults==='object'?row.defaults:{})};
+const universe=getFactorTemplateSelectedSymbols(`${prefix}-universe`,row);
+if(universe.length){
+  params.universe_symbols=universe;
+  params.max_symbols=Math.max(Number(params.max_symbols||0)||0,universe.length);
+}
+const overrides=[
+  ['long_quantile',`${prefix}-long-quantile`],
+  ['short_quantile',`${prefix}-short-quantile`],
+  ['max_symbol_weight',`${prefix}-max-weight`],
+  ['min_quote_volume',`${prefix}-min-volume`],
+];
+for(const [key,id] of overrides){
+  const raw=String(document.getElementById(id)?.value||'').trim();
+  if(raw==='')continue;
+  const n=Number(raw);
+  if(Number.isFinite(n))params[key]=n;
+}
+return params;
+}
+function factorRunDates(prefix){
+applyFactorSamplePreset(prefix,false);
+return {
+  start:String(document.getElementById(`${prefix}-start-date`)?.value||'').trim(),
+  end:String(document.getElementById(`${prefix}-end-date`)?.value||'').trim(),
+};
+}
+async function runFactorTemplateBacktest(){
+const row=getFactorTemplateRow(document.getElementById('factor-template-strategy')?.value||'');
+if(!row){notify('请选择因子模板',true);return;}
+const params=buildFactorTemplateParams(row,'factor-template');
+const universe=Array.isArray(params.universe_symbols)?params.universe_symbols:[];
+const symbol=String(universe[0]||row?.recommended_symbols?.[0]||'BTC/USDT');
+const tf=factorTemplateTimeframe(row);
+const capital=Number(document.getElementById('factor-template-capital')?.value||10000);
+const dates=factorRunDates('factor-template');
+let u=`/backtest/run_custom?strategy=${encodeURIComponent(row.name)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(tf)}&initial_capital=${encodeURIComponent(capital)}&commission_rate=${encodeURIComponent(0.0004)}&slippage_bps=${encodeURIComponent(2)}&include_series=true&params_json=${encodeURIComponent(JSON.stringify(params))}`;
+if(dates.start)u+=`&start_date=${encodeURIComponent(dates.start)}`;
+if(dates.end)u+=`&end_date=${encodeURIComponent(dates.end)}`;
+renderBacktestExtraLoading('因子模板回测运行中',`${row.name} / ${tf} / 币池 ${universe.length||'-'} 个`);
+const result=await api(u,{method:'POST',timeoutMs:estimateBacktestCompareTimeoutMs(1,8,tf,90)});
+renderBacktest(result);
+renderBacktestExtraStatus('因子模板回测',`${row.name} 已按固定模板执行。`);
+notify('因子模板回测完成');
+}
+function selectedFactorBatchRows(){
+const selection=backtestUIState.factorBatchSelection instanceof Set?backtestUIState.factorBatchSelection:new Set();
+backtestUIState.factorBatchSelection=selection;
+return [...selection].map(name=>getFactorTemplateRow(name)).filter(Boolean);
+}
+function updateFactorBatchCount(){
+const c=document.getElementById('factor-batch-picked-count');
+if(c)c.textContent=`已选 ${selectedFactorBatchRows().length}`;
+}
+function renderFactorBatchList(){
+const box=document.getElementById('factor-batch-list');
+if(!box)return;
+const search=String(document.getElementById('factor-batch-search')?.value||'').trim().toLowerCase();
+const verdict=String(document.getElementById('factor-batch-verdict-filter')?.value||'').trim();
+const tf=String(document.getElementById('factor-batch-timeframe-filter')?.value||'').trim();
+const rows=getFactorTemplateRows().filter(row=>{
+  const spec=factorTemplateSpec(row);
+  const hay=[row.name,row.usage,row.description,row.factor_family,row.live_verdict,spec.execution_mode].map(v=>String(v||'').toLowerCase()).join(' ');
+  if(search&&!hay.includes(search))return false;
+  if(verdict&&String(row.live_verdict||row?.defaults?.live_verdict||'')!==verdict)return false;
+  if(tf&&factorTemplateTimeframe(row)!==tf)return false;
+  return true;
+});
+if(!backtestUIState.factorBatchSelection||!(backtestUIState.factorBatchSelection instanceof Set)){
+  backtestUIState.factorBatchSelection=new Set();
+}
+if(!backtestUIState.factorBatchSelectionInitialized){
+  backtestUIState.factorBatchSelectionInitialized=true;
+  rows.filter(row=>String(row.live_verdict||row?.defaults?.live_verdict||'priority')==='priority').slice(0,FACTOR_BACKTEST_DEFAULT_BATCH_LIMIT).forEach(row=>backtestUIState.factorBatchSelection.add(row.name));
+}
+box.innerHTML=rows.length?rows.map(row=>{
+  const spec=factorTemplateSpec(row);
+  const checked=backtestUIState.factorBatchSelection.has(row.name);
+  return `<label class="backtest-compare-item"><input type="checkbox" data-factor-batch-strategy value="${esc(row.name)}" ${checked?'checked':''}><span>${esc(row.name)}</span><span class="mini">${esc(factorTemplateTimeframe(row))} | ${esc(spec.execution_mode||'-')} | ${esc(row.live_verdict||'-')}</span></label>`;
+}).join(''):'<div class="list-item">暂无匹配的因子模板</div>';
+box.querySelectorAll('input[data-factor-batch-strategy]').forEach(cb=>cb.addEventListener('change',()=>{
+  if(cb.checked)backtestUIState.factorBatchSelection.add(cb.value);
+  else backtestUIState.factorBatchSelection.delete(cb.value);
+  updateFactorBatchCount();
+}));
+updateFactorBatchCount();
+}
+async function runFactorBatchBacktest(){
+const rows=selectedFactorBatchRows();
+if(!rows.length){notify('请至少勾选一个因子模板',true);return;}
+const universe=getFactorTemplateSelectedSymbols('factor-batch-universe',rows[0]);
+const symbol=String(universe[0]||'BTC/USDT');
+const capital=Number(document.getElementById('factor-batch-capital')?.value||10000);
+const dates=factorRunDates('factor-batch');
+const groups=new Map();
+rows.forEach(row=>{const tf=factorTemplateTimeframe(row);if(!groups.has(tf))groups.set(tf,[]);groups.get(tf).push(row);});
+const allResults=[];
+let dataPoints=0;
+renderBacktestExtraLoading('批量因子运行中',`按 ${groups.size} 个周期分组执行，共 ${rows.length} 个模板。`);
+const localOut=document.getElementById('factor-batch-output');
+if(localOut)localOut.innerHTML=`<div class="list-item"><span>批量因子运行中</span><span>${rows.length} 个模板 / ${universe.length} 个币</span></div>`;
+for(const [tf,groupRows] of groups.entries()){
+  const params={universe_symbols:universe,max_symbols:Math.max(universe.length,Number(groupRows[0]?.defaults?.max_symbols||0)||0)};
+  let u=`/backtest/compare?strategies=${encodeURIComponent(groupRows.map(r=>r.name).join(','))}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(tf)}&initial_capital=${encodeURIComponent(capital)}&commission_rate=${encodeURIComponent(0.0004)}&slippage_bps=${encodeURIComponent(2)}&pre_optimize=false&optimize_max_trials=8&params_json=${encodeURIComponent(JSON.stringify(params))}`;
+  if(dates.start)u+=`&start_date=${encodeURIComponent(dates.start)}`;
+  if(dates.end)u+=`&end_date=${encodeURIComponent(dates.end)}`;
+  const d=await api(u,{method:'POST',timeoutMs:estimateBacktestCompareTimeoutMs(groupRows.length,8,tf,90)});
+  dataPoints+=Number(d?.data_points||0);
+  (Array.isArray(d?.results)?d.results:[]).forEach(item=>{
+    const row=getFactorTemplateRow(item.strategy);
+    const itemExitTemplate=String(item?.exit_template||d?.exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE).trim()||DEFAULT_BACKTEST_EXIT_TEMPLATE;
+    const itemUseStopTake=!!(item?.use_stop_take ?? d?.use_stop_take ?? false);
+    const itemStopLoss=item?.stop_loss_pct ?? d?.stop_loss_pct ?? null;
+    const itemTakeProfit=item?.take_profit_pct ?? d?.take_profit_pct ?? null;
+    const previewParams={...params,...(item.optimized_params||{})};
+    allResults.push({
+      ...item,
+      timeframe:tf,
+      symbol,
+      requested_start_date:dates.start,
+      requested_end_date:dates.end,
+      exit_template:itemExitTemplate,
+      use_stop_take:itemUseStopTake,
+      stop_loss_pct:itemStopLoss,
+      take_profit_pct:itemTakeProfit,
+      register_spec:{strategy_type:item.strategy,symbol,timeframe:tf,params:previewParams,symbols:universe,exchange:'binance',exit_template:itemExitTemplate,use_stop_take:itemUseStopTake,stop_loss_pct:itemStopLoss,take_profit_pct:itemTakeProfit},
+      factor_family:row?.factor_family||row?.defaults?.family||'',
+      live_verdict:row?.live_verdict||row?.defaults?.live_verdict||'',
+      execution_mode:factorTemplateSpec(row).execution_mode||'',
+    });
+  });
+}
+const payload={
+  compare_mode:'factor_batch',
+  symbol:`因子币池(${universe.length})`,
+  timeframe:[...groups.keys()].join(','),
+  initial_capital:capital,
+  commission_rate:0.0004,
+  slippage_bps:2,
+  exit_template:DEFAULT_BACKTEST_EXIT_TEMPLATE,
+  default_exit_template:DEFAULT_BACKTEST_EXIT_TEMPLATE,
+  use_stop_take:false,
+  stop_loss_pct:null,
+  take_profit_pct:null,
+  requested_start_date:dates.start,
+  requested_end_date:dates.end,
+  data_points:dataPoints,
+  pre_optimize:false,
+  results:allResults,
+};
+renderFactorBatchOutput(payload);
+notify('批量因子对比完成');
+}
+function renderFactorBatchOutput(data){
+const out=getBacktestExtraPanel();
+if(!out)return;
+const rows=(Array.isArray(data?.results)?data.results:[]).filter(r=>r&&!r.error);
+const errRows=(Array.isArray(data?.results)?data.results:[]).filter(r=>r&&r.error);
+const ranked=[...rows].sort((a,b)=>Number(b.total_return||-1e9)-Number(a.total_return||-1e9)||Number(b.sharpe_ratio||-1e9)-Number(a.sharpe_ratio||-1e9));
+backtestUIState.lastCompare={...(data||{}),ranked};
+out.innerHTML=`
+<div class="list-item"><span>批量因子对比（${esc(data.timeframe||'-')}）</span><span>成功 ${ranked.length} / 总计 ${(data.results||[]).length}</span></div>
+<div class="list-item"><span>样本区间 / 币池</span><span>${esc(data.requested_start_date||'-')} ~ ${esc(data.requested_end_date||'-')} | ${esc(data.symbol||'-')}</span></div>
+<div class="backtest-table-wrap"><table class="data-table"><thead><tr><th>排名</th><th>因子模板</th><th>周期</th><th>执行模板</th><th>状态</th><th>净收益</th><th>Sharpe</th><th>MaxDD</th><th>换手/交易</th><th>成本拖累</th><th>操作</th></tr></thead><tbody>
+${ranked.map((r,i)=>`<tr class="bt-compare-row" data-rank-index="${i}" onclick="previewCompareStrategyByRank(${i})" style="cursor:pointer;"><td>${i+1}</td><td>${esc(r.strategy||'-')}<div class="mini">${esc(r.factor_family||'-')}</div></td><td>${esc(r.timeframe||'-')}</td><td>${esc(r.execution_mode||'-')}</td><td>${esc(r.live_verdict||'-')}</td><td class="${Number(r.total_return||0)>=0?'positive':'negative'}">${btPct(r.total_return)}</td><td>${btNum(r.sharpe_ratio)}</td><td>${btPct(r.max_drawdown)}</td><td>${btMetricCell(r.total_trades,'int')}</td><td>${btPct(r.cost_drag_return_pct)}</td><td><div class="inline-actions" style="gap:6px;"><button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();previewCompareStrategyByRank(${i})">详情</button><button type="button" class="btn btn-primary btn-sm" onclick="event.stopPropagation();registerCompareStrategyByRank(${i})">注册</button></div></td></tr>`).join('')||'<tr><td colspan="11">无成功结果</td></tr>'}
+</tbody></table></div>
+<div id="backtest-extra-chart" class="backtest-chart"></div>
+${errRows.length?`<div class="section-title">失败模板</div><div class="backtest-table-wrap"><table class="data-table"><thead><tr><th>模板</th><th>错误</th></tr></thead><tbody>${errRows.map(r=>`<tr><td>${esc(r.strategy||'-')}</td><td>${esc(r.error||'')}</td></tr>`).join('')}</tbody></table></div>`:''}
+${renderBacktestRawBlock(data,'查看原始批量因子结果(JSON)')}`;
+renderBacktestCompareChart(ranked.slice(0,12));
+const local=document.getElementById('factor-batch-output');
+if(local){
+  const topRows=ranked.slice(0,8).map((r,i)=>`<div class="list-item"><span>${i+1}. ${esc(r.strategy||'-')}</span><span>${btPct(r.total_return)} / Sharpe ${btNum(r.sharpe_ratio)}</span></div>`).join('');
+  local.innerHTML=`<div class="list-item"><span>批量因子对比</span><span>成功 ${ranked.length} / 总计 ${(data.results||[]).length}</span></div>${topRows||'<div class="list-item"><span>结果</span><span>暂无成功模板</span></div>'}`;
+}
+}
+async function ensureFactorBacktestPanels(){
+const templateSelect=document.getElementById('factor-template-strategy');
+if(templateSelect instanceof HTMLSelectElement&&!backtestUIState.factorTemplateRows.length){
+  templateSelect.innerHTML='<option value="">模板加载中...</option>';
+}
+const batchList=document.getElementById('factor-batch-list');
+if(batchList&&!backtestUIState.factorTemplateRows.length){
+  batchList.innerHTML='<div class="list-item">模板加载中...</div>';
+}
+await ensureStrategyCatalog();
+renderFactorTemplateOptions();
+applyFactorSamplePreset('factor-template',false);
+applyFactorSamplePreset('factor-batch',false);
+}
+function setBacktestMode(mode='classic'){
+const resolved=['classic','factor_template','factor_batch'].includes(String(mode))?String(mode):'classic';
+backtestUIState.mode=resolved;
+document.querySelectorAll('[data-backtest-mode]').forEach(btn=>btn.classList.toggle('active',String(btn.getAttribute('data-backtest-mode'))===resolved));
+['classic','factor_template','factor_batch'].forEach(name=>{
+  const el=document.getElementById(`backtest-mode-${name.replace('_','-')}`);
+  if(el)el.hidden=name!==resolved;
+});
+const note=document.getElementById('backtest-mode-note');
+if(note)note.textContent=BACKTEST_MODE_NOTES[resolved]||BACKTEST_MODE_NOTES.classic;
+if(resolved!=='classic')ensureFactorBacktestPanels().catch(e=>notify(`因子模板加载失败: ${e.message}`,true));
+}
+function bindBacktestModeControls(){
+if(backtestUIState._modeBound)return;
+backtestUIState._modeBound=true;
+document.querySelectorAll('[data-backtest-mode]').forEach(btn=>btn.addEventListener('click',()=>setBacktestMode(btn.getAttribute('data-backtest-mode')||'classic')));
+setBacktestMode(backtestUIState.mode||'classic');
+}
+function bindFactorBacktestControls(){
+if(backtestUIState._factorControlsBound)return;
+backtestUIState._factorControlsBound=true;
+const templateSel=document.getElementById('factor-template-strategy');
+if(templateSel)templateSel.addEventListener('change',()=>{const row=getFactorTemplateRow(templateSel.value);const rowUniverse=factorTemplateUniverse(row);const defaultUniverse=rowUniverse.length?rowUniverse.slice(0,FACTOR_BACKTEST_DEFAULT_UNIVERSE_LIMIT):RESEARCH_DEFAULT_SYMBOLS.slice(0,FACTOR_BACKTEST_DEFAULT_UNIVERSE_LIMIT);renderFactorTemplateSpec(row);syncFactorUniverseSelect('factor-template-universe',[...rowUniverse,...RESEARCH_DEFAULT_SYMBOLS],defaultUniverse);});
+['factor-template-sample-preset','factor-batch-sample-preset'].forEach(id=>{const el=document.getElementById(id);if(el)el.addEventListener('change',()=>applyFactorSamplePreset(id.replace('-sample-preset',''),true));});
+['factor-batch-search','factor-batch-verdict-filter','factor-batch-timeframe-filter'].forEach(id=>{const el=document.getElementById(id);if(el)el.addEventListener(id==='factor-batch-search'?'input':'change',renderFactorBatchList);});
+const runTemplate=document.getElementById('btn-factor-template-run');
+if(runTemplate)runTemplate.onclick=()=>runFactorTemplateBacktest().catch(e=>{renderBacktestExtraError(e);notify(`因子模板回测失败: ${e.message}`,true);});
+const addBatch=document.getElementById('btn-factor-template-add-batch');
+if(addBatch)addBatch.onclick=()=>{const row=getFactorTemplateRow(document.getElementById('factor-template-strategy')?.value||'');if(row){backtestUIState.factorBatchSelection.add(row.name);setBacktestMode('factor_batch');renderFactorBatchList();notify(`已加入批量因子：${row.name}`);}};
+const register=document.getElementById('btn-factor-template-register');
+if(register)register.onclick=async()=>{try{const row=getFactorTemplateRow(document.getElementById('factor-template-strategy')?.value||'');if(!row)throw new Error('请选择因子模板');const params=buildFactorTemplateParams(row,'factor-template');const universe=Array.isArray(params.universe_symbols)?params.universe_symbols:[];await registerStrategyInstanceFromBacktestSpec({strategy_type:row.name,symbol:universe[0]||'BTC/USDT',symbols:universe,timeframe:factorTemplateTimeframe(row),params,exchange:'binance'});}catch(e){notify(`注册因子模板失败: ${e.message}`,true);}};
+const selectAll=document.getElementById('btn-factor-batch-select-all');
+if(selectAll)selectAll.onclick=()=>{getFactorTemplateRows().forEach(row=>backtestUIState.factorBatchSelection.add(row.name));renderFactorBatchList();};
+const selectNone=document.getElementById('btn-factor-batch-select-none');
+if(selectNone)selectNone.onclick=()=>{backtestUIState.factorBatchSelectionInitialized=true;backtestUIState.factorBatchSelection.clear();renderFactorBatchList();};
+const refresh=document.getElementById('btn-factor-batch-refresh');
+if(refresh)refresh.onclick=()=>ensureFactorBacktestPanels().then(()=>notify('因子模板已刷新')).catch(e=>notify(`刷新失败: ${e.message}`,true));
+const runBatch=document.getElementById('btn-factor-batch-run');
+if(runBatch)runBatch.onclick=()=>runFactorBatchBacktest().catch(e=>{renderBacktestExtraError(e);notify(`批量因子失败: ${e.message}`,true);});
+}
+
 function setBacktestCustomParams(params=null, note=''){
 const box=document.getElementById('backtest-custom-params');
 const hint=document.getElementById('backtest-custom-params-hint');
@@ -874,6 +1290,7 @@ if(row&&!row.backtest_supported){
 }
 activateTab('backtest');
 await ensureTabLoaded('backtest',{force:true});
+setBacktestMode('classic');
 await loadBacktestSymbolOptions(String(spec?.exchange||'binance').trim().toLowerCase()||'binance');
 await ensureBacktestStrategySelect();
 ensureBacktestExitTemplateSelect();
@@ -1792,6 +2209,9 @@ async function loadBacktestTabData(){
   loadDataSymbolOptions('binance',['backtest-symbol']);
   await ensureBacktestStrategySelect().catch(e=>console.error(e));
   initBacktestComparePicker(true);
+  bindBacktestModeControls();
+  bindFactorBacktestControls();
+  ensureFactorBacktestPanels().catch(e=>console.warn('ensureFactorBacktestPanels failed:',e?.message||e));
 }
 async function ensureTabLoaded(tabName,{force=false}={}){
 const tab=String(tabName||'').trim();
@@ -1836,6 +2256,8 @@ function runSummaryTaskSingleFlight(slot,taskFactory,options={}){
 const taskKey=String(slot||'').trim();
 if(!taskKey)return Promise.resolve().then(taskFactory);
 const startedAtKey=`${taskKey}StartedAt`;
+const resultKey=`${taskKey}LastResult`;
+const resultAtKey=`${taskKey}LastResultAt`;
 const maxAgeMs=Math.max(0,Number(options?.maxAgeMs??SUMMARY_TASK_REUSE_MAX_AGE_MS)||0);
 const existingTask=summaryFetchState[taskKey];
 const existingStartedAt=Number(summaryFetchState[startedAtKey]||0);
@@ -1843,7 +2265,11 @@ if(existingTask){
   const ageMs=Date.now()-existingStartedAt;
   if(ageMs<=maxAgeMs)return existingTask;
 }
-const task=Promise.resolve().then(taskFactory).finally(()=>{
+const task=Promise.resolve().then(taskFactory).then(value=>{
+  summaryFetchState[resultKey]=value;
+  summaryFetchState[resultAtKey]=Date.now();
+  return value;
+}).finally(()=>{
   if(summaryFetchState[taskKey]===task){
     summaryFetchState[taskKey]=null;
     summaryFetchState[startedAtKey]=0;
@@ -1852,6 +2278,15 @@ const task=Promise.resolve().then(taskFactory).finally(()=>{
 summaryFetchState[taskKey]=task;
 summaryFetchState[startedAtKey]=Date.now();
 return task;
+}
+function getSummaryTaskLastResult(slot,maxAgeMs=SUMMARY_RESULT_CACHE_MAX_AGE_MS){
+const taskKey=String(slot||'').trim();
+if(!taskKey)return null;
+const result=summaryFetchState[`${taskKey}LastResult`];
+const at=Number(summaryFetchState[`${taskKey}LastResultAt`]||0);
+if(!result||!at)return null;
+if(Date.now()-at>Math.max(0,Number(maxAgeMs||0)))return null;
+return result;
 }
 async function settleWithin(promise,timeoutMs){
 let timer=null;
@@ -2097,8 +2532,10 @@ const [sr,br]=await Promise.all([
 ]);
 const statsFresh=(sr.status==='fulfilled'&&sr.value&&typeof sr.value==='object')?sr.value:null;
 const balancesFresh=(br.status==='fulfilled'&&br.value&&typeof br.value==='object')?br.value:null;
-const s=statsFresh||prevStats||{};
-const b=balancesFresh||prevBalances||{};
+const statsLateCache=getSummaryTaskLastResult('statsTask');
+const balancesLateCache=getSummaryTaskLastResult('balancesTask');
+const s=statsFresh||statsLateCache||prevStats||{};
+const b=balancesFresh||balancesLateCache||prevBalances||{};
 const statusMode=normalizeRuntimeMode(state?._systemStatusLast?.trading_mode);
 const statsMode=normalizeRuntimeMode(s?.trading_mode);
 const balanceMode=normalizeRuntimeMode(b?.mode??b?.active_account_type);
@@ -2106,13 +2543,13 @@ const activeType=resolveRuntimeModeSnapshot({statusMode,statsMode,balanceMode});
 const staleCrossModeBalance=Boolean(!balancesFresh&&balanceMode&&balanceMode!==activeType);
 const displayBalances=staleCrossModeBalance?{}:b;
 const historyMode=activeType==='live'?'live':'paper';
-const historyFresh=(statsFresh||balancesFresh||Object.keys(prevHistoryByMode).length)
+const historyFresh=(statsFresh||balancesFresh||statsLateCache||balancesLateCache||Object.keys(prevHistoryByMode).length)
   ?await api(`/trading/balances/history?hours=72&exchange=all&limit=500&mode=${encodeURIComponent(historyMode)}`,{timeoutMs:5000}).catch(()=>null)
   :null;
 const historyByMode={...prevHistoryByMode};
 if(Array.isArray(historyFresh?.history))historyByMode[historyMode]=historyFresh.history;
 const historyRows=Array.isArray(historyByMode?.[historyMode])?historyByMode[historyMode]:[];
-if(statsFresh||balancesFresh||Array.isArray(historyFresh?.history)){
+if(statsFresh||balancesFresh||statsLateCache||balancesLateCache||Array.isArray(historyFresh?.history)){
   state.lastSummarySnapshot={stats:s,balances:b,historyByMode};
 }
 const hasBalanceSnapshot=hasRenderableBalanceSnapshot(displayBalances);
@@ -4864,7 +5301,9 @@ return params;
 function appendBacktestProtectionParams(url,cfg=null){
 const conf=cfg||getBacktestProtectionConfig();
 let out=String(url||'');
-out+=`&exit_template=${encodeURIComponent(getBacktestExitTemplate())}`;
+const rawExitTemplate=String(conf?.exitTemplate||conf?.exit_template||getBacktestExitTemplate()).trim();
+const exitTemplate=BACKTEST_EXIT_TEMPLATE_OPTIONS.includes(rawExitTemplate)?rawExitTemplate:DEFAULT_BACKTEST_EXIT_TEMPLATE;
+out+=`&exit_template=${encodeURIComponent(exitTemplate)}`;
 out+=`&use_stop_take=${conf.enabled?'true':'false'}`;
 if(conf.enabled){
   if(Number.isFinite(conf.stopLossPct))out+=`&stop_loss_pct=${encodeURIComponent(conf.stopLossPct)}`;
@@ -4886,6 +5325,7 @@ apply();
 }
 function getBacktestExtraPanel(){return document.getElementById('backtest-extra-output');}
 function renderBacktestExtraLoading(title='处理中',detail=''){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>请稍候...</span></div>${detail?`<div class="list-item"><span>执行提示</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(detail)}</span></div>`:''}`;}
+function renderBacktestExtraStatus(title='已完成',detail='',statusText='完成'){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>${esc(statusText)}</span></div>${detail?`<div class="list-item"><span>执行提示</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(detail)}</span></div>`:''}`;}
 function renderBacktestExtraError(err){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>操作失败</span><span style="color:#ff8b8b">${esc(err?.message||String(err||'未知错误'))}</span></div>`;}
 function renderBacktestRawBlock(data,label='原始JSON'){
 return `<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(data,null,2))}</pre></details>`;
@@ -5580,17 +6020,25 @@ try{
   const st=String(row.strategy||'').trim();
   const symbol=String(row?.symbol||compare.symbol||document.getElementById('backtest-symbol')?.value||'BTC/USDT');
   const tf=String(row?.timeframe||compare.timeframe||document.getElementById('backtest-timeframe')?.value||'1h');
-  const capital=Number(document.getElementById('backtest-capital')?.value||compare.initial_capital||10000);
-  const sd=String(document.getElementById('backtest-start-date')?.value||'').trim();
-  const ed=String(document.getElementById('backtest-end-date')?.value||'').trim();
+  const capital=Number(compare.initial_capital||document.getElementById('backtest-capital')?.value||10000);
+  const sd=String(row?.requested_start_date||compare.requested_start_date||compare?._compare_request_meta?.effectiveStartDate||document.getElementById('backtest-start-date')?.value||'').trim();
+  const ed=String(row?.requested_end_date||compare.requested_end_date||compare?._compare_request_meta?.effectiveEndDate||document.getElementById('backtest-end-date')?.value||'').trim();
   const cr=Number(compare.commission_rate ?? 0.0004);
   const sb=Number(compare.slippage_bps ?? 2);
   const params=(row?.register_spec?.params&&typeof row.register_spec.params==='object')?row.register_spec.params:((row.optimization_applied&&row.optimized_params&&typeof row.optimized_params==='object')?row.optimized_params:null);
+  const previewProtection=resolveBacktestRuntimeProtection({
+    exit_template: row?.exit_template||compare?.exit_template||compare?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE,
+    default_exit_template: compare?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE,
+    use_stop_take: row?.use_stop_take ?? compare?.use_stop_take ?? false,
+    stop_loss_pct: row?.stop_loss_pct ?? compare?.stop_loss_pct ?? null,
+    take_profit_pct: row?.take_profit_pct ?? compare?.take_profit_pct ?? null,
+    params: params||{},
+  });
   let u=`/backtest/run_custom?strategy=${encodeURIComponent(st)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(tf)}&initial_capital=${encodeURIComponent(capital)}&commission_rate=${encodeURIComponent(cr)}&slippage_bps=${encodeURIComponent(sb)}&include_series=true`;
   if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
   if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
   if(params)u+=`&params_json=${encodeURIComponent(JSON.stringify(params))}`;
-  u=appendBacktestProtectionParams(u);
+  u=appendBacktestProtectionParams(u,previewProtection);
   notify(`正在预览: ${backtestCompareEntryTitle(row)}`);
   const r=await api(u,{method:'POST',timeoutMs:90000});
   r._from_compare_preview=true;
@@ -8258,6 +8706,8 @@ ensureBacktestExitTemplateSelect();
 bindBacktestProtectionControls();
 bindBacktestSymbolControls();
 bindBacktestMlCompareControls();
+bindBacktestModeControls();
+bindFactorBacktestControls();
 const f=document.getElementById('backtest-form');
 if(f)f.onsubmit=async e=>{
 e.preventDefault();

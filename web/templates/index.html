@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>加密交易系统</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-    <link rel="stylesheet" href="{{ static_asset_url('css/style.css') }}">
+    <link rel="stylesheet" href="{{ static_asset_url('css/style.css') }}&bt_modes=20260525d">
     <script>
         (function (root) {
             if (!root) return;
@@ -3055,6 +3055,13 @@
                 <div class="grid">
                     <div class="card">
                         <h3>策略回测</h3>
+                        <div class="backtest-mode-tabs" id="backtest-mode-tabs" role="tablist" aria-label="回测模式">
+                            <button type="button" class="backtest-mode-tab active" data-backtest-mode="classic">自由回测</button>
+                            <button type="button" class="backtest-mode-tab" data-backtest-mode="factor_template">因子模板</button>
+                            <button type="button" class="backtest-mode-tab" data-backtest-mode="factor_batch">批量因子</button>
+                        </div>
+                        <div id="backtest-mode-note" class="backtest-mode-note">自由选择策略、交易对、周期、退出模板和优化参数。</div>
+                        <div id="backtest-mode-classic" class="backtest-mode-panel active">
                         <form id="backtest-form" class="form">
                             <div class="form-group">
                                 <label>策略</label>
@@ -3267,6 +3274,159 @@
                                 </div>
                             </div>
                         </form>
+                        </div>
+                        <div id="backtest-mode-factor-template" class="backtest-mode-panel" hidden>
+                            <div class="form">
+                                <div class="form-group">
+                                    <label>因子模板</label>
+                                    <select id="factor-template-strategy">
+                                        <option value="">因子模板加载中...</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label>币池 <span class="form-help-inline">(按住 Ctrl 多选)</span></label>
+                                    <select id="factor-template-universe" multiple size="10"></select>
+                                    <div class="form-help">默认使用模板推荐币池；运行时会按模板固定周期、rebalance 和执行方式构建组合。</div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>样本窗口</label>
+                                        <select id="factor-template-sample-preset">
+                                            <option value="recent_30d" selected>最近 30 天</option>
+                                            <option value="recent_90d">最近 90 天</option>
+                                            <option value="recent_180d">最近 180 天</option>
+                                            <option value="form_range">沿用自由回测区间</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>模板周期</label>
+                                        <input type="text" id="factor-template-timeframe-preview" value="等待模板" readonly>
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>开始时间（精确到分钟）</label>
+                                        <input type="datetime-local" id="factor-template-start-date" step="60">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>结束时间（精确到分钟）</label>
+                                        <input type="datetime-local" id="factor-template-end-date" step="60">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label>初始资金 ($)</label>
+                                    <input type="number" id="factor-template-capital" value="10000">
+                                </div>
+                                <div id="factor-template-spec" class="factor-template-spec">
+                                    <div class="list-item"><span>模板规格</span><span>请选择因子模板</span></div>
+                                </div>
+                                <details class="backtest-custom-params">
+                                    <summary>高级覆盖（仅覆盖组合筛选与成本参数）</summary>
+                                    <div class="form-row" style="margin-top:10px;">
+                                        <div class="form-group">
+                                            <label>Long quantile</label>
+                                            <input type="number" id="factor-template-long-quantile" min="0.05" max="0.5" step="0.05">
+                                        </div>
+                                        <div class="form-group">
+                                            <label>Short quantile</label>
+                                            <input type="number" id="factor-template-short-quantile" min="0.05" max="0.5" step="0.05">
+                                        </div>
+                                    </div>
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label>最大单币权重</label>
+                                            <input type="number" id="factor-template-max-weight" min="0.01" max="1" step="0.01">
+                                        </div>
+                                        <div class="form-group">
+                                            <label>最小成交额</label>
+                                            <input type="number" id="factor-template-min-volume" min="0" step="10000">
+                                        </div>
+                                    </div>
+                                    <div class="form-help">周期、lookback、rebalance、horizon 和 execution mode 默认锁定，不放在主流程里修改。</div>
+                                </details>
+                                <div class="inline-actions">
+                                    <button type="button" class="btn btn-primary" id="btn-factor-template-run">运行模板回测</button>
+                                    <button type="button" class="btn btn-primary" id="btn-factor-template-add-batch">加入批量因子</button>
+                                    <button type="button" class="btn btn-primary" id="btn-factor-template-register">注册为策略实例</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="backtest-mode-factor-batch" class="backtest-mode-panel" hidden>
+                            <div class="form">
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>搜索过滤</label>
+                                        <input type="text" id="factor-batch-search" placeholder="模板名 / family / 说明">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>状态过滤</label>
+                                        <select id="factor-batch-verdict-filter">
+                                            <option value="">全部状态</option>
+                                            <option value="priority">priority</option>
+                                            <option value="candidate">candidate</option>
+                                            <option value="watchlist">watchlist</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>周期过滤</label>
+                                        <select id="factor-batch-timeframe-filter">
+                                            <option value="">全部周期</option>
+                                            <option value="5m">5m</option>
+                                            <option value="15m">15m</option>
+                                            <option value="1h">1h</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label>币池 <span class="form-help-inline">(按住 Ctrl 多选)</span></label>
+                                    <select id="factor-batch-universe" multiple size="10"></select>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>样本窗口</label>
+                                        <select id="factor-batch-sample-preset">
+                                            <option value="recent_30d" selected>最近 30 天</option>
+                                            <option value="recent_90d">最近 90 天</option>
+                                            <option value="recent_180d">最近 180 天</option>
+                                            <option value="form_range">沿用自由回测区间</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>运行说明</label>
+                                        <div class="form-help">复用多策略对比接口按模板策略名批量跑；每个模板的只读规格来自策略目录。</div>
+                                    </div>
+                                </div>
+                                <div class="form-row">
+                                    <div class="form-group">
+                                        <label>开始时间（精确到分钟）</label>
+                                        <input type="datetime-local" id="factor-batch-start-date" step="60">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>结束时间（精确到分钟）</label>
+                                        <input type="datetime-local" id="factor-batch-end-date" step="60">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label>初始资金 ($)</label>
+                                    <input type="number" id="factor-batch-capital" value="10000">
+                                </div>
+                                <details class="backtest-compare-picker" open>
+                                    <summary>因子模板集合 <span id="factor-batch-picked-count" style="margin-left:8px;color:#9fb1c9;">已选 0</span></summary>
+                                    <div class="inline-actions" style="margin-top:8px;">
+                                        <button type="button" class="btn btn-primary btn-sm" id="btn-factor-batch-select-all">全选</button>
+                                        <button type="button" class="btn btn-primary btn-sm" id="btn-factor-batch-select-none">清空</button>
+                                        <button type="button" class="btn btn-primary btn-sm" id="btn-factor-batch-refresh">刷新模板</button>
+                                    </div>
+                                    <div id="factor-batch-list" class="backtest-compare-groups"></div>
+                                </details>
+                                <div class="inline-actions">
+                                    <button type="button" class="btn btn-primary" id="btn-factor-batch-run">运行批量因子</button>
+                                </div>
+                                <div id="factor-batch-output" class="output-box factor-batch-output">
+                                    <div class="list-item"><span>批量因子结果</span><span>点击运行后展示</span></div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="card wide">
@@ -3296,7 +3456,7 @@
     </div>
 
     <script charset="utf-8" src="{{ static_asset_url('js/altcoin_radar.js') }}"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/app.js') }}"></script>
+    <script charset="utf-8" src="{{ static_asset_url('js/app.js') }}&bt_modes=20260525d"></script>
     <script charset="utf-8" src="{{ static_asset_url('js/research_workbench.js') }}"></script>
     <script charset="utf-8" src="{{ static_asset_url('js/ai_research.js') }}"></script>
     <script charset="utf-8" src="{{ static_asset_url('js/ai_research_diagnostics.js') }}"></script>

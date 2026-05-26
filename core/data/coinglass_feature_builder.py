@@ -1266,13 +1266,25 @@ async def update_coinglass_cache(
     }
     if not coinglass_enabled():
         return summary
-    if not manual:
+    minute_limit = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30))
+    if manual:
+        total_planned = len(selected_symbols) * len(selected_datasets)
+        if total_planned > minute_limit:
+            if minute_limit < len(selected_symbols):
+                selected_symbols = selected_symbols[:minute_limit]
+                selected_datasets = selected_datasets[:1]
+            else:
+                selected_datasets = selected_datasets[: max(1, minute_limit // max(1, len(selected_symbols)))]
+            summary["symbols"] = selected_symbols
+            summary["datasets"] = selected_datasets
+            summary["stopped_early"] = True
+            summary["stop_reason"] = f"manual_refresh_limited_by_{minute_limit}_per_min_budget"
+    else:
         try:
             budget_state = await get_coinglass_budget_state()
             headroom = coinglass_minute_headroom(budget_state, manual=False)
         except Exception:
             headroom = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30) - 2)
-        minute_limit = max(1, int(getattr(settings, "COINGLASS_RATE_LIMIT_PER_MIN", 30) or 30))
         effective_capacity = max(0, int(headroom) - _NON_MANUAL_DATASET_RESERVE)
         if effective_capacity <= 0:
             summary["stopped_early"] = True

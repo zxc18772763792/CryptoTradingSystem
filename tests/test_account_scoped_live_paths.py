@@ -80,6 +80,53 @@ def test_execution_engine_refresh_equity_uses_account_scoped_snapshot(monkeypatc
     assert snapshot_mock.await_args.kwargs["account_id"] == "acct_live"
 
 
+def test_execution_engine_skips_incomplete_low_shared_live_equity(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    gate_connector = SimpleNamespace(
+        get_balance=AsyncMock(
+            return_value=[SimpleNamespace(currency="USDT", total=1.1574)]
+        )
+    )
+    binance_connector = SimpleNamespace(
+        get_balance=AsyncMock(side_effect=RuntimeError("binance down"))
+    )
+    connectors = {"gate": gate_connector, "binance": binance_connector}
+
+    monkeypatch.setattr(
+        execution_engine_module.exchange_manager,
+        "get_connected_exchanges",
+        lambda: ["gate", "binance"],
+    )
+    monkeypatch.setattr(
+        engine,
+        "_resolve_cached_exchange",
+        lambda exchange_name, account_id=None: connectors.get(exchange_name),
+    )
+    monkeypatch.setattr(
+        execution_engine_module,
+        "fetch_binance_live_wallet_snapshot_fast",
+        AsyncMock(side_effect=TimeoutError()),
+    )
+    monkeypatch.setattr(
+        execution_engine_module.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 0.0}},
+    )
+    published = []
+    monkeypatch.setattr(
+        execution_engine_module.risk_manager,
+        "update_equity",
+        lambda value, **kwargs: published.append(value),
+    )
+
+    equity = asyncio.run(engine._refresh_equity())
+
+    assert equity == 0.0
+    assert published == []
+
+
 def test_execution_engine_unknown_account_inherits_active_live_mode(monkeypatch):
     engine = ExecutionEngine()
     engine.set_paper_trading(False, sync_runtime_state=False)

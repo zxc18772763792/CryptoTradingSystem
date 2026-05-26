@@ -4,7 +4,7 @@ param(
     [int]$Port = 8000,
     [bool]$OpenBrowser = $true,
     [int]$HealthWaitSec = 20,
-    [bool]$AllowPersistedLiveMode = $false,
+    [bool]$AllowPersistedLiveMode = $true,
     [bool]$StartAutonomousAgent = $false,
     [bool]$StartNewsWorker = $false,
     [bool]$StartNewsLlmWorker = $false,
@@ -285,7 +285,8 @@ if (-not $EnableAnalyticsHistory) {
 } else {
     Set-Item -Path Env:ANALYTICS_HISTORY_ENABLED -Value "1"
 }
-Set-Item -Path Env:ALLOW_PERSISTED_LIVE_MODE_START -Value $(if ($AllowPersistedLiveMode) { "1" } else { "0" })
+Set-Item -Path Env:TRADING_MODE -Value "live"
+Set-Item -Path Env:ALLOW_PERSISTED_LIVE_MODE_START -Value "1"
 Set-EffectiveWorkerEnvFlags `
     -NewsWorker $StartNewsWorker `
     -NewsLlmWorker $StartNewsLlmWorker `
@@ -306,9 +307,7 @@ if ($pidOnPort) {
             Write-Host "Default start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
             Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' to opt into analytics history collectors." -ForegroundColor Yellow
         }
-        if (-not $AllowPersistedLiveMode) {
-            Write-Host "Managed start blocks persisted live-mode restore unless you pass '.\web.bat start -AllowPersistedLiveMode'." -ForegroundColor Yellow
-        }
+        Write-Host "Managed start forces TRADING_MODE=live and allows persisted live-mode restore." -ForegroundColor Yellow
         if ($requestedExternalWorkerLabels.Count) {
             Write-Host "Worker mix was not changed because the web service is already running." -ForegroundColor Yellow
             Write-Host "Use '.\web.bat stop -IncludeWorkers' and then start again with the desired worker flags." -ForegroundColor Yellow
@@ -342,9 +341,7 @@ if (-not $EnableAnalyticsHistory) {
     Write-Host "Default start forces ANALYTICS_HISTORY_ENABLED=0." -ForegroundColor Yellow
     Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' when you want analytics history collectors." -ForegroundColor Yellow
 }
-if (-not $AllowPersistedLiveMode) {
-    Write-Host "Managed start blocks persisted live-mode restore unless you pass '.\web.bat start -AllowPersistedLiveMode'." -ForegroundColor Yellow
-}
+Write-Host "Managed start forces TRADING_MODE=live and allows persisted live-mode restore." -ForegroundColor Yellow
 
 $startupStamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $webStdoutPath = Join-Path $PSScriptRoot ("logs\uvicorn_web_{0}.out.log" -f $startupStamp)

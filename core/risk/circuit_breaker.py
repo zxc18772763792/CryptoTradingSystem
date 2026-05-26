@@ -38,6 +38,7 @@ DECISION_ALLOW = "allow"
 DECISION_CLOSE_ONLY = "close_only"
 DECISION_BLOCK = "block"
 _DECISIONS = (DECISION_ALLOW, DECISION_CLOSE_ONLY, DECISION_BLOCK)
+_FALSE_TRIP_AUTO_CLEAR_MIN_RECORDED_DD = 0.20
 
 
 @dataclass
@@ -360,6 +361,66 @@ class CircuitBreaker:
         })
         return True
 
+    def tripped_strategy_states(self) -> Dict[str, Dict[str, Any]]:
+        with self._lock:
+            return {
+                name: state.to_dict()
+                for name, state in self._strategies.items()
+                if state.tripped
+            }
+
+    def portfolio_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._portfolio.to_dict()
+
+    def clear_strategy_false_trip(
+        self,
+        name: str,
+        *,
+        reason: str,
+        daily_dd: float,
+        weekly_dd: float,
+        operator: str = "auto_false_trip_recalc",
+    ) -> bool:
+        if not name:
+            return False
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            state = self._strategies.get(str(name))
+            if not state or not state.tripped:
+                return False
+            state.tripped = False
+            state.reason = reason
+            state.daily_dd = float(daily_dd or 0.0)
+            state.weekly_dd = float(weekly_dd or 0.0)
+            state.last_reset_at = now_iso
+            state.last_reset_by = str(operator or "auto_false_trip_recalc")
+            self._persist()
+        logger.info(f"circuit_breaker: auto-cleared false strategy trip {name}: {reason}")
+        return True
+
+    def clear_portfolio_false_trip(
+        self,
+        *,
+        reason: str,
+        daily_dd: float,
+        weekly_dd: float,
+        operator: str = "auto_false_trip_recalc",
+    ) -> bool:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            if not self._portfolio.tripped:
+                return False
+            self._portfolio.tripped = False
+            self._portfolio.reason = reason
+            self._portfolio.daily_dd = float(daily_dd or 0.0)
+            self._portfolio.weekly_dd = float(weekly_dd or 0.0)
+            self._portfolio.last_reset_at = now_iso
+            self._portfolio.last_reset_by = str(operator or "auto_false_trip_recalc")
+            self._persist()
+        logger.info(f"circuit_breaker: auto-cleared false portfolio trip: {reason}")
+        return True
+
     def _fire_close_positions(self, name: str, reason: str) -> None:
         """Sync, best-effort fire of the close-positions hook.
 
@@ -475,6 +536,37 @@ def _resolve_account_equity() -> float:
     return 0.0
 
 
+def _credible_equity_floor() -> float:
+    return max(10.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
+
+
+def _should_auto_clear_false_trip(
+    stored_state: Dict[str, Any],
+    *,
+    current_daily_dd: float,
+    current_weekly_dd: float,
+    daily_threshold: float,
+    weekly_threshold: float,
+    account_equity: float,
+) -> bool:
+    """Conservatively clear trips caused by a clearly bad equity denominator."""
+    if account_equity < _credible_equity_floor():
+        return False
+    try:
+        stored_daily = float((stored_state or {}).get("daily_dd") or 0.0)
+        stored_weekly = float((stored_state or {}).get("weekly_dd") or 0.0)
+    except Exception:
+        return False
+    if max(stored_daily, stored_weekly) < _FALSE_TRIP_AUTO_CLEAR_MIN_RECORDED_DD:
+        return False
+    if current_daily_dd >= daily_threshold or current_weekly_dd >= weekly_threshold:
+        return False
+    return (
+        current_daily_dd <= max(daily_threshold * 0.5, 1e-9)
+        and current_weekly_dd <= max(weekly_threshold * 0.5, 1e-9)
+    )
+
+
 def _normalize_strategy_names(names: Optional[Iterable[Any]]) -> Optional[Set[str]]:
     if names is None:
         return None
@@ -522,6 +614,9 @@ def _trade_row_is_runtime_eligible(
     if active_names is not None and name not in active_names:
         return False, "inactive_strategy"
     row_scope = _runtime_row_scope(row)
+    order_id = str(row.get("order_id") or "").strip()
+    if order_id.startswith("paper_") and (runtime_mode == "live" or row_scope == "live"):
+        return False, "paper_order_in_live"
     if runtime_mode and row_scope and row_scope != runtime_mode:
         return False, "scope_mismatch"
     return True, ""
@@ -709,6 +804,7 @@ def run_circuit_breaker_checks(
     portfolio_drawdown: Optional[Dict[str, float]] = None,
     account_equity: Optional[float] = None,
     active_strategy_names: Optional[Iterable[Any]] = None,
+    auto_clear_false_trips: bool = False,
 ) -> Dict[str, Any]:
     """Single evaluation pass. Returns a report dict.
 
@@ -756,6 +852,49 @@ def run_circuit_breaker_checks(
     report["strategy_dds"] = strat_dds
     daily_thr = breaker.strategy_daily_threshold
     weekly_thr = breaker.strategy_weekly_threshold
+    strategy_auto_clears: List[Dict[str, Any]] = []
+
+    tripped_strategy_states = breaker.tripped_strategy_states()
+    if auto_clear_false_trips and tripped_strategy_states:
+        full_strategy_dds = strat_dds
+        if active_names is not None:
+            full_strategy_dds = evaluate_strategy_drawdowns(
+                trade_history,
+                base_capital=float(account_equity or 0.0) if account_equity else None,
+                active_strategy_names=None,
+                runtime_mode=runtime_mode if not history_was_supplied else None,
+            )
+        for name, stored_state in tripped_strategy_states.items():
+            dds = full_strategy_dds.get(name) or {"daily_dd": 0.0, "weekly_dd": 0.0}
+            current_daily = float(dds.get("daily_dd") or 0.0)
+            current_weekly = float(dds.get("weekly_dd") or 0.0)
+            if not _should_auto_clear_false_trip(
+                stored_state,
+                current_daily_dd=current_daily,
+                current_weekly_dd=current_weekly,
+                daily_threshold=daily_thr,
+                weekly_threshold=weekly_thr,
+                account_equity=float(account_equity or 0.0),
+            ):
+                continue
+            reason = (
+                "auto-cleared false trip after credible equity recalculation; "
+                f"recomputed 24h_dd={current_daily:.4f}, 7d_dd={current_weekly:.4f}, "
+                f"account_equity={float(account_equity or 0.0):.4f}"
+            )
+            if breaker.clear_strategy_false_trip(
+                name,
+                reason=reason,
+                daily_dd=current_daily,
+                weekly_dd=current_weekly,
+            ):
+                strategy_auto_clears.append({
+                    "strategy": name,
+                    "reason": reason,
+                    "daily_dd": current_daily,
+                    "weekly_dd": current_weekly,
+                })
+    report["strategy_auto_clears"] = strategy_auto_clears
 
     for name, dds in strat_dds.items():
         daily = float(dds.get("daily_dd") or 0.0)
@@ -778,6 +917,32 @@ def run_circuit_breaker_checks(
 
     port_daily = float((portfolio_drawdown or {}).get("daily_dd") or 0.0)
     port_weekly = float((portfolio_drawdown or {}).get("weekly_dd") or 0.0)
+    report["portfolio_auto_clear"] = None
+    portfolio_state = breaker.portfolio_state()
+    if auto_clear_false_trips and bool(portfolio_state.get("tripped")) and _should_auto_clear_false_trip(
+        portfolio_state,
+        current_daily_dd=port_daily,
+        current_weekly_dd=port_weekly,
+        daily_threshold=breaker.portfolio_daily_threshold,
+        weekly_threshold=breaker.portfolio_weekly_threshold,
+        account_equity=float(account_equity or 0.0),
+    ):
+        reason = (
+            "auto-cleared false trip after credible equity recalculation; "
+            f"recomputed 24h_dd={port_daily:.4f}, 7d_dd={port_weekly:.4f}, "
+            f"account_equity={float(account_equity or 0.0):.4f}"
+        )
+        if breaker.clear_portfolio_false_trip(
+            reason=reason,
+            daily_dd=port_daily,
+            weekly_dd=port_weekly,
+        ):
+            report["portfolio_auto_clear"] = {
+                "reason": reason,
+                "daily_dd": port_daily,
+                "weekly_dd": port_weekly,
+            }
+
     port_breaches: List[str] = []
     if breaker.portfolio_daily_threshold > 0 and port_daily >= breaker.portfolio_daily_threshold:
         port_breaches.append(f"24h_dd {port_daily:.4f} >= {breaker.portfolio_daily_threshold:.4f}")

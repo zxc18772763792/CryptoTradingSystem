@@ -934,6 +934,7 @@ class ExecutionEngine:
     async def _refresh_equity(self, account_id: Optional[str] = None) -> float:
         total_usd = 0.0
         has_unpriced_assets = False
+        failed_exchange_names: List[str] = []
         cached_eq = self._get_cached_equity_value(account_id)
         report_eq = 0.0
         if self._should_publish_equity(account_id):
@@ -1007,10 +1008,28 @@ class ExecutionEngine:
                     logger.debug(f"Equity valuation fallback on {exchange_name}: unpriced_assets={unpriced_assets}")
                     has_unpriced_assets = True
             except Exception as e:
+                failed_exchange_names.append(str(exchange_name or "").lower())
                 logger.debug(f"Failed to estimate equity on {exchange_name}: {e}")
 
         if total_usd > 0:
             candidate = float(total_usd)
+            live_min_credible_equity = max(
+                10.0,
+                float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0),
+            )
+            if (
+                (not self._paper_trading)
+                and account_id is None
+                and failed_exchange_names
+                and len(scoped_connectors) > 1
+                and candidate < live_min_credible_equity
+            ):
+                logger.warning(
+                    "Skip incomplete low live equity snapshot in execution engine: "
+                    f"candidate={candidate:.4f}, failed_exchanges={sorted(set(failed_exchange_names))}, "
+                    f"cached={cached_eq:.4f}, report_eq={report_eq:.4f}"
+                )
+                return self._get_cached_equity_value(account_id)
             if (
                 (not self._paper_trading)
                 and report_eq > 100

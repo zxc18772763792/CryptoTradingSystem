@@ -118,6 +118,34 @@ def test_strategy_catalog_and_library_use_same_effective_defaults():
     assert "factors" in multi and "gates" in multi and "risk" in multi
     assert ml["model_path"].replace("\\", "/").endswith("models/ml_signal_xgb.json")
 
+    factor_defaults = get_strategy_defaults("Ret24hReversalStrategy")
+    expected_spec_keys = {
+        "strategy_id",
+        "timeframe",
+        "lookback_bars",
+        "rebalance_bars",
+        "horizon_bars",
+        "execution_mode",
+        "direction",
+    }
+    for row in [catalog_by_name["Ret24hReversalStrategy"], library_by_name["Ret24hReversalStrategy"]]:
+        assert row["strategy_kind"] == "factor_template"
+        assert row["template_locked"] is True
+        assert row["factor_family"] == factor_defaults["family"]
+        assert row["live_verdict"] == factor_defaults["live_verdict"]
+        assert expected_spec_keys.issubset(row["template_spec"])
+        assert set(row["locked_fields"]) == expected_spec_keys
+        for key in expected_spec_keys:
+            assert row["template_spec"][key] == factor_defaults[key]
+
+    for row in [catalog_by_name["MAStrategy"], library_by_name["MAStrategy"]]:
+        assert row["strategy_kind"] == "classic"
+        assert row["template_locked"] is False
+        assert row["locked_fields"] == []
+        assert row["factor_family"] == ""
+        assert row["live_verdict"] == ""
+        assert row["template_spec"] == {}
+
 
 def test_mlxgboost_strategy_defaults_include_model_path_for_non_api_callers():
     defaults = get_strategy_defaults("MLXGBoostStrategy")

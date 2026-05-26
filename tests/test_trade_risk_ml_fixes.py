@@ -14,7 +14,7 @@ from core.ml.pipeline import FEATURE_SET_VERSION
 from core.risk.risk_manager import RiskManager
 
 
-def test_allow_close_only_bypasses_daily_loss_halt_not_leverage_or_size(monkeypatch):
+def test_allow_close_bypasses_entry_only_caps_during_daily_loss_halt(monkeypatch):
     risk_module = importlib.import_module("core.risk.risk_manager")
     monkeypatch.setattr(
         risk_module,
@@ -53,7 +53,7 @@ def test_allow_close_only_bypasses_daily_loss_halt_not_leverage_or_size(monkeypa
         order_value=500.0,
         leverage=10.0,
         allow_close=True,
-    ) is False
+    ) is True
 
     assert manager.pre_trade_check(
         symbol="BTC/USDT",
@@ -63,10 +63,10 @@ def test_allow_close_only_bypasses_daily_loss_halt_not_leverage_or_size(monkeypa
         order_value=50.0,
         leverage=10.0,
         allow_close=True,
-    ) is False
+    ) is True
 
 
-def test_allow_close_does_not_bypass_non_daily_halt_or_position_count(monkeypatch):
+def test_allow_close_does_not_bypass_non_daily_halt_but_bypasses_position_count(monkeypatch):
     risk_module = importlib.import_module("core.risk.risk_manager")
     monkeypatch.setattr(
         risk_module,
@@ -106,7 +106,7 @@ def test_allow_close_does_not_bypass_non_daily_halt_or_position_count(monkeypatc
         order_value=50.0,
         leverage=1.0,
         allow_close=True,
-    ) is False
+    ) is True
 
 
 class _FakeModel:

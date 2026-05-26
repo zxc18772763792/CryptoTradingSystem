@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,6 +10,7 @@ import pytest
 
 from core.data import coinglass_client as client_module
 from core.data import coinglass_feature_builder as builder_module
+from core.data import coinglass_onchain as onchain_module
 from core.data.coinglass_registry import get_coinglass_manifest
 from core.data.coinglass_registry import COINGLASS_DEFAULT_DATASETS
 
@@ -66,6 +68,101 @@ def test_optional_coinglass_datasets_are_supported_but_not_default():
     assert get_coinglass_manifest("top_long_short_position_ratio_history") is not None
     assert get_coinglass_manifest("options_exchange_oi_history") is not None
     assert get_coinglass_manifest("bitcoin_etf_flow_history") is not None
+
+
+def test_coinglass_onchain_source_policy_has_no_binance_price_fallback():
+    source = inspect.getsource(onchain_module)
+
+    assert "api.binance.com" not in source
+    assert "ticker/price" not in source
+    assert "_fetch_btc_price" not in source
+
+
+def test_coinglass_whale_transfers_derives_btc_price_from_payload(monkeypatch):
+    captured = []
+
+    class FakeCoinglassClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request_json(self, path, params=None, manual=False):
+            captured.append({"path": path, "params": dict(params or {}), "manual": manual})
+            return {
+                "payload": {
+                    "data": [
+                        {
+                            "hash": "tx1",
+                            "asset_symbol": "BTC",
+                            "asset_quantity": 2,
+                            "amount_usd": 120000,
+                            "timestamp": 1710000000000,
+                        }
+                    ]
+                }
+            }
+
+    monkeypatch.setattr(onchain_module, "coinglass_enabled", lambda: True)
+    monkeypatch.setattr(onchain_module, "CoinglassClient", FakeCoinglassClient)
+
+    result = asyncio.run(
+        onchain_module.fetch_coinglass_whale_transfers(symbol="BTC/USDT", min_btc=1.0, manual=True)
+    )
+
+    assert captured[0]["path"] == "/v4/api/chain/v2/whale-transfer"
+    assert result["btc_price"] == pytest.approx(60000.0)
+    assert result["transactions"][0]["btc"] == pytest.approx(2.0)
+    assert result["transactions"][0]["amount_usd"] == pytest.approx(120000.0)
+
+
+def test_coinglass_exchange_chain_transfers_does_not_send_binance_derived_min_usd(monkeypatch):
+    captured = []
+
+    class FakeCoinglassClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def request_json(self, path, params=None, manual=False):
+            captured.append({"path": path, "params": dict(params or {}), "manual": manual})
+            return {
+                "payload": {
+                    "data": [
+                        {
+                            "hash": "tx1",
+                            "asset_symbol": "BTC",
+                            "asset_quantity": 2,
+                            "amount_usd": 120000,
+                            "transfer_type": "withdraw",
+                            "exchange_name": "Binance",
+                            "timestamp": 1710000000000,
+                        }
+                    ]
+                }
+            }
+
+    monkeypatch.setattr(onchain_module, "coinglass_enabled", lambda: True)
+    monkeypatch.setattr(onchain_module, "CoinglassClient", FakeCoinglassClient)
+
+    result = asyncio.run(
+        onchain_module.fetch_coinglass_exchange_chain_transfers(symbol="BTC/USDT", min_btc=1.0, manual=True)
+    )
+
+    assert captured[0]["path"] == "/v4/api/exchange/chain/tx/list"
+    assert "min_usd" not in captured[0]["params"]
+    assert result["btc_price"] == pytest.approx(60000.0)
+    assert result["transactions"][0]["btc"] == pytest.approx(2.0)
+    assert result["flow_summary"]["spot_exchange_outflow_usd"] == pytest.approx(120000.0)
 
 
 def test_optional_manifest_params_cover_liquidation_map_and_top_ratios():

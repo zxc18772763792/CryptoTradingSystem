@@ -21,6 +21,26 @@ INTRADAY_CROSS_SECTION_STRATEGY_IDS = [
     "RelRet24hReversalStrategy",
     "ResidualMom24hStrategy",
     "CloseLocation48hStrategy",
+    "ReturnEntropy4hStrategy",
+    "FalseBreakoutSupply24hStrategy",
+    "RangeAsymmetry48hStrategy",
+    "SessionAsiaFlow24hStrategy",
+    "SessionFlowRotation24hStrategy",
+    "VolumeWeightedReturn24hStrategy",
+    "WickImbalance48hStrategy",
+    "TurnoverEntropy48hStrategy",
+    "BodyVolumeCorr24hStrategy",
+    "CorrBreakdown24h72hStrategy",
+    "ExtremeRecency48hStrategy",
+    "UpDownBetaSpread24h72hStrategy",
+    "DirectionalRangeEfficiency48hStrategy",
+    "CrossSectionalStress4hStrategy",
+    "SignImbalance4hStrategy",
+    "VWAPSlope24hStrategy",
+    "VWAPGap48hStrategy",
+    "RelativeVolShock24hStrategy",
+    "LeadMarketResponse24h72hStrategy",
+    "BreakCountBalance24hStrategy",
 ]
 
 
@@ -55,6 +75,12 @@ class IntradayCrossSectionSpec:
     lookback_bars: int
     direction: str
     description: str
+    timeframe: str = "5m"
+    rebalance_bars: int = 288
+    horizon_bars: int = 288
+    execution_mode: str = "spread_low_minus_high"
+    family: str = "cross_section"
+    live_verdict: str = "priority"
 
 
 INTRADAY_CROSS_SECTION_SPECS: Dict[str, IntradayCrossSectionSpec] = {
@@ -92,6 +118,213 @@ INTRADAY_CROSS_SECTION_SPECS: Dict[str, IntradayCrossSectionSpec] = {
         lookback_bars=576,
         direction="high",
         description="48h rolling mean of close location within each candle.",
+        execution_mode="spread_high_minus_low",
+    ),
+    "ReturnEntropy4hStrategy": IntradayCrossSectionSpec(
+        strategy_id="return_entropy_4h",
+        factor_name="return_entropy",
+        lookback_bars=4,
+        direction="low",
+        description="4h binary return entropy: long low-entropy one-way tapes, short high-entropy chop.",
+        timeframe="1h",
+        rebalance_bars=24,
+        horizon_bars=48,
+        execution_mode="spread_low_minus_high",
+        family="nonparametric_chop",
+        live_verdict="priority",
+    ),
+    "FalseBreakoutSupply24hStrategy": IntradayCrossSectionSpec(
+        strategy_id="false_breakout_supply_24h",
+        factor_name="false_breakout_supply",
+        lookback_bars=24,
+        direction="low",
+        description="24h failed new-high supply pressure; short the selected low factor bucket.",
+        timeframe="1h",
+        rebalance_bars=24,
+        horizon_bars=72,
+        execution_mode="short_low",
+        family="liquidity_rejection",
+        live_verdict="candidate",
+    ),
+    "RangeAsymmetry48hStrategy": IntradayCrossSectionSpec(
+        strategy_id="range_asymmetry_48h",
+        factor_name="range_asymmetry",
+        lookback_bars=576,
+        direction="low",
+        description="48h intrabar upside-vs-downside range asymmetry.",
+        execution_mode="spread_low_minus_high",
+        family="intrabar_range_shape",
+    ),
+    "SessionAsiaFlow24hStrategy": IntradayCrossSectionSpec(
+        strategy_id="session_asia_flow_24h",
+        factor_name="session_asia_flow",
+        lookback_bars=288,
+        direction="low",
+        description="24h UTC 00-08 volume-weighted directional flow.",
+        execution_mode="spread_low_minus_high",
+        family="session_flow",
+    ),
+    "SessionFlowRotation24hStrategy": IntradayCrossSectionSpec(
+        strategy_id="session_flow_rotation_24h",
+        factor_name="session_flow_rotation",
+        lookback_bars=288,
+        direction="low",
+        description="24h Asia-session flow minus US-session flow rotation.",
+        execution_mode="spread_low_minus_high",
+        family="session_flow",
+    ),
+    "VolumeWeightedReturn24hStrategy": IntradayCrossSectionSpec(
+        strategy_id="volume_weighted_return_24h",
+        factor_name="volume_weighted_return",
+        lookback_bars=288,
+        direction="low",
+        description="24h volume-weighted return pressure.",
+        execution_mode="spread_low_minus_high",
+        family="volume_confirmed_pressure",
+    ),
+    "WickImbalance48hStrategy": IntradayCrossSectionSpec(
+        strategy_id="wick_imbalance_48h",
+        factor_name="wick_imbalance",
+        lookback_bars=576,
+        direction="low",
+        description="48h lower-wick minus upper-wick liquidity rejection imbalance.",
+        execution_mode="short_low",
+        family="liquidity_rejection",
+    ),
+    "TurnoverEntropy48hStrategy": IntradayCrossSectionSpec(
+        strategy_id="turnover_entropy_48h",
+        factor_name="turnover_entropy",
+        lookback_bars=192,
+        direction="high",
+        description="48h turnover concentration entropy on 15m bars.",
+        timeframe="15m",
+        rebalance_bars=96,
+        horizon_bars=192,
+        execution_mode="short_high",
+        family="attention_structure",
+    ),
+    "BodyVolumeCorr24hStrategy": IntradayCrossSectionSpec(
+        strategy_id="body_volume_corr_24h",
+        factor_name="body_volume_correlation",
+        lookback_bars=288,
+        direction="low",
+        description="24h rolling correlation between candle body returns and log dollar volume.",
+        execution_mode="spread_low_minus_high",
+        family="activity_direction_confirmation",
+    ),
+    "CorrBreakdown24h72hStrategy": IntradayCrossSectionSpec(
+        strategy_id="corr_breakdown_24h_72h",
+        factor_name="correlation_breakdown",
+        lookback_bars=864,
+        direction="high",
+        description="24h market-correlation minus 72h market-correlation breakdown.",
+        execution_mode="short_high",
+        family="market_relation_shift",
+    ),
+    "ExtremeRecency48hStrategy": IntradayCrossSectionSpec(
+        strategy_id="extreme_recency_48h",
+        factor_name="extreme_recency",
+        lookback_bars=576,
+        direction="high",
+        description="48h recency of rolling high versus rolling low.",
+        execution_mode="short_high",
+        family="breakout_timing",
+        live_verdict="watchlist",
+    ),
+    "UpDownBetaSpread24h72hStrategy": IntradayCrossSectionSpec(
+        strategy_id="up_down_beta_spread_24h_72h",
+        factor_name="up_down_beta_spread",
+        lookback_bars=864,
+        direction="low",
+        description="72h up-market beta minus down-market beta asymmetry.",
+        execution_mode="spread_low_minus_high",
+        family="asymmetric_market_beta",
+    ),
+    "DirectionalRangeEfficiency48hStrategy": IntradayCrossSectionSpec(
+        strategy_id="directional_range_efficiency_48h",
+        factor_name="directional_range_efficiency",
+        lookback_bars=576,
+        direction="low",
+        description="48h signed range expansion per dollar-volume liquidity.",
+        execution_mode="spread_low_minus_high",
+        family="liquidity_impact",
+    ),
+    "CrossSectionalStress4hStrategy": IntradayCrossSectionSpec(
+        strategy_id="cross_sectional_stress_4h",
+        factor_name="cross_sectional_stress",
+        lookback_bars=4,
+        direction="low",
+        description="4h move extremity relative to same-timestamp cross-sectional dispersion.",
+        timeframe="1h",
+        rebalance_bars=24,
+        horizon_bars=72,
+        execution_mode="spread_low_minus_high",
+        family="relative_shock",
+        live_verdict="candidate",
+    ),
+    "SignImbalance4hStrategy": IntradayCrossSectionSpec(
+        strategy_id="sign_imbalance_4h",
+        factor_name="sign_imbalance",
+        lookback_bars=4,
+        direction="high",
+        description="4h non-parametric up/down bar sign imbalance.",
+        timeframe="1h",
+        rebalance_bars=24,
+        horizon_bars=48,
+        execution_mode="long_high",
+        family="nonparametric_trend",
+        live_verdict="candidate",
+    ),
+    "VWAPSlope24hStrategy": IntradayCrossSectionSpec(
+        strategy_id="vwap_slope_24h",
+        factor_name="vwap_slope",
+        lookback_bars=288,
+        direction="low",
+        description="24h short-VWAP versus long-VWAP slope.",
+        execution_mode="spread_low_minus_high",
+        family="volume_price_inventory",
+        live_verdict="watchlist",
+    ),
+    "VWAPGap48hStrategy": IntradayCrossSectionSpec(
+        strategy_id="vwap_gap_48h",
+        factor_name="vwap_gap",
+        lookback_bars=576,
+        direction="low",
+        description="48h close-to-volume-weighted-inventory gap.",
+        execution_mode="spread_low_minus_high",
+        family="volume_price_inventory",
+        live_verdict="watchlist",
+    ),
+    "RelativeVolShock24hStrategy": IntradayCrossSectionSpec(
+        strategy_id="relative_vol_shock_24h",
+        factor_name="relative_vol_shock",
+        lookback_bars=288,
+        direction="low",
+        description="24h realized-volatility shock versus cross-sectional peers.",
+        rebalance_bars=144,
+        horizon_bars=144,
+        execution_mode="short_low",
+        family="relative_volatility",
+    ),
+    "LeadMarketResponse24h72hStrategy": IntradayCrossSectionSpec(
+        strategy_id="lead_market_response_24h_72h",
+        factor_name="lead_market_response",
+        lookback_bars=864,
+        direction="low",
+        description="72h rolling correlation of lagged asset returns with current market returns.",
+        execution_mode="spread_low_minus_high",
+        family="lead_lag",
+        live_verdict="candidate",
+    ),
+    "BreakCountBalance24hStrategy": IntradayCrossSectionSpec(
+        strategy_id="break_count_balance_24h",
+        factor_name="break_count_balance",
+        lookback_bars=288,
+        direction="low",
+        description="24h repeated high-break count minus low-break count balance.",
+        execution_mode="spread_low_minus_high",
+        family="breakout_frequency",
+        live_verdict="candidate",
     ),
 }
 
@@ -119,6 +352,26 @@ def normalize_symbol_list(symbols: Iterable[Any]) -> List[str]:
         seen.add(symbol)
         out.append(symbol)
     return out
+
+
+def _timeframe_to_seconds(timeframe: str) -> int:
+    text = str(timeframe or "5m").strip().lower()
+    if not text:
+        return 300
+    unit = text[-1]
+    try:
+        value = max(1, int(text[:-1] or 1))
+    except Exception:
+        return 300
+    if unit == "s":
+        return value
+    if unit == "m":
+        return value * 60
+    if unit == "h":
+        return value * 3600
+    if unit == "d":
+        return value * 86400
+    return 300
 
 
 def calc_return(close: pd.DataFrame, lookback_bars: int) -> pd.DataFrame:
@@ -152,6 +405,130 @@ def calc_close_location(
     location = (close - low) / spread.replace(0.0, np.nan)
     location = location.mask(spread == 0.0, 0.5)
     return location.replace([np.inf, -np.inf], np.nan).clip(lower=0.0, upper=1.0)
+
+
+def _rolling_min_periods(window: int) -> int:
+    return max(2, min(int(window), max(2, int(window) // 2)))
+
+
+def _binary_entropy(p_up: pd.DataFrame, p_down: pd.DataFrame) -> pd.DataFrame:
+    up = p_up.where(p_up > 0.0)
+    down = p_down.where(p_down > 0.0)
+    entropy = -(up * np.log(up) + down * np.log(down))
+    return entropy.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+
+def _rolling_entropy(values: pd.DataFrame, window: int) -> pd.DataFrame:
+    def entropy_array(raw: np.ndarray) -> float:
+        arr = np.asarray(raw, dtype=float)
+        arr = arr[np.isfinite(arr) & (arr > 0.0)]
+        if arr.size <= 1:
+            return 0.0
+        total = float(arr.sum())
+        if total <= 0.0:
+            return 0.0
+        p = arr / total
+        entropy = -float(np.sum(p * np.log(p)))
+        return entropy / float(np.log(arr.size)) if arr.size > 1 else 0.0
+
+    return values.rolling(int(window), min_periods=_rolling_min_periods(window)).apply(entropy_array, raw=True)
+
+
+def _rolling_extreme_recency(values: pd.DataFrame, window: int, *, high: bool) -> pd.DataFrame:
+    def recency_array(raw: np.ndarray) -> float:
+        arr = np.asarray(raw, dtype=float)
+        if arr.size <= 1 or not np.isfinite(arr).any():
+            return 0.0
+        filled = np.where(np.isfinite(arr), arr, -np.inf if high else np.inf)
+        loc = int(np.argmax(filled) if high else np.argmin(filled))
+        return float(loc) / float(max(1, arr.size - 1))
+
+    return values.rolling(int(window), min_periods=_rolling_min_periods(window)).apply(recency_array, raw=True)
+
+
+def _rolling_corr_with_market(values: pd.DataFrame, market: pd.Series, window: int) -> pd.DataFrame:
+    minp = _rolling_min_periods(window)
+    m = pd.to_numeric(market, errors="coerce").reindex(values.index)
+    out = pd.DataFrame(index=values.index, columns=values.columns, dtype=float)
+    for col in values.columns:
+        out[col] = pd.to_numeric(values[col], errors="coerce").rolling(window, min_periods=minp).corr(m)
+    return out.replace([np.inf, -np.inf], np.nan)
+
+
+def _conditional_beta_panel(
+    returns: pd.DataFrame,
+    market: pd.Series,
+    window: int,
+    *,
+    up_market: bool,
+) -> pd.DataFrame:
+    minp = max(2, min(int(window), max(2, int(window) // 6)))
+    m = pd.to_numeric(market, errors="coerce").reindex(returns.index)
+    mask = m.gt(0.0) if up_market else m.lt(0.0)
+    count = mask.astype(float).rolling(window, min_periods=1).sum()
+    valid = count >= minp
+    m_sel = m.where(mask)
+    m_sum = m_sel.rolling(window, min_periods=1).sum()
+    m2_sum = (m_sel * m_sel).rolling(window, min_periods=1).sum()
+
+    out = pd.DataFrame(index=returns.index, columns=returns.columns, dtype=float)
+    for col in returns.columns:
+        r = pd.to_numeric(returns[col], errors="coerce").where(mask)
+        r_sum = r.rolling(window, min_periods=1).sum()
+        rm_sum = (r * m_sel).rolling(window, min_periods=1).sum()
+        mean_r = r_sum / count.replace(0.0, np.nan)
+        mean_m = m_sum / count.replace(0.0, np.nan)
+        cov = rm_sum / count.replace(0.0, np.nan) - mean_r * mean_m
+        var = m2_sum / count.replace(0.0, np.nan) - mean_m * mean_m
+        out[col] = (cov / var.replace(0.0, np.nan)).where(valid)
+    return out.replace([np.inf, -np.inf], np.nan)
+
+
+def _session_mask(index: pd.Index, start_hour: int, end_hour: int) -> pd.Series:
+    idx = pd.DatetimeIndex(pd.to_datetime(index, errors="coerce"))
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC")
+    hours = pd.Series(idx.hour, index=index)
+    if int(start_hour) <= int(end_hour):
+        active = (hours >= int(start_hour)) & (hours < int(end_hour))
+    else:
+        active = (hours >= int(start_hour)) | (hours < int(end_hour))
+    return active.fillna(False).astype(bool)
+
+
+def _session_volume_weighted_return(
+    returns: pd.DataFrame,
+    dollar_volume: pd.DataFrame,
+    window: int,
+    *,
+    start_hour: int,
+    end_hour: int,
+) -> pd.DataFrame:
+    mask = _session_mask(returns.index, start_hour, end_hour)
+    weighted = (returns * dollar_volume).where(mask, 0.0)
+    volume = dollar_volume.where(mask, 0.0)
+    num = weighted.rolling(window, min_periods=_rolling_min_periods(window)).sum()
+    den = volume.rolling(window, min_periods=_rolling_min_periods(window)).sum()
+    return (num / den.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+
+
+def _rolling_vwap(
+    close: pd.DataFrame,
+    high: pd.DataFrame,
+    low: pd.DataFrame,
+    volume: pd.DataFrame,
+    window: int,
+) -> pd.DataFrame:
+    typical = (high + low + close) / 3.0
+    num = (typical * volume).rolling(window, min_periods=_rolling_min_periods(window)).sum()
+    den = volume.rolling(window, min_periods=_rolling_min_periods(window)).sum()
+    return (num / den.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+
+
+def _cross_sectional_zscore(values: pd.DataFrame) -> pd.DataFrame:
+    mean = values.mean(axis=1, skipna=True)
+    std = values.std(axis=1, skipna=True).replace(0.0, np.nan)
+    return values.sub(mean, axis=0).div(std, axis=0).replace([np.inf, -np.inf], np.nan)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -229,6 +606,7 @@ def cross_section_rank_select(
     *,
     min_names_per_side: int = 1,
     max_names_per_side: Optional[int] = None,
+    execution_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     clean = pd.to_numeric(factor, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
     clean = clean.sort_values(ascending=True)
@@ -250,13 +628,32 @@ def cross_section_rank_select(
         long_n = min(long_n, int(max_names_per_side))
         short_n = min(short_n, int(max_names_per_side))
 
+    mode = str(execution_mode or "").strip().lower()
     direction_text = str(direction or "low").strip().lower()
-    if direction_text == "high":
-        long_symbols = list(clean.tail(long_n).sort_values(ascending=False).index)
-        short_symbols = list(clean.head(short_n).index)
+    if not mode:
+        mode = "spread_high_minus_low" if direction_text == "high" else "spread_low_minus_high"
+
+    low_symbols = list(clean.head(max(long_n, short_n)).index)
+    high_symbols = list(clean.tail(max(long_n, short_n)).sort_values(ascending=False).index)
+
+    if mode == "spread_high_minus_low":
+        long_symbols = high_symbols[:long_n]
+        short_symbols = low_symbols[:short_n]
+    elif mode == "short_low":
+        long_symbols = []
+        short_symbols = low_symbols[:short_n]
+    elif mode == "short_high":
+        long_symbols = []
+        short_symbols = high_symbols[:short_n]
+    elif mode == "long_high":
+        long_symbols = high_symbols[:long_n]
+        short_symbols = []
+    elif mode == "long_low":
+        long_symbols = low_symbols[:long_n]
+        short_symbols = []
     else:
-        long_symbols = list(clean.head(long_n).index)
-        short_symbols = list(clean.tail(short_n).sort_values(ascending=False).index)
+        long_symbols = low_symbols[:long_n]
+        short_symbols = high_symbols[:short_n]
 
     ranks = clean.rank(method="first", ascending=True)
     return {
@@ -265,6 +662,15 @@ def cross_section_rank_select(
         "long_symbols": long_symbols,
         "short_symbols": short_symbols,
     }
+
+
+def execution_mode_permissions(execution_mode: str) -> tuple[bool, bool]:
+    mode = str(execution_mode or "spread_low_minus_high").strip().lower()
+    if mode.startswith("short_"):
+        return False, True
+    if mode.startswith("long_"):
+        return True, False
+    return True, True
 
 
 def build_equal_weight_long_short_positions(
@@ -333,6 +739,7 @@ def _is_rebalance_bar(
     *,
     rebalance_offset_bars: int = 0,
     fallback_index: Optional[int] = None,
+    timeframe: str = "5m",
 ) -> bool:
     bars = max(1, int(rebalance_bars or 1))
     try:
@@ -343,7 +750,8 @@ def _is_rebalance_bar(
             ts = ts.tz_localize("UTC")
         else:
             ts = ts.tz_convert("UTC")
-        slot = int(ts.value // (5 * 60 * 1_000_000_000))
+        tf_seconds = max(1, _timeframe_to_seconds(timeframe))
+        slot = int(ts.value // (tf_seconds * 1_000_000_000))
         return (slot - int(rebalance_offset_bars or 0)) % bars == 0
     except Exception:
         return fallback_index is not None and int(fallback_index) % bars == 0
@@ -402,7 +810,16 @@ def compute_intraday_factor_panel(
     spec: IntradayCrossSectionSpec,
     panels: Dict[str, pd.DataFrame],
 ) -> pd.DataFrame:
-    close = panels["close"]
+    close = panels["close"].apply(pd.to_numeric, errors="coerce")
+    high = panels["high"].reindex(close.index).reindex(columns=close.columns).apply(pd.to_numeric, errors="coerce")
+    low = panels["low"].reindex(close.index).reindex(columns=close.columns).apply(pd.to_numeric, errors="coerce")
+    open_ = panels.get("open", close).reindex(close.index).reindex(columns=close.columns).apply(pd.to_numeric, errors="coerce")
+    volume = panels.get("volume", pd.DataFrame(index=close.index, columns=close.columns)).reindex(close.index).reindex(columns=close.columns)
+    volume = volume.apply(pd.to_numeric, errors="coerce").fillna(0.0).clip(lower=0.0)
+    returns = close.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
+    dollar_volume = (close * volume).replace([np.inf, -np.inf], np.nan)
+    window = max(1, int(spec.lookback_bars or 1))
+
     if spec.factor_name == "return":
         return calc_return(close, spec.lookback_bars)
     if spec.factor_name == "residual_return":
@@ -415,6 +832,116 @@ def compute_intraday_factor_panel(
             close,
         )
         return location.rolling(spec.lookback_bars, min_periods=spec.lookback_bars).mean()
+    if spec.factor_name == "return_entropy":
+        up_count = returns.gt(0.0).astype(float).rolling(window, min_periods=_rolling_min_periods(window)).sum()
+        down_count = returns.lt(0.0).astype(float).rolling(window, min_periods=_rolling_min_periods(window)).sum()
+        total = (up_count + down_count).replace(0.0, np.nan)
+        return _binary_entropy(up_count / total, down_count / total)
+    if spec.factor_name == "false_breakout_supply":
+        prev_high = high.rolling(window, min_periods=window).max().shift(1)
+        spread = (high - low).replace(0.0, np.nan)
+        body_top = open_.where(open_ >= close, close)
+        upper_rejection = ((high - body_top) / spread).clip(lower=0.0, upper=1.0)
+        probe = high > prev_high
+        return upper_rejection.where(probe).rolling(window, min_periods=1).mean()
+    if spec.factor_name == "range_asymmetry":
+        prev_close = close.shift(1).replace(0.0, np.nan)
+        upside_probe = high / prev_close - 1.0
+        downside_probe = prev_close / low.replace(0.0, np.nan) - 1.0
+        metric = upside_probe - downside_probe
+        return metric.rolling(window, min_periods=_rolling_min_periods(window)).mean()
+    if spec.factor_name == "session_asia_flow":
+        return _session_volume_weighted_return(
+            returns,
+            dollar_volume,
+            window,
+            start_hour=0,
+            end_hour=8,
+        )
+    if spec.factor_name == "session_flow_rotation":
+        asia = _session_volume_weighted_return(
+            returns,
+            dollar_volume,
+            window,
+            start_hour=0,
+            end_hour=8,
+        )
+        us = _session_volume_weighted_return(
+            returns,
+            dollar_volume,
+            window,
+            start_hour=16,
+            end_hour=24,
+        )
+        return (asia - us).replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "volume_weighted_return":
+        num = (returns * dollar_volume).rolling(window, min_periods=_rolling_min_periods(window)).sum()
+        den = dollar_volume.rolling(window, min_periods=_rolling_min_periods(window)).sum()
+        return (num / den.replace(0.0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "wick_imbalance":
+        spread = (high - low).replace(0.0, np.nan)
+        body_top = open_.where(open_ >= close, close)
+        body_bottom = open_.where(open_ <= close, close)
+        lower_wick = ((body_bottom - low) / spread).clip(lower=0.0, upper=1.0)
+        upper_wick = ((high - body_top) / spread).clip(lower=0.0, upper=1.0)
+        return (lower_wick - upper_wick).rolling(window, min_periods=_rolling_min_periods(window)).mean()
+    if spec.factor_name == "turnover_entropy":
+        return _rolling_entropy(dollar_volume.fillna(0.0), window)
+    if spec.factor_name == "body_volume_correlation":
+        body_return = (close / open_.replace(0.0, np.nan) - 1.0).replace([np.inf, -np.inf], np.nan)
+        log_dv = np.log1p(dollar_volume.clip(lower=0.0))
+        out = pd.DataFrame(index=close.index, columns=close.columns, dtype=float)
+        for col in close.columns:
+            out[col] = body_return[col].rolling(window, min_periods=_rolling_min_periods(window)).corr(log_dv[col])
+        return out.replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "correlation_breakdown":
+        short_window = max(2, window // 3)
+        market = returns.mean(axis=1, skipna=True)
+        short_corr = _rolling_corr_with_market(returns, market, short_window)
+        long_corr = _rolling_corr_with_market(returns, market, window)
+        return (short_corr - long_corr).replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "extreme_recency":
+        high_recency = _rolling_extreme_recency(high, window, high=True)
+        low_recency = _rolling_extreme_recency(low, window, high=False)
+        return (high_recency - low_recency).replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "up_down_beta_spread":
+        market = returns.mean(axis=1, skipna=True)
+        beta_up = _conditional_beta_panel(returns, market, window, up_market=True)
+        beta_down = _conditional_beta_panel(returns, market, window, up_market=False)
+        metric = beta_up.sub(beta_down, fill_value=0.0)
+        metric = metric.where(beta_up.notna() | beta_down.notna())
+        return metric.replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "directional_range_efficiency":
+        range_pct = (high - low).abs() / close.replace(0.0, np.nan)
+        liquidity = np.log1p(dollar_volume.clip(lower=0.0)).replace(0.0, np.nan)
+        metric = np.sign(returns.fillna(0.0)) * range_pct / liquidity
+        return metric.rolling(window, min_periods=_rolling_min_periods(window)).mean()
+    if spec.factor_name == "cross_sectional_stress":
+        metric = _cross_sectional_zscore(returns)
+        return metric.rolling(window, min_periods=_rolling_min_periods(window)).mean().replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "sign_imbalance":
+        signed = returns.apply(np.sign).replace([np.inf, -np.inf], np.nan)
+        return signed.rolling(window, min_periods=_rolling_min_periods(window)).mean()
+    if spec.factor_name == "vwap_slope":
+        long_vwap = _rolling_vwap(close, high, low, volume, window)
+        short_window = max(2, window // 2)
+        short_vwap = _rolling_vwap(close, high, low, volume, short_window)
+        return (short_vwap / long_vwap.replace(0.0, np.nan) - 1.0).replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "vwap_gap":
+        vwap = _rolling_vwap(close, high, low, volume, window)
+        return (close / vwap.replace(0.0, np.nan) - 1.0).replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "relative_vol_shock":
+        vol = returns.rolling(window, min_periods=_rolling_min_periods(window)).std()
+        return _cross_sectional_zscore(vol).replace([np.inf, -np.inf], np.nan)
+    if spec.factor_name == "lead_market_response":
+        market = returns.mean(axis=1, skipna=True)
+        return _rolling_corr_with_market(returns.shift(1), market, window)
+    if spec.factor_name == "break_count_balance":
+        prev_high = high.rolling(window, min_periods=window).max().shift(1)
+        prev_low = low.rolling(window, min_periods=window).min().shift(1)
+        new_high = (high > prev_high).astype(float)
+        new_low = (low < prev_low).astype(float)
+        return (new_high - new_low).rolling(window, min_periods=_rolling_min_periods(window)).mean()
     raise ValueError(f"Unknown intraday factor: {spec.factor_name}")
 
 
@@ -428,12 +955,21 @@ def build_intraday_cross_section_weights(
         raise ValueError("OHLCV panels are required")
 
     lookback_bars = max(1, int(cfg.get("lookback_bars", spec.lookback_bars) or spec.lookback_bars))
+    rebalance_bars = max(1, int(cfg.get("rebalance_bars", spec.rebalance_bars) or spec.rebalance_bars))
+    timeframe = str(cfg.get("timeframe") or spec.timeframe or "5m").strip().lower()
+    execution_mode = str(cfg.get("execution_mode") or spec.execution_mode or "spread_low_minus_high").strip().lower()
     effective_spec = IntradayCrossSectionSpec(
         strategy_id=spec.strategy_id,
         factor_name=spec.factor_name,
         lookback_bars=lookback_bars,
         direction=str(cfg.get("direction") or spec.direction),
         description=spec.description,
+        timeframe=timeframe,
+        rebalance_bars=rebalance_bars,
+        horizon_bars=int(cfg.get("horizon_bars", spec.horizon_bars) or spec.horizon_bars),
+        execution_mode=execution_mode,
+        family=spec.family,
+        live_verdict=spec.live_verdict,
     )
     close = panels["close"].copy()
     high = panels["high"].reindex(close.index).reindex(columns=close.columns)
@@ -452,12 +988,12 @@ def build_intraday_cross_section_weights(
 
     long_q = max(0.01, min(0.49, float(cfg.get("long_quantile", 0.2) or 0.2)))
     short_q = max(0.01, min(0.49, float(cfg.get("short_quantile", 0.2) or 0.2)))
-    rebalance_bars = max(1, int(cfg.get("rebalance_bars", 288) or 288))
     rebalance_offset_bars = int(cfg.get("rebalance_offset_bars", 0) or 0)
     max_symbol_weight = max(0.0, float(cfg.get("max_symbol_weight", 0.10) or 0.10))
     max_leverage = max(0.0, float(cfg.get("max_portfolio_leverage", 1.0) or 1.0))
-    allow_short = bool(cfg.get("allow_short", True))
-    allow_long = bool(cfg.get("allow_long", True))
+    mode_allow_long, mode_allow_short = execution_mode_permissions(execution_mode)
+    allow_short = bool(cfg.get("allow_short", mode_allow_short))
+    allow_long = bool(cfg.get("allow_long", mode_allow_long))
     min_universe_size = max(2, int(cfg.get("min_universe_size", 5) or 5))
     min_names_per_side = max(1, int(cfg.get("min_names_per_side", 1) or 1))
     max_names_per_side_raw = cfg.get("max_names_per_side")
@@ -483,6 +1019,7 @@ def build_intraday_cross_section_weights(
             rebalance_bars,
             rebalance_offset_bars=rebalance_offset_bars,
             fallback_index=idx,
+            timeframe=effective_spec.timeframe,
         ):
             weights.iloc[idx] = current
             continue
@@ -514,6 +1051,7 @@ def build_intraday_cross_section_weights(
                 direction=effective_spec.direction,
                 min_names_per_side=min_names_per_side,
                 max_names_per_side=max_names_per_side,
+                execution_mode=effective_spec.execution_mode,
             )
             current = build_equal_weight_long_short_positions(
                 selection["long_symbols"],
@@ -528,6 +1066,9 @@ def build_intraday_cross_section_weights(
                 {
                     "timestamp": ts,
                     "strategy_id": spec.strategy_id,
+                    "timeframe": effective_spec.timeframe,
+                    "execution_mode": effective_spec.execution_mode,
+                    "family": effective_spec.family,
                     "long_symbols": selection["long_symbols"],
                     "short_symbols": selection["short_symbols"],
                     "universe_size": int(len(row)),
@@ -546,6 +1087,10 @@ def build_intraday_cross_section_weights(
         "rebalance_rows": rebalance_rows,
         "quote_volume": quote_volume_rolling,
         "lookback_bars": lookback_bars,
+        "rebalance_bars": rebalance_bars,
+        "timeframe": effective_spec.timeframe,
+        "execution_mode": effective_spec.execution_mode,
+        "family": effective_spec.family,
     }
 
 
@@ -568,39 +1113,47 @@ def latest_intraday_cross_section_plan(
         "price": panels["close"].loc[row["timestamp"]].to_dict(),
         "params": dict(params or {}),
         "lookback_bars": int(components.get("lookback_bars") or spec.lookback_bars),
-        "rebalance_bars": int((params or {}).get("rebalance_bars", 288) or 288),
+        "rebalance_bars": int(components.get("rebalance_bars") or spec.rebalance_bars),
         "direction": str((params or {}).get("direction") or spec.direction),
+        "timeframe": str(components.get("timeframe") or spec.timeframe),
+        "execution_mode": str(components.get("execution_mode") or spec.execution_mode),
+        "family": str(components.get("family") or spec.family),
     }
 
 
 class IntradayCrossSectionStrategyBase(StrategyBase):
-    """Base class for 5m cross-sectional Binance USD-M strategies."""
+    """Base class for cross-sectional Binance USD-M long/short factor strategies."""
 
     mutates_input = False
     spec_key = "Ret24hReversalStrategy"
 
     def __init__(self, name: str, params: Optional[Dict[str, Any]] = None):
         spec = INTRADAY_CROSS_SECTION_SPECS[self.spec_key]
+        mode_allow_long, mode_allow_short = execution_mode_permissions(spec.execution_mode)
         default_params: Dict[str, Any] = {
             "strategy_id": spec.strategy_id,
-            "timeframe": "5m",
+            "timeframe": spec.timeframe,
             "exchange": "binance",
             "market_type": "future",
             "universe_symbols": list(DEFAULT_INTRADAY_CROSS_SECTION_UNIVERSE),
             "max_symbols": 100,
             "lookback_bars": spec.lookback_bars,
-            "rebalance_bars": 288,
+            "rebalance_bars": spec.rebalance_bars,
             "rebalance_offset_bars": 0,
+            "horizon_bars": spec.horizon_bars,
             "long_quantile": 0.2,
             "short_quantile": 0.2,
             "direction": spec.direction,
+            "execution_mode": spec.execution_mode,
+            "family": spec.family,
+            "live_verdict": spec.live_verdict,
             "max_symbol_weight": 0.10,
             "min_quote_volume": 0.0,
             "min_universe_size": 5,
             "min_names_per_side": 1,
             "max_names_per_side": None,
-            "allow_long": True,
-            "allow_short": True,
+            "allow_long": mode_allow_long,
+            "allow_short": mode_allow_short,
             "reverse_on_signal": True,
             "allow_pyramiding": False,
             "max_portfolio_leverage": 1.0,
@@ -618,7 +1171,16 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
             default_params.update(params)
         default_params["strategy_id"] = spec.strategy_id
         default_params["lookback_bars"] = int(default_params.get("lookback_bars") or spec.lookback_bars)
+        default_params["rebalance_bars"] = int(default_params.get("rebalance_bars") or spec.rebalance_bars)
+        default_params["horizon_bars"] = int(default_params.get("horizon_bars") or spec.horizon_bars)
+        default_params["timeframe"] = str(default_params.get("timeframe") or spec.timeframe).strip().lower()
         default_params["direction"] = str(default_params.get("direction") or spec.direction)
+        default_params["execution_mode"] = str(default_params.get("execution_mode") or spec.execution_mode).strip().lower()
+        override_allow_long, override_allow_short = execution_mode_permissions(default_params["execution_mode"])
+        if not params or "allow_long" not in params:
+            default_params["allow_long"] = override_allow_long
+        if not params or "allow_short" not in params:
+            default_params["allow_short"] = override_allow_short
         super().__init__(name=name, params=default_params)
         self.spec = IntradayCrossSectionSpec(
             strategy_id=spec.strategy_id,
@@ -626,6 +1188,12 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
             lookback_bars=int(default_params["lookback_bars"]),
             direction=str(default_params["direction"]),
             description=spec.description,
+            timeframe=str(default_params["timeframe"]),
+            rebalance_bars=int(default_params["rebalance_bars"]),
+            horizon_bars=int(default_params["horizon_bars"]),
+            execution_mode=str(default_params["execution_mode"]),
+            family=spec.family,
+            live_verdict=spec.live_verdict,
         )
         self._last_rebalance_key: Optional[str] = None
         self._target_longs: Set[str] = set()
@@ -646,12 +1214,45 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
             ts = ts.tz_convert("UTC").tz_localize(None)
         return ts.isoformat()
 
+    def _max_data_age_seconds(self) -> float:
+        raw = self.params.get("max_data_age_seconds")
+        if raw is not None:
+            try:
+                return max(0.0, float(raw))
+            except Exception:
+                pass
+        timeframe_seconds = _timeframe_to_seconds(str(self.params.get("timeframe") or self.spec.timeframe))
+        return float(max(3 * timeframe_seconds, 15 * 60))
+
+    @staticmethod
+    def _to_utc_timestamp(value: Any) -> Optional[pd.Timestamp]:
+        try:
+            ts = pd.Timestamp(value)
+        except Exception:
+            return None
+        if pd.isna(ts):
+            return None
+        if ts.tzinfo is None:
+            return ts.tz_localize("UTC")
+        return ts.tz_convert("UTC")
+
+    def _plan_is_fresh(self, plan: Dict[str, Any]) -> bool:
+        max_age = self._max_data_age_seconds()
+        if max_age <= 0:
+            return True
+        ts = self._to_utc_timestamp(plan.get("rebalance_timestamp"))
+        if ts is None:
+            return False
+        now = pd.Timestamp.now(tz="UTC")
+        age_seconds = (now - ts).total_seconds()
+        return age_seconds <= max_age
+
     async def _load_universe_frames(self, universe: List[str]) -> Dict[str, pd.DataFrame]:
         exchange = str(self.params.get("exchange", "binance") or "binance").strip().lower()
         timeframe = str(self.params.get("timeframe", "5m") or "5m").strip().lower()
         lookback = max(
             int(self.params.get("lookback_bars", self.spec.lookback_bars) or self.spec.lookback_bars)
-            + int(self.params.get("rebalance_bars", 288) or 288)
+            + int(self.params.get("rebalance_bars", self.spec.rebalance_bars) or self.spec.rebalance_bars)
             + 5,
             int(self.params.get("min_symbol_bars", 0) or 0),
         )
@@ -680,23 +1281,40 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
     def _position_symbol(position: Any) -> str:
         return normalize_symbol(getattr(position, "symbol", ""))
 
-    def _active_sets_from_position_manager(self) -> tuple[Set[str], Set[str]]:
+    def _active_positions_from_position_manager(self) -> tuple[Dict[str, Any], Dict[str, Any]]:
         try:
             from core.trading.position_manager import position_manager
 
             rows = position_manager.get_positions_by_strategy(self.name)
         except Exception:
-            return set(self._target_longs), set(self._target_shorts)
-        longs: Set[str] = set()
-        shorts: Set[str] = set()
+            return {sym: None for sym in self._target_longs}, {sym: None for sym in self._target_shorts}
+        longs: Dict[str, Any] = {}
+        shorts: Dict[str, Any] = {}
         for pos in rows:
             symbol = self._position_symbol(pos)
             side = self._position_side(pos)
+            if not symbol:
+                continue
             if side == "long":
-                longs.add(symbol)
+                longs[symbol] = pos
             elif side == "short":
-                shorts.add(symbol)
+                shorts[symbol] = pos
         return longs, shorts
+
+    @staticmethod
+    def _position_target_weight(position: Any) -> Optional[float]:
+        metadata = getattr(position, "metadata", None) or {}
+        if not isinstance(metadata, dict):
+            return None
+        if "target_weight" not in metadata:
+            return None
+        try:
+            value = float(metadata.get("target_weight"))
+        except Exception:
+            return None
+        if not math.isfinite(value):
+            return None
+        return value
 
     def _signal_metadata(
         self,
@@ -720,7 +1338,12 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
             "target_weights": {str(k): float(v) for k, v in target_weights.items()},
             "rebalance_timestamp": pd.Timestamp(plan["rebalance_timestamp"]).isoformat(),
             "lookback_bars": int(self.spec.lookback_bars),
-            "rebalance_bars": int(plan.get("rebalance_bars") or self.params.get("rebalance_bars", 288)),
+            "rebalance_bars": int(plan.get("rebalance_bars") or self.params.get("rebalance_bars", self.spec.rebalance_bars)),
+            "horizon_bars": int(self.params.get("horizon_bars", self.spec.horizon_bars) or self.spec.horizon_bars),
+            "timeframe": str(self.params.get("timeframe") or self.spec.timeframe),
+            "execution_mode": str(self.params.get("execution_mode") or self.spec.execution_mode),
+            "family": str(self.spec.family),
+            "live_verdict": str(self.spec.live_verdict),
             "long_quantile": float(self.params.get("long_quantile", 0.2)),
             "short_quantile": float(self.params.get("short_quantile", 0.2)),
             "direction": str(self.params.get("direction") or self.spec.direction),
@@ -774,15 +1397,29 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
         )
         if not plan:
             return []
+        if not self._plan_is_fresh(plan):
+            rebalance_ts = plan.get("rebalance_timestamp")
+            logger.warning(
+                f"{self.name} skipped stale cross-section plan ts={rebalance_ts} "
+                f"max_age_seconds={self._max_data_age_seconds():.0f}"
+            )
+            return []
 
         rebalance_key = self._rebalance_key(plan["rebalance_timestamp"])
         if rebalance_key == self._last_rebalance_key:
             return []
 
-        target_weights = {str(k): float(v) for k, v in dict(plan.get("target_weights") or {}).items()}
-        target_longs = {normalize_symbol(sym) for sym in plan.get("long_symbols") or []}
-        target_shorts = {normalize_symbol(sym) for sym in plan.get("short_symbols") or []}
-        active_longs, active_shorts = self._active_sets_from_position_manager()
+        target_weights = {
+            normalize_symbol(k): float(v)
+            for k, v in dict(plan.get("target_weights") or {}).items()
+            if normalize_symbol(k)
+        }
+        target_longs = {normalize_symbol(sym) for sym in plan.get("long_symbols") or [] if normalize_symbol(sym)}
+        target_shorts = {normalize_symbol(sym) for sym in plan.get("short_symbols") or [] if normalize_symbol(sym)}
+        active_long_positions, active_short_positions = self._active_positions_from_position_manager()
+        active_longs = set(active_long_positions)
+        active_shorts = set(active_short_positions)
+        resize_tolerance = max(0.0, float(self.params.get("rebalance_weight_tolerance", 0.01) or 0.0))
         signals: List[Signal] = []
 
         for sym in sorted(active_longs - target_longs):
@@ -797,6 +1434,45 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
                 sig.metadata["close_only"] = True
                 sig.metadata["close_reason"] = "intraday_cross_section_rebalance"
                 signals.append(sig)
+        resized_longs: Set[str] = set()
+        resized_shorts: Set[str] = set()
+        for sym in sorted(active_longs & target_longs):
+            current_weight = self._position_target_weight(active_long_positions.get(sym))
+            target_weight = target_weights.get(sym, 0.0)
+            if current_weight is None or abs(target_weight - current_weight) <= resize_tolerance:
+                continue
+            sig = self._make_signal(
+                plan=plan,
+                symbol=sym,
+                signal_type=SignalType.CLOSE_LONG,
+                leg="resize_exit_long",
+                target_weight=0.0,
+            )
+            if sig:
+                sig.metadata["close_only"] = True
+                sig.metadata["close_reason"] = "intraday_cross_section_rebalance_resize"
+                sig.metadata["rebalance_resize"] = True
+                signals.append(sig)
+                resized_longs.add(sym)
+        if bool(self.params.get("allow_short", True)):
+            for sym in sorted(active_shorts & target_shorts):
+                current_weight = self._position_target_weight(active_short_positions.get(sym))
+                target_weight = target_weights.get(sym, 0.0)
+                if current_weight is None or abs(target_weight - current_weight) <= resize_tolerance:
+                    continue
+                sig = self._make_signal(
+                    plan=plan,
+                    symbol=sym,
+                    signal_type=SignalType.CLOSE_SHORT,
+                    leg="resize_exit_short",
+                    target_weight=0.0,
+                )
+                if sig:
+                    sig.metadata["close_only"] = True
+                    sig.metadata["close_reason"] = "intraday_cross_section_rebalance_resize"
+                    sig.metadata["rebalance_resize"] = True
+                    signals.append(sig)
+                    resized_shorts.add(sym)
         for sym in sorted(target_longs - active_longs):
             sig = self._make_signal(
                 plan=plan,
@@ -806,6 +1482,17 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
                 target_weight=target_weights.get(sym, 0.0),
             )
             if sig:
+                signals.append(sig)
+        for sym in sorted(resized_longs):
+            sig = self._make_signal(
+                plan=plan,
+                symbol=sym,
+                signal_type=SignalType.BUY,
+                leg="long",
+                target_weight=target_weights.get(sym, 0.0),
+            )
+            if sig:
+                sig.metadata["rebalance_resize"] = True
                 signals.append(sig)
         if bool(self.params.get("allow_short", True)):
             for sym in sorted(target_shorts - active_shorts):
@@ -817,6 +1504,17 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
                     target_weight=target_weights.get(sym, 0.0),
                 )
                 if sig:
+                    signals.append(sig)
+            for sym in sorted(resized_shorts):
+                sig = self._make_signal(
+                    plan=plan,
+                    symbol=sym,
+                    signal_type=SignalType.SELL,
+                    leg="short",
+                    target_weight=target_weights.get(sym, 0.0),
+                )
+                if sig:
+                    sig.metadata["rebalance_resize"] = True
                     signals.append(sig)
 
         self._target_longs = target_longs
@@ -835,8 +1533,8 @@ class IntradayCrossSectionStrategyBase(StrategyBase):
         return {
             "type": "cross_sectional_ohlcv",
             "columns": ["open", "high", "low", "close", "volume"],
-            "timeframe": "5m",
-            "min_length": int(self.spec.lookback_bars) + int(self.params.get("rebalance_bars", 288) or 288) + 5,
+            "timeframe": str(self.params.get("timeframe") or self.spec.timeframe),
+            "min_length": int(self.spec.lookback_bars) + int(self.params.get("rebalance_bars", self.spec.rebalance_bars) or self.spec.rebalance_bars) + 5,
             "multi_symbol": True,
             "execution": "next_bar",
         }
@@ -874,4 +1572,144 @@ class CloseLocation48hStrategy(IntradayCrossSectionStrategyBase):
     spec_key = "CloseLocation48hStrategy"
 
     def __init__(self, name: str = "CloseLocation48hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class ReturnEntropy4hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "ReturnEntropy4hStrategy"
+
+    def __init__(self, name: str = "ReturnEntropy4hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class FalseBreakoutSupply24hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "FalseBreakoutSupply24hStrategy"
+
+    def __init__(self, name: str = "FalseBreakoutSupply24hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class RangeAsymmetry48hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "RangeAsymmetry48hStrategy"
+
+    def __init__(self, name: str = "RangeAsymmetry48hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class SessionAsiaFlow24hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "SessionAsiaFlow24hStrategy"
+
+    def __init__(self, name: str = "SessionAsiaFlow24hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class SessionFlowRotation24hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "SessionFlowRotation24hStrategy"
+
+    def __init__(self, name: str = "SessionFlowRotation24hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class VolumeWeightedReturn24hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "VolumeWeightedReturn24hStrategy"
+
+    def __init__(self, name: str = "VolumeWeightedReturn24hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class WickImbalance48hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "WickImbalance48hStrategy"
+
+    def __init__(self, name: str = "WickImbalance48hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class TurnoverEntropy48hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "TurnoverEntropy48hStrategy"
+
+    def __init__(self, name: str = "TurnoverEntropy48hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class BodyVolumeCorr24hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "BodyVolumeCorr24hStrategy"
+
+    def __init__(self, name: str = "BodyVolumeCorr24hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class CorrBreakdown24h72hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "CorrBreakdown24h72hStrategy"
+
+    def __init__(self, name: str = "CorrBreakdown24h72hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class ExtremeRecency48hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "ExtremeRecency48hStrategy"
+
+    def __init__(self, name: str = "ExtremeRecency48hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class UpDownBetaSpread24h72hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "UpDownBetaSpread24h72hStrategy"
+
+    def __init__(self, name: str = "UpDownBetaSpread24h72hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class DirectionalRangeEfficiency48hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "DirectionalRangeEfficiency48hStrategy"
+
+    def __init__(self, name: str = "DirectionalRangeEfficiency48hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class CrossSectionalStress4hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "CrossSectionalStress4hStrategy"
+
+    def __init__(self, name: str = "CrossSectionalStress4hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class SignImbalance4hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "SignImbalance4hStrategy"
+
+    def __init__(self, name: str = "SignImbalance4hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class VWAPSlope24hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "VWAPSlope24hStrategy"
+
+    def __init__(self, name: str = "VWAPSlope24hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class VWAPGap48hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "VWAPGap48hStrategy"
+
+    def __init__(self, name: str = "VWAPGap48hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class RelativeVolShock24hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "RelativeVolShock24hStrategy"
+
+    def __init__(self, name: str = "RelativeVolShock24hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class LeadMarketResponse24h72hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "LeadMarketResponse24h72hStrategy"
+
+    def __init__(self, name: str = "LeadMarketResponse24h72hStrategy", params: Optional[Dict[str, Any]] = None):
+        super().__init__(name=name, params=params)
+
+
+class BreakCountBalance24hStrategy(IntradayCrossSectionStrategyBase):
+    spec_key = "BreakCountBalance24hStrategy"
+
+    def __init__(self, name: str = "BreakCountBalance24hStrategy", params: Optional[Dict[str, Any]] = None):
         super().__init__(name=name, params=params)

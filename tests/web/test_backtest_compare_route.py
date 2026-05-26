@@ -309,3 +309,126 @@ def test_compare_backtests_sanitizes_non_finite_metrics_for_json(monkeypatch):
     assert payload["results"][0]["profit_factor"] is None
     assert payload["best"]["profit_factor"] is None
     json.dumps(payload, allow_nan=False)
+
+
+def test_compare_backtests_applies_shared_params_json(monkeypatch):
+    from web.api import backtest as backtest_api
+
+    df = _compare_frame(rows=720, freq="1h")
+    seen_params: list[dict] = []
+
+    async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
+        return df.copy()
+
+    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None):
+        return _fake_attach_backtest_enrichment_if_needed(df)
+
+    def fake_run_backtest_core(strategy: str, df: pd.DataFrame, timeframe: str, initial_capital: float, **kwargs):
+        seen_params.append(dict(kwargs.get("params") or {}))
+        return {
+            "strategy": strategy,
+            "total_return": 12.3,
+            "sharpe_ratio": 1.8,
+            "max_drawdown": 4.2,
+            "win_rate": 61.0,
+            "total_trades": 5,
+            "quality_flag": "ok",
+            "recommended_min_bars": 72,
+            "zero_trade_reason": "",
+            "cost_drag_return_pct": 0.001,
+        }
+
+    monkeypatch.setattr(backtest_api, "_load_backtest_df", fake_load_backtest_df)
+    monkeypatch.setattr(backtest_api, "_attach_backtest_enrichment_if_needed", fake_attach_backtest_enrichment_if_needed)
+    monkeypatch.setattr(backtest_api, "_run_backtest_core", fake_run_backtest_core)
+
+    payload = asyncio.run(
+        backtest_api.compare_backtests(
+            strategies="MAStrategy,EMAStrategy",
+            symbol="BTC/USDT",
+            timeframe="1h",
+            initial_capital=10000,
+            pre_optimize=False,
+            params_json='{"universe_symbols":["BTC/USDT","ETH/USDT"],"max_symbols":2,"min_quote_volume":100000}',
+        )
+    )
+
+    assert payload["custom_params"] == {
+        "universe_symbols": ["BTC/USDT", "ETH/USDT"],
+        "max_symbols": 2,
+        "min_quote_volume": 100000,
+    }
+    assert len(seen_params) == 2
+    assert all(params["universe_symbols"] == ["BTC/USDT", "ETH/USDT"] for params in seen_params)
+    assert all(params["max_symbols"] == 2 for params in seen_params)
+    assert all(params["min_quote_volume"] == 100000 for params in seen_params)
+
+
+def test_compare_backtests_reuses_intraday_cross_section_market_bundle(monkeypatch):
+    from web.api import backtest as backtest_api
+
+    df_by_symbol = {
+        "BTC/USDT": _compare_frame(rows=900, symbol="BTC/USDT", freq="5min"),
+        "ETH/USDT": _compare_frame(rows=900, symbol="ETH/USDT", freq="5min"),
+    }
+    load_calls: list[str] = []
+    seen_bundles: list[dict] = []
+
+    async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
+        return df_by_symbol.get(str(symbol), pd.DataFrame()).copy()
+
+    async def fake_load_backtest_df_for_strategy(
+        symbol: str,
+        timeframe: str,
+        *,
+        strategy: str,
+        params=None,
+        start_time=None,
+        end_time=None,
+    ):
+        load_calls.append(str(symbol))
+        return df_by_symbol.get(str(symbol), pd.DataFrame()).copy()
+
+    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None):
+        return _fake_attach_backtest_enrichment_if_needed(df)
+
+    def fake_run_backtest_core(strategy: str, df: pd.DataFrame, timeframe: str, initial_capital: float, **kwargs):
+        seen_bundles.append(kwargs.get("market_bundle") or {})
+        return {
+            "strategy": strategy,
+            "total_return": 0.01,
+            "sharpe_ratio": 1.0,
+            "max_drawdown": 0.02,
+            "win_rate": 55.0,
+            "total_trades": 8,
+            "quality_flag": "ok",
+            "recommended_min_bars": 288,
+            "zero_trade_reason": "",
+            "cost_drag_return_pct": 0.001,
+            "portfolio_mode": "intraday_cross_section_long_short",
+        }
+
+    monkeypatch.setattr(backtest_api, "_load_backtest_df", fake_load_backtest_df)
+    monkeypatch.setattr(backtest_api, "_load_backtest_df_for_strategy", fake_load_backtest_df_for_strategy)
+    monkeypatch.setattr(backtest_api, "_attach_backtest_enrichment_if_needed", fake_attach_backtest_enrichment_if_needed)
+    monkeypatch.setattr(backtest_api, "_run_backtest_core", fake_run_backtest_core)
+
+    payload = asyncio.run(
+        backtest_api.compare_backtests(
+            strategies="Ret24hReversalStrategy,RelRet24hReversalStrategy,BodyVolumeCorr24hStrategy",
+            symbol="BTC/USDT",
+            timeframe="5m",
+            initial_capital=10000,
+            pre_optimize=False,
+            params_json='{"universe_symbols":["BTC/USDT","ETH/USDT"],"max_symbols":2}',
+        )
+    )
+
+    assert [row["strategy"] for row in payload["results"]] == [
+        "Ret24hReversalStrategy",
+        "RelRet24hReversalStrategy",
+        "BodyVolumeCorr24hStrategy",
+    ]
+    assert load_calls == ["BTC/USDT", "ETH/USDT"]
+    assert len(seen_bundles) == 3
+    assert all(set(bundle.keys()) == {"BTC/USDT", "ETH/USDT"} for bundle in seen_bundles)

@@ -43,6 +43,7 @@ from core.trading.execution_engine import execution_engine
 from core.trading.order_manager import order_manager
 from core.trading.position_manager import PositionSide, position_manager
 from strategies import ALL_STRATEGIES
+from strategies.quantitative.intraday_cross_section import INTRADAY_CROSS_SECTION_SPECS
 from web.api.auth import require_sensitive_ops_permissions
 from web.api.backtest import (
     _load_backtest_inputs,
@@ -163,13 +164,7 @@ _MONITOR_EXCHANGE_POSITION_CACHE: Dict[str, Any] = {
     "rows": [],
 }
 
-_BINANCE_USDM_CROSS_SECTION_STRATEGIES = {
-    "ResidualMom48hStrategy",
-    "Ret24hReversalStrategy",
-    "RelRet24hReversalStrategy",
-    "ResidualMom24hStrategy",
-    "CloseLocation48hStrategy",
-}
+_BINANCE_USDM_CROSS_SECTION_STRATEGIES = set(INTRADAY_CROSS_SECTION_SPECS.keys())
 
 
 def _recommended_symbols(strategy_type: str) -> List[str]:
@@ -1824,6 +1819,12 @@ async def get_strategy_catalog():
                 "family": meta.get("family", "traditional"),
                 "decision_engine": meta.get("decision_engine", "rule"),
                 "ai_driven": bool(meta.get("ai_driven", False)),
+                "strategy_kind": meta.get("strategy_kind", "classic"),
+                "template_locked": bool(meta.get("template_locked", False)),
+                "locked_fields": list(meta.get("locked_fields") or []),
+                "factor_family": meta.get("factor_family", ""),
+                "live_verdict": meta.get("live_verdict", ""),
+                "template_spec": dict(meta.get("template_spec") or {}),
                 "default_start": name in DEFAULT_START_ALL_STRATEGIES,
                 "recommended_timeframe": _recommended_timeframe(name),
                 "recommended_symbols": _recommended_symbols(name),
@@ -1876,6 +1877,12 @@ async def get_strategy_library():
                 "family": meta.get("family", "traditional"),
                 "decision_engine": meta.get("decision_engine", "rule"),
                 "ai_driven": bool(meta.get("ai_driven", False)),
+                "strategy_kind": meta.get("strategy_kind", "classic"),
+                "template_locked": bool(meta.get("template_locked", False)),
+                "locked_fields": list(meta.get("locked_fields") or []),
+                "factor_family": meta.get("factor_family", ""),
+                "live_verdict": meta.get("live_verdict", ""),
+                "template_spec": dict(meta.get("template_spec") or {}),
                 "default_timeframe": _recommended_timeframe(name),
                 "default_symbols": _recommended_symbols(name),
                 "required_data": required_data,

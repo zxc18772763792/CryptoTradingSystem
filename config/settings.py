@@ -102,8 +102,8 @@ class Settings(BaseSettings):
     HTTPS_PROXY: Optional[str] = None
 
     # Trading
-    TRADING_MODE: str = "paper"  # paper/live
-    ALLOW_PERSISTED_LIVE_MODE_START: bool = False
+    TRADING_MODE: str = "live"  # paper/live
+    ALLOW_PERSISTED_LIVE_MODE_START: bool = True
     MAX_POSITION_SIZE: float = 0.1
     MAX_DAILY_LOSS: float = 0.02
     MAX_OPEN_POSITIONS: int = 100

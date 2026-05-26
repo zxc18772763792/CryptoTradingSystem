@@ -74,7 +74,7 @@ These are futures long/short components, not spot long-only systems. Before live
 - Watch turnover and cost drag; the 24h rebalance reduces churn but basket replacement can still be expensive.
 - Avoid treating these as independent alpha streams.
 
-The first four strategies are highly related because they all express 24h/48h cross-sectional weakness reversal. `rel_ret_24h` and `residual_mom_24h` are currently identical by definition; the separate ID is reserved for a future beta-adjusted residual implementation.
+The first four strategies are highly related because they all express 24h/48h cross-sectional weakness reversal. `rel_ret_24h` and `residual_mom_24h` are currently identical by definition, but the separate strategy ID is intentionally retained for compatibility and for a future beta-adjusted residual implementation.
 
 Suggested live blend:
 

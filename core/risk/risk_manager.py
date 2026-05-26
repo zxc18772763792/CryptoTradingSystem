@@ -810,7 +810,7 @@ class RiskManager:
             )
             return False
 
-        if self._daily_trades >= self.max_daily_trades:
+        if not allow_close and self._daily_trades >= self.max_daily_trades:
             self._add_alert(
                 title="交易次数超限",
                 message=f"当日交易次数已达上限 {self.max_daily_trades}",
@@ -820,7 +820,7 @@ class RiskManager:
 
         position_manager = _position_manager()
         position_count = position_manager.get_position_count()
-        if position_count >= self.max_open_positions:
+        if not allow_close and position_count >= self.max_open_positions:
             self._add_alert(
                 title="持仓数超限",
                 message=f"当前持仓 {position_count} 超过限制 {self.max_open_positions}",
@@ -828,7 +828,7 @@ class RiskManager:
             )
             return False
 
-        if leverage > self.max_leverage:
+        if not allow_close and leverage > self.max_leverage:
             self._add_alert(
                 title="杠杆超限",
                 message=f"请求杠杆 {leverage:.2f}x 超过上限 {self.max_leverage:.2f}x",
@@ -856,11 +856,9 @@ class RiskManager:
 
         # Allow tiny float/quote drift when comparing order notional to risk caps.
         epsilon = max(1e-4, float(equity) * 1e-6, 0.05)
-        # Single-trade notional cap also applies to closes — a forced exit at
-        # a much larger size than the existing position would itself be a
-        # latent open. ``allow_close=True`` only legitimately bypasses the
-        # daily-loss halt and portfolio-/strategy-allocation caps below.
-        if equity > 0 and notional > 0:
+        # Entry-only notional caps must not block exits; forced closes reduce
+        # exposure even when the live position has grown past entry limits.
+        if not allow_close and equity > 0 and notional > 0:
             single_limit = equity * self.max_position_size
             if notional > single_limit + epsilon:
                 self._add_alert(
@@ -943,6 +941,13 @@ class RiskManager:
                 or (trade or {}).get("mode")
                 or self._risk_scope
             )
+            order_id = str((trade or {}).get("order_id") or "").strip()
+            if target_scope == "live" and order_id.startswith("paper_"):
+                logger.warning(
+                    "risk_manager: skipped paper order in live trade history "
+                    f"symbol={trade.get('symbol')} strategy={trade.get('strategy')} order_id={order_id}"
+                )
+                return
             if target_scope != self._risk_scope:
                 state = self._scope_state_copy(target_scope)
                 self._check_new_day_for_state(state)

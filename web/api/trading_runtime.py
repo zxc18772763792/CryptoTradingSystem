@@ -31,7 +31,9 @@ from web.services import (
 
 
 router = APIRouter()
-_TRADING_STATS_CACHE_TTL_SEC = 2.0
+_TRADING_STATS_CACHE_TTL_SEC = 8.0
+_TRADING_STATS_STALE_TTL_SEC = 60.0
+_TRADING_STATS_BUILD_TIMEOUT_SEC = 7.5
 _trading_stats_cache_payload = None
 _trading_stats_cache_at = 0.0
 _trading_stats_cache_lock: asyncio.Lock | None = None  # lazily created
@@ -93,6 +95,33 @@ async def _build_trading_stats_payload() -> dict:
         "risk": risk_report,
         "risk_degraded": degraded,
         "trading_mode": execution_engine.get_trading_mode(),
+    }
+
+
+def _clone_trading_stats_cache(*, max_age_sec: float, stale: bool = False) -> dict | None:
+    if _trading_stats_cache_payload is None:
+        return None
+    age_sec = max(0.0, time.monotonic() - float(_trading_stats_cache_at or 0.0))
+    if age_sec > max(0.0, float(max_age_sec or 0.0)):
+        return None
+    payload = copy.deepcopy(_trading_stats_cache_payload)
+    payload["from_cache"] = True
+    payload["cache_age_sec"] = round(age_sec, 2)
+    if stale:
+        payload["stale"] = True
+        payload.setdefault("warning", "统计快照刷新中，已先返回最近缓存。")
+    return payload
+
+
+def _build_trading_stats_fallback_payload(reason: str) -> dict:
+    return {
+        "orders": order_manager.get_stats(),
+        "positions": position_manager.get_stats(),
+        "risk": risk_manager.get_risk_report(),
+        "risk_degraded": True,
+        "trading_mode": execution_engine.get_trading_mode(),
+        "stale": True,
+        "warning": reason,
     }
 
 
@@ -166,17 +195,34 @@ async def reset_paper_trading_state(clear_snapshots: bool = True):
 @router.get("/stats")
 async def get_trading_stats(force_refresh: bool = False):
     global _trading_stats_cache_payload, _trading_stats_cache_at
-    now_mono = time.monotonic()
-    if not force_refresh and _trading_stats_cache_payload is not None:
-        if (now_mono - _trading_stats_cache_at) <= _TRADING_STATS_CACHE_TTL_SEC:
-            return copy.deepcopy(_trading_stats_cache_payload)
+    if not force_refresh:
+        cached = _clone_trading_stats_cache(max_age_sec=_TRADING_STATS_CACHE_TTL_SEC)
+        if cached is not None:
+            return cached
+        if _get_stats_lock().locked():
+            stale = _clone_trading_stats_cache(
+                max_age_sec=_TRADING_STATS_STALE_TTL_SEC,
+                stale=True,
+            )
+            if stale is not None:
+                return stale
+            return _build_trading_stats_fallback_payload("统计快照刷新中，已返回轻量级快照。")
 
     async with _get_stats_lock():
-        now_mono = time.monotonic()
-        if not force_refresh and _trading_stats_cache_payload is not None:
-            if (now_mono - _trading_stats_cache_at) <= _TRADING_STATS_CACHE_TTL_SEC:
-                return copy.deepcopy(_trading_stats_cache_payload)
-        payload = await _build_trading_stats_payload()
+        if not force_refresh:
+            cached = _clone_trading_stats_cache(
+                max_age_sec=_TRADING_STATS_CACHE_TTL_SEC
+            )
+            if cached is not None:
+                return cached
+        try:
+            payload = await asyncio.wait_for(
+                _build_trading_stats_payload(),
+                timeout=_TRADING_STATS_BUILD_TIMEOUT_SEC,
+            )
+        except Exception as exc:
+            logger.warning(f"trading stats refresh fell back to cached risk report: {exc}")
+            payload = _build_trading_stats_fallback_payload("统计快照刷新超时，已返回轻量级快照。")
         _trading_stats_cache_payload = copy.deepcopy(payload)
         _trading_stats_cache_at = time.monotonic()
         return payload

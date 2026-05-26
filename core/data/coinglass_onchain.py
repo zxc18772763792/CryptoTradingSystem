@@ -3,13 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
-import aiohttp
 import pandas as pd
 
 from core.data.coinglass_client import CoinglassClient, coinglass_enabled
 from core.data.coinglass_registry import normalize_coinglass_symbol
 
-_BINANCE_PUBLIC_BASE = "https://api.binance.com"
 _DEFAULT_EXCHANGE_LIST = "Binance,OKX,Bybit,Bitget,Gate"
 
 
@@ -82,19 +80,46 @@ def _symbol_base(symbol: Any) -> str:
     return normalize_coinglass_symbol(symbol) or "BTC"
 
 
-async def _fetch_btc_price(timeout_sec: float = 6.5) -> float:
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout_sec), trust_env=True
-        ) as session:
-            async with session.get(
-                f"{_BINANCE_PUBLIC_BASE}/api/v3/ticker/price",
-                params={"symbol": "BTCUSDT"},
-            ) as response:
-                payload = await response.json(content_type=None)
-                return float(payload.get("price") or 0.0)
-    except Exception:
-        return 0.0
+def _row_asset_symbol(row: Mapping[str, Any]) -> str:
+    return str(
+        row.get("asset_symbol")
+        or row.get("assetSymbol")
+        or row.get("coin")
+        or row.get("symbol")
+        or ""
+    ).upper()
+
+
+def _row_btc_amount(row: Mapping[str, Any]) -> Optional[float]:
+    direct = _coalesce_float(row, "btc", "btc_amount", "amount_btc", "btcAmount")
+    if direct is not None:
+        return direct
+    asset_symbol = _row_asset_symbol(row)
+    if asset_symbol in {"BTC", "WBTC", "XBT"}:
+        return _coalesce_float(row, "asset_quantity", "assetQuantity", "quantity", "amount")
+    return None
+
+
+def _derive_btc_price_from_rows(rows: List[Mapping[str, Any]]) -> float:
+    for row in rows:
+        explicit = _coalesce_float(row, "btc_price", "btcPrice", "price_btc_usd", "btcUsdPrice")
+        if explicit and explicit > 0:
+            return float(explicit)
+        amount_usd = _coalesce_float(row, "amount_usd", "amountUsd", "usd", "value")
+        btc_amount = _row_btc_amount(row)
+        if amount_usd and amount_usd > 0 and btc_amount and btc_amount > 0:
+            return float(amount_usd) / float(btc_amount)
+    return 0.0
+
+
+def _passes_min_btc_threshold(item: Mapping[str, Any], *, min_btc: float, threshold_usd: float) -> bool:
+    btc_amount = _to_float(item.get("btc"), 0.0) or 0.0
+    if threshold_usd > 0:
+        amount_usd = _to_float(item.get("amount_usd"), 0.0) or 0.0
+        if amount_usd > 0:
+            return amount_usd >= threshold_usd
+        return min_btc <= 0 or btc_amount <= 0 or btc_amount >= min_btc
+    return min_btc <= 0 or btc_amount <= 0 or btc_amount >= min_btc
 
 
 def exchange_flow_direction(value: Any) -> str:
@@ -115,7 +140,8 @@ def exchange_flow_direction(value: Any) -> str:
 def normalize_whale_transfer(row: Mapping[str, Any], *, btc_price: float) -> Dict[str, Any]:
     amount_usd = _coalesce_float(row, "amount_usd", "amountUsd", "usd", "value") or 0.0
     asset_qty = _coalesce_float(row, "asset_quantity", "assetQuantity", "quantity", "amount") or 0.0
-    btc_equiv = amount_usd / btc_price if btc_price > 0 and amount_usd > 0 else 0.0
+    direct_btc = _row_btc_amount(row)
+    btc_equiv = direct_btc if direct_btc is not None else amount_usd / btc_price if btc_price > 0 and amount_usd > 0 else 0.0
     return {
         "hash": row.get("transaction_hash") or row.get("hash") or row.get("tx_hash"),
         "btc": round(btc_equiv, 6),
@@ -133,7 +159,8 @@ def normalize_whale_transfer(row: Mapping[str, Any], *, btc_price: float) -> Dic
 def normalize_exchange_chain_transfer(row: Mapping[str, Any], *, btc_price: float) -> Dict[str, Any]:
     amount_usd = _coalesce_float(row, "amount_usd", "amountUsd", "usd", "value") or 0.0
     asset_qty = _coalesce_float(row, "asset_quantity", "assetQuantity", "quantity", "amount") or 0.0
-    btc_equiv = amount_usd / btc_price if btc_price > 0 and amount_usd > 0 else 0.0
+    direct_btc = _row_btc_amount(row)
+    btc_equiv = direct_btc if direct_btc is not None else amount_usd / btc_price if btc_price > 0 and amount_usd > 0 else 0.0
     transfer_type = str(row.get("transfer_type") or row.get("type") or "").strip()
     return {
         "hash": row.get("transaction_hash") or row.get("hash") or row.get("tx_hash"),
@@ -290,7 +317,6 @@ async def fetch_coinglass_whale_transfers(
             "transactions": [],
         }
 
-    btc_price = await _fetch_btc_price()
     try:
         async with CoinglassClient(timeout_sec=8) as client:
             response = await client.request_json(
@@ -304,15 +330,19 @@ async def fetch_coinglass_whale_transfers(
             "error": str(exc),
             "source_name": "coinglass_whale_transfer",
             "threshold_btc": min_btc,
-            "btc_price": btc_price,
+            "btc_price": 0.0,
             "count": 0,
             "transactions": [],
         }
 
-    transactions = [normalize_whale_transfer(row, btc_price=btc_price) for row in _payload_rows(response)]
+    rows = _payload_rows(response)
+    btc_price = _derive_btc_price_from_rows(rows)
+    transactions = [normalize_whale_transfer(row, btc_price=btc_price) for row in rows]
     threshold_usd = (float(min_btc) * btc_price) if btc_price > 0 else 0.0
     filtered = [
-        item for item in transactions if threshold_usd <= 0 or (_to_float(item.get("amount_usd"), 0.0) or 0.0) >= threshold_usd
+        item
+        for item in transactions
+        if _passes_min_btc_threshold(item, min_btc=float(min_btc), threshold_usd=threshold_usd)
     ]
     return {
         "available": bool(filtered),
@@ -339,15 +369,12 @@ async def fetch_coinglass_exchange_chain_transfers(
             "transactions": [],
         }
 
-    btc_price = await _fetch_btc_price()
-    threshold_usd = (float(min_btc) * btc_price) if btc_price > 0 else 0.0
     try:
         async with CoinglassClient(timeout_sec=8) as client:
             response = await client.request_json(
                 "/v4/api/exchange/chain/tx/list",
                 params={
                     "symbol": _symbol_base(symbol),
-                    "min_usd": round(threshold_usd, 2) if threshold_usd > 0 else None,
                     "per_page": 20,
                     "page": 1,
                 },
@@ -359,17 +386,19 @@ async def fetch_coinglass_exchange_chain_transfers(
             "error": str(exc),
             "source_name": "coinglass_exchange_chain_tx",
             "threshold_btc": min_btc,
-            "btc_price": btc_price,
+            "btc_price": 0.0,
             "count": 0,
             "transactions": [],
         }
 
-    transactions = [
-        normalize_exchange_chain_transfer(row, btc_price=btc_price)
-        for row in _payload_rows(response)
-    ]
+    rows = _payload_rows(response)
+    btc_price = _derive_btc_price_from_rows(rows)
+    threshold_usd = (float(min_btc) * btc_price) if btc_price > 0 else 0.0
+    transactions = [normalize_exchange_chain_transfer(row, btc_price=btc_price) for row in rows]
     filtered = [
-        item for item in transactions if threshold_usd <= 0 or (_to_float(item.get("amount_usd"), 0.0) or 0.0) >= threshold_usd
+        item
+        for item in transactions
+        if _passes_min_btc_threshold(item, min_btc=float(min_btc), threshold_usd=threshold_usd)
     ]
     return {
         "available": bool(filtered),
