@@ -8259,7 +8259,7 @@ return map[name]||String(name||'未知模块');
 function moduleBrief(name,payload){
 const d=payload?.data||payload||{};
 if(name==='performance'){const wr=d?.win_rate_breakdown?.overall??d?.win_rate??0,sh=d?.risk_adjusted?.sharpe??d?.sharpe_ratio??0;return `胜率 ${Number(wr).toFixed(2)}% | Sharpe ${Number(sh).toFixed(2)}`;}
-if(name==='risk_dashboard'){return `风险 ${esc(d?.risk_level||'未知')} | VaR95 ${Number(d?.var?.var95_pct??0).toFixed(2)}%`;}
+if(name==='risk_dashboard'){return `风险 ${esc((typeof window.formatRiskLevel==='function'?window.formatRiskLevel(d?.risk_level):d?.risk_level)||'未知')} | VaR95 ${Number(d?.var?.var95_pct??0).toFixed(2)}%`;}
 if(name==='calendar'){return `事件 ${Number((d?.count??((d?.events||[]).length||0)))} 条`;}
 if(name==='microstructure'){return `点差 ${Number(d?.orderbook?.spread_bps??0).toFixed(2)} bps`;}
 if(name==='equity_rebalance'){return `建议 ${Number((d?.rebalance?.suggestions||[]).length)} 条`;}
@@ -8380,7 +8380,7 @@ const announcements=Array.isArray(community?.announcements)?community.announceme
 const whaleCount=Number(community?.whale_transfers?.count||0);
 const warnings=(Array.isArray(module?.warnings)?module.warnings:[]).filter(Boolean);
 const cards=[
-{title:'市场状态',badge:regime?.regime||'待判定',status:'connected',lines:[`方向 ${regime?.bias||'neutral'}`,`置信 ${Number(regime?.confidence||0).toFixed(2)} | 风险 ${regime?.risk_level||'unknown'}`]},
+{title:'市场状态',badge:(typeof window.formatRegimeLabel==='function'?window.formatRegimeLabel(regime?.regime):regime?.regime)||'待判定',status:'connected',lines:[`方向 ${(typeof window.formatRecommendationBias==='function'?window.formatRecommendationBias(regime?.bias):regime?.bias)||'中性'}`,`置信 ${Number(regime?.confidence||0).toFixed(2)} | 风险 ${(typeof window.formatRiskLevel==='function'?window.formatRiskLevel(regime?.risk_level):regime?.risk_level)||'未知'}`]},
 {title:'交易日历',badge:calendarBadge,status:calendarStatus,lines:[calendarRows.length?`事件 ${calendarRows.length} 条 | 官方 ${calendarOfficialCount} | 估算 ${calendarEstimatedCount}`:'当前窗口内暂无重点事件',calendarRows.length?`来源 ${calendarSourceLabel}${calendarStale?' | 缓存回退':''}`:'等待下一次刷新',calendarFocus?.title||calendarFocus?.event||'等待下一次刷新']},
 {title:'宏观快照',badge:macroBadge,status:macroStatus,lines:[macroGroupLine,`来源 ${macroSourceLabel} | 状态 ${macroSourceStatus}`,`缓存 ${macroAgeText} | ${String(macroSourceSummary?.note||macroHeadline).slice(0,48)}`]},
 {title:'衍生品上下文',badge:derivativesBadge,status:derivativesStatus,lines:[`来源 ${derivativesSourceLabel} | 状态 ${derivativesSourceStatus}`,`新鲜度 ${derivativesAgeText} | 数据集 ${derivativesDatasetCount}`,`${derivativesHistoryReady?'历史序列已就绪':'历史序列部分缺失'} | 日余量 ${derivativesQuotaRemaining!==null?derivativesQuotaRemaining:'--'}`]},
@@ -8391,8 +8391,8 @@ const cards=[
 ];
 researchState.lastAnalytics={workbench:true,risk_level:regime?.risk_level||'unknown',market_regime:regime?.regime||'未知',direction_bias:regime?.bias||'neutral',confidence:Number(regime?.confidence||0),calendar_count:calendarRows.length,calendar_source:calendarSummary?.source||null,calendar_official_count:calendarOfficialCount,calendar_estimated_count:calendarEstimatedCount,calendar_stale:calendarStale,macro_source:macroSourceSummary?.source||macroSnapshot?.source||null,macro_source_status:macroSourceStatus,macro_available_series:macroAvailableSeries,macro_stale:macroStale,derivatives_source:derivativesSourceSummary?.source||derivativesSummary?.provider||null,derivatives_source_status:derivativesSourceStatus,derivatives_dataset_count:derivativesDatasetCount,derivatives_stale:derivativesStale,news_samples:newsCount.total,whale_count:whaleCount,microstructure_available:microReady,long_short_ratio:longShortRatio,wall_bias:wallBias,iceberg_candidates:Number.isFinite(icebergCandidates)?icebergCandidates:0,large_order_count:largeOrders.length};
 summary.innerHTML=[
-`<div class="list-item"><span>市场状态 / 方向</span><span>${esc(regime?.regime||'未知')} / ${esc(regime?.bias||'neutral')}</span></div>`,
-`<div class="list-item"><span>置信度 / 风险等级</span><span>${Number(regime?.confidence||0).toFixed(2)} / ${esc(regime?.risk_level||'unknown')}</span></div>`,
+`<div class="list-item"><span>市场状态 / 方向</span><span>${esc((typeof window.formatRegimeLabel==='function'?window.formatRegimeLabel(regime?.regime):regime?.regime)||'未知')} / ${esc((typeof window.formatRecommendationBias==='function'?window.formatRecommendationBias(regime?.bias):regime?.bias)||'中性')}</span></div>`,
+`<div class="list-item"><span>置信度 / 风险等级</span><span>${Number(regime?.confidence||0).toFixed(2)} / ${esc((typeof window.formatRiskLevel==='function'?window.formatRiskLevel(regime?.risk_level):regime?.risk_level)||'未知')}</span></div>`,
 `<div class="list-item"><span>交易日历 / 新闻样本</span><span>${calendarRows.length} / ${newsCount.total}</span></div>`,
 `<div class="list-item"><span>日历来源 / 官方占比</span><span>${esc(calendarSourceLabel)}${calendarStale?' / 缓存回退':''} / ${calendarOfficialCount}-${calendarEstimatedCount}</span></div>`,
 `<div class="list-item"><span>宏观来源 / 缓存状态</span><span>${esc(macroSourceLabel)} / ${esc(macroSourceStatus)}${macroStale?' / 偏旧':''}</span></div>`,
@@ -8440,7 +8440,7 @@ function renderAnalyticsModuleDetail(endpoint,data){
 const out=getResearchOutputEl();if(!out)return;
 const rows=[];
 if(endpoint.includes('/analytics/performance'))rows.push({label:'绩效摘要',value:`交易 ${Number(data?.trade_count||0)} | Sharpe ${Number(data?.risk_adjusted?.sharpe||0).toFixed(2)}`});
-if(endpoint.includes('/analytics/risk-dashboard'))rows.push({label:'风险摘要',value:`等级 ${data?.risk_level||'未知'} | VaR95 ${Number(data?.var?.var95_pct||0).toFixed(2)}%`});
+if(endpoint.includes('/analytics/risk-dashboard'))rows.push({label:'风险摘要',value:`等级 ${(typeof window.formatRiskLevel==='function'?window.formatRiskLevel(data?.risk_level):data?.risk_level)||'未知'} | VaR95 ${Number(data?.var?.var95_pct||0).toFixed(2)}%`});
 if(endpoint.includes('/analytics/calendar'))rows.push({label:'交易日历',value:`事件 ${Number(data?.count||0)} 条`});
 if(endpoint.includes('/analytics/microstructure'))rows.push({label:'微观结构',value:`点差 ${Number(data?.orderbook?.spread_bps||0).toFixed(2)} bps`});
 if(endpoint.includes('/analytics/equity/rebalance'))rows.push({label:'再平衡',value:`建议 ${(data?.rebalance?.suggestions||[]).length} 条`});
@@ -8941,17 +8941,38 @@ init().catch(markBootFailure);
 
 let _monitorTimer = null;
 let _monitorCurrentName = '';
+let _monitorConsecutiveFailures = 0;
+const _MONITOR_MAX_FAILURES = 5;
 
 async function openStrategyMonitor(name) {
     const panel = document.getElementById('strategy-monitor-panel');
     if (!panel) return;
     _monitorCurrentName = String(name || '');
+    _monitorConsecutiveFailures = 0;
     panel.style.display = 'block';
     setTimeout(() => panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 80);
     await _loadMonitorData(name);
     if (_monitorTimer) clearInterval(_monitorTimer);
     _monitorTimer = setInterval(() => {
-        if (_monitorCurrentName) _loadMonitorData(_monitorCurrentName).catch(() => {});
+        if (!_monitorCurrentName) return;
+        _loadMonitorData(_monitorCurrentName)
+            .then(() => { _monitorConsecutiveFailures = 0; })
+            .catch(() => {
+                _monitorConsecutiveFailures += 1;
+                // After enough consecutive failures the strategy is almost
+                // certainly stale (deleted / renamed / mojibake mismatch).
+                // Stop the timer so we don't keep spamming /monitor-data and
+                // the server log with the same 404.
+                if (_monitorConsecutiveFailures >= _MONITOR_MAX_FAILURES) {
+                    if (_monitorTimer) { clearInterval(_monitorTimer); _monitorTimer = null; }
+                    const badge = document.getElementById('monitor-status-badge');
+                    if (badge) {
+                        badge.textContent = '已停止轮询（连续失败）';
+                        badge.style.background = '#7f1d1d';
+                        badge.style.color = '#fca5a5';
+                    }
+                }
+            });
     }, 12000);
 }
 
