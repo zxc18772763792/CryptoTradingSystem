@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 from uuid import uuid4
 
@@ -3941,30 +3941,64 @@ def _save_stoploss_policy(policy: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
+# Cached fallback connector — reused across calls so we don't repeat the
+# connect/load_markets/disconnect cycle on every balance/position request.
+# Replaced (transparently) if credentials change or the connector goes stale.
+_FALLBACK_CONNECTOR_LOCK = asyncio.Lock()
+_FALLBACK_CONNECTOR: Optional[BinanceConnector] = None
+_FALLBACK_CONNECTOR_KEY: Optional[Tuple[str, str, str]] = None
+
+
 async def _create_binance_readonly_connector() -> Optional[BinanceConnector]:
+    global _FALLBACK_CONNECTOR, _FALLBACK_CONNECTOR_KEY
+
     base_cfg = get_exchange_config("binance")
     if not base_cfg:
         return None
-    cfg = copy.deepcopy(base_cfg)
-    cfg.api_key = settings.BINANCE_API_KEY or cfg.api_key
-    cfg.api_secret = settings.BINANCE_API_SECRET or cfg.api_secret
-    cfg.default_type = str(
-        getattr(settings, "BINANCE_DEFAULT_TYPE", cfg.default_type)
-        or cfg.default_type
+
+    api_key = settings.BINANCE_API_KEY or base_cfg.api_key or ""
+    api_secret = settings.BINANCE_API_SECRET or base_cfg.api_secret or ""
+    default_type = str(
+        getattr(settings, "BINANCE_DEFAULT_TYPE", base_cfg.default_type)
+        or base_cfg.default_type
         or "spot"
     )
-    connector = BinanceConnector(cfg)
-    try:
-        ok = await connector.connect()
-    except asyncio.CancelledError:
-        with contextlib.suppress(Exception):
-            await connector.disconnect()
-        raise
-    if not ok:
-        with contextlib.suppress(Exception):
-            await connector.disconnect()
-        return None
-    return connector
+    key = (api_key, api_secret, default_type)
+
+    async with _FALLBACK_CONNECTOR_LOCK:
+        existing = _FALLBACK_CONNECTOR
+        if (
+            existing is not None
+            and _FALLBACK_CONNECTOR_KEY == key
+            and getattr(existing, "is_connected", False)
+        ):
+            return existing
+
+        # Credentials/type changed or prior connector dead — drop and rebuild.
+        if existing is not None and _FALLBACK_CONNECTOR_KEY != key:
+            with contextlib.suppress(Exception):
+                await existing.disconnect()
+            _FALLBACK_CONNECTOR = None
+            _FALLBACK_CONNECTOR_KEY = None
+
+        cfg = copy.deepcopy(base_cfg)
+        cfg.api_key = api_key
+        cfg.api_secret = api_secret
+        cfg.default_type = default_type
+        connector = BinanceConnector(cfg)
+        try:
+            ok = await connector.connect()
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await connector.disconnect()
+            raise
+        if not ok:
+            with contextlib.suppress(Exception):
+                await connector.disconnect()
+            return None
+        _FALLBACK_CONNECTOR = connector
+        _FALLBACK_CONNECTOR_KEY = key
+        return connector
 
 
 async def _fetch_binance_balances_via_fallback() -> Optional[List[Any]]:
@@ -3973,9 +4007,16 @@ async def _fetch_binance_balances_via_fallback() -> Optional[List[Any]]:
         return None
     try:
         return await connector.get_balance()
-    finally:
-        with contextlib.suppress(Exception):
-            await connector.disconnect()
+    except Exception:
+        # Drop cached connector on failure so the next call rebuilds it.
+        global _FALLBACK_CONNECTOR, _FALLBACK_CONNECTOR_KEY
+        async with _FALLBACK_CONNECTOR_LOCK:
+            if _FALLBACK_CONNECTOR is connector:
+                with contextlib.suppress(Exception):
+                    await connector.disconnect()
+                _FALLBACK_CONNECTOR = None
+                _FALLBACK_CONNECTOR_KEY = None
+        raise
 
 
 async def _fetch_binance_positions_via_fallback() -> Optional[List[Any]]:
@@ -3984,9 +4025,15 @@ async def _fetch_binance_positions_via_fallback() -> Optional[List[Any]]:
         return None
     try:
         return await connector.get_positions()
-    finally:
-        with contextlib.suppress(Exception):
-            await connector.disconnect()
+    except Exception:
+        global _FALLBACK_CONNECTOR, _FALLBACK_CONNECTOR_KEY
+        async with _FALLBACK_CONNECTOR_LOCK:
+            if _FALLBACK_CONNECTOR is connector:
+                with contextlib.suppress(Exception):
+                    await connector.disconnect()
+                _FALLBACK_CONNECTOR = None
+                _FALLBACK_CONNECTOR_KEY = None
+        raise
 
 
 def _binance_has_credentials() -> bool:

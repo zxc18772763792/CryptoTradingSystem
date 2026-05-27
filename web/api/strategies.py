@@ -2305,6 +2305,31 @@ async def stop_all_strategies():
 
 @router.post("/register", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def register_strategy(request: StrategyRegisterRequest):
+    # Reject mojibake / non-ASCII names. Such names break URL-encoded round-trips
+    # (PowerShell GBK console once corrupted "指数" into stray bytes, so every
+    # /strategies/{name}/monitor-data call from the UI 404'd forever).
+    raw_name = str(request.name or "").strip()
+    if not raw_name:
+        raise HTTPException(status_code=400, detail="Strategy name is required")
+    try:
+        raw_name.encode("ascii")
+    except UnicodeEncodeError:
+        # Allow CJK only when it round-trips cleanly through UTF-8 (catches
+        # mojibake artefacts like '\udcb8\udcb8' from a misdecoded GBK source).
+        try:
+            raw_name.encode("utf-8").decode("utf-8")
+            for ch in raw_name:
+                if 0xDC00 <= ord(ch) <= 0xDFFF:
+                    raise UnicodeEncodeError("utf-8", raw_name, 0, 1, "surrogate")
+        except UnicodeEncodeError:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Strategy name contains corrupted (mojibake) characters. "
+                    "Re-enter the name in UTF-8 or use ASCII-only identifiers."
+                ),
+            )
+
     strategy_classes = _get_strategy_classes()
     strategy_class = strategy_classes.get(request.strategy_type)
     if not strategy_class:

@@ -395,6 +395,25 @@ def _collect_watch_symbols() -> List[str]:
     return list(symbols)[:8]
 
 
+_MARKET_TICK_PER_CALL_TIMEOUT_SEC = 3.0
+
+
+async def _fetch_one_ticker(connector: Any, symbol: str) -> Optional[Dict[str, Any]]:
+    try:
+        ticker = await asyncio.wait_for(
+            connector.get_ticker(symbol),
+            timeout=_MARKET_TICK_PER_CALL_TIMEOUT_SEC,
+        )
+        return {
+            "last": float(ticker.last or 0.0),
+            "bid": float(ticker.bid or 0.0),
+            "ask": float(ticker.ask or 0.0),
+            "timestamp": ticker.timestamp.isoformat() if ticker.timestamp else None,
+        }
+    except Exception:
+        return None
+
+
 async def _emit_market_ticks() -> None:
     if not event_bus.has_subscribers():
         return
@@ -403,38 +422,62 @@ async def _emit_market_ticks() -> None:
         return
 
     payload: Dict[str, Dict[str, Any]] = {}
+    # Fetch all (exchange, symbol) tickers concurrently — sequential REST was
+    # spending ~16 calls × per-call latency every cycle and starving other
+    # Binance traffic of rate-limit budget.
+    jobs: List[Tuple[str, str, asyncio.Task]] = []
     for exchange_name in exchange_manager.get_connected_exchanges():
         connector = exchange_manager.get_exchange(exchange_name)
         if not connector:
             continue
-
-        ticks: Dict[str, Any] = {}
         for symbol in symbols:
-            try:
-                ticker = await connector.get_ticker(symbol)
-                ticks[symbol] = {
-                    "last": float(ticker.last or 0.0),
-                    "bid": float(ticker.bid or 0.0),
-                    "ask": float(ticker.ask or 0.0),
-                    "timestamp": ticker.timestamp.isoformat() if ticker.timestamp else None,
-                }
-            except Exception:
-                continue
-        if ticks:
-            payload[exchange_name] = ticks
+            jobs.append(
+                (
+                    exchange_name,
+                    symbol,
+                    asyncio.create_task(_fetch_one_ticker(connector, symbol)),
+                )
+            )
+
+    if not jobs:
+        return
+
+    try:
+        results = await asyncio.gather(*(j[2] for j in jobs), return_exceptions=True)
+    except Exception:
+        # Best-effort: cancel any stragglers then bail out for this cycle.
+        for _, _, task in jobs:
+            if not task.done():
+                task.cancel()
+        return
+
+    for (exchange_name, symbol, _task), result in zip(jobs, results):
+        if isinstance(result, BaseException) or not isinstance(result, dict):
+            continue
+        payload.setdefault(exchange_name, {})[symbol] = result
 
     if payload:
         await event_bus.publish_nowait_safe(event="market_tick", payload=payload)
 
 
+# Push snapshots every 2s (in-memory data, cheap) but only fan out REST-heavy
+# market ticks every _MARKET_TICK_INTERVAL_SEC to keep the exchange rate-limit
+# budget under control. Reduces REST QPS roughly 3-4×.
+_MARKET_TICK_INTERVAL_SEC = 6.0
+
+
 async def _runtime_pusher(stop_event: asyncio.Event) -> None:
+    last_market_tick_at = 0.0
     while not stop_event.is_set():
         try:
             if not event_bus.has_subscribers():
                 await asyncio.sleep(2)
                 continue
             await _emit_runtime_snapshot()
-            await _emit_market_ticks()
+            now = asyncio.get_event_loop().time()
+            if now - last_market_tick_at >= _MARKET_TICK_INTERVAL_SEC:
+                await _emit_market_ticks()
+                last_market_tick_at = now
             _touch_runtime_task("runtime", success=True)
         except Exception as e:
             logger.debug(f"runtime snapshot push failed: {e}")
@@ -994,8 +1037,15 @@ async def _kaiko_worker(stop_event: asyncio.Event) -> None:
 
 
 async def _coinglass_worker(stop_event: asyncio.Event) -> None:
-    """Refresh CoinGlass premium cache in the background (no-op when disabled)."""
-    INTERVAL = 180
+    """Refresh CoinGlass premium cache in the background (no-op when disabled).
+
+    Each refresh round can fire >30 requests (3 symbols × ~10 datasets), which
+    saturates COINGLASS_RATE_LIMIT_PER_MIN=30 in a single shot. At INTERVAL=180s
+    that meant a 429 every cycle (576/day in production logs). Stretching to
+    600s lets the minute-budget recover between cycles and stops the steady
+    rate-limit alarms.
+    """
+    INTERVAL = 600
     await asyncio.sleep(360)  # stagger: 6 min after startup
     while not stop_event.is_set():
         try:
@@ -1702,39 +1752,64 @@ async def websocket_endpoint(websocket: WebSocket):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     )
+    recv_task: Optional[asyncio.Task] = None
+    send_task: Optional[asyncio.Task] = None
     try:
         while True:
             recv_task = asyncio.create_task(websocket.receive_text())
             send_task = asyncio.create_task(queue.get())
-            done, pending = await asyncio.wait(
-                {recv_task, send_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+            try:
+                done, pending = await asyncio.wait(
+                    {recv_task, send_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except BaseException:
+                # asyncio.wait was cancelled — cancel both children before propagating
+                for t in (recv_task, send_task):
+                    if t and not t.done():
+                        t.cancel()
+                        with contextlib.suppress(BaseException):
+                            await t
+                recv_task = send_task = None
+                raise
 
-            if send_task in done:
-                payload = send_task.result()
-                await websocket.send_json(payload)
+            try:
+                if send_task in done:
+                    payload = send_task.result()
+                    await websocket.send_json(payload)
 
-            if recv_task in done:
-                message = (recv_task.result() or "").strip().lower()
-                if message in {"ping", "heartbeat"}:
-                    await websocket.send_json(
-                        {
-                            "event": "pong",
-                            "payload": {"server_time": datetime.now(timezone.utc).isoformat()},
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        }
-                    )
-                elif message == "status":
-                    await _emit_runtime_snapshot()
-
-            for task in pending:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+                if recv_task in done:
+                    message = (recv_task.result() or "").strip().lower()
+                    if message in {"ping", "heartbeat"}:
+                        await websocket.send_json(
+                            {
+                                "event": "pong",
+                                "payload": {"server_time": datetime.now(timezone.utc).isoformat()},
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                    elif message == "status":
+                        await _emit_runtime_snapshot()
+            finally:
+                # Always cancel/await the pending task so the loop never leaks
+                # a queue.get() or receive_text() across iterations or on
+                # WebSocketDisconnect raised from send_json.
+                for task in pending:
+                    if not task.done():
+                        task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
+                recv_task = send_task = None
     except WebSocketDisconnect:
         pass
     finally:
+        # Belt-and-braces: if we exited via an exception path before the inner
+        # finally ran, ensure no child task is left dangling.
+        for t in (recv_task, send_task):
+            if t and not t.done():
+                t.cancel()
+                with contextlib.suppress(BaseException):
+                    await t
         await event_bus.unsubscribe(queue)
 
 
