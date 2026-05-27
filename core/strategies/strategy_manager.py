@@ -69,7 +69,12 @@ class StrategyRuntimeStats:
 
 
 _SIGNAL_CONFLICT_WINDOW_SECONDS = 60
-_MARKET_DATA_FETCH_TIMEOUT_SEC = 12.0
+# 12s timeout + 90s backoff produced "signal feels stuck" episodes: when
+# exchange traffic spikes for any reason (concurrent REST elsewhere), one slow
+# fetch took strategies offline for 90s. Tighten the timeout so we fail-fast,
+# and shrink the backoff so we recover within a couple of bars on a 1m feed.
+_MARKET_DATA_FETCH_TIMEOUT_SEC = 8.0
+_DEFAULT_LIVE_FETCH_BACKOFF_SEC = 30.0
 # Canonical fetch size so strategies sharing a feed reuse one cached pull
 # instead of each issuing its own get_klines (which overflows the shared ccxt
 # rate-limit queue: "throttle queue is over maxCapacity").
@@ -105,7 +110,11 @@ class StrategyManager:
             1.0, float(getattr(settings, "LIVE_KLINE_FETCH_TIMEOUT_SEC", _MARKET_DATA_FETCH_TIMEOUT_SEC) or _MARKET_DATA_FETCH_TIMEOUT_SEC)
         )
         self._live_fetch_backoff_sec: float = max(
-            5.0, float(getattr(settings, "LIVE_KLINE_FETCH_BACKOFF_SEC", 90.0) or 90.0)
+            5.0,
+            float(
+                getattr(settings, "LIVE_KLINE_FETCH_BACKOFF_SEC", _DEFAULT_LIVE_FETCH_BACKOFF_SEC)
+                or _DEFAULT_LIVE_FETCH_BACKOFF_SEC
+            ),
         )
         # Shared market data cache: (exchange, symbol, timeframe, limit) -> (df, timestamp)
         # TTL is dynamic per timeframe to keep sub-minute strategies responsive while
