@@ -657,6 +657,13 @@ class AutonomousTradingAgent:
         self._profile = self._load_profile()
         self._learning_memory = self._load_learning_memory()
         self._last_error: Optional[str] = None
+        # Throttle for noisy "live position lookup failed" debug lines: when
+        # the upstream connector is in a sustained failure mode the agent's
+        # decision loop calls _load_live_position_snapshots multiple times per
+        # cycle, producing several DEBUG lines per second. Suppress repeats of
+        # the same reason inside a 30s window.
+        self._live_pos_err_last_msg: str = ""
+        self._live_pos_err_last_at: float = 0.0
         self._last_run_at: Optional[str] = None
         self._next_run_at: Optional[str] = None
         self._last_latency_ms: Optional[int] = None
@@ -855,7 +862,15 @@ class AutonomousTradingAgent:
         try:
             positions = await asyncio.wait_for(connector.get_positions(), timeout=8.0)
         except Exception as exc:
-            logger.debug(f"autonomous agent live position lookup failed: {exc}")
+            now_mono = time.monotonic()
+            msg = str(exc)
+            if (
+                msg != self._live_pos_err_last_msg
+                or now_mono - self._live_pos_err_last_at >= 30.0
+            ):
+                logger.debug(f"autonomous agent live position lookup failed: {exc}")
+                self._live_pos_err_last_msg = msg
+                self._live_pos_err_last_at = now_mono
             return []
 
         snapshots: List[Dict[str, Any]] = []

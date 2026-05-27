@@ -5,7 +5,7 @@ import time
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
@@ -159,10 +159,22 @@ _MONITOR_TIMEFRAME_FALLBACKS: List[str] = [
     "1d",
 ]
 _MONITOR_EXCHANGE_POSITION_CACHE_TTL_SEC = 8.0
+# When the exchange call fails (network blip, key revoked, rate-limited) we
+# previously cached nothing, so every 12s UI poll re-hit the dead path and
+# spammed DEBUG logs. Cache the empty result for a shorter window so we still
+# recover quickly once the exchange is healthy again.
+_MONITOR_EXCHANGE_POSITION_NEG_TTL_SEC = 4.0
 _MONITOR_EXCHANGE_POSITION_CACHE: Dict[str, Any] = {
     "ts": 0.0,
     "rows": [],
+    "neg_ts": 0.0,
+    "neg_reason": "",
 }
+
+# Same idea for per-strategy open-orders: a failing strategy name should not
+# produce one DEBUG line every 12s for the entire process lifetime.
+_MONITOR_OPEN_ORDERS_NEG_TTL_SEC = 5.0
+_MONITOR_OPEN_ORDERS_NEG_CACHE: Dict[Tuple[str, str], float] = {}
 
 _BINANCE_USDM_CROSS_SECTION_STRATEGIES = set(INTRADAY_CROSS_SECTION_SPECS.keys())
 
@@ -830,8 +842,14 @@ async def _load_exchange_position_rows_cached(*, force: bool = False) -> List[Di
     cached_rows = list(_MONITOR_EXCHANGE_POSITION_CACHE.get("rows") or [])
     if cached_rows and now - cached_at <= _MONITOR_EXCHANGE_POSITION_CACHE_TTL_SEC:
         return [dict(row) for row in cached_rows]
+    # Negative cache: skip the fetch entirely if all exchanges failed recently.
+    neg_at = float(_MONITOR_EXCHANGE_POSITION_CACHE.get("neg_ts") or 0.0)
+    if not force and neg_at and now - neg_at <= _MONITOR_EXCHANGE_POSITION_NEG_TTL_SEC:
+        return []
 
     rows: List[Dict[str, Any]] = []
+    any_success = False
+    last_error: str = ""
     for exchange_name in exchange_manager.get_connected_exchanges():
         connector = exchange_manager.get_exchange(exchange_name)
         if not connector:
@@ -841,8 +859,13 @@ async def _load_exchange_position_rows_cached(*, force: bool = False) -> List[Di
             continue
         try:
             exchange_positions = await asyncio.wait_for(connector.get_positions(), timeout=5.0)
+            any_success = True
         except Exception as exc:
-            logger.debug(f"monitor-data: exchange positions unavailable for {exchange_name}: {exc}")
+            last_error = str(exc)
+            # Only log when the reason changes — repeated identical failures
+            # within the negative-cache window are silent.
+            if last_error != str(_MONITOR_EXCHANGE_POSITION_CACHE.get("neg_reason") or ""):
+                logger.debug(f"monitor-data: exchange positions unavailable for {exchange_name}: {exc}")
             continue
         for raw in exchange_positions or []:
             symbol = str(_raw_field(raw, "symbol", default="") or "").strip()
@@ -959,6 +982,14 @@ async def _load_exchange_position_rows_cached(*, force: bool = False) -> List[Di
     if rows:
         _MONITOR_EXCHANGE_POSITION_CACHE["ts"] = now
         _MONITOR_EXCHANGE_POSITION_CACHE["rows"] = [dict(row) for row in rows]
+        _MONITOR_EXCHANGE_POSITION_CACHE["neg_ts"] = 0.0
+        _MONITOR_EXCHANGE_POSITION_CACHE["neg_reason"] = ""
+    elif not any_success:
+        # All exchanges failed → arm negative cache. Empty-but-successful
+        # results (no positions on healthy exchanges) intentionally skip this
+        # branch so a closed-positions state still re-checks promptly.
+        _MONITOR_EXCHANGE_POSITION_CACHE["neg_ts"] = now
+        _MONITOR_EXCHANGE_POSITION_CACHE["neg_reason"] = last_error
     return rows
 
 
@@ -1277,14 +1308,25 @@ async def _load_strategy_open_orders(
     exchange: str,
     runtime_mode: str,
 ) -> List[Dict[str, Any]]:
+    now = time.time()
+    neg_key = (str(name or ""), str(exchange or ""))
+    neg_until = float(_MONITOR_OPEN_ORDERS_NEG_CACHE.get(neg_key) or 0.0)
+    if neg_until and now < neg_until:
+        return []
     try:
         rows = await asyncio.wait_for(
             order_manager.get_open_orders(exchange=exchange),
             timeout=4.5,
         )
     except Exception as exc:
-        logger.debug(f"monitor-data: open orders load failed for {name}: {exc}")
+        # Suppress repeat DEBUG within the negative window — one call can fail
+        # 5x/min from the UI's 12s monitor poll and clog the log.
+        if not neg_until:
+            logger.debug(f"monitor-data: open orders load failed for {name}: {exc}")
+        _MONITOR_OPEN_ORDERS_NEG_CACHE[neg_key] = now + _MONITOR_OPEN_ORDERS_NEG_TTL_SEC
         return []
+    # Healthy fetch — clear any prior negative entry so the next failure logs.
+    _MONITOR_OPEN_ORDERS_NEG_CACHE.pop(neg_key, None)
 
     items: List[Dict[str, Any]] = []
     for order in rows or []:

@@ -231,8 +231,35 @@ class BaseExchange(ABC):
         return client
 
     async def health_check(self) -> bool:
-        """健康检查"""
+        """健康检查 — 使用最轻的 fetch_time 端点而非 24hr ticker.
+
+        前版本调用 ``get_ticker("BTC/USDT")`` 走的是 ``/fapi/v1/ticker/24hr`` —
+        每分钟一次的 watchdog 持续给 24hr stats 端点施压, 还消耗 ccxt 内部
+        节流配额. fetch_time 在所有主流 CEX 上都是亚毫秒级响应, 也不占
+        签名/权重配额.
+        """
+        client = getattr(self, "_client", None)
+        if client is None:
+            try:
+                client = await self._ensure_client()  # type: ignore[attr-defined]
+            except AttributeError:
+                # Subclasses without _ensure_client → fall back to old path.
+                try:
+                    await self.get_ticker("BTC/USDT")
+                    return True
+                except Exception as e:
+                    logger.error(f"Health check failed for {self.name}: {e}")
+                    return False
+            except Exception as e:
+                logger.error(f"Health check failed for {self.name}: {e}")
+                return False
+
         try:
+            fetch_time = getattr(client, "fetch_time", None)
+            if callable(fetch_time):
+                await asyncio.wait_for(fetch_time(), timeout=6.0)
+                return True
+            # No fetch_time on this client: legacy ticker path.
             await self.get_ticker("BTC/USDT")
             return True
         except Exception as e:

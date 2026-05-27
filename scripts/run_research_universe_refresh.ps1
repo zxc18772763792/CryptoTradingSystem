@@ -165,6 +165,27 @@ if (Test-Path $stderrPath) {
     }
 }
 $logLines += ("[{0}] Research universe refresh exit={1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $exitCode)
+
+# Size-based rotation: keep current log under 10MB. When it exceeds the limit,
+# rename to .1 (overwriting any prior .1) so we retain ~2 rotations worth of
+# history without unbounded growth. The previous run had no rotation at all
+# and the file had grown to 35MB+ in production.
+$rotateThresholdBytes = 10MB
+if (Test-Path $resolvedLogPath) {
+    try {
+        $sizeBytes = (Get-Item $resolvedLogPath).Length
+        if ($sizeBytes -ge $rotateThresholdBytes) {
+            $rotated = "$resolvedLogPath.1"
+            if (Test-Path $rotated) {
+                Remove-Item $rotated -Force -ErrorAction SilentlyContinue
+            }
+            Move-Item -Path $resolvedLogPath -Destination $rotated -Force -ErrorAction SilentlyContinue
+        }
+    } catch {
+        # Rotation is best-effort; never let a logging hiccup break the refresh.
+    }
+}
+
 $logLines | Add-Content -Path $resolvedLogPath
 
 if (-not $Quiet) {
