@@ -117,6 +117,19 @@ async def test_normalize_skips_zero_and_nonnumeric():
     assert "timestamp" in out["SOL/USDT"]
 
 
+async def test_normalize_strips_perp_settlement_suffix():
+    """Futures symbols like BTC/USDT:USDT must map back to the UI's BTC/USDT key."""
+    out = CcxtProMarketFeed._normalize_tickers(
+        "binance",
+        {
+            "BTC/USDT:USDT": {"last": 50000.0, "timestamp": 1_700_000_000_000},
+            "ETH/USDT": {"last": 2000.0, "timestamp": 1_700_000_000_000},
+        },
+    )
+    assert set(out.keys()) == {"BTC/USDT", "ETH/USDT"}
+    assert out["BTC/USDT"]["last"] == 50000.0
+
+
 async def test_watch_error_triggers_reconnect_then_recovers():
     class _FlakyClient(_FakeProClient):
         def __init__(self):

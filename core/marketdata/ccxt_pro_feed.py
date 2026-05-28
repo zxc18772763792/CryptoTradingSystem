@@ -252,7 +252,18 @@ class CcxtProMarketFeed:
         return list(seen.keys())[:16]
 
     @staticmethod
-    def _normalize_tickers(name: str, tickers: Any) -> Dict[str, Any]:
+    def _spot_style_symbol(symbol: str) -> str:
+        """Strip the ``:SETTLEMENT`` suffix so perp symbols match the UI keys.
+
+        ccxt resolves "BTC/USDT" on a futures client to the unified perp symbol
+        "BTC/USDT:USDT". The REST path and the front-end key ticks by the
+        plain "BTC/USDT" form, so normalize back to that to keep them aligned.
+        """
+        s = str(symbol or "")
+        return s.split(":", 1)[0] if ":" in s else s
+
+    @classmethod
+    def _normalize_tickers(cls, name: str, tickers: Any) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
         if not isinstance(tickers, dict):
             return out
@@ -271,7 +282,7 @@ class CcxtProMarketFeed:
                 ts_iso = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
             else:
                 ts_iso = datetime.now(timezone.utc).isoformat()
-            out[str(symbol)] = {
+            out[cls._spot_style_symbol(symbol)] = {
                 "last": last_f,
                 "bid": float(t.get("bid") or 0.0),
                 "ask": float(t.get("ask") or 0.0),
