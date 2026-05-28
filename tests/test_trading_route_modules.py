@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
@@ -8,6 +9,12 @@ from fastapi.testclient import TestClient
 
 from web.api import trading as trading_api
 from web.api import trading_analytics, trading_orders, trading_positions
+
+
+def test_trading_session_name_returns_readable_chinese_labels():
+    assert trading_api._session_name(datetime(2026, 1, 1, 0, tzinfo=timezone.utc)) == "亚盘"
+    assert trading_api._session_name(datetime(2026, 1, 1, 8, tzinfo=timezone.utc)) == "欧盘"
+    assert trading_api._session_name(datetime(2026, 1, 1, 16, tzinfo=timezone.utc)) == "美盘"
 
 
 def test_orders_route_bridges_to_service(monkeypatch):

@@ -37,12 +37,16 @@ def test_loop_bound_async_lock_rejects_sync_context():
 
 def test_loop_bound_async_lock_creates_independent_locks_per_event_loop():
     lock = LoopBoundAsyncLock()
+    # Hold references to the actual lock objects rather than comparing id(): a
+    # freed object's id() can be reused by the next allocation, which made the
+    # earlier id()-based assertion fail deterministically on CPython.
+    captured: list[asyncio.Lock] = []
 
-    async def _acquire_once() -> int:
+    async def _acquire_once() -> None:
         async with lock:
-            return id(lock._lock_for_current_loop())
+            captured.append(lock._lock_for_current_loop())
 
-    first = asyncio.run(_acquire_once())
-    second = asyncio.run(_acquire_once())
+    asyncio.run(_acquire_once())
+    asyncio.run(_acquire_once())
 
-    assert first != second
+    assert captured[0] is not captured[1]

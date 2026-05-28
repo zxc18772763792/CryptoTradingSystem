@@ -3507,7 +3507,7 @@
       state.selectedProposalId = linkedProposalId;
     }
     renderProposalList();
-    renderCandidateCards();   // 鏇存柊閫変腑楂樹寒
+    renderCandidateCards();   // 更新选中高亮
     updateRunBtn();
 
     if (!panel) return;

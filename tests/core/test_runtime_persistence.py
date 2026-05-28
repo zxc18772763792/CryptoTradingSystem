@@ -122,6 +122,21 @@ def test_risk_manager_update_equity_accepts_explicit_scope(tmp_path, monkeypatch
     assert manager.get_risk_report(scope="live")["equity"]["current"] == 5000.0
 
 
+def test_risk_manager_scoped_equity_alert_text_is_readable(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(risk_module.settings, "TRADING_MODE", "paper", raising=False)
+
+    manager = risk_module.RiskManager(use_persisted_overlay=False)
+    manager.balance_volatility_alert_pct = 0.01
+    manager.update_equity(1000.0, scope="paper")
+    manager.update_equity(1125.0, scope="paper")
+
+    alerts = manager.get_risk_report(scope="paper")["alerts"]
+    assert alerts[-1]["title"] == "账户波动预警"
+    assert alerts[-1]["message"] == "账户权益短时上升12.50%"
+    assert "涓" not in alerts[-1]["message"]
+
+
 def test_risk_manager_skips_test_stub_trade_history(tmp_path, monkeypatch):
     monkeypatch.setattr(risk_module.settings, "CACHE_PATH", tmp_path, raising=False)
     monkeypatch.setattr(risk_module.settings, "TRADING_MODE", "live", raising=False)

@@ -522,6 +522,29 @@ def test_account_mutation_api_key_must_have_manage_accounts_permission(monkeypat
     assert response.json()["success"] is True
 
 
+def test_account_summary_requires_read_trading_state_permission(monkeypatch):
+    app = _build_app(("/api/trading", trading_accounts.router))
+    client = TestClient(app)
+    monkeypatch.setattr(trading_api.account_manager, "list_accounts", lambda: [])
+    monkeypatch.setattr(trading_api.position_manager, "get_all_positions", lambda: [])
+    monkeypatch.setattr(trading_api.order_manager, "get_recent_orders", lambda limit=1000: [])
+
+    response = client.get("/api/trading/accounts/summary")
+    assert response.status_code == 401
+
+    monkeypatch.setattr(
+        ops_auth_module,
+        "resolve_api_key_identity",
+        AsyncMock(return_value=_api_identity("AUDITOR")),
+    )
+    response = client.get(
+        "/api/trading/accounts/summary",
+        headers={"X-API-KEY": "auditor-key"},
+    )
+    assert response.status_code == 200
+    assert response.json()["accounts"] == []
+
+
 def test_live_mode_confirm_requires_approve_live_permission_for_api_key(monkeypatch):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
     trading_runtime.invalidate_trading_stats_cache()

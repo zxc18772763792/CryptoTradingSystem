@@ -149,7 +149,6 @@ def _futures_price_divisor(symbol: str, mapped_symbol: str, default_type: str) -
 class BinanceConnector(BaseExchange):
     def __init__(self, config: ExchangeConfig):
         super().__init__(config)
-        self._ws_client: Any = None
         self._funding_cache: Dict[str, Dict[str, float]] = {}
         self._funding_cache_ts: float = 0.0
         self._balance_cache: List[Balance] = []

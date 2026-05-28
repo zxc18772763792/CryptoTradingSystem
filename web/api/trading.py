@@ -6121,10 +6121,10 @@ async def close_position(req: PositionCloseRequest):
 def _session_name(ts: datetime) -> str:
     hour = int(ts.hour)
     if 0 <= hour < 8:
-        return "浜氱洏"
+        return "亚盘"
     if 8 <= hour < 16:
-        return "娆х洏"
-    return "缇庣洏"
+        return "欧盘"
+    return "美盘"
 
 
 def _parse_target_allocations(raw: str) -> Dict[str, float]:

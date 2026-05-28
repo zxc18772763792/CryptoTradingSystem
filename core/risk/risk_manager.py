@@ -578,12 +578,12 @@ class RiskManager:
             if last_equity and float(last_equity) > 0:
                 change_ratio = (equity - float(last_equity)) / float(last_equity)
                 if abs(change_ratio) >= self.balance_volatility_alert_pct:
-                    direction = "涓婂崌" if change_ratio > 0 else "涓嬮檷"
+                    direction = "上升" if change_ratio > 0 else "下降"
                     alerts.append(
                         {
                             "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "title": "璐︽埛娉㈠姩棰勮",
-                            "message": f"璐︽埛鏉冪泭鐭椂{direction}{abs(change_ratio) * 100:.2f}%",
+                            "title": "账户波动预警",
+                            "message": f"账户权益短时{direction}{abs(change_ratio) * 100:.2f}%",
                             "severity": "warning",
                             "data": {
                                 "scope": self._normalize_scope(scope),
