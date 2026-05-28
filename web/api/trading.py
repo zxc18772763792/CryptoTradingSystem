@@ -15,7 +15,6 @@ from html import unescape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
-from uuid import uuid4
 
 import httpx
 import pandas as pd
@@ -40,7 +39,6 @@ from core.exchanges.exchange_manager import exchange_manager
 from core.exchanges.base_exchange import OrderSide, OrderType
 from core.exchanges.binance_connector import BinanceConnector
 from core.notifications import notification_manager
-from core.realtime import event_bus
 from core.risk.risk_manager import risk_manager
 from core.runtime import runtime_state
 from core.strategies import Signal, SignalType, strategy_manager
@@ -60,12 +58,6 @@ from core.trading.binance_rest import (
 from core.trading.order_manager import OrderRequest as CoreOrderRequest
 from core.utils.asyncio_compat import LoopBoundAsyncLock
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
-from web.services import build_runtime_diagnostics
-from web.services import cancel_mode_switch as cancel_trading_mode_switch_token
-from web.services import clear_local_trading_runtime as clear_local_runtime_service
-from web.services import get_mode_confirm_text, list_pending_mode_switches
-from web.services import request_mode_switch as request_trading_mode_switch_service
-from web.services import switch_trading_mode as switch_trading_mode_service
 
 _BALANCE_FETCH_TIMEOUT_SEC = 5.5
 _TICKER_FETCH_TIMEOUT_SEC = 1.6

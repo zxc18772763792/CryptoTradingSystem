@@ -1528,7 +1528,6 @@ def _build_market_regime(
         + max(-0.6, min(0.6, long_short_ratio - 1.0)) * 0.30
         + wall_bias * 0.25
     )
-    joint_signal = micro_signal + (news_bias * 0.25)
     derivatives_ready = bool(derivatives_summary.get("available"))
     derivatives_history_ready = bool(derivatives_summary.get("history_ready"))
     derivatives_freshness_sec = _coerce_finite_float(
@@ -3975,10 +3974,7 @@ async def get_regime_calendar(
     """
     from sqlalchemy import select as _sel
 
-    from config.database import (
-        AnalyticsCommunitySnapshot,
-        AnalyticsMicrostructureSnapshot,
-    )
+    from config.database import AnalyticsMicrostructureSnapshot
     from config.database import async_session_maker as _asm
 
     days = max(1, min(int(days), 30))

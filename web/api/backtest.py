@@ -1606,7 +1606,6 @@ def _build_pairs_backtest_components(
     )
 
     spread_state = pd.to_numeric(spread_execution.effective_position, errors="coerce").fillna(0.0)
-    active_hr = hedge_ratio.where(spread_state.abs() > 0, 0.0).ffill().fillna(0.0)
     gross_returns = pd.to_numeric(spread_execution.gross_returns, errors="coerce").fillna(0.0)
     turnover = pd.to_numeric(spread_execution.turnover, errors="coerce").fillna(0.0)
     clip_limit = _return_clip_limit(timeframe)
