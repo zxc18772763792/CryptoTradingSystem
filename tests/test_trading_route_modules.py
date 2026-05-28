@@ -11,6 +11,7 @@ from web.api import trading_analytics, trading_orders, trading_positions
 
 
 def test_orders_route_bridges_to_service(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_orders.router, prefix="/api/trading")
     client = TestClient(app)
@@ -29,7 +30,8 @@ def test_orders_route_bridges_to_service(monkeypatch):
     monkeypatch.setattr(trading_api, "get_orders", fake_get_orders)
 
     response = client.get(
-        "/api/trading/orders?symbol=BTCUSDT&exchange=binance&include_history=false&limit=5"
+        "/api/trading/orders?symbol=BTCUSDT&exchange=binance&include_history=false&limit=5",
+        headers={"X-OPS-TOKEN": "test-token"},
     )
     assert response.status_code == 200
     payload = response.json()
@@ -197,6 +199,7 @@ def test_analytics_history_status_route_bridges_to_service(monkeypatch):
 
 
 def test_positions_route_passes_mode_to_service(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_positions.router, prefix="/api/trading")
     client = TestClient(app)
@@ -209,7 +212,10 @@ def test_positions_route_passes_mode_to_service(monkeypatch):
 
     monkeypatch.setattr(trading_api, "get_positions", fake_positions)
 
-    response = client.get("/api/trading/positions?mode=paper")
+    response = client.get(
+        "/api/trading/positions?mode=paper",
+        headers={"X-OPS-TOKEN": "test-token"},
+    )
     assert response.status_code == 200
     assert response.json() == {"mode": "paper", "ok": True}
     assert captured["mode"] == "paper"

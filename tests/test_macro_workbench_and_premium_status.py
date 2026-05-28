@@ -288,9 +288,7 @@ def test_market_state_marks_stale_macro_cache_as_degraded(monkeypatch):
     assert result["status"] == "degraded"
     assert result["payload"]["macro_source_summary"]["stale"] is True
     assert result["payload"]["macro_source_summary"]["source_status"] == "cache_stale"
-    assert any(
-        "Macro snapshot cache is stale" in warning for warning in result["warnings"]
-    )
+    assert any("宏观缓存偏旧" in warning for warning in result["warnings"])
 
 
 def test_onchain_module_exposes_derivatives_shadow_summary(monkeypatch):

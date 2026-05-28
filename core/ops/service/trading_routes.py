@@ -9,7 +9,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from core.audit.ops_audit import ops_audit_scope
 from core.exchanges import exchange_manager
 from core.ops.service import api as ops_api
-from core.ops.service.auth import get_request_auth
+from core.ops.service.auth import get_request_auth, require_ops_permissions
 from core.risk.risk_manager import risk_manager
 from core.trading.execution_engine import execution_engine
 
@@ -19,6 +19,7 @@ router = APIRouter()
 
 @router.post("/trading/start_paper")
 async def trading_start_paper(request: Request):
+    require_ops_permissions(request, "reset_paper_runtime", "resume_engine")
     auth = get_request_auth(request)
     async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/start_paper", method="POST", params={}, ip=auth.client_ip) as audit_state:
         try:
@@ -38,6 +39,7 @@ async def trading_start_paper(request: Request):
 
 @router.post("/trading/arm_live")
 async def trading_arm_live(request: Request):
+    require_ops_permissions(request, "request_live")
     auth = get_request_auth(request)
     async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/arm_live", method="POST", params={}, ip=auth.client_ip) as audit_state:
         try:
@@ -68,6 +70,7 @@ async def trading_arm_live(request: Request):
 
 @router.post("/trading/start_live")
 async def trading_start_live(request: Request, x_ops_approval: Optional[str] = Header(default=None, alias="X-OPS-APPROVAL")):
+    require_ops_permissions(request, "approve_live")
     auth = get_request_auth(request)
     params = {"approval_code": x_ops_approval or ""}
     async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/start_live", method="POST", params=params, ip=auth.client_ip) as audit_state:
@@ -102,6 +105,7 @@ async def trading_start_live(request: Request, x_ops_approval: Optional[str] = H
 
 @router.post("/trading/stop")
 async def trading_stop(request: Request):
+    require_ops_permissions(request, "pause_engine")
     auth = get_request_auth(request)
     async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/stop", method="POST", params={}, ip=auth.client_ip) as audit_state:
         try:
@@ -121,6 +125,7 @@ async def trading_stop(request: Request):
 
 @router.post("/trading/kill_switch")
 async def trading_kill_switch(request: Request):
+    require_ops_permissions(request, "set_kill_switch", "close_positions")
     auth = get_request_auth(request)
     params = {"mode": execution_engine.get_trading_mode()}
     async with ops_audit_scope(actor=auth.actor, endpoint="/ops/trading/kill_switch", method="POST", params=params, ip=auth.client_ip) as audit_state:
@@ -166,6 +171,7 @@ async def trading_kill_switch(request: Request):
 
 @router.post("/risk/reset_halt")
 async def risk_reset_halt(request: Request):
+    require_ops_permissions(request, "approve_risk_change")
     auth = get_request_auth(request)
     async with ops_audit_scope(actor=auth.actor, endpoint="/ops/risk/reset_halt", method="POST", params={}, ip=auth.client_ip) as audit_state:
         try:

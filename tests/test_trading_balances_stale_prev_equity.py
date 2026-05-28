@@ -31,6 +31,12 @@ def test_prev_equity_unreliable_below_10_usd():
     assert "prev_equity < 10.0" in src
 
 
+def test_prev_equity_unreliable_when_negative():
+    """Negative cached equity is corrupt state, not a valid cashflow baseline."""
+    src = _read_balances_module()
+    assert "prev_equity < 0" in src
+
+
 def test_prev_equity_unreliable_below_10pct_of_baseline():
     """A prev_equity below 10% of today's day_start baseline indicates a
     corrupt cached value, e.g. funding-wallet-only fetch result."""

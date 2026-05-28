@@ -4370,6 +4370,14 @@ async def human_approve_candidate(request: Request, candidate_id: str, payload: 
         if cand.validation_summary is None:
             raise HTTPException(status_code=400, detail="candidate has no validation summary")
         cand.promotion = build_promotion_decision(cand.candidate_id, cand.validation_summary)
+    current_decision = str(cand.promotion.decision or "").strip()
+    if current_decision == "shadow":
+        current_decision = "paper"
+    if target == "live_candidate" and current_decision != "live_candidate":
+        raise HTTPException(
+            status_code=400,
+            detail="approval target live_candidate exceeds validation decision",
+        )
     cand.promotion.decision = target
 
     # Clear the gate; record approval metadata

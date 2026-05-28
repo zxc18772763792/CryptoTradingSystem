@@ -434,14 +434,24 @@ def test_close_position_uses_actual_filled_quantity_for_partial_live_close(monke
         execution_engine_module.order_manager,
         "create_order",
         AsyncMock(
-            return_value=SimpleNamespace(
-                id="close-1",
-                status=OrderStatus.OPEN,
-                price=105.0,
-                amount=1.0,
-                filled=0.25,
-                fee=0.0,
-            )
+            side_effect=[
+                SimpleNamespace(
+                    id="close-1",
+                    status=OrderStatus.OPEN,
+                    price=105.0,
+                    amount=1.0,
+                    filled=0.25,
+                    fee=0.0,
+                ),
+                SimpleNamespace(
+                    id="close-2",
+                    status=OrderStatus.CLOSED,
+                    price=105.0,
+                    amount=0.75,
+                    filled=0.75,
+                    fee=0.0,
+                ),
+            ]
         ),
     )
     cancel_mock = AsyncMock(return_value=True)
@@ -454,13 +464,12 @@ def test_close_position_uses_actual_filled_quantity_for_partial_live_close(monke
     result = asyncio.run(engine._close_position_in_active_mode(signal, PositionSide.LONG))
 
     assert result is not None
-    assert result["quantity"] == pytest.approx(0.25)
-    assert result["close_order_mode"] == "limit_first_partial"
-    assert record_trade_calls[-1]["quantity"] == pytest.approx(0.25)
+    assert result["quantity"] == pytest.approx(1.0)
+    assert result["close_order_mode"] == "limit_first_partial_market_fallback"
+    assert record_trade_calls[-1]["quantity"] == pytest.approx(1.0)
     remaining = position_manager.get_position("binance", "BTC/USDT", account_id="main", strategy="demo_close")
-    assert remaining is not None
-    assert remaining.quantity == pytest.approx(0.75)
-    assert live_trade_mock.await_args.kwargs["quantity"] == pytest.approx(0.25)
+    assert remaining is None
+    assert live_trade_mock.await_args.kwargs["quantity"] == pytest.approx(1.0)
     assert notify_mock.await_args.args[0] == "order_executed"
     cancel_mock.assert_awaited_once_with("close-1", "BTC/USDT", "binance")
 
@@ -665,14 +674,24 @@ def test_live_close_backfills_fee_from_binance_trades_and_records_slippage(monke
         execution_engine_module.order_manager,
         "create_order",
         AsyncMock(
-            return_value=SimpleNamespace(
-                id="close-cost-1",
-                status=OrderStatus.CLOSED,
-                price=106.0,
-                amount=1.0,
-                filled=0.4,
-                fee=0.0,
-            )
+            side_effect=[
+                SimpleNamespace(
+                    id="close-cost-1",
+                    status=OrderStatus.CLOSED,
+                    price=106.0,
+                    amount=1.0,
+                    filled=0.4,
+                    fee=0.0,
+                ),
+                SimpleNamespace(
+                    id="close-cost-2",
+                    status=OrderStatus.CLOSED,
+                    price=106.0,
+                    amount=0.6,
+                    filled=0.6,
+                    fee=0.0,
+                ),
+            ]
         ),
     )
     monkeypatch.setattr(engine, "_consume_paper_order_cost", lambda order_id: {"fee_usd": 0.0, "slippage_cost_usd": 0.0})
@@ -701,12 +720,12 @@ def test_live_close_backfills_fee_from_binance_trades_and_records_slippage(monke
 
     assert result is not None
     assert result["fee_usd"] == pytest.approx(0.01696)
-    assert result["slippage_cost_usd"] == pytest.approx(0.4)
+    assert result["slippage_cost_usd"] == pytest.approx(1.0)
     assert result["order"]["slippage_bps"] == pytest.approx((1.0 / 105.0) * 10000.0)
     assert record_trade_calls[-1]["fee_usd"] == pytest.approx(0.01696)
-    assert record_trade_calls[-1]["slippage_cost_usd"] == pytest.approx(0.4)
+    assert record_trade_calls[-1]["slippage_cost_usd"] == pytest.approx(1.0)
     assert record_trade_calls[-1]["fee_source"] == "exchange_trades"
     assert record_trade_calls[-1]["slippage_source"] == "fill_vs_reference"
     assert live_trade_mock.await_args.kwargs["fee_usd"] == pytest.approx(0.01696)
-    assert live_trade_mock.await_args.kwargs["slippage_cost_usd"] == pytest.approx(0.4)
+    assert live_trade_mock.await_args.kwargs["slippage_cost_usd"] == pytest.approx(1.0)
     assert live_trade_mock.await_args.kwargs["cost_details"]["fee_source"] == "exchange_trades"

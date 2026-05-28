@@ -11,7 +11,7 @@ from web.api import trading as trading_api
 router = APIRouter()
 
 
-@router.get("/positions")
+@router.get("/positions", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_positions(mode: Optional[str] = None):
     return await trading_api.get_positions(mode=mode)
 

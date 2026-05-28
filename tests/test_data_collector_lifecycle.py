@@ -13,7 +13,7 @@ import gc
 
 import pytest
 
-from core.data.data_collector import DataCollector
+from core.data.data_collector import DataCollector, DataType
 
 
 def test_start_retains_loop_task_reference():
@@ -85,5 +85,32 @@ def test_stop_without_start_is_safe():
         dc = DataCollector()
         # No start() — _loop_task is None.
         await dc.stop()  # must not raise
+
+    asyncio.run(_run())
+
+
+def test_callback_failures_are_exposed_in_diagnostics():
+    async def _run() -> None:
+        dc = DataCollector()
+        task_id = dc.add_task("binance", "BTC/USDT", DataType.TICKER, interval=60)
+
+        async def _fake_collect(_task):
+            return {"price": 100.0}
+
+        async def _bad_callback(_task, _data):
+            raise RuntimeError("callback boom")
+
+        dc._collect_ticker = _fake_collect
+        dc.register_callback(DataType.TICKER, _bad_callback)
+
+        await dc._process_task(task_id)
+
+        assert dc.get_collected_data(task_id) == [{"price": 100.0}]
+        diagnostics = dc.get_diagnostics()
+        assert diagnostics["callback_failures"] == 1
+        assert diagnostics["callback_failures_by_type"]["ticker"] == 1
+        assert diagnostics["last_callback_error"]["task_id"] == task_id
+        assert diagnostics["last_callback_error"]["data_type"] == "ticker"
+        assert diagnostics["last_callback_error"]["error"] == "callback boom"
 
     asyncio.run(_run())

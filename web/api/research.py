@@ -1974,7 +1974,7 @@ def _build_macro_summary(payload: Dict[str, Any]) -> Dict[str, Any]:
         "available_count": len(active_series),
         "headline": " || ".join(headline_parts)
         if headline_parts
-        else "Macro snapshot unavailable",
+        else "宏观快照不可用",
         "cross_market_headline": market_headline,
         "us_headline": us_summary["headline"],
         "china_headline": china_summary["headline"],
@@ -2148,11 +2148,11 @@ def _build_macro_source_summary(payload: Optional[Dict[str, Any]]) -> Dict[str, 
                 )
                 else "partial"
             )
-            note = "Macro cache contains stale groups; verify the daily refresh job and upstream release windows."
+            note = "宏观缓存包含偏旧分组，请检查每日刷新任务和上游发布窗口。"
         elif partial_groups or missing_groups:
             source_status = "partial"
             note = (
-                "Macro snapshot is partially populated across market/US/China groups."
+                "宏观快照在跨市场/美国/中国分组上仅部分填充。"
             )
         else:
             source_status = "cache_fresh"
@@ -2445,7 +2445,7 @@ def _fallback_factor_library_from_fama(
         "universe_size": int(fama.get("universe_size") or len(asset_scores)),
         "universe_quality": fama.get("universe_quality") or "low",
         "warnings": [
-            "Factor library degraded to Fama snapshot fallback for fast workbench response."
+            "因子库降级到 Fama 快照兜底，以便工坊快速响应。"
         ],
         "latest": dict(fama.get("latest") or {}),
         "mean_24": dict(fama.get("mean_24") or {}),
@@ -2693,27 +2693,17 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
 
     if not risk_dashboard:
         degraded = True
-        warnings.append(
-            "Risk dashboard timed out; market-state decision is based on partial inputs."
-        )
+        warnings.append("风险看板超时，市场状态判定使用了部分输入。")
     elif bool(risk_dashboard.get("stale")):
-        warnings.append(
-            "Risk dashboard live refresh is pending; using recent cached snapshot."
-        )
+        warnings.append("风险看板实时刷新挂起，正在使用最近一次快照。")
     if str(news.get("scope")) == "global_fallback":
         degraded = True
-        warnings.append(
-            "Symbol-scoped news was sparse; switched to global market news fallback."
-        )
+        warnings.append("当前标的新闻样本稀疏，已切换到全市场新闻兜底。")
     if news.get("stale") and not _source_pending_timeout(news):
-        warnings.append(
-            "News summary live refresh failed; using recent cached snapshot."
-        )
+        warnings.append("新闻摘要实时刷新失败，正在使用最近一次快照。")
     if _source_pending_timeout(news):
         degraded = True
-        warnings.append(
-            "News summary refresh is still pending; event coverage may update shortly."
-        )
+        warnings.append("新闻摘要仍在刷新中，事件覆盖稍后才会更新。")
     elif (
         int(news.get("events_count") or 0)
         + int(news.get("feed_count") or 0)
@@ -2721,45 +2711,29 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         <= 0
     ):
         degraded = True
-        warnings.append(
-            "News summary returned no usable samples, so event coverage may be stale."
-        )
+        warnings.append("新闻摘要无可用样本，事件覆盖可能过旧。")
     if used_history_micro and not prefer_history_micro:
         degraded = True
-        warnings.append(
-            "Live microstructure timed out; using recent snapshot fallback."
-        )
+        warnings.append("实时微观结构超时，正在使用最近一次快照兜底。")
     elif bool(micro.get("stale")):
-        warnings.append(
-            "Microstructure live refresh is pending; using recent cached snapshot."
-        )
+        warnings.append("微观结构实时刷新挂起，正在使用最近一次快照。")
     if (used_history_community and not prefer_history_community) or used_history_whale:
         degraded = True
-        warnings.append(
-            "Live community/whale stream timed out; using recent snapshot fallback."
-        )
+        warnings.append("实时社区/巨鲸流超时，正在使用最近一次快照兜底。")
     elif bool(community.get("stale")):
-        warnings.append(
-            "Community overview live refresh is pending; using recent cached snapshot."
-        )
+        warnings.append("社区摘要实时刷新挂起，正在使用最近一次快照。")
     if bool(((community.get("security_alerts") or {}).get("stale"))):
-        warnings.append(
-            "Security alerts live refresh failed; using recent cached SlowMist incidents."
-        )
+        warnings.append("安全警报实时刷新失败，正在使用最近一次 SlowMist 缓存。")
     if not calendar_rows:
         degraded = True
-        warnings.append("Trading calendar unavailable; watchlist fallback was used.")
+        warnings.append("交易日历不可用，已使用 watchlist 兜底。")
     elif bool(calendar_source_summary.get("stale")) and calendar_rows:
-        warnings.append(
-            "Trading calendar live refresh failed; using recent cached CoinGlass snapshot."
-        )
+        warnings.append("交易日历实时刷新失败，正在使用最近一次 CoinGlass 缓存。")
     elif bool(
         calendar_source_summary.get("explicit_source_metadata")
     ) and not calendar_source_summary.get("official_available"):
         degraded = True
-        warnings.append(
-            "Trading calendar is currently relying on internal estimates only; official CoinGlass events are unavailable."
-        )
+        warnings.append("交易日历目前只能依赖内部估算，官方 CoinGlass 事件暂不可用。")
     elif (
         bool(calendar_source_summary.get("fallback_used"))
         and int(calendar_source_summary.get("estimated_count") or 0) > 0
@@ -2767,22 +2741,14 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         and int(calendar_source_summary.get("estimated_count") or 0)
         >= int(calendar_source_summary.get("official_count") or 0)
     ):
-        warnings.append(
-            "Trading calendar currently mixes official CoinGlass events with internal estimate supplements."
-        )
+        warnings.append("交易日历当前混用官方 CoinGlass 事件和内部估算补充。")
     if not micro_summary.get("has_actionable_signal"):
         degraded = True
-        warnings.append(
-            "Microstructure signal unavailable, so orderbook and order-flow interpretation is limited."
-        )
+        warnings.append("微观结构无可用信号，盘口/主动流解读受限。")
     elif not micro_summary.get("has_orderbook_depth"):
-        warnings.append(
-            "Orderbook depth rows are sparse; wall and liquidity diagnostics may be incomplete."
-        )
+        warnings.append("盘口深度样本稀疏，墙/流动性诊断可能不完整。")
     if not micro_summary.get("long_short_ratio_available"):
-        warnings.append(
-            "Long/short ratio is unavailable for this snapshot; crowding diagnostics are partial."
-        )
+        warnings.append("当前快照缺多空比，拥挤度诊断不完整。")
     has_derivatives_context = (
         bool(derivatives_summary.get("key_configured"))
         or bool(derivatives_summary.get("available"))
@@ -2792,9 +2758,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
     if has_derivatives_context:
         if not derivatives_summary.get("available"):
             degraded = True
-            warnings.append(
-                "CoinGlass derivatives snapshot is unavailable; research is using exchange/public fallbacks."
-            )
+            warnings.append("CoinGlass 衍生品快照不可用，研究正在使用交易所/公开兜底数据。")
         elif _coerce_finite_float(
             derivatives_summary.get("freshness_sec")
         ) is not None and float(
@@ -2803,18 +2767,14 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             _COINGLASS_PREFERRED_MAX_AGE_SEC
         ):
             degraded = True
-            warnings.append(
-                "CoinGlass derivatives snapshot is stale; crowding/funding context may lag."
-            )
+            warnings.append("CoinGlass 衍生品快照偏旧，拥挤度/资金费率上下文可能滞后。")
         elif derivatives_summary.get("degraded_reason"):
             degraded = True
             warnings.append(
-                f"CoinGlass derivatives snapshot degraded: {derivatives_summary.get('degraded_reason')}."
+                f"CoinGlass 衍生品快照降级：{derivatives_summary.get('degraded_reason')}。"
             )
     if not _macro_has_signal(macro_snapshot):
-        warnings.append(
-            "Macro snapshot is unavailable; regime view leans on microstructure/news only."
-        )
+        warnings.append("宏观快照不可用，市场状态判断只能依靠微观结构和新闻。")
     elif bool(macro_source_summary.get("stale")):
         macro_cache_age = _coerce_finite_float(macro_source_summary.get("cache_age_sec"))
         if (
@@ -2822,67 +2782,39 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
             and macro_cache_age > float(_MACRO_MONTHLY_STALE_MAX_AGE_SEC)
         ):
             degraded = True
-        warnings.append(
-            "Macro snapshot cache is stale; cross-market or regional release context may lag."
-        )
+        warnings.append("宏观缓存偏旧，跨市场或地区数据释放上下文可能滞后。")
     elif str(macro_source_summary.get("source_status") or "") == "partial":
-        warnings.append(
-            "Macro snapshot is partially populated; some market/US/China legs are missing."
-        )
+        warnings.append("宏观快照仅部分填充，跨市场/美国/中国分组中有缺失。")
     elif macro_summary.get("scissors_spread_pp") is None:
-        warnings.append(
-            "Macro snapshot is missing the PPI-CPI scissors spread; refresh macro cache to restore it."
-        )
+        warnings.append("宏观快照缺 PPI-CPI 剪刀差，请刷新宏观缓存补全。")
     elif macro_summary.get("china_scissors_spread_pp") is None:
-        warnings.append(
-            "China macro snapshot is missing the PPI-CPI scissors spread; China regime read is partial."
-        )
+        warnings.append("中国宏观快照缺 PPI-CPI 剪刀差，中国侧解读不完整。")
     fear_greed_value = _coerce_finite_float(fear_greed.get("value"))
     if _source_pending_timeout(fear_greed):
-        warnings.append(
-            "Fear & Greed refresh is still pending; crowd sentiment context may update shortly."
-        )
+        warnings.append("Fear & Greed 刷新仍在进行，情绪上下文稍后才会更新。")
     elif fear_greed.get("available") is False or "available" not in fear_greed:
-        warnings.append(
-            "Fear & Greed index is unavailable; crowd sentiment context is partial."
-        )
+        warnings.append("Fear & Greed 指数不可用，群体情绪上下文不完整。")
     elif fear_greed.get("stale"):
-        warnings.append(
-            "Fear & Greed live refresh failed; using recent cached snapshot."
-        )
+        warnings.append("Fear & Greed 实时刷新失败，正在使用最近一次快照。")
     elif fear_greed_value is not None and fear_greed_value <= 25:
-        warnings.append(
-            "Fear & Greed is in extreme fear; panic-driven reversals may increase."
-        )
+        warnings.append("Fear & Greed 处于极度恐惧区，恐慌引发的反转风险上升。")
     elif fear_greed_value is not None and fear_greed_value >= 75:
-        warnings.append("Fear & Greed is in extreme greed; crowding risk is elevated.")
+        warnings.append("Fear & Greed 处于极度贪婪区，拥挤风险升高。")
     market_cap_change_pct_24h = _coerce_finite_float(
         market_breadth.get("market_cap_change_pct_24h")
     )
     if _source_pending_timeout(market_breadth):
-        warnings.append(
-            "Global market breadth refresh is still pending; cross-market tape context may update shortly."
-        )
+        warnings.append("全市场广度刷新仍在进行，跨市场盘口上下文稍后才会更新。")
     elif market_breadth.get("available") is False or "available" not in market_breadth:
-        warnings.append(
-            "Global market breadth is unavailable; cross-market tape context is partial."
-        )
+        warnings.append("全市场广度数据不可用，跨市场盘口上下文不完整。")
     elif market_breadth.get("stale"):
-        warnings.append(
-            "Global market breadth live refresh failed; using recent cached snapshot."
-        )
+        warnings.append("全市场广度实时刷新失败，正在使用最近一次快照。")
     elif market_cap_change_pct_24h is not None and market_cap_change_pct_24h <= -3.0:
-        warnings.append(
-            "Global crypto market cap is falling sharply in 24h; beta risk remains elevated."
-        )
+        warnings.append("加密总市值 24h 急跌，beta 风险仍高。")
     elif market_cap_change_pct_24h is not None and market_cap_change_pct_24h >= 3.0:
-        warnings.append(
-            "Global crypto market cap is expanding quickly in 24h; beta follow-through is improving."
-        )
+        warnings.append("加密总市值 24h 快速扩张，beta 跟随改善。")
     if regime.get("risk_level") == "high":
-        warnings.append(
-            "Current risk level is high; lower confidence and tighten risk budgets."
-        )
+        warnings.append("当前风险等级高，请降低置信度并收紧风险预算。")
     return _module_result(
         "market_state",
         status=_status_from_flags(ok=True, degraded=degraded),
@@ -3018,17 +2950,13 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
 
     warnings: List[str] = list(factor_library.get("warnings") or [])
     if not factor_library:
-        warnings.append(
-            "Factor library timed out; returning a minimal fallback summary."
-        )
+        warnings.append("因子库超时，正在返回简化兜底摘要。")
     if not fama:
-        warnings.append("Fama-style factors unavailable for this run.")
+        warnings.append("本次运行无可用的 Fama 风格因子。")
     if not cross_asset:
-        warnings.append(
-            "Cross-asset snapshot timed out; asset ranking may be incomplete."
-        )
+        warnings.append("多币种快照超时，资产排序可能不完整。")
     warnings.append(
-        "Workbench factor module is optimized for speed and does not replace full factor research jobs."
+        "研究工坊因子模块为速度优化，并不替代完整的因子研究任务。"
     )
     latest_fama = dict(fama.get("latest") or {})
     top_symbols = [
@@ -3049,7 +2977,7 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
         source_labels=["data.factors.library", "data.factors.fama"],
         warnings=warnings[:8],
         summary={
-            "headline": "Factor & Style",
+            "headline": "因子与风格",
             "top_symbols": top_symbols,
             "universe_size": int(factor_library.get("universe_size") or 0),
             "factor_count": len(factor_library.get("factors") or []),
@@ -3078,7 +3006,7 @@ async def _build_cross_asset_module(profile: ResearchProfile) -> Dict[str, Any]:
     leader = assets[0] if assets else {}
     degraded = int(data.get("count") or 0) < 3
     warnings = (
-        ["Available symbols are fewer than 3; cross-asset rotation may be noisy."]
+        ["可用币种少于 3 个，多币种轮动结论可能噪声较大。"]
         if degraded
         else []
     )
@@ -3089,7 +3017,7 @@ async def _build_cross_asset_module(profile: ResearchProfile) -> Dict[str, Any]:
         source_labels=["data.multi_assets.overview"],
         warnings=warnings,
         summary={
-            "headline": "Cross-Asset Rotation",
+            "headline": "多币种轮动",
             "asset_count": int(data.get("count") or 0),
             "leader_symbol": str(leader.get("symbol") or "-"),
             "leader_return_pct": float(leader.get("return_pct") or 0.0),
@@ -3161,38 +3089,28 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
     )
     warnings: List[str] = []
     if not onchain:
-        warnings.append("Onchain overview timed out; returning fallback summary.")
+        warnings.append("链上概览超时，正在返回兜底摘要。")
     elif onchain.get("degraded"):
-        warnings.append(
-            "Onchain payload contains proxy/cache data; confidence is reduced."
-        )
+        warnings.append("链上数据包含代理/缓存数据，置信度下降。")
     if news.get("stale"):
-        warnings.append(
-            "News summary live refresh failed; using recent cached snapshot."
-        )
+        warnings.append("新闻摘要实时刷新失败，正在使用最近一次快照。")
     if funding_count <= 0:
-        warnings.append("Multi-exchange funding rates are currently unavailable.")
+        warnings.append("当前无可用的多交易所资金费率。")
     if not fear_greed_available:
-        warnings.append("Fear & Greed index is currently unavailable.")
+        warnings.append("当前 Fear & Greed 指数不可用。")
     if not derivatives_summary.get("available"):
-        warnings.append(
-            "CoinGlass derivatives shadow is unavailable, so crowding context is reduced."
-        )
+        warnings.append("CoinGlass 衍生品影子不可用，拥挤度上下文受限。")
     elif (
         derivatives_summary.get("freshness_sec") is not None
         and float(derivatives_summary.get("freshness_sec") or 0.0) > 1800
     ):
-        warnings.append(
-            "CoinGlass derivatives shadow is stale, so funding/crowding context may lag."
-        )
+        warnings.append("CoinGlass 衍生品影子偏旧，资金费率/拥挤度上下文可能滞后。")
     elif derivatives_summary.get("degraded_reason"):
         warnings.append(
-            f"CoinGlass derivatives shadow degraded: {derivatives_summary.get('degraded_reason')}."
+            f"CoinGlass 衍生品影子降级：{derivatives_summary.get('degraded_reason')}。"
         )
     if str(news.get("scope")) == "global_fallback":
-        warnings.append(
-            "Symbol-specific exogenous news is sparse; using global fallback."
-        )
+        warnings.append("当前标的的外生新闻稀疏，正在使用全市场兜底。")
 
     return _module_result(
         "onchain",
@@ -3205,7 +3123,7 @@ async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
         ],
         warnings=warnings[:8],
         summary={
-            "headline": "Onchain & Exogenous",
+            "headline": "链上与外生",
             "whale_count": int(
                 (onchain.get("whale_activity") or {}).get("count")
                 or (community.get("whale_transfers") or {}).get("count")
@@ -3264,13 +3182,11 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
 
     warnings: List[str] = []
     if degraded:
-        warnings.append(
-            "No recent behavior logs; discipline module is showing generic guidance only."
-        )
+        warnings.append("近期无行为记录，纪律模块仅展示通用建议。")
     if overtrade:
-        warnings.append("Overtrading risk detected.")
+        warnings.append("检测到过度交易风险。")
     if impulsive_ratio >= 0.3:
-        warnings.append("Impulsive trading ratio is elevated.")
+        warnings.append("冲动交易比例偏高。")
 
     return _module_result(
         "discipline",
@@ -3281,7 +3197,7 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
         ],
         warnings=warnings,
         summary={
-            "headline": "Discipline & Risk Control",
+            "headline": "纪律与风控",
             "entries": int(behavior.get("entries") or 0),
             "impulsive_ratio": round(impulsive_ratio, 4),
             "overtrading_warning": overtrade,
@@ -3379,69 +3295,57 @@ def _build_recommendations(
 
     direction_bias = str(regime.get("bias") or "neutral")
     if direction_bias == "bullish":
-        preferred = ["trend_following", "momentum_breakout", "pullback_entry"]
+        preferred = ["趋势跟随", "动量突破", "回踩入场"]
     elif direction_bias == "bearish":
-        preferred = ["defensive_mean_reversion", "short_rebound", "event_scalp"]
+        preferred = ["防守型均值回归", "反弹做空", "事件驱动快进快出"]
+    elif direction_bias == "defensive":
+        preferred = ["轻仓观察", "防守对冲", "回撤控制"]
     else:
-        preferred = ["mean_reversion", "range_trade", "light_positioning"]
+        preferred = ["均值回归", "区间交易", "轻仓试探"]
 
     avoid: List[str] = []
     next_actions: List[str] = []
     jump_targets: List[Dict[str, Any]] = []
 
     if bool(onchain.get("degraded")):
-        avoid.append(
-            "Onchain context is degraded; do not use it as a sole entry trigger."
-        )
+        avoid.append("链上数据降级，请勿单独作为入场触发条件。")
     if not bool(derivatives_summary.get("available")):
-        avoid.append(
-            "Derivatives shadow is unavailable; do not rely on crowding/funding confirmation."
-        )
+        avoid.append("衍生品快照缺失，不要依赖资金费率/拥挤度做单独确认。")
     elif (
         _coerce_finite_float(derivatives_summary.get("freshness_sec")) is not None
         and float(derivatives_summary.get("freshness_sec") or 0.0) > 1800
     ):
-        avoid.append(
-            "Derivatives shadow is stale; confirm funding/crowding before acting."
-        )
+        avoid.append("衍生品快照偏旧，执行前先确认最新资金费率与拥挤度。")
     if not _news_summary_has_usable_samples(news_summary):
-        avoid.append(
-            "Symbol-level news coverage is sparse; avoid event-only decisions."
-        )
+        avoid.append("当前标的新闻样本不足，避免只靠事件驱动做决策。")
     if bool(behavior.get("overtrading_warning")):
-        avoid.append("Overtrading risk is active; reduce trial frequency.")
+        avoid.append("过度交易预警已触发，降低试单频率。")
     if float(behavior.get("impulsive_ratio") or 0.0) >= 0.3:
-        avoid.append("Execution discipline is weak; avoid chasing multiple symbols.")
+        avoid.append("执行纪律偏弱，避免同时追逐多个标的。")
 
     if direction_bias == "bullish":
-        next_actions.append(
-            "Validate trend continuity on 5m/15m before scaling positions."
-        )
+        next_actions.append("在 5m/15m 上确认趋势延续后再加仓。")
     elif direction_bias == "bearish":
-        next_actions.append("Prioritize defensive setups and downside risk control.")
+        next_actions.append("优先考虑防守型设置，控制下行风险敞口。")
+    elif direction_bias == "defensive":
+        next_actions.append("减小仓位、等点差与拥挤度回到正常区间再考虑入场。")
     else:
-        next_actions.append(
-            "Validate range or mean-reversion setups before expanding coverage."
-        )
+        next_actions.append("先确认震荡/回归型条件，再扩大覆盖范围。")
 
     if int(cross_asset.get("count") or 0) < 3:
-        next_actions.append(
-            "Expand symbol coverage before making rotation conclusions."
-        )
+        next_actions.append("可观察币种不足 3 个，先扩展币种覆盖再下轮动结论。")
     if bool(derivatives_summary.get("available")):
-        next_actions.append(
-            "Use derivatives shadow to confirm funding and crowding before execution."
-        )
+        next_actions.append("用衍生品快照确认资金费率和拥挤度后再执行。")
 
     headline = str(
         (overview or {}).get("market_regime")
         or regime.get("regime")
-        or "research_recommendation"
+        or "研究推荐"
     )
     if profile.primary_symbol:
         jump_targets.append(
             {
-                "label": f"Backtest {profile.primary_symbol}",
+                "label": f"回测 {profile.primary_symbol}",
                 "target": "backtest",
                 "params": {
                     "exchange": profile.exchange,
@@ -3492,12 +3396,12 @@ def _build_structured_recommendations(
             or "break" in headline_lower
             or "突破" in headline_text
         ):
-            return {"strategy_type": "DonchianBreakoutStrategy", "label": "breakout"}
+            return {"strategy_type": "DonchianBreakoutStrategy", "label": "突破"}
         if bias == "bullish":
-            return {"strategy_type": "TrendFollowingStrategy", "label": "trend"}
+            return {"strategy_type": "TrendFollowingStrategy", "label": "趋势"}
         if bias == "bearish":
-            return {"strategy_type": "MeanReversionStrategy", "label": "defensive"}
-        return {"strategy_type": "MeanReversionStrategy", "label": "mean_reversion"}
+            return {"strategy_type": "MeanReversionStrategy", "label": "均值回归"}
+        return {"strategy_type": "MeanReversionStrategy", "label": "均值回归"}
 
     def _map_planner_regime(bias: str, title: str) -> str:
         headline_text = str(title or "")
@@ -3575,7 +3479,7 @@ def _build_structured_recommendations(
         (overview or {}).get("market_regime")
         or regime.get("regime")
         or base.get("headline")
-        or "research_recommendation"
+        or "研究推荐"
     )
     planner_regime = _map_planner_regime(direction_bias, headline)
     research_timeframes = _derive_research_timeframes(profile.timeframe)
@@ -3593,7 +3497,7 @@ def _build_structured_recommendations(
     thesis_points: List[str] = []
     if factor_focus:
         thesis_points.append(
-            "Factor focus: "
+            "因子焦点："
             + " / ".join(
                 f"{item['symbol']}({item['score']:.2f})" for item in factor_focus
             )
@@ -3608,10 +3512,10 @@ def _build_structured_recommendations(
         or ""
     )
     if cross_leader:
-        thesis_points.append(f"Cross-asset leader: {cross_leader}.")
+        thesis_points.append(f"横截面领涨：{cross_leader}。")
     whale_count = int((onchain.get("whale_activity") or {}).get("count") or 0)
     if whale_count > 0:
-        thesis_points.append(f"Whale transfers active ({whale_count}).")
+        thesis_points.append(f"链上巨鲸活跃（{whale_count} 笔）。")
     derivatives_freshness = _coerce_finite_float(
         derivatives_summary.get("freshness_sec")
     )
@@ -3624,98 +3528,81 @@ def _build_structured_recommendations(
         dataset_count = int(derivatives_summary.get("dataset_count") or 0)
         provider = str(derivatives_summary.get("provider") or "coinglass")
         thesis_points.append(
-            f"Derivatives shadow: {provider} / {str(derivatives_summary.get('status') or 'ok')} / {dataset_count} datasets."
+            f"衍生品快照：{provider} / {str(derivatives_summary.get('status') or 'ok')} / {dataset_count} 个数据集。"
         )
         if derivatives_freshness is not None:
             thesis_points.append(
-                f"Derivatives freshness: {derivatives_freshness:.0f}s."
+                f"衍生品新鲜度：{derivatives_freshness:.0f} 秒。"
             )
         funding_mean_rate_pct = _coerce_finite_float(
             derivatives_summary.get("funding_mean_rate_pct")
         )
         if funding_mean_rate_pct is not None:
             thesis_points.append(
-                f"Derivatives funding mean: {funding_mean_rate_pct:+.2f}%."
+                f"资金费率均值：{funding_mean_rate_pct:+.2f}%。"
             )
         if funding_zscore is not None:
             thesis_points.insert(
                 min(len(thesis_points), 1),
-                f"Derivatives funding z-score: {funding_zscore:+.2f}.",
+                f"资金费率 z-score：{funding_zscore:+.2f}。",
             )
         if derivatives_summary.get("squeeze_building"):
             thesis_points.insert(
                 min(len(thesis_points), 2),
-                "Derivatives short squeeze risk is building.",
+                "衍生品空头挤压风险正在累积。",
             )
         if derivatives_summary.get("order_flow_confirmed"):
             thesis_points.insert(
                 min(len(thesis_points), 2),
-                "Order flow is confirming the current derivatives positioning.",
+                "主动流正在确认当前衍生品持仓方向。",
             )
         if long_short_ratio_change is not None:
             thesis_points.append(
-                f"Long/short ratio 24h change: {long_short_ratio_change:+.2f}."
+                f"多空比 24h 变化：{long_short_ratio_change:+.2f}。"
             )
     macro_gap = _coerce_finite_float(macro_snapshot.get("ppi_cpi_gap"))
     if macro_gap is not None:
-        thesis_points.append(f"Macro scissors spread (PPI-CPI): {macro_gap:+.2f}pp.")
+        thesis_points.append(f"宏观剪刀差（PPI-CPI）：{macro_gap:+.2f}pp。")
     liquidity_gap = _coerce_finite_float(macro_snapshot.get("m1_m2_gap"))
     if liquidity_gap is not None:
         thesis_points.append(
-            f"Liquidity scissors spread (M1-M2): {liquidity_gap:+.2f}pp."
+            f"流动性剪刀差（M1-M2）：{liquidity_gap:+.2f}pp。"
         )
     if int(news_summary.get("events_count") or 0) > 0:
         thesis_points.append(
-            f"News events in last 24h: {int(news_summary.get('events_count') or 0)}."
+            f"过去 24 小时新闻事件：{int(news_summary.get('events_count') or 0)} 条。"
         )
     if not thesis_points:
         thesis_points.append(
-            "Current conclusion is built from lightweight module summaries."
+            "当前结论基于轻量模块摘要构建，建议补齐数据后再下定论。"
         )
 
     if not bool(derivatives_summary.get("available")):
-        avoid.append(
-            "Derivatives shadow is missing, so crowding/funding confirmation is incomplete."
-        )
+        avoid.append("衍生品快照缺失，资金费率/拥挤度确认不完整。")
     elif derivatives_freshness is not None and derivatives_freshness > 1800:
-        avoid.append(
-            "Derivatives shadow is stale, so crowding/funding confirmation may lag."
-        )
+        avoid.append("衍生品快照偏旧，资金费率/拥挤度确认可能滞后。")
     elif not bool(derivatives_summary.get("history_ready")):
-        avoid.append(
-            "Derivatives history is incomplete, so z-score and reversion signals are lower confidence."
-        )
+        avoid.append("衍生品历史序列不完整，z-score 与回归信号置信度偏低。")
     if derivatives_summary.get("crowded_long"):
-        avoid.append(
-            "Crowded long conditions raise squeeze-down risk for fresh chase entries."
-        )
+        avoid.append("多头拥挤，追涨开仓的轧空风险升高。")
     if derivatives_summary.get("basis_dislocation"):
-        avoid.append(
-            "Basis/funding dislocation is elevated, so leverage and execution timing should stay conservative."
-        )
+        avoid.append("基差/资金费率偏离度上升，杠杆与执行时点应保守。")
     if derivatives_summary.get("flow_divergence"):
-        avoid.append(
-            "Taker flow is diverging from positioning, so confirmation quality is reduced."
-        )
+        avoid.append("主动流与持仓方向背离，信号确认质量下降。")
 
     if derivatives_summary.get("squeeze_building") or derivatives_summary.get(
         "order_flow_confirmed"
     ):
-        next_actions.append(
-            "Track whether taker flow and open interest continue to confirm the squeeze setup."
-        )
+        next_actions.append("跟踪主动流和持仓量是否持续确认挤压设置。")
     if derivatives_summary.get("crowded_long"):
-        next_actions.append(
-            "Wait for crowding or funding to cool before sizing fresh momentum longs."
-        )
+        next_actions.append("等拥挤度或资金费率回落后再考虑加仓动量多单。")
     if derivatives_summary.get("basis_dislocation"):
-        next_actions.append(
-            "Re-check basis and funding dislocation before execution to avoid poor fills."
-        )
+        next_actions.append("执行前先复核基差和资金费率偏离，避免被动成交价差过大。")
 
     ai_goal = (
-        f"Focus on {' / '.join(focus_symbols)} under {headline}, validate {' / '.join(preferred[:2] or ['core'])}, "
-        "and define trigger, invalidation, and position constraints."
+        f"围绕 {' / '.join(focus_symbols)} 在 {headline} 环境下，"
+        f"优先验证 {' / '.join(preferred[:2] or ['核心思路'])}，"
+        "并明确触发条件、失效条件与仓位约束。"
     )
     ai_brief = {
         "headline": headline,
@@ -3730,7 +3617,7 @@ def _build_structured_recommendations(
         "risk_notes": (
             avoid
             or [
-                "No extra abnormal risk flagged, but backtest/execution quality checks are required."
+                "未发现明显额外风险，但仍需做好回测与成交质量验证。"
             ]
         )[:4],
         "next_steps": next_actions[:4],
@@ -3749,15 +3636,15 @@ def _build_structured_recommendations(
     }
     ai_brief["prompt_context"] = "\n".join(
         [
-            f"Research goal: {ai_goal}",
-            f"Market state: {headline} / {direction_bias}",
-            f"Symbols: {' / '.join(ai_brief['symbols'])}",
-            f"Timeframes: {' / '.join(ai_brief['timeframes'])}",
-            f"Preferred families: {' / '.join(preferred)}",
-            f"Derivatives shadow: {ai_brief['derivatives_context']['status']} / {ai_brief['derivatives_context']['provider']} / {ai_brief['derivatives_context']['dataset_count']} datasets",
-            f"Thesis: {'; '.join(ai_brief['thesis'])}",
-            f"Risk notes: {'; '.join(ai_brief['risk_notes'])}",
-            f"Next steps: {'; '.join(ai_brief['next_steps'])}",
+            f"研究任务：{ai_goal}",
+            f"市场状态：{headline} / {direction_bias}",
+            f"关注标的：{' / '.join(ai_brief['symbols'])}",
+            f"观察周期：{' / '.join(ai_brief['timeframes'])}",
+            f"优先策略：{' / '.join(preferred)}",
+            f"衍生品快照：{ai_brief['derivatives_context']['status']} / {ai_brief['derivatives_context']['provider']} / {ai_brief['derivatives_context']['dataset_count']} 个数据集",
+            f"研究观察：{'；'.join(ai_brief['thesis'])}",
+            f"风险提示：{'；'.join(ai_brief['risk_notes'])}",
+            f"下一步：{'；'.join(ai_brief['next_steps'])}",
         ]
     )
 
@@ -3765,8 +3652,8 @@ def _build_structured_recommendations(
         {
             "id": "prefill_ai_research",
             "kind": "ai_prefill",
-            "label": "Prefill AI Research",
-            "description": "Fill AI research panel with market state, symbols, and risk constraints.",
+            "label": "填入 AI 研究器",
+            "description": "把市场状态、币种、周期和风险约束写入 AI 研究页面。",
             "tone": "primary",
             "params": {
                 "goal": ai_brief["prompt_context"],
@@ -3790,15 +3677,15 @@ def _build_structured_recommendations(
             {
                 "id": "open_backtest_focus_symbol",
                 "kind": "backtest",
-                "label": f"Backtest {focus_symbols[0]} ({backtest_strategy['label']})",
-                "description": f"Open backtest with {focus_symbols[0]} / {profile.timeframe} preset.",
+                "label": f"回测 {focus_symbols[0]} {backtest_strategy['label']}策略",
+                "description": f"跳转到回测页并预填 {focus_symbols[0]} / {profile.timeframe}。",
                 "tone": "positive",
                 "params": backtest_params,
             }
         )
         jump_targets.append(
             {
-                "label": f"Backtest {focus_symbols[0]} ({backtest_strategy['label']})",
+                "label": f"回测 {focus_symbols[0]} {backtest_strategy['label']}策略",
                 "target": "backtest",
                 "params": backtest_params,
             }
@@ -3809,8 +3696,8 @@ def _build_structured_recommendations(
             {
                 "id": "refresh_factor_module",
                 "kind": "module",
-                "label": "Refresh Factors",
-                "description": "No clear priority symbols yet; refresh factor ranking.",
+                "label": "刷新因子风格",
+                "description": "当前还没有清晰的优先币种，先补齐因子排序。",
                 "tone": "neutral",
                 "module": "factors",
             }
@@ -3820,8 +3707,8 @@ def _build_structured_recommendations(
             {
                 "id": "refresh_cross_asset_module",
                 "kind": "module",
-                "label": "Refresh Cross-Asset",
-                "description": "Symbol coverage is sparse; refresh cross-asset module.",
+                "label": "补齐多币种覆盖",
+                "description": "当前横截面线索偏少，先刷新多币种轮动面板。",
                 "tone": "neutral",
                 "module": "cross_asset",
             }
@@ -3833,8 +3720,8 @@ def _build_structured_recommendations(
             {
                 "id": "refresh_onchain_module",
                 "kind": "module",
-                "label": "Refresh Onchain",
-                "description": "Onchain/news context is weak; refresh exogenous module.",
+                "label": "刷新链上数据",
+                "description": "链上/新闻样本不足，先刷新外生数据模块。",
                 "tone": "warn",
                 "module": "onchain",
             }
@@ -3847,9 +3734,9 @@ def _build_structured_recommendations(
                 "title": "因子观察",
                 "tone": "neutral",
                 "body": " / ".join(
-                    f"{item['symbol']} score {item['score']:.2f}"
+                    f"{item['symbol']} 评分 {item['score']:.2f}"
                     + (
-                        f" | momentum {item['momentum']:.2f}"
+                        f" | 动量 {item['momentum']:.2f}"
                         if item["momentum"]
                         else ""
                     )
@@ -3858,11 +3745,11 @@ def _build_structured_recommendations(
             }
         )
     insight_cards.extend(
-        {"title": "Next Step", "tone": "positive", "body": text}
+        {"title": "下一步", "tone": "positive", "body": text}
         for text in next_actions[:4]
     )
     insight_cards.extend(
-        {"title": "Risk Note", "tone": "warn", "body": text} for text in avoid[:4]
+        {"title": "风险提示", "tone": "warn", "body": text} for text in avoid[:4]
     )
     insight_cards.extend(
         {"title": "研究观察", "tone": "neutral", "body": text} for text in thesis_points[:4]

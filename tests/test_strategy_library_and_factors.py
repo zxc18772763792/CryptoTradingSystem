@@ -1,5 +1,6 @@
 """Strategy library and factor library regression tests."""
 import asyncio
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -183,6 +184,42 @@ def test_mlxgboost_backtest_support_reflects_runtime_dependencies(monkeypatch):
     assert catalog[0]["backtest_supported"] is False
     assert catalog[0]["reason"] == "runtime missing"
     assert strategy_registry.is_strategy_backtest_supported("MLXGBoostStrategy") is False
+
+
+def test_mlxgboost_backtest_support_requires_valid_manifest(monkeypatch, tmp_path):
+    model_path = tmp_path / "model.json"
+    model_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(strategy_registry.importlib_util, "find_spec", lambda name: object())
+    monkeypatch.setattr(strategy_registry, "_mlxgboost_model_candidates", lambda: [model_path])
+
+    supported, reason = strategy_registry._mlxgboost_backtest_support_status()
+
+    assert supported is False
+    assert "manifest" in str(reason)
+
+
+def test_mlxgboost_backtest_support_accepts_manifest_valid_model_path(monkeypatch, tmp_path):
+    from core.ai.ml_signal import FEATURE_COLS
+    from core.ml.pipeline import FEATURE_SET_VERSION
+
+    model_path = tmp_path / "model.json"
+    model_path.write_text("{}", encoding="utf-8")
+    model_path.with_suffix(".manifest.json").write_text(
+        json.dumps(
+            {
+                "feature_set_version": FEATURE_SET_VERSION,
+                "feature_columns": FEATURE_COLS,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(strategy_registry.importlib_util, "find_spec", lambda name: object())
+    monkeypatch.setattr(strategy_registry, "_mlxgboost_model_candidates", lambda: [model_path])
+
+    supported, reason = strategy_registry._mlxgboost_backtest_support_status()
+
+    assert supported is True
+    assert reason is None
 
 
 def test_shared_cost_model_helpers_support_flat_and_dynamic_modes():

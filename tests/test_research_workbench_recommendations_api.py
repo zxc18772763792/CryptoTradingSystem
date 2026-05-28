@@ -101,12 +101,12 @@ def test_workbench_recommendations_return_structured_actions_and_ai_brief():
     assert data["ai_brief"]["derivatives_context"]["history_ready"] is True
     assert data["ai_brief"]["derivatives_context"]["history_interval"] == "h1"
     assert data["ai_brief"]["derivatives_context"]["funding_zscore"] == 1.7
-    assert "Derivatives shadow: ok / coinglass / 2 datasets" in data["ai_brief"]["prompt_context"]
-    assert any("Derivatives" in item for item in data["ai_brief"]["thesis"])
-    assert any("Derivatives funding z-score: +1.70." == item for item in data["ai_brief"]["thesis"])
-    assert any("Order flow is confirming" in item for item in data["ai_brief"]["thesis"])
-    assert any("funding and crowding" in item for item in data["ai_brief"]["next_steps"])
-    assert any("open interest continue to confirm the squeeze setup" in item for item in data["ai_brief"]["next_steps"])
+    assert "衍生品快照：ok / coinglass / 2 个数据集" in data["ai_brief"]["prompt_context"]
+    assert any("衍生品" in item for item in data["ai_brief"]["thesis"])
+    assert any("资金费率 z-score：+1.70。" == item for item in data["ai_brief"]["thesis"])
+    assert any("主动流正在确认" in item for item in data["ai_brief"]["thesis"])
+    assert any("资金费率和拥挤度" in item for item in data["ai_brief"]["next_steps"])
+    assert any("持仓量是否持续确认挤压设置" in item for item in data["ai_brief"]["next_steps"])
     assert data["source_meta"]["served_mode"] == "unknown"
     assert data["source_meta"]["universe_size"] == 0
     assert any(item["kind"] == "ai_prefill" for item in data["action_items"])
@@ -115,13 +115,12 @@ def test_workbench_recommendations_return_structured_actions_and_ai_brief():
         for item in data["action_items"]
     )
     assert any(item["kind"] == "module" and item["module"] == "onchain" for item in data["action_items"])
-    assert any(item["title"] == "Next Step" for item in data["insight_cards"])
-    assert any(item["title"] == "Risk Note" for item in data["insight_cards"])
+    assert any(item["title"] == "下一步" for item in data["insight_cards"])
+    assert any(item["title"] == "风险提示" for item in data["insight_cards"])
     assert any(
-        item["tone"] == "neutral" and "BTC/USDT score 0.00" in str(item.get("body") or "")
+        item["tone"] == "neutral" and "BTC/USDT 评分 0.00" in str(item.get("body") or "")
         for item in data["insight_cards"]
     )
-    assert any("Factor focus: BTC/USDT(0.00)" in str(item.get("body") or "") for item in data["insight_cards"])
 
 
 def test_workbench_recommendations_prefer_market_state_derivatives_and_news_when_onchain_is_sparse():
@@ -221,7 +220,7 @@ def test_workbench_recommendations_prefer_market_state_derivatives_and_news_when
 
     assert data["ai_brief"]["derivatives_context"]["available"] is True
     assert data["ai_brief"]["derivatives_context"]["dataset_count"] == 3
-    assert "Derivatives shadow: ok / coinglass / 3 datasets" in data["ai_brief"]["prompt_context"]
+    assert "衍生品快照：ok / coinglass / 3 个数据集" in data["ai_brief"]["prompt_context"]
     assert "Derivatives shadow is unavailable; do not rely on crowding/funding confirmation." not in data["avoid_conditions"]
     assert "Derivatives shadow is missing, so crowding/funding confirmation is incomplete." not in data["avoid_conditions"]
     assert "Symbol-level news coverage is sparse; avoid event-only decisions." not in data["avoid_conditions"]

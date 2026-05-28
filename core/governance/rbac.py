@@ -39,6 +39,7 @@ _get_rbac_pepper._warned = False  # type: ignore[attr-defined]
 
 ROLE_PERMISSIONS: Dict[str, Set[str]] = {
     "RESEARCH_LEAD": {
+        "read_trading_state",
         "propose_strategy",
         "approve_strategy",
         "promote_paper",
@@ -49,6 +50,7 @@ ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "manage_strategies",
     },
     "RISK_OWNER": {
+        "read_trading_state",
         "approve_risk_change",
         "set_kill_switch",
         "set_reduce_only",
@@ -62,6 +64,7 @@ ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "close_positions",
     },
     "OPERATOR": {
+        "read_trading_state",
         "pause_engine",
         "resume_engine",
         "set_reduce_only",
@@ -81,11 +84,13 @@ ROLE_PERMISSIONS: Dict[str, Set[str]] = {
         "manage_ai_agent",
     },
     "AUDITOR": {
+        "read_trading_state",
         "read_audit",
         "export_audit",
         "annotate_incident",
     },
     "ENGINEER": {
+        "read_trading_state",
         "migrations",
         "manage_data_sources",
         "deploy_config",

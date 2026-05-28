@@ -532,7 +532,7 @@ def test_market_state_surfaces_stale_calendar_warning(monkeypatch):
     assert (
         result["payload"]["calendar_source_summary"]["source_status"] == "cache_stale"
     )
-    assert any("cached CoinGlass snapshot" in warning for warning in result["warnings"])
+    assert any("CoinGlass 缓存" in warning for warning in result["warnings"])
 
 
 def test_market_state_surfaces_stale_news_warning(monkeypatch):
@@ -624,9 +624,7 @@ def test_market_state_surfaces_stale_news_warning(monkeypatch):
 
     result = asyncio.run(module._build_market_state_module(module.ResearchProfile()))
 
-    assert any(
-        "News summary live refresh failed" in warning for warning in result["warnings"]
-    )
+    assert any("新闻摘要实时刷新失败" in warning for warning in result["warnings"])
 
 
 def test_risk_dashboard_uses_recent_stale_cache_without_blocking(monkeypatch):
@@ -864,15 +862,12 @@ def test_market_state_surfaces_stale_risk_micro_and_community_warnings(monkeypat
     result = asyncio.run(module._build_market_state_module(module.ResearchProfile()))
 
     assert result["status"] == "ok"
+    assert any("风险看板实时刷新挂起" in warning for warning in result["warnings"])
     assert any(
-        "Risk dashboard live refresh is pending" in warning
+        "微观结构实时刷新挂起" in warning
         for warning in result["warnings"]
     )
     assert any(
-        "Microstructure live refresh is pending" in warning
-        for warning in result["warnings"]
-    )
-    assert any(
-        "Community overview live refresh is pending" in warning
+        "社区摘要实时刷新挂起" in warning
         for warning in result["warnings"]
     )

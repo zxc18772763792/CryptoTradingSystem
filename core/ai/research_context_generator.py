@@ -15,6 +15,7 @@ import aiohttp
 from loguru import logger
 
 from config.settings import settings
+from core.governance.schemas import LLMResearchOutput
 from core.utils.openai_responses import (
     anthropic_messages_endpoint,
     build_anthropic_messages_payload,
@@ -418,7 +419,7 @@ async def generate_research_context(
         missing = _REQUIRED_KEYS - set(payload.keys())
         if missing:
             logger.debug(f"research_context_generator: missing keys after fill: {missing}")
-        return payload
+        return LLMResearchOutput.model_validate(payload).model_dump(mode="json")
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"research_context_generator: unexpected error: {exc}")
         return None

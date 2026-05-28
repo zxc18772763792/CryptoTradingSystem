@@ -333,9 +333,7 @@ def test_market_state_marks_internal_only_calendar_as_degraded(monkeypatch):
 
     assert result["status"] == "degraded"
     assert result["payload"]["calendar_source_summary"]["official_available"] is False
-    assert any(
-        "internal estimates only" in warning.lower() for warning in result["warnings"]
-    )
+    assert any("内部估算" in warning for warning in result["warnings"])
 
 
 def test_market_state_does_not_retry_empty_news_summary(monkeypatch):
@@ -398,10 +396,7 @@ def test_market_state_does_not_retry_empty_news_summary(monkeypatch):
 
     assert result["status"] == "degraded"
     assert news_mock.await_count == 1
-    assert any(
-        "News summary returned no usable samples" in warning
-        for warning in result["warnings"]
-    )
+    assert any("新闻摘要无可用样本" in warning for warning in result["warnings"])
 
 
 def test_market_state_uses_stale_news_cache_when_overview_refresh_times_out(
@@ -996,8 +991,5 @@ def test_market_state_exposes_public_sentiment_snapshots(monkeypatch):
     assert result["summary"]["market_cap_change_pct_24h"] == -4.2
     assert "alternative.me.fng" in result["source_labels"]
     assert "coingecko.global" in result["source_labels"]
-    assert any("extreme fear" in warning.lower() for warning in result["warnings"])
-    assert any(
-        "market cap is falling sharply" in warning.lower()
-        for warning in result["warnings"]
-    )
+    assert any("极度恐惧" in warning for warning in result["warnings"])
+    assert any("急跌" in warning for warning in result["warnings"])

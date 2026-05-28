@@ -57,6 +57,8 @@ keys.txt
 .env.*.local
 *.pem
 *.key
+config/*_api_key.txt
+config/secrets/
 
 # Archives and misc
 *.zip

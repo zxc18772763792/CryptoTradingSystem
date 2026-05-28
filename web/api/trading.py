@@ -5107,8 +5107,14 @@ async def _precheck_binance_futures_order(request: OrderRequest) -> None:
     if bool(request.reduce_only):
         return
 
-    connector = exchange_manager.get_exchange("binance")
+    account_id = str(request.account_id or "main")
+    connector = exchange_manager.get_exchange("binance", account_id=account_id)
     if not connector:
+        if account_manager.requires_live_connector_isolation(account_id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Binance live connector unavailable for account {account_id}",
+            )
         return
     default_type = str(
         getattr(getattr(connector, "config", None), "default_type", "") or ""
@@ -6009,10 +6015,12 @@ async def close_position(req: PositionCloseRequest):
             detail="Paper mode cannot close exchange-synced positions directly",
         )
 
-    connector = exchange_manager.get_exchange(exchange)
+    close_account_id = str(req.account_id or "main")
+    connector = exchange_manager.get_exchange(exchange, account_id=close_account_id)
     if not connector:
         raise HTTPException(
-            status_code=404, detail=f"Exchange connector not found: {exchange}"
+            status_code=404,
+            detail=f"Exchange connector not found: {exchange} account_id={close_account_id}",
         )
 
     default_type = str(
@@ -6063,7 +6071,7 @@ async def close_position(req: PositionCloseRequest):
             price=None,
             exchange=exchange,
             strategy="manual_ui_close",
-            account_id=str(req.account_id or "main"),
+            account_id=close_account_id,
             reduce_only=True,
             params={"source": "manual_ui_close", "position_side": matched_side},
         )

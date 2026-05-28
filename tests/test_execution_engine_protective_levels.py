@@ -61,7 +61,7 @@ def _make_signal(
     )
 
 
-def test_background_tick_stays_in_paper_scope_when_default_is_paper(monkeypatch):
+def test_background_tick_checks_paper_and_live_scopes_when_default_is_paper(monkeypatch):
     engine = ExecutionEngine()
     engine.set_paper_trading(True, sync_runtime_state=False)
     engine._bg_check_interval_seconds = 0
@@ -82,7 +82,13 @@ def test_background_tick_stays_in_paper_scope_when_default_is_paper(monkeypatch)
 
     asyncio.run(engine._background_tick())
 
-    assert events == ["paper:conditional", "paper:protective"]
+    assert events == [
+        "paper:conditional",
+        "paper:protective",
+        "live:reconcile",
+        "live:conditional",
+        "live:protective",
+    ]
 
 
 def test_auto_inject_buy_levels_from_policy_pct():

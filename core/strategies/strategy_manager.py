@@ -805,15 +805,17 @@ class StrategyManager:
             metadata = dict((cfg.metadata if cfg else {}) or {})
             # If the operator deliberately pinned this strategy to a specific
             # mode (via params or metadata at registration time), respect it.
-            pinned = (
-                params.get("runtime_mode")
-                or params.get("trading_mode")
-                or params.get("mode")
-                or metadata.get("runtime_mode")
-                or metadata.get("trading_mode")
-                or metadata.get("mode")
-            )
-            if pinned and self._normalize_runtime_mode(pinned) != target:
+            pinned_mode = None
+            pinned = False
+            for source in (params, metadata):
+                for key in ("runtime_mode", "trading_mode", "mode"):
+                    if key in source and source.get(key) is not None:
+                        pinned_mode = source.get(key)
+                        pinned = True
+                        break
+                if pinned:
+                    break
+            if pinned and self._normalize_runtime_mode(pinned_mode) != target:
                 continue
             current_strategy_mode = getattr(strategy, "runtime_mode", None)
             if self._normalize_runtime_mode(current_strategy_mode) == target:

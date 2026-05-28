@@ -303,7 +303,8 @@ function Show-Help {
     Write-Host ""
     Write-Host "Managed default profile:"
     Write-Host "  - '.\web.bat start' launches web + news worker + news LLM worker."
-    Write-Host "  - Managed start forces TRADING_MODE=live and allows persisted live-mode restore."
+    Write-Host "  - Managed start defaults to TRADING_MODE=paper and blocks persisted live-mode restore."
+    Write-Host "  - Pass -AllowPersistedLiveMode only when intentionally restoring live mode."
     Write-Host "  - Managed start ignores .env START_* worker flags and uses command-line flags."
     Write-Host "  - Analytics history stays off unless you pass -EnableAnalyticsHistory."
     Write-Host "  - PM worker remains opt-in via -StartPmWorker."
@@ -341,7 +342,7 @@ function Show-Status {
     Write-Host ("  Project root : {0}" -f $projectRoot)
     Write-Host ("  Port         : {0}" -f $PortNumber)
     Write-Host "  Start policy : default web + news engine (analytics-history disabled)"
-    Write-Host "  Live restore : managed start forces TRADING_MODE=live and allows persisted live restore"
+    Write-Host "  Live restore : default blocks persisted live restore; -AllowPersistedLiveMode opts in"
     Write-Host "  Worker start : news workers auto-start by default; PM worker stays opt-in"
     $analyticsEnvValue = if ($envValues.ContainsKey("ANALYTICS_HISTORY_ENABLED")) { [string]$envValues["ANALYTICS_HISTORY_ENABLED"] } else { $null }
     $runtimeAnalyticsKnown = $false
@@ -590,7 +591,7 @@ switch ($Action) {
             -Port $Port `
             -HealthWaitSec $HealthWaitSec `
             -OpenBrowser:$OpenBrowser.IsPresent `
-            -AllowPersistedLiveMode:$true `
+            -AllowPersistedLiveMode:$AllowPersistedLiveMode.IsPresent `
             -StartAutonomousAgent:$StartAutonomousAgent.IsPresent `
             -StartNewsWorker:$effectiveStartNewsWorker `
             -StartNewsLlmWorker:$effectiveStartNewsLlmWorker `

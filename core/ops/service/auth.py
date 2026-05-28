@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from fastapi import HTTPException, Request, status
 
 from config.settings import settings
-from core.governance.rbac import resolve_api_key_identity
+from core.governance.rbac import has_permission, resolve_api_key_identity
 
 
 @dataclass
@@ -90,4 +90,21 @@ def get_request_auth(request: Request) -> OpsAuthContext:
         token_present=False,
         api_key_present=False,
         client_ip=client_ip,
+    )
+
+
+def require_ops_permissions(request: Request, *permissions: str) -> OpsAuthContext:
+    ctx = get_request_auth(request)
+    normalized = [
+        str(permission or "").strip()
+        for permission in permissions
+        if str(permission or "").strip()
+    ]
+    if not normalized:
+        return ctx
+    if any(has_permission(ctx.role, permission) for permission in normalized):
+        return ctx
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"permission denied: {' or '.join(normalized)}",
     )

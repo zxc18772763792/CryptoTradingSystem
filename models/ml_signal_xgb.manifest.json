@@ -1,0 +1,24 @@
+{
+  "feature_set_version": "ml_signal_v1",
+  "feature_columns": [
+    "rsi",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "ema_fast",
+    "ema_slow",
+    "bb_upper",
+    "bb_lower",
+    "bb_mid",
+    "atr",
+    "volume_ratio",
+    "momentum",
+    "close",
+    "high",
+    "low",
+    "open",
+    "volume"
+  ],
+  "model_id": "legacy_canonical_ml_signal_xgb",
+  "source": "restored_sidecar_for_models/ml_signal_xgb.json"
+}

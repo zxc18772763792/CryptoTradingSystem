@@ -3256,6 +3256,11 @@ canvas {
     background: rgba(148,163,184,0.08);
     border: 1px solid rgba(148,163,184,0.2);
 }
+.rec-bias-badge.bias-defensive {
+    color: #f0b429;
+    background: rgba(240,180,41,0.10);
+    border: 1px solid rgba(240,180,41,0.28);
+}
 .rec-conf-badge {
     font-size: 11px;
     padding: 3px 8px;

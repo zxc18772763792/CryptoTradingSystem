@@ -989,7 +989,8 @@ def get_strategy_backtest_surface_meta(name: str, item: Dict[str, Any] | None = 
 def _mlxgboost_model_candidates() -> List[Path]:
     defaults = STRATEGY_REGISTRY.get("MLXGBoostStrategy", {}).get("defaults", {})
     configured_path = str(defaults.get("model_path") or "").strip()
-    repo_model = Path(__file__).resolve().parents[1] / "models" / "ml_signal_xgb.json"
+    repo_root = Path(__file__).resolve().parents[1]
+    repo_model = repo_root / "models" / "ml_signal_xgb.json"
     raw_candidates = [configured_path, "models/ml_signal_xgb.json", str(repo_model)]
 
     candidates: List[Path] = []
@@ -997,17 +998,41 @@ def _mlxgboost_model_candidates() -> List[Path]:
         if not raw:
             continue
         path = Path(raw)
+        if not path.is_absolute():
+            path = repo_root / path
         if path not in candidates:
             candidates.append(path)
     return candidates
 
 
+def _mlxgboost_manifest_error(model_path: Path) -> str | None:
+    try:
+        from core.ai.ml_signal import MLSignalModel  # noqa: PLC0415
+
+        model = MLSignalModel(str(model_path))
+        manifest = model._load_manifest()
+        model._validate_manifest(manifest)
+        return None
+    except Exception as exc:
+        return str(exc)
+
+
 def _mlxgboost_backtest_support_status() -> tuple[bool, str | None]:
     if importlib_util.find_spec("xgboost") is None:
         return False, "当前环境缺少 xgboost，MLXGBoostStrategy 暂不可回测"
-    if not any(path.exists() for path in _mlxgboost_model_candidates()):
+    manifest_errors: List[str] = []
+    found_model = False
+    for path in _mlxgboost_model_candidates():
+        if not path.exists():
+            continue
+        found_model = True
+        manifest_error = _mlxgboost_manifest_error(path)
+        if manifest_error is None:
+            return True, None
+        manifest_errors.append(f"{path}: {manifest_error}")
+    if not found_model:
         return False, "当前环境缺少 MLXGBoostStrategy 模型文件，暂不可回测"
-    return True, None
+    return False, "MLXGBoostStrategy 模型 manifest 缺失或无效: " + "; ".join(manifest_errors[:2])
 
 
 def _resolve_backtest_support(name: str) -> tuple[bool, str | None]:
