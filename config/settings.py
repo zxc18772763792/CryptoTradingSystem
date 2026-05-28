@@ -187,8 +187,17 @@ class Settings(BaseSettings):
     # Live kline fetch (strategy runtime). On timeout/failure the (exchange,
     # symbol, timeframe) is put in backoff and served from local/cache data
     # instead of re-hammering a slow endpoint every cycle.
-    LIVE_KLINE_FETCH_TIMEOUT_SEC: float = 12.0
-    LIVE_KLINE_FETCH_BACKOFF_SEC: float = 90.0
+    # 8s/30s (was 12s/90s): fail-fast on a slow endpoint and recover within a
+    # couple of bars instead of pulling strategies off the live feed for 90s.
+    LIVE_KLINE_FETCH_TIMEOUT_SEC: float = 8.0
+    LIVE_KLINE_FETCH_BACKOFF_SEC: float = 30.0
+    # Real-time market-data WebSocket feed (ccxt.pro). When enabled, ticker
+    # updates are pushed over a persistent socket instead of polled via REST;
+    # the REST fan-out becomes an automatic fallback while the socket is down.
+    MARKET_WS_ENABLED: bool = False
+    MARKET_WS_EXCHANGES: str = "binance"  # comma-separated; blank = all connected
+    MARKET_WS_WATCH_TIMEOUT_SEC: float = 25.0
+    MARKET_WS_HEALTH_MAX_AGE_SEC: float = 15.0
     # When True, a parquet index that looks local-stamped (runs ahead of real
     # UTC) raises instead of being silently shifted — use to flush out any
     # remaining non-UTC kline writer in CI / debugging.

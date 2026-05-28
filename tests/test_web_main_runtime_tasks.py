@@ -58,6 +58,80 @@ def test_optional_external_data_workers_can_be_enabled(monkeypatch):
     assert "kaiko" in factories
 
 
+def test_market_ws_feed_factory_gated_by_flag(monkeypatch):
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", False)
+    factories = web_main._build_runtime_task_factories(FastAPI())
+    assert "market_ws_feed" not in factories
+
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    factories = web_main._build_runtime_task_factories(FastAPI())
+    assert "market_ws_feed" in factories
+    assert factories["market_ws_feed"]["restart_on_failure"] is True
+
+
+def test_runtime_pusher_skips_rest_when_ws_healthy(monkeypatch):
+    """When the WS feed reports healthy, the REST market-tick fan-out is skipped."""
+
+    class _HealthyFeed:
+        def is_healthy(self):
+            return True
+
+    emit_calls = {"n": 0}
+
+    async def _fake_emit_market_ticks():
+        emit_calls["n"] += 1
+
+    async def _fake_emit_runtime_snapshot():
+        return None
+
+    monkeypatch.setattr(web_main, "_market_ws_feed", _HealthyFeed())
+    monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
+    monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+
+    async def _run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(web_main._runtime_pusher(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(_run())
+    assert emit_calls["n"] == 0, "REST ticks should be skipped while WS is healthy"
+
+
+def test_runtime_pusher_uses_rest_when_ws_unhealthy(monkeypatch):
+    """When the WS feed is down/absent, REST market ticks are used as fallback."""
+
+    class _DeadFeed:
+        def is_healthy(self):
+            return False
+
+    emit_calls = {"n": 0}
+
+    async def _fake_emit_market_ticks():
+        emit_calls["n"] += 1
+
+    async def _fake_emit_runtime_snapshot():
+        return None
+
+    monkeypatch.setattr(web_main, "_market_ws_feed", _DeadFeed())
+    monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
+    monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
+    monkeypatch.setattr(web_main, "_MARKET_TICK_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+
+    async def _run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(web_main._runtime_pusher(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(_run())
+    assert emit_calls["n"] >= 1, "REST ticks should run as fallback when WS is down"
+
+
 def test_cors_does_not_allow_wildcard_with_credentials():
     cors = next(
         middleware

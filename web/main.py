@@ -97,6 +97,10 @@ _PREMIUM_EXTERNAL_WORKERS_ENABLED = _env_bool(
     "PREMIUM_EXTERNAL_WORKERS_ENABLED",
     bool(getattr(settings, "PREMIUM_EXTERNAL_WORKERS_ENABLED", False)),
 )
+_MARKET_WS_ENABLED = _env_bool(
+    "MARKET_WS_ENABLED",
+    bool(getattr(settings, "MARKET_WS_ENABLED", False)),
+)
 _ANALYTICS_HISTORY_ENABLED = _env_bool(
     "ANALYTICS_HISTORY_ENABLED",
     bool(getattr(settings, "ANALYTICS_HISTORY_ENABLED", False)),
@@ -465,6 +469,11 @@ async def _emit_market_ticks() -> None:
 # budget under control. Reduces REST QPS roughly 3-4×.
 _MARKET_TICK_INTERVAL_SEC = 6.0
 
+# Holder for the live WS feed. Set by _market_ws_feed_worker when the feed is
+# running so the REST pusher can defer to it (and back-fill only when the
+# socket goes quiet). None when the feed is disabled or not yet started.
+_market_ws_feed: Optional[Any] = None
+
 
 async def _runtime_pusher(stop_event: asyncio.Event) -> None:
     last_market_tick_at = 0.0
@@ -476,12 +485,61 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
             await _emit_runtime_snapshot()
             now = asyncio.get_event_loop().time()
             if now - last_market_tick_at >= _MARKET_TICK_INTERVAL_SEC:
-                await _emit_market_ticks()
+                # When the WS feed is healthy it is already pushing ticks, so
+                # skip the REST fan-out. If the socket is down (or feed
+                # disabled) fall through to REST as the automatic backfill.
+                feed = _market_ws_feed
+                ws_healthy = bool(feed is not None and feed.is_healthy())
+                if not ws_healthy:
+                    await _emit_market_ticks()
                 last_market_tick_at = now
             _touch_runtime_task("runtime", success=True)
         except Exception as e:
             logger.debug(f"runtime snapshot push failed: {e}")
         await asyncio.sleep(2)
+
+
+async def _publish_market_ticks(payload: Dict[str, Dict[str, Any]]) -> None:
+    """Callback for the WS feed — forward normalized ticks to subscribers."""
+    if payload and event_bus.has_subscribers():
+        await event_bus.publish_nowait_safe(event="market_tick", payload=payload)
+
+
+async def _market_ws_feed_worker(stop_event: asyncio.Event) -> None:
+    """Run the ccxt.pro market-data feed for the session lifetime."""
+    global _market_ws_feed
+    try:
+        from core.marketdata.ccxt_pro_feed import CcxtProMarketFeed, CCXT_PRO_AVAILABLE
+    except Exception as exc:  # pragma: no cover - import guard
+        logger.warning(f"market_ws_feed: import failed, staying on REST: {exc}")
+        return
+    if not CCXT_PRO_AVAILABLE:
+        logger.warning("market_ws_feed: ccxt.pro unavailable, staying on REST ticks")
+        return
+
+    configured = str(getattr(settings, "MARKET_WS_EXCHANGES", "") or "").strip()
+    if configured:
+        exchanges = [e.strip().lower() for e in configured.split(",") if e.strip()]
+    else:
+        exchanges = exchange_manager.get_connected_exchanges()
+    if not exchanges:
+        # Nothing connected yet — exit; supervisor restart will retry later.
+        logger.info("market_ws_feed: no exchanges to stream yet")
+        await asyncio.sleep(5)
+        return
+
+    feed = CcxtProMarketFeed(
+        on_tick=_publish_market_ticks,
+        symbols_provider=_collect_watch_symbols,
+        exchanges=exchanges,
+        watch_timeout_sec=float(getattr(settings, "MARKET_WS_WATCH_TIMEOUT_SEC", 25.0) or 25.0),
+        health_max_age_sec=float(getattr(settings, "MARKET_WS_HEALTH_MAX_AGE_SEC", 15.0) or 15.0),
+    )
+    _market_ws_feed = feed
+    try:
+        await feed.run(stop_event)
+    finally:
+        _market_ws_feed = None
 
 
 async def _emit_news_preview(app: FastAPI, limit: int = 10, hours: int = 24) -> None:
@@ -1299,6 +1357,13 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "restart_on_failure": False,
         },
     }
+    if _MARKET_WS_ENABLED:
+        factories["market_ws_feed"] = {
+            "factory": lambda stop_event: _market_ws_feed_worker(stop_event),
+            # Keep retrying: it may start before exchanges finish connecting,
+            # and we want it to recover across transient socket failures.
+            "restart_on_failure": True,
+        }
     if _PUBLIC_MACRO_WORKERS_ENABLED:
         factories.update(
             {
