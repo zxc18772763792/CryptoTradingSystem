@@ -167,7 +167,16 @@ def test_docker_compose_does_not_pin_version_and_requires_secrets():
 
 def test_dockerignore_blocks_secrets_and_runtime_dirs():
     text = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
-    for entry in ("keys.txt", ".env", "runtime/", "logs/", "*.log", "MagicMock/"):
+    for entry in (
+        "keys.txt",
+        ".env",
+        "config/*_api_key.txt",
+        "config/secrets/",
+        "runtime/",
+        "logs/",
+        "*.log",
+        "MagicMock/",
+    ):
         assert entry in text, f".dockerignore missing entry {entry!r}"
 
 

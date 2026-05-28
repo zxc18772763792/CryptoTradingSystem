@@ -57,6 +57,11 @@ class DataCollector:
             DataType.FEAR_GREED: [],
         }
         self._collected_data: Dict[str, List[Any]] = {}
+        self._callback_failures: int = 0
+        self._callback_failure_counts: Dict[DataType, int] = {
+            data_type: 0 for data_type in DataType
+        }
+        self._last_callback_error: Optional[Dict[str, Any]] = None
 
         # 子采集器实例
         self._funding_rate_collector = None
@@ -258,6 +263,16 @@ class DataCollector:
                 try:
                     await callback(task, data)
                 except Exception as e:
+                    self._callback_failures += 1
+                    self._callback_failure_counts[task.data_type] = (
+                        int(self._callback_failure_counts.get(task.data_type, 0)) + 1
+                    )
+                    self._last_callback_error = {
+                        "task_id": task_id,
+                        "data_type": task.data_type.value,
+                        "error": str(e),
+                        "timestamp": _utc_now().isoformat(),
+                    }
                     logger.error(f"Callback error: {e}")
 
     async def _run_collection_loop(self) -> None:
@@ -347,6 +362,18 @@ class DataCollector:
             self.get_task_info(task_id)
             for task_id in self._tasks
         ]
+
+    def get_diagnostics(self) -> Dict[str, Any]:
+        return {
+            "callback_failures": int(self._callback_failures),
+            "callback_failures_by_type": {
+                data_type.value: int(count)
+                for data_type, count in self._callback_failure_counts.items()
+            },
+            "last_callback_error": dict(self._last_callback_error)
+            if self._last_callback_error
+            else None,
+        }
 
 
 # 全局数据采集器实例

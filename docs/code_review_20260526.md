@@ -44,7 +44,7 @@ Affected tests (all now passing):
 
 ---
 
-## Code Bugs Found (Not Yet Fixed)
+## Code Bugs Found (Fixed 2026-05-27)
 
 ### 3. Reduce-only failure counter cleared before close attempt
 **File:** `core/trading/execution_engine.py:4797`
@@ -53,6 +53,8 @@ Affected tests (all now passing):
 When the force-close branch triggers (failure count ≥ threshold), the failure counter is cleared at line 4797 **before** `position_manager.close_position()` is called at line 4802. If `close_position()` returns falsy (e.g. if the local position was already deleted by a concurrent reconcile), the counter is gone and the next set of reduce-only rejections will need to accumulate `threshold` failures all over again before another force-close is attempted. This can extend a retry storm.
 
 **Suggested fix:** Move `self._reduce_only_failure_counts.pop(fail_key, None)` into the `if closed:` block at line 4810, so the counter is only erased on a confirmed local close.
+
+**Status 2026-05-27:** Fixed in `core/trading/execution_engine.py`; regression coverage added in `tests/test_execution_engine_stale_position_force_close.py`.
 
 ---
 
@@ -85,6 +87,8 @@ pinned = (
 )
 ```
 
+**Status 2026-05-27:** Fixed in `core/strategies/strategy_manager.py`; empty-string mode keys now remain pins and are covered in `tests/test_strategy_mode_sync.py`.
+
 ---
 
 ### 5. Stale equity guard does not cover negative `prev_equity`
@@ -114,6 +118,8 @@ prev_equity_unreliable = (
 )
 ```
 
+**Status 2026-05-27:** Fixed in `web/api/trading_balances.py`; negative cached equity is now treated as stale and covered in `tests/test_trading_balances_stale_prev_equity.py`.
+
 ---
 
 ### 6. Callback exceptions silently swallowed in DataCollector
@@ -123,6 +129,8 @@ prev_equity_unreliable = (
 Exceptions thrown by data callbacks are caught and logged but not surfaced to callers. If a downstream consumer (e.g. sentiment processor, storage layer) raises an exception, the data collection loop continues silently. This is consistent with the fire-and-forget pattern used elsewhere, but may mask data-loss scenarios.
 
 **Suggested improvement:** At minimum, track a failed-callback count in diagnostics so the health endpoint can surface it.
+
+**Status 2026-05-27:** Fixed in `core/data/data_collector.py` and surfaced from `/api/data/collector/tasks`; regression coverage added in `tests/test_data_collector_lifecycle.py`.
 
 ---
 

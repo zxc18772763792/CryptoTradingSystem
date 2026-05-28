@@ -15,10 +15,14 @@ This test pins down the force-close fallback added to break the loop.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
 from core.trading.execution_engine import ExecutionEngine
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_force_close_threshold_default():
@@ -60,6 +64,18 @@ def test_force_close_distinguishes_per_position():
     assert btc_long not in engine._reduce_only_failure_counts
     assert eth_short not in engine._reduce_only_failure_counts
     assert eth_other_account not in engine._reduce_only_failure_counts
+
+
+def test_force_close_counter_clears_only_after_confirmed_local_close():
+    src = (REPO_ROOT / "core" / "trading" / "execution_engine.py").read_text(encoding="utf-8")
+    force_branch = src.split("if (not checked) and current >= self._reduce_only_force_close_threshold:", 1)[1]
+    force_branch = force_branch.split("if checked and not has_exchange_pos:", 1)[0]
+    assert "_reduce_only_failure_counts.pop(fail_key, None)" not in force_branch
+
+    reconcile_branch = src.split("if checked and not has_exchange_pos:", 1)[1]
+    reconcile_branch = reconcile_branch.split("logger.warning(", 1)[0]
+    assert "if closed:" in reconcile_branch
+    assert "self._reduce_only_failure_counts.pop(fail_key, None)" in reconcile_branch
 
 
 def test_is_reduce_only_rejected_matches_known_error_shapes():

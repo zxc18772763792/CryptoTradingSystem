@@ -16,7 +16,7 @@ Important distinction: these checks prove runtime compatibility and catch many i
 
 1. Most classical single-symbol strategies are mechanically correct, but their standalone edge is likely regime-dependent. They should be traded behind volatility/trend/range regime gates, not as always-on systems.
 2. Several macro/proxy strategies are correctly wired but rely on fallback proxies. Their live quality depends more on source freshness and point-in-time data quality than indicator math.
-3. `MLXGBoostStrategy` is wired and smoke-tested, but the local model manifest is missing. Treat it as runtime-compatible but not performance-validated until the model artifact, feature manifest, calibration, and drift checks are present.
+3. `MLXGBoostStrategy` is wired and smoke-tested. 2026-05-27 follow-up restored the canonical `models/ml_signal_xgb.manifest.json` sidecar and made registry support validate the manifest before counting the strategy as backtest-supported; calibration and drift checks remain required before live priority.
 4. Intraday cross-section strategies are framework-correct and backtestable. Their next validation step is IC/turnover/slippage stability across symbols, market regimes, and listing-age filters.
 5. `ResidualMom24hStrategy` was removed because it was identical to `RelRet24hReversalStrategy` in factor, lookback, direction, and execution behavior.
 
@@ -69,7 +69,7 @@ Important distinction: these checks prove runtime compatibility and catch many i
 | AltcoinDowntrendBounceShortStrategy | Correct short-only bounce-failure rule and time exit. | Add market beta filter, funding/borrow checks, and ATR stop option. |
 | SupplyEventStrategy | Correct point-in-time event visibility and gate/trade split. | Add event surprise/float unlock size normalization and post-event absorption confirmation. |
 | OnChainFlowRegimeStrategy | Correct slow regime scalar/optional trade logic. | Use primarily as portfolio scalar; validate stale-data handling and source latency. |
-| MLXGBoostStrategy | Runtime-compatible; performance not validated without manifest/model metadata. | Restore manifest, probability calibration, feature drift checks, and embargoed walk-forward tests. |
+| MLXGBoostStrategy | Runtime-compatible; manifest-gated as of 2026-05-27, but not live-priority without calibration/drift evidence. | Add probability calibration, feature drift checks, and embargoed walk-forward tests. |
 | CEXArbitrageStrategy | Correctly live-only; OHLCV backtest is inappropriate. | Improve with fee/slippage/order-book simulation and exchange latency model. |
 | TriangularArbitrageStrategy | Correctly live-only; requires real-time same-exchange quotes. | Improve with executable-depth routing, fee tiers, and stale-quote rejection. |
 | DEXArbitrageStrategy | Correctly live-only; depends on on-chain pool state. | Improve with gas/slippage/MEV-aware simulator and route freshness checks. |
@@ -101,7 +101,7 @@ Important distinction: these checks prove runtime compatibility and catch many i
 
 ## Recommended Priority
 
-1. P0: Restore/validate `MLXGBoostStrategy` model manifest before treating it as performance-valid.
+1. P0: `MLXGBoostStrategy` manifest restore/validation is complete as of 2026-05-27; keep probability calibration and feature drift checks as the remaining live-priority gate.
 2. P0: Add a strategy-quality report that computes IC, turnover, trade count, max drawdown, cost sensitivity, and sample stability for every backtest-supported strategy.
 3. P1: Add regime gates to classical trend/reversion/oscillator strategies.
 4. P1: Add point-in-time source validation for macro, event, on-chain, and derivatives strategies.

@@ -6372,6 +6372,7 @@ async def get_collector_tasks():
         "running": data_collector.is_running,
         "task_count": data_collector.task_count,
         "tasks": data_collector.list_tasks(),
+        "diagnostics": data_collector.get_diagnostics(),
     }
 
 

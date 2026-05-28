@@ -1971,6 +1971,14 @@ async def promote_existing_candidate(
             decision = "paper"
         if decision not in {"paper", "live_candidate"}:
             raise HTTPException(status_code=400, detail="unsupported promotion target")
+        current_decision = str(promotion.decision or "").strip()
+        if current_decision == "shadow":
+            current_decision = "paper"
+        if decision == "live_candidate" and current_decision != "live_candidate":
+            raise HTTPException(
+                status_code=400,
+                detail="promotion target live_candidate exceeds validation decision",
+            )
         paper_allocation_cap = max(0.0, min(1.0, float(getattr(settings, "DEFAULT_STRATEGY_ALLOCATION", 0.15) or 0.15)))
         promotion.decision = decision
         promotion.constraints["allocation_cap"] = paper_allocation_cap if decision == "paper" else 0.0

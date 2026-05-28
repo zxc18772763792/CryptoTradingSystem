@@ -62,12 +62,13 @@ class OrderIntentRouter:
             metadata={"signal": signal.to_dict(), **context},
         )
 
-    async def _acquire_rate_limit(self) -> None:
+    async def _acquire_rate_limit(self, *, reduce_only: bool = False) -> None:
         if self.policy is None:
             return
-        # `reduce_only` orders are risk-reducing; the cooldown gate only blocks NEW
-        # exposure, so we let exits through even when the bot is in reduce_only mode.
-        # That decision is left to higher layers (we don't see reduce_only here).
+        # `reduce_only` orders are risk-reducing exits; do not let entry throttles
+        # block stop-loss, forced-close, or kill-switch cleanup paths.
+        if reduce_only:
+            return
         # Acquire each configured order bucket. `acquire_async` raises
         # RateLimitExceeded on timeout — let it bubble so the caller sees the
         # bucket name and retry-after.
@@ -89,7 +90,7 @@ class OrderIntentRouter:
             reduce_only=intent.reduce_only,
             params={"strategy_name": intent.strategy_name, **dict(intent.metadata or {})},
         )
-        await self._acquire_rate_limit()
+        await self._acquire_rate_limit(reduce_only=bool(intent.reduce_only))
         try:
             result = await self.adapter.create_order(req)
         except RateLimitExceeded:

@@ -1,7 +1,7 @@
 from web.startup_mode import resolve_startup_trading_mode
 
 
-def test_persisted_live_restore_is_enabled_by_default():
+def test_persisted_live_restore_is_blocked_by_default():
     decision = resolve_startup_trading_mode(
         configured_mode="paper",
         persisted_account={"mode": "live"},
@@ -9,9 +9,9 @@ def test_persisted_live_restore_is_enabled_by_default():
 
     assert decision.configured_mode == "paper"
     assert decision.persisted_mode == "live"
-    assert decision.effective_mode == "live"
-    assert decision.source == "persisted"
-    assert decision.blocked_persisted_live_restore is False
+    assert decision.effective_mode == "paper"
+    assert decision.source == "guarded_configured"
+    assert decision.blocked_persisted_live_restore is True
 
 
 def test_persisted_live_restore_can_be_explicitly_blocked():

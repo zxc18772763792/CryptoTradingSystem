@@ -671,7 +671,7 @@
       next_steps: nextSteps,
       prompt_context: [
         `研究任务：${goal}`,
-        `市场状态：${regimeLabel} / ${directionBias === 'bullish' ? '看多' : directionBias === 'bearish' ? '看空' : '中性'}`,
+        `市场状态：${regimeLabel} / ${directionBias === 'bullish' ? '偏多' : directionBias === 'bearish' ? '偏空' : '中性'}`,
         `关注标的：${symbols.join(' / ')}`,
         `观察周期：${timeframes.join(' / ')}`,
         `优先策略：${preferred.join(' / ')}`,

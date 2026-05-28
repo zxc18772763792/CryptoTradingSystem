@@ -4724,6 +4724,53 @@ class ExecutionEngine:
                                     signal.symbol,
                                     exchange,
                                 )
+                            remaining_close_qty = max(0.0, close_qty - filled_limit_qty)
+                            if remaining_close_qty > 1e-12:
+                                fallback_params = dict(close_params)
+                                fallback_params["close_order_mode"] = "limit_first_partial_market_fallback"
+                                fallback_params["fallback_from_order_id"] = getattr(limit_first_order, "id", None)
+                                fallback_order = await order_manager.create_order(
+                                    OrderRequest(
+                                        symbol=signal.symbol,
+                                        side=close_side,
+                                        order_type=OrderType.MARKET,
+                                        amount=remaining_close_qty,
+                                        price=signal.price if float(signal.price or 0.0) > 0 else (quote_price if quote_price > 0 else None),
+                                        exchange=exchange,
+                                        strategy=signal.strategy_name,
+                                        account_id=account_id,
+                                        reduce_only=True,
+                                        params=fallback_params,
+                                    )
+                                )
+                                if fallback_order is not None:
+                                    fallback_qty = self._resolved_order_fill_qty(fallback_order, remaining_close_qty)
+                                    if fallback_qty > 0:
+                                        limit_price = float(getattr(limit_first_order, "price", 0.0) or quote_price or signal.price or 0.0)
+                                        fallback_price = float(getattr(fallback_order, "price", 0.0) or quote_price or signal.price or limit_price)
+                                        total_qty = filled_limit_qty + fallback_qty
+                                        weighted_price = (
+                                            ((limit_price * filled_limit_qty) + (fallback_price * fallback_qty)) / total_qty
+                                            if total_qty > 0
+                                            else fallback_price
+                                        )
+                                        close_order = SimpleNamespace(
+                                            id=f"{getattr(limit_first_order, 'id', '')}+{getattr(fallback_order, 'id', '')}",
+                                            price=weighted_price,
+                                            amount=total_qty,
+                                            filled=total_qty,
+                                            status="closed",
+                                            fee=(
+                                                self._safe_nonnegative_float(getattr(limit_first_order, "fee", 0.0), 0.0)
+                                                + self._safe_nonnegative_float(getattr(fallback_order, "fee", 0.0), 0.0)
+                                            ),
+                                            fee_currency=str(
+                                                getattr(fallback_order, "fee_currency", None)
+                                                or getattr(limit_first_order, "fee_currency", "")
+                                                or ""
+                                            ),
+                                        )
+                                        close_order_mode = "limit_first_partial_market_fallback"
                     else:
                         close_order_mode = "market_fallback"
                         with contextlib.suppress(Exception):
@@ -4780,21 +4827,27 @@ class ExecutionEngine:
                     current = int(self._reduce_only_failure_counts.get(fail_key, 0) or 0) + 1
                     self._reduce_only_failure_counts[fail_key] = current
                     if (not checked) and current >= self._reduce_only_force_close_threshold:
-                        # Verification keeps failing AND -2022 keeps coming back.
-                        # That's the stale-local-position pattern. Force a local
-                        # close so the retry storm stops eating the worker.
-                        logger.warning(
-                            f"reduce-only rejected {current}x in a row but exchange-side verification "
-                            f"unavailable; forcing local close of stale position. "
-                            f"strategy={signal.strategy_name} symbol={signal.symbol} "
-                            f"side={position_side.value} account_id={account_id}"
-                        )
-                        # Synthesize a `checked=True, has_exchange_pos=False` outcome
-                        # so the existing reconcile branch (below) handles cleanup
-                        # via position_manager.close_position + audit + callbacks.
-                        checked = True
-                        has_exchange_pos = False
-                        self._reduce_only_failure_counts.pop(fail_key, None)
+                        if self._current_trading_mode() == "live":
+                            logger.error(
+                                f"reduce-only rejected {current}x in a row and exchange-side verification "
+                                f"is unavailable in live mode; keeping local position open for retry. "
+                                f"strategy={signal.strategy_name} symbol={signal.symbol} "
+                                f"side={position_side.value} account_id={account_id}"
+                            )
+                        else:
+                            # Verification keeps failing AND -2022 keeps coming back.
+                            # In paper/simulation this is the stale-local-position pattern.
+                            logger.warning(
+                                f"reduce-only rejected {current}x in a row but exchange-side verification "
+                                f"unavailable; forcing local close of stale position. "
+                                f"strategy={signal.strategy_name} symbol={signal.symbol} "
+                                f"side={position_side.value} account_id={account_id}"
+                            )
+                            # Synthesize a `checked=True, has_exchange_pos=False` outcome
+                            # so the existing reconcile branch (below) handles cleanup
+                            # via position_manager.close_position + audit + callbacks.
+                            checked = True
+                            has_exchange_pos = False
                 if checked and not has_exchange_pos:
                     close_price = float(quote_price or signal.price or position.current_price or position.entry_price or 0.0)
                     if close_price <= 0:
@@ -4808,6 +4861,7 @@ class ExecutionEngine:
                         strategy=strategy_lookup,
                     )
                     if closed:
+                        self._reduce_only_failure_counts.pop(fail_key, None)
                         logger.warning(
                             f"Reconciled local-only position after reduce-only rejection: "
                             f"strategy={signal.strategy_name} symbol={signal.symbol} side={position_side.value} "
@@ -4929,7 +4983,7 @@ class ExecutionEngine:
                 quantity=float(executed_close_qty or 0.0),
                 fill_price=float(close_price or 0.0),
                 order_id=close_order.id,
-                order_status=close_order.status.value,
+                order_status=self._order_status_value(getattr(close_order, "status", "")),
                 pnl=close_pnl,
                 fee_usd=fee_usd,
                 slippage_cost_usd=slippage_cost_usd,
@@ -4958,7 +5012,7 @@ class ExecutionEngine:
             "signal": signal.to_dict(),
             "order": {
                 "id": close_order.id,
-                "status": close_order.status.value,
+                "status": self._order_status_value(getattr(close_order, "status", "")),
                 "price": close_order.price,
                 "amount": close_order.amount,
                 "filled": close_order.filled,
@@ -5850,7 +5904,16 @@ class ExecutionEngine:
         }
 
     async def _check_protective_orders(self) -> None:
-        positions = position_manager.get_all_positions()
+        current_mode = self._current_trading_mode()
+        positions = [
+            pos
+            for pos in position_manager.get_all_positions()
+            if self._resolve_account_trading_mode(
+                getattr(pos, "account_id", "main"),
+                fallback=current_mode,
+            )
+            == current_mode
+        ]
         if not positions:
             return
 
@@ -5971,7 +6034,7 @@ class ExecutionEngine:
         if self._last_bg_check_at and (now - self._last_bg_check_at).total_seconds() < self._bg_check_interval_seconds:
             return
         self._last_bg_check_at = now
-        modes = ("paper",) if self._default_paper_trading else ("live",)
+        modes = ("paper", "live")
         for mode in modes:
             async with self._mode_guard(mode):
                 if mode == "live":

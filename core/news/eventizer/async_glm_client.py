@@ -619,8 +619,10 @@ class AsyncGLMClient:
         self._requests_total += 1
         timeout = timeout or self._timeout
 
-        # Wait for rate limiter
-        await rate_limiter.wait_for_token(timeout=30.0)
+        # Wait for rate limiter. A timeout means the provider budget is already
+        # saturated, so do not send a request that will amplify 429/backoff.
+        if not await rate_limiter.wait_for_token(timeout=30.0):
+            raise RuntimeError("rate_limit_timeout")
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             total_targets = len(targets)

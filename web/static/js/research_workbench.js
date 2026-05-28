@@ -20,10 +20,18 @@
   const MODULE_NAMES = ['market_state', 'factors', 'cross_asset', 'onchain', 'discipline'];
   const MODULE_LABELS = {
     market_state: '市场状态',
-    factors: '因子与风格',
-    cross_asset: '多币种轮动',
-    onchain: '链上与外生',
-    discipline: '纪律与风控',
+    factors: '因子风格',
+    cross_asset: '多币种',
+    onchain: '链上数据',
+    discipline: '纪律风控',
+  };
+  // 短标签专门给状态 chip 用（chip 区域窄，避免 slice 截出半个词）
+  const MODULE_SHORT_LABELS = {
+    market_state: '市场',
+    factors: '因子',
+    cross_asset: '多币种',
+    onchain: '链上',
+    discipline: '纪律',
   };
   const STATUS_LABELS = {
     idle: '待运行',
@@ -32,6 +40,76 @@
     degraded: '降级',
     error: '失败',
   };
+
+  // 市场状态分类（classifier 输出）到中文显示的统一映射，主结论/总览/历史日历都用它
+  const REGIME_DISPLAY_LABELS = {
+    trend_bullish:      '顺势偏多',
+    trend_bearish:      '顺势偏空',
+    high_risk_chop:     '高风险震荡',
+    low_info_range:     '低信息震荡',
+    event_driven_mixed: '事件驱动混合',
+    // 后端 / planner 也可能用这些更宽口径的同义标签，一并兜底
+    trend_up:           '顺势偏多',
+    trend_down:         '顺势偏空',
+    mean_reversion:     '震荡回归',
+    breakout:           '突破行情',
+    mixed:              '混合行情',
+    news_event:         '事件驱动混合',
+    pending_confirmation: '待生成',
+  };
+
+  function formatRegimeLabel(value) {
+    const key = String(value || '').trim().toLowerCase();
+    if (!key || key === '-') return '-';
+    return REGIME_DISPLAY_LABELS[key] || String(value);
+  }
+
+  const RISK_LEVEL_LABELS = {
+    low: '低',
+    medium: '中',
+    high: '高',
+    extreme: '极端',
+    unknown: '未知',
+  };
+  function formatRiskLevel(value) {
+    const key = String(value || '').trim().toLowerCase();
+    if (!key) return '-';
+    return RISK_LEVEL_LABELS[key] || String(value);
+  }
+
+  // Fear & Greed 分类 / 信号统一翻译
+  const FNG_CLASSIFICATION_LABELS = {
+    'extreme fear': '极度恐惧',
+    'fear': '恐惧',
+    'neutral': '中性',
+    'greed': '贪婪',
+    'extreme greed': '极度贪婪',
+  };
+  function formatFearGreedClassification(value) {
+    const key = String(value || '').trim().toLowerCase();
+    if (!key) return '';
+    return FNG_CLASSIFICATION_LABELS[key] || String(value);
+  }
+  const FNG_SIGNAL_LABELS = {
+    buy: '买入信号',
+    sell: '卖出信号',
+    neutral: '观望',
+  };
+  function formatFearGreedSignal(value) {
+    const key = String(value || '').trim().toLowerCase();
+    if (!key) return '观望';
+    return FNG_SIGNAL_LABELS[key] || String(value);
+  }
+
+  // 翻译器是纯函数，立即挂到 window，让 app.js / 其他渲染器都能用，
+  // 避免等到 lazyInit 才可用导致首屏文本仍是英文。
+  if (typeof window !== 'undefined') {
+    window.formatRegimeLabel = formatRegimeLabel;
+    window.formatRecommendationBias = formatRecommendationBias;
+    window.formatRiskLevel = formatRiskLevel;
+    window.formatFearGreedClassification = formatFearGreedClassification;
+    window.formatFearGreedSignal = formatFearGreedSignal;
+  }
 
   function q(id) {
     return document.getElementById(id);
@@ -223,14 +301,15 @@
     const lower = title.toLowerCase();
     if (lower.includes('breakout') || title.includes('突破')) return { strategy_type: 'DonchianBreakoutStrategy', label: '突破' };
     if (directionBias === 'bullish') return { strategy_type: 'TrendFollowingStrategy', label: '趋势' };
-    if (directionBias === 'bearish') return { strategy_type: 'MeanReversionStrategy', label: '防守' };
+    if (directionBias === 'bearish') return { strategy_type: 'MeanReversionStrategy', label: '均值回归' };
     return { strategy_type: 'MeanReversionStrategy', label: '均值回归' };
   }
 
   function formatRecommendationBias(value) {
     const bias = String(value || '').trim().toLowerCase();
-    if (bias === 'bullish') return '看多';
-    if (bias === 'bearish') return '看空';
+    if (bias === 'bullish') return '偏多';
+    if (bias === 'bearish') return '偏空';
+    if (bias === 'defensive') return '防守';
     if (bias === 'neutral') return '中性';
     return String(value || '-');
   }
@@ -297,7 +376,8 @@
   }
 
   function buildRecommendationConclusion(rec = state.recommendations, overview = state.overview) {
-    const headline = String(rec?.headline || overview?.market_regime || '待生成').trim() || '待生成';
+    const rawHeadline = String(rec?.headline || overview?.market_regime || '待生成').trim() || '待生成';
+    const headline = formatRegimeLabel(rawHeadline);
     const biasText = formatRecommendationBias(rec?.direction_bias || overview?.direction_bias || '-');
     return `${headline} / ${biasText}`;
   }
@@ -497,8 +577,9 @@
       const t = state.moduleTimes?.[name];
       const timeStr = t ? new Date(t).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', timeZone: UI_TIMEZONE }) : '';
       const label = MODULE_LABELS[name] || name;
+      const shortLabel = MODULE_SHORT_LABELS[name] || label.slice(0, 2);
       const title = `${label}：${STATUS_LABELS[st] || st}${timeStr ? ' · ' + timeStr : ''}`;
-      return `<span class="module-chip" style="color:${color};border-color:${color}40;" title="${escSafe(title)}"><span class="chip-dot" style="background:${color};"></span>${escSafe(label.slice(0, 2))}${timeStr ? `<span class="chip-time">${escSafe(timeStr)}</span>` : ''}</span>`;
+      return `<span class="module-chip" style="color:${color};border-color:${color}40;" title="${escSafe(title)}"><span class="chip-dot" style="background:${color};"></span>${escSafe(shortLabel)}${timeStr ? `<span class="chip-time">${escSafe(timeStr)}</span>` : ''}</span>`;
     }).join('');
     setStatusItemValue(moduleEl, chips);
 
@@ -527,18 +608,116 @@
     }
   }
 
+  function setOverviewCardValue(key, html) {
+    const root = q('research-overview-summary-list');
+    if (!root) return;
+    const valEl = root.querySelector(`[data-overview-card="${key}"] .overview-card-value`);
+    if (valEl) valEl.innerHTML = html;
+  }
+
+  const OVERVIEW_CARD_KEYS = ['market_state', 'sentiment', 'factors', 'cross_asset', 'onchain', 'discipline'];
+
+  function _overviewSubLine(text) {
+    return `<div style="font-size:11px;color:#7a8fa6;margin-top:2px;">${escSafe(text)}</div>`;
+  }
+
   function renderOverview() {
     const summaryEl = q('research-overview-summary-list');
     const actionEl = q('research-overview-actions');
     if (!summaryEl || !actionEl) return;
 
     if (!state.overview) {
-      summaryEl.innerHTML = listItem('状态', '等待运行研究总览');
+      OVERVIEW_CARD_KEYS.forEach((key) => setOverviewCardValue(key, '等待运行研究总览'));
       actionEl.innerHTML = listItem('建议动作', '先运行研究总览');
       return;
     }
 
     const overview = state.overview;
+    const modules = state.modules || {};
+
+    // ── 卡片 1: 市场状态 ──
+    const marketSummary = modules.market_state?.summary || {};
+    const rawRegime = String(overview.market_regime || marketSummary.market_regime || '-');
+    const regime = formatRegimeLabel(rawRegime);
+    const biasText = formatRecommendationBias(overview.direction_bias || marketSummary.direction_bias || '-');
+    const confidence = Number.isFinite(Number(overview.confidence)) ? Number(overview.confidence).toFixed(2) : '-';
+    const riskLevel = String(marketSummary.risk_level || 'unknown');
+    setOverviewCardValue(
+      'market_state',
+      `<div>${escSafe(regime)} · ${escSafe(biasText)}</div>${_overviewSubLine(`置信 ${confidence} · 风险 ${riskLevel}`)}`
+    );
+
+    // ── 卡片 2: 情绪指标（F&G + 新闻情绪） ──
+    const sentimentDashboard = modules.market_state?.payload?.sentiment_dashboard || {};
+    const fearGreed = sentimentDashboard.fear_greed || {};
+    const newsObj = sentimentDashboard.news || {};
+    const fgValueNum = Number(fearGreed.value);
+    const fgLabel = formatFearGreedClassification(fearGreed.classification);
+    const newsTotal = Number(newsObj.events_count || 0) + Number(newsObj.feed_count || 0);
+    const newsSent = newsObj.sentiment || {};
+    const newsPos = Number(newsSent.positive || 0);
+    const newsNeg = Number(newsSent.negative || 0);
+    const newsDelta = newsPos - newsNeg;
+    const newsTone = newsTotal === 0 ? '样本不足' : (newsDelta > 0 ? '偏正' : newsDelta < 0 ? '偏负' : '中性');
+    const fgLine = Number.isFinite(fgValueNum) && fgValueNum > 0
+      ? `F&G ${fgValueNum}${fgLabel ? ' · ' + fgLabel : ''}`
+      : 'F&G 数据加载中';
+    setOverviewCardValue(
+      'sentiment',
+      `<div>${escSafe(fgLine)}</div>${_overviewSubLine(`新闻 ${newsTotal} · ${newsTone}`)}`
+    );
+
+    // ── 卡片 3: 因子风格 ──
+    const factorSummary = modules.factors?.summary || {};
+    const factorTops = Array.isArray(factorSummary.top_symbols) ? factorSummary.top_symbols.filter(Boolean) : [];
+    const factorUniverseSize = Number(factorSummary.universe_size || 0);
+    const factorCount = Number(factorSummary.factor_count || 0);
+    const factorMain = factorTops.length ? factorTops.slice(0, 3).join(' / ') : '暂无排名';
+    setOverviewCardValue(
+      'factors',
+      `<div>${escSafe(factorMain)}</div>${_overviewSubLine(`币种 ${factorUniverseSize} · 因子 ${factorCount}`)}`
+    );
+
+    // ── 卡片 4: 多币种 ──
+    const crossSummary = modules.cross_asset?.summary || {};
+    const leader = String(crossSummary.leader_symbol || '-');
+    const leaderRet = Number(crossSummary.leader_return_pct || 0);
+    const leaderSign = leaderRet > 0 ? '+' : '';
+    const assetCount = Number(crossSummary.asset_count || 0);
+    const crossMain = leader && leader !== '-'
+      ? `${leader} ${leaderSign}${leaderRet.toFixed(2)}%`
+      : '暂无领涨';
+    setOverviewCardValue(
+      'cross_asset',
+      `<div>${escSafe(crossMain)}</div>${_overviewSubLine(`币池 ${assetCount}`)}`
+    );
+
+    // ── 卡片 5: 链上数据 ──
+    const onchainSummary = modules.onchain?.summary || {};
+    const whaleCount = Number(onchainSummary.whale_count || 0);
+    const newsEvents = Number(onchainSummary.news_events || 0);
+    const fundingSources = Number(onchainSummary.funding_sources || 0);
+    const fearGreedOnchain = onchainSummary.fear_greed_value;
+    const subParts = [`资金费率源 ${fundingSources}`];
+    if (fearGreedOnchain != null) subParts.push(`F&G ${fearGreedOnchain}`);
+    setOverviewCardValue(
+      'onchain',
+      `<div>巨鲸 ${whaleCount} · 新闻 ${newsEvents}</div>${_overviewSubLine(subParts.join(' · '))}`
+    );
+
+    // ── 卡片 6: 纪律风控 ──
+    const discSummary = modules.discipline?.summary || {};
+    const entries = Number(discSummary.entries || 0);
+    const impulsiveRatio = Number(discSummary.impulsive_ratio || 0);
+    const overtrade = Boolean(discSummary.overtrading_warning);
+    const positionSuggestions = Number(discSummary.position_suggestions || 0);
+    const discMain = overtrade ? '⚠ 过度交易' : (entries > 0 ? '正常' : '暂无记录');
+    setOverviewCardValue(
+      'discipline',
+      `<div>${escSafe(discMain)}</div>${_overviewSubLine(`记录 ${entries} · 冲动 ${(impulsiveRatio * 100).toFixed(0)}% · 止损建议 ${positionSuggestions}`)}`
+    );
+
+    // ── 底部行动列表 ──
     const jumpText = Array.isArray(state.recommendations?.action_items) && state.recommendations.action_items.length
       ? state.recommendations.action_items.slice(0, 2).map((item) => item.label).join(' / ')
       : Array.isArray(state.recommendations?.backtest_jump_targets) && state.recommendations.backtest_jump_targets.length
@@ -547,18 +726,11 @@
     const factorText = formatFactorFocusSummary(getFactorFocusItems(state.recommendations));
     const conclusionText = buildRecommendationConclusion(state.recommendations, overview);
 
-    summaryEl.innerHTML = [
-      listItem('市场状态', overview.market_regime || '-'),
-      listItem('方向偏向', formatRecommendationBias(overview.direction_bias || '-')),
-      listItem('研究可信度', fmtNumber(overview.confidence, 2)),
-      listItem('模块覆盖', `${Number(overview.coverage?.ok_count || 0)}/${Number(overview.coverage?.total || 0)}`),
-      listItem('降级模块', Number(overview.coverage?.degraded_count || 0)),
-    ].join('');
-
     actionEl.innerHTML = [
       listItem('研究结论', conclusionText),
       listItem('因子观察', factorText),
       listItem('建议动作', jumpText),
+      listItem('模块覆盖 / 降级', `${Number(overview.coverage?.ok_count || 0)}/${Number(overview.coverage?.total || 0)} · 降级 ${Number(overview.coverage?.degraded_count || 0)}`),
     ].join('');
   }
 
@@ -583,6 +755,7 @@
     const b = String(bias || '').trim().toLowerCase();
     if (b === 'bullish') return { icon: '▲', label: '偏多', cls: 'bias-bullish' };
     if (b === 'bearish') return { icon: '▼', label: '偏空', cls: 'bias-bearish' };
+    if (b === 'defensive') return { icon: '⚠', label: '防守', cls: 'bias-defensive' };
     return { icon: '─', label: '中性', cls: 'bias-neutral' };
   }
 
@@ -749,7 +922,8 @@
     const rec = state.recommendations;
     const brief = rec.ai_brief || {};
     const bias = rec.direction_bias || state.overview?.direction_bias || 'neutral';
-    const headline = String(rec.headline || state.overview?.market_regime || '综合判断中').trim();
+    const rawHeadline = String(rec.headline || state.overview?.market_regime || '综合判断中').trim();
+    const headline = formatRegimeLabel(rawHeadline);
     const focusSymbols = (brief.symbols || rec.focus_symbols || []).filter(Boolean);
     const sourceMeta = getRecommendationSourceMeta(rec);
     const timeLabel = sourceMeta.generated_at ? fmtTime(sourceMeta.generated_at) : '';
@@ -1756,13 +1930,7 @@
   }
 
   /* ── Regime Calendar ─────────────────────────────────────────── */
-  const REGIME_DISPLAY_LABELS = {
-    trend_bullish:    '顺势偏多',
-    trend_bearish:    '顺势偏空',
-    high_risk_chop:   '高风险震荡',
-    low_info_range:   '低信息震荡',
-    event_driven_mixed: '事件驱动混合',
-  };
+  // REGIME_DISPLAY_LABELS is hoisted to module top; reused here to keep calendar / overview / conclusion consistent.
   const BIAS_CLASS = {
     bullish: 'regime-bias-bullish',
     bearish: 'regime-bias-bearish',
@@ -1855,6 +2023,7 @@
     window.renderResearchConclusionCard = renderRecommendations;
     window.refreshResearchWorkbench = (quiet = true) => runWorkbenchOverviewDirect(Boolean(quiet));
     window.syncWorkbenchMarketSentiment = syncWorkbenchMarketSentiment;
+    // 翻译器已经在 IIFE 顶部挂到 window；这里不重复
   }
 
   async function lazyInit() {

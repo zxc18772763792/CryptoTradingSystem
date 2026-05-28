@@ -2,22 +2,24 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from web.api import trading as trading_api
-from web.api.auth import require_sensitive_ops_permissions
+from web.api.auth import require_request_permissions, require_sensitive_ops_permissions
 
 
 router = APIRouter()
 
 
-@router.get("/accounts")
+@router.get("/accounts", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def list_accounts():
     return {"accounts": trading_api.account_manager.list_accounts()}
 
 
 @router.post("/accounts", dependencies=[Depends(require_sensitive_ops_permissions("manage_accounts"))])
-async def create_account(req: trading_api.AccountCreateRequest):
+async def create_account(request: Request, req: trading_api.AccountCreateRequest):
+    if str(req.mode or "").strip().lower() == "live":
+        require_request_permissions(request, "approve_live")
     try:
         item = trading_api.account_manager.create_account(
             account_id=req.account_id,
@@ -34,8 +36,10 @@ async def create_account(req: trading_api.AccountCreateRequest):
 
 
 @router.put("/accounts/{account_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_accounts"))])
-async def update_account(account_id: str, req: trading_api.AccountUpdateRequest):
+async def update_account(request: Request, account_id: str, req: trading_api.AccountUpdateRequest):
     payload = req.model_dump(exclude_none=True)
+    if str(payload.get("mode") or "").strip().lower() == "live":
+        require_request_permissions(request, "approve_live")
     try:
         item = trading_api.account_manager.update_account(account_id, payload)
         return {"success": True, "account": item}

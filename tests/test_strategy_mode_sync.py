@@ -93,6 +93,26 @@ def test_register_with_explicit_mode_is_preserved(monkeypatch):
     assert updated == 0
 
 
+def test_sync_runtime_mode_to_global_treats_empty_mode_key_as_pin(monkeypatch):
+    """Presence of a mode key is a pin even if the stored value is empty."""
+    mgr = _fresh_manager()
+    monkeypatch.setattr(mgr, "_resolve_strategy_runtime_mode", lambda *_a, **_k: "paper")
+    monkeypatch.setattr(mgr, "_sync_strategy_account", lambda *a, **k: None)
+
+    ok = mgr.register_strategy(
+        name="dummy_empty_mode_pin",
+        strategy_class=_DummyStrategy,
+        params={"runtime_mode": ""},
+        symbols=["BTC/USDT"],
+        timeframe="1h",
+    )
+    assert ok is True
+
+    updated = mgr.sync_runtime_mode_to_global("live")
+    assert updated == 0
+    assert mgr._strategies["dummy_empty_mode_pin"].runtime_mode == "paper"
+
+
 def test_sync_runtime_mode_to_global_updates_unpinned_strategies(monkeypatch):
     """The whole point: when global flips paper→live, every strategy that
     didn't pin its mode must follow the global without a restart."""

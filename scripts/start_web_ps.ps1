@@ -36,7 +36,7 @@ try {
         Port = $Port
         HealthWaitSec = $HealthWaitSec
         OpenBrowser = $OpenBrowser.IsPresent
-        AllowPersistedLiveMode = $true
+        AllowPersistedLiveMode = $AllowPersistedLiveMode.IsPresent
         StartAutonomousAgent = $StartAutonomousAgent.IsPresent
         StartNewsWorker = $StartNewsWorker.IsPresent
         StartNewsLlmWorker = $StartNewsLlmWorker.IsPresent

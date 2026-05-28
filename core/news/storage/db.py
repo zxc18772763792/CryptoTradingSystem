@@ -42,7 +42,7 @@ def _normalize_url_for_dedup(url: str) -> str:
         return text
 
 from loguru import logger
-from sqlalchemy import and_, case, event, func, insert, or_, select, text
+from sqlalchemy import and_, case, event, func, insert, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -1332,15 +1332,43 @@ async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
                 .limit(max_rows)
             )
         ).scalars().all()
+        claimed_ids: List[int] = []
         raw_ids: List[int] = []
         for row in rows:
-            row.status = "running"
-            row.attempt_count = int(row.attempt_count or 0) + 1
-            row.started_at = now
-            row.finished_at = None
-            row.updated_at = now
+            result = await session.execute(
+                update(NewsLLMTask)
+                .where(
+                    and_(
+                        NewsLLMTask.id == row.id,
+                        NewsLLMTask.status.in_(["pending", "retry"]),
+                        or_(
+                            NewsLLMTask.next_retry_at.is_(None),
+                            NewsLLMTask.next_retry_at <= now,
+                        ),
+                    )
+                )
+                .values(
+                    status="running",
+                    attempt_count=int(row.attempt_count or 0) + 1,
+                    started_at=now,
+                    finished_at=None,
+                    updated_at=now,
+                )
+            )
+            if int(result.rowcount or 0) <= 0:
+                continue
+            claimed_ids.append(int(row.id))
             raw_ids.append(int(row.raw_news_id))
         await session.flush()
+        if not claimed_ids:
+            return []
+        rows = (
+            await session.execute(
+                select(NewsLLMTask)
+                .where(NewsLLMTask.id.in_(claimed_ids))
+                .order_by(NewsLLMTask.priority.desc(), NewsLLMTask.created_at.asc())
+            )
+        ).scalars().all()
         news_rows = (
             await session.execute(select(NewsRaw).where(NewsRaw.id.in_(raw_ids)).order_by(NewsRaw.published_at.desc()))
         ).scalars().all()

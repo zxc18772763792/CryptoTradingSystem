@@ -7552,7 +7552,7 @@ const metrics=[
 {name:'新闻情绪',score:newsScore,raw:newsBalance,fmt:newsN>0?newsBalance.toFixed(4):'--',hint:`结构化${newsEvents} / 当前流${newsFeedCount} / 原始${newsRawCount}`,available:newsAvailable},
 {name:'资金费率(反向拥挤)',score:fundingScore,raw:funding,fmt:fundingAvailable?(funding*100).toFixed(4)+'%':'--',hint:fundingAvailable?'费率越高越拥挤':'暂无资金费率数据',available:fundingAvailable},
 {name:'期现基差(反向拥挤)',score:basisScore,raw:basisPct,fmt:basisAvailable?basisPct.toFixed(4)+'%':'--',hint:basisAvailable?'正基差高=多头拥挤风险':'暂无期现基差数据',available:basisAvailable},
-{name:'Fear & Greed(逆向)',score:fearGreedScore,raw:fearGreedValue,fmt:fearGreedAvailable?String(Math.round(fearGreedValue)):'--',hint:fearGreedAvailable?String(fearGreed?.classification||payload?.onchain?.fear_greed_index?.classification||'市场情绪'):'暂无 Fear & Greed 数据',available:fearGreedAvailable},
+{name:'Fear & Greed(逆向)',score:fearGreedScore,raw:fearGreedValue,fmt:fearGreedAvailable?String(Math.round(fearGreedValue)):'--',hint:fearGreedAvailable?(typeof window.formatFearGreedClassification==='function'?window.formatFearGreedClassification(fearGreed?.classification||payload?.onchain?.fear_greed_index?.classification||'')||'市场情绪':String(fearGreed?.classification||payload?.onchain?.fear_greed_index?.classification||'市场情绪')):'暂无 Fear & Greed 数据',available:fearGreedAvailable},
 {name:'全市场 Breadth',score:globalBreadthScore,raw:marketCapChangePct,fmt:globalBreadthAvailable?`${Number.isFinite(Number(marketCapChangePct))?Number(marketCapChangePct).toFixed(2)+'%':'--'} / ${Number.isFinite(Number(volumeChangePct))?Number(volumeChangePct).toFixed(2)+'%':'--'}`:'--',hint:globalBreadthAvailable?'市值24h / 成交量24h':'暂无全市场 breadth 数据',available:globalBreadthAvailable},
 {name:'点差健康度',score:spreadScore,raw:spreadBps,fmt:spreadAvailable?spreadBps.toFixed(3)+' bps':'--',hint:spreadAvailable?'点差越小流动性越好':'暂无盘口点差数据',available:spreadAvailable},
 {name:'拥挤风险',score:riskCrowding,raw:riskCrowding,fmt:riskCrowding.toFixed(3),hint:`巨鲸=${whaleCount}，公告=${annCount}`},
@@ -8072,7 +8072,7 @@ if(summary){
   <div class="list-item"><span>7d 变化 / 交易所流向</span>${formatMetricLines([`${Number(tvl?.change_7d_pct||0).toFixed(2)}% / ${flow.toFixed(4)}`])}</div>
   <div class="list-item"><span>巨鲸数量</span>${formatMetricLines([`${Number(whales?.count||0)} 笔`,`阈值 ${Number(whales?.threshold_btc||0)} BTC`])}</div>
   <div class="list-item"><span>多所 Funding</span>${formatMetricLines([fundingLine1,fundingLine2])}</div>
-  <div class="list-item"><span>恐慌贪婪指数</span>${formatMetricLines([fearGreedOk?`${fearGreedValue} (${fearGreed?.classification||'-'})`:'暂无可用数据',fearGreedOk?`信号 ${fearGreed?.signal||'neutral'}`:''])}</div>
+  <div class="list-item"><span>恐慌贪婪指数</span>${formatMetricLines([fearGreedOk?`${fearGreedValue} (${(typeof window.formatFearGreedClassification==='function'?window.formatFearGreedClassification(fearGreed?.classification):fearGreed?.classification)||'-'})`:'暂无可用数据',fearGreedOk?`信号 ${(typeof window.formatFearGreedSignal==='function'?window.formatFearGreedSignal(fearGreed?.signal):fearGreed?.signal)||'观望'}`:''])}</div>
   <div class="list-item"><span>高级源快照</span>${formatMetricLines([premiumLine1,premiumLine2])}</div>
   <div class="list-item"><span>返回方式 / 生成时间</span>${formatMetricLines([servedMode,generatedAt])}</div>
   <div class="list-item"><span>组件状态</span>${formatMetricLines([statusLine1,statusLine2,statusLine3])}</div>`;
@@ -8080,7 +8080,7 @@ if(summary){
 if(externalSummary){
   externalSummary.innerHTML=`
   <div class="list-item"><span>外生资金</span>${formatMetricLines([fundingLine1,fundingLine2])}</div>
-  <div class="list-item"><span>风险情绪</span>${formatMetricLines([fearGreedOk?`${fearGreedValue} (${fearGreed?.classification||'-'})`:'暂无可用数据',fearGreedOk?`信号 ${fearGreed?.signal||'neutral'}`:''])}</div>
+  <div class="list-item"><span>风险情绪</span>${formatMetricLines([fearGreedOk?`${fearGreedValue} (${(typeof window.formatFearGreedClassification==='function'?window.formatFearGreedClassification(fearGreed?.classification):fearGreed?.classification)||'-'})`:'暂无可用数据',fearGreedOk?`信号 ${(typeof window.formatFearGreedSignal==='function'?window.formatFearGreedSignal(fearGreed?.signal):fearGreed?.signal)||'观望'}`:''])}</div>
   <div class="list-item"><span>高级源快照</span>${formatMetricLines([premiumLine1,premiumLine2])}</div>
   <div class="list-item"><span>返回模式</span>${formatMetricLines([servedMode,generatedAt])}</div>
   <div class="list-item"><span>组件健康</span>${formatMetricLines([statusLine1,statusLine2,statusLine3])}</div>`;

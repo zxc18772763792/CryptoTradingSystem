@@ -5,9 +5,10 @@ import copy
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from web.api import trading as trading_api
+from web.api.auth import require_sensitive_ops_permissions
 
 
 router = APIRouter()
@@ -324,7 +325,7 @@ async def _balance_response_fallback_with_notifications(
     return payload
 
 
-@router.get("/balance")
+@router.get("/balance", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_balance(exchange: str = "gate"):
     connector = trading_api.exchange_manager.get_exchange(exchange)
     if not connector:
@@ -866,10 +867,13 @@ async def _build_all_balances_payload():
     # certainly not a real account value) or (b) it's < 10% of a positive
     # day_start baseline. In either case fall back to the baseline.
     prev_equity_unreliable = (
-        prev_equity > 0
-        and (
-            prev_equity < 10.0
-            or (sanity_baseline > 0 and prev_equity < sanity_baseline * 0.1)
+        prev_equity < 0
+        or (
+            prev_equity > 0
+            and (
+                prev_equity < 10.0
+                or (sanity_baseline > 0 and prev_equity < sanity_baseline * 0.1)
+            )
         )
     )
     if prev_equity_unreliable:

@@ -53,7 +53,7 @@ And it also:
 - keeps analytics-history collectors off unless you explicitly pass `-EnableAnalyticsHistory`
 - keeps the PM worker opt-in via `-StartPmWorker`
 - ignores `.env` `START_*` worker flags for managed startup decisions
-- forces `TRADING_MODE=live` for managed restarts and allows persisted `live`-mode restore
+- defaults to `TRADING_MODE=paper` and blocks persisted `live`-mode restore unless you explicitly pass `-AllowPersistedLiveMode`
 - keeps the AI autonomous agent separate from the default boot path
 
 Keep `START_NEWS_WORKER`, `START_NEWS_LLM_WORKER`, and `START_PM_WORKER` unset in local `.env` for the managed path; use the `web.bat` flags above so `status` and startup behavior stay aligned.
