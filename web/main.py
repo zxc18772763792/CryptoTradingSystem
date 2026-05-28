@@ -468,6 +468,7 @@ async def _emit_market_ticks() -> None:
 # market ticks every _MARKET_TICK_INTERVAL_SEC to keep the exchange rate-limit
 # budget under control. Reduces REST QPS roughly 3-4×.
 _MARKET_TICK_INTERVAL_SEC = 6.0
+_MARKET_WS_EXCHANGE_DISCOVERY_INTERVAL_SEC = 5.0
 
 # Holder for the live WS feed. Set by _market_ws_feed_worker when the feed is
 # running so the REST pusher can defer to it (and back-fill only when the
@@ -518,14 +519,27 @@ async def _market_ws_feed_worker(stop_event: asyncio.Event) -> None:
         return
 
     configured = str(getattr(settings, "MARKET_WS_EXCHANGES", "") or "").strip()
-    if configured:
-        exchanges = [e.strip().lower() for e in configured.split(",") if e.strip()]
-    else:
-        exchanges = exchange_manager.get_connected_exchanges()
-    if not exchanges:
-        # Nothing connected yet — exit; supervisor restart will retry later.
-        logger.info("market_ws_feed: no exchanges to stream yet")
-        await asyncio.sleep(5)
+
+    def _resolve_exchanges() -> List[str]:
+        if configured:
+            return [e.strip().lower() for e in configured.split(",") if e.strip()]
+        return list(exchange_manager.get_connected_exchanges())
+
+    # When the list is sourced from live connections it can be empty at boot
+    # because this worker may start before exchange_manager finishes connecting.
+    # Wait for them rather than returning: a normal return is NOT restarted by
+    # the supervisor (only exceptions are), so returning here would disable the
+    # feed for the whole session.
+    exchanges = _resolve_exchanges()
+    while not exchanges and not stop_event.is_set():
+        logger.info("market_ws_feed: no exchanges to stream yet, waiting...")
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=_MARKET_WS_EXCHANGE_DISCOVERY_INTERVAL_SEC,
+            )
+        exchanges = _resolve_exchanges()
+    if stop_event.is_set():
         return
 
     feed = CcxtProMarketFeed(
@@ -1864,6 +1878,13 @@ async def websocket_endpoint(websocket: WebSocket):
                         task.cancel()
                     with contextlib.suppress(BaseException):
                         await task
+                # Retrieve the result of every completed task. When a disconnect
+                # completes both recv_task and send_task in the same wait() and
+                # the send path raises, the unconsumed task's exception would
+                # otherwise be reported as "Task exception was never retrieved".
+                for task in done:
+                    with contextlib.suppress(BaseException):
+                        task.exception()
                 recv_task = send_task = None
     except WebSocketDisconnect:
         pass

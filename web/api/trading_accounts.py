@@ -58,7 +58,10 @@ async def delete_account(account_id: str):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/accounts/summary")
+@router.get(
+    "/accounts/summary",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def account_summary():
     positions = [p.to_dict() for p in trading_api.position_manager.get_all_positions()]
     orders = [trading_api._serialize_order(o) for o in trading_api.order_manager.get_recent_orders(limit=1000)]

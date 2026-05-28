@@ -1815,7 +1815,7 @@
           if (typeof notify === 'function') notify('已手动加入 Watchlist');
         })
         .catch((error) => {
-          if (typeof notify === 'function') notify(`Watchlist 鏇存柊澶辫触: ${error.message}`, true);
+          if (typeof notify === 'function') notify(`Watchlist 更新失败: ${error.message}`, true);
         });
     };
     if (addWatchlistManualBtn) {

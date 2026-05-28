@@ -94,8 +94,8 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "function renderDecisionTracePanel(" in ai_js
     assert "关键门槛：" in ai_js
     assert "检查链路" in ai_js
-    assert "Operating Mode" in ai_js
-    assert "Work Queue" in ai_js
+    assert "运行模式" in ai_js
+    assert "工作队列" in ai_js
     assert "发送到自治观察" in ai_js
     assert "/operating-mode" in ai_js
     assert "/work-queue" in ai_js

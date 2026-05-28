@@ -184,7 +184,7 @@ class MACDHistogramStrategy(StrategyBase):
             "fast_period": 12,
             "slow_period": 26,
             "signal_period": 9,
-            "min_histogram": 0.0001,  # ????????????
+            "min_histogram": 0.0001,  # Ignore tiny histogram noise.
             "stop_loss_pct": 0.02,
             "take_profit_pct": 0.05,
         }

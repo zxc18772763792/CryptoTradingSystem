@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """Fix mojibake in ai_research.js caused by UTF-8 bytes being misread as GBK."""
+import argparse
 import sys
 import io
 import re
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+_PARSER = argparse.ArgumentParser(
+    description="Legacy one-off mojibake fixer for web/static/js/ai_research.js."
+)
+_PARSER.add_argument("--path", default="web/static/js/ai_research.js")
+_PARSER.add_argument("--write", action="store_true", help="write changes back to --path")
+_ARGS, _UNKNOWN_ARGS = _PARSER.parse_known_args()
 
 # Order: longer strings first to avoid partial replacement
 MOJI_MAP = [
@@ -206,7 +214,7 @@ def fix_separator_dot(content):
     content = content.replace("join(' 路 ')", "join(' · ')")
     return content
 
-with open('web/static/js/ai_research.js', 'r', encoding='utf-8') as f:
+with open(_ARGS.path, 'r', encoding='utf-8') as f:
     content = f.read()
 
 original_len = len(content)
@@ -245,8 +253,12 @@ for old, new in [
         content = content.replace(old, new)
         print(f'  Fixed AI error: {repr(old[:50])}')
 
-with open('web/static/js/ai_research.js', 'w', encoding='utf-8') as f:
-    f.write(content)
+if _ARGS.write:
+    with open(_ARGS.path, 'w', encoding='utf-8') as f:
+        f.write(content)
+    print(f'Wrote changes to {_ARGS.path}')
+else:
+    print('Dry run only; pass --write to update the file.')
 
 print(f'\nDone. New length: {len(content)} chars, {len(content.splitlines())} lines')
 print(f'Total replacements: {replaced_count}')

@@ -10,6 +10,8 @@ Covers:
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -138,6 +140,36 @@ def test_repo_root_junk_removed(removed):
 ])
 def test_legacy_files_relocated(relocated):
     assert (REPO_ROOT / relocated).exists(), f"{relocated!r} should exist"
+
+
+def test_legacy_mojibake_fixer_defaults_to_dry_run(tmp_path):
+    target = tmp_path / "ai_research.js"
+    target.write_text("const label = '鐮旂┒鐩爣澶煭';\n", encoding="utf-8")
+    original = target.read_text(encoding="utf-8")
+    script = REPO_ROOT / "scripts" / "legacy" / "fix_mojibake.py"
+
+    dry_run = subprocess.run(
+        [sys.executable, str(script), "--path", str(target)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+
+    assert "Dry run only" in dry_run.stdout
+    assert target.read_text(encoding="utf-8") == original
+
+    subprocess.run(
+        [sys.executable, str(script), "--path", str(target), "--write"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+
+    assert "研究目标太短" in target.read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

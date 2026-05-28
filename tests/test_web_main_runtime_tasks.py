@@ -69,6 +69,45 @@ def test_market_ws_feed_factory_gated_by_flag(monkeypatch):
     assert factories["market_ws_feed"]["restart_on_failure"] is True
 
 
+async def test_market_ws_feed_waits_for_late_exchange_connections(monkeypatch):
+    from core.marketdata import ccxt_pro_feed
+
+    captured: dict[str, object] = {}
+
+    class _FakeFeed:
+        def __init__(self, *, exchanges, **kwargs):
+            captured["exchanges"] = exchanges
+
+        async def run(self, stop_event):
+            captured["ran"] = True
+            stop_event.set()
+
+        def is_healthy(self):
+            return True
+
+    calls = {"count": 0}
+
+    def _connected_exchanges():
+        calls["count"] += 1
+        return [] if calls["count"] == 1 else ["binance"]
+
+    monkeypatch.setattr(ccxt_pro_feed, "CCXT_PRO_AVAILABLE", True)
+    monkeypatch.setattr(ccxt_pro_feed, "CcxtProMarketFeed", _FakeFeed)
+    monkeypatch.setattr(web_main.settings, "MARKET_WS_EXCHANGES", "")
+    monkeypatch.setattr(
+        web_main,
+        "_MARKET_WS_EXCHANGE_DISCOVERY_INTERVAL_SEC",
+        0.01,
+    )
+    monkeypatch.setattr(web_main.exchange_manager, "get_connected_exchanges", _connected_exchanges)
+
+    await asyncio.wait_for(web_main._market_ws_feed_worker(asyncio.Event()), timeout=1.0)
+
+    assert captured["exchanges"] == ["binance"]
+    assert captured["ran"] is True
+    assert web_main._market_ws_feed is None
+
+
 def test_runtime_pusher_skips_rest_when_ws_healthy(monkeypatch):
     """When the WS feed reports healthy, the REST market-tick fan-out is skipped."""
 
