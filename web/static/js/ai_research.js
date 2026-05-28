@@ -1896,7 +1896,7 @@
   function renderSearchLoopSummary(summary, drafts = []) {
     const info = summary && typeof summary === 'object' ? summary : null;
     if (!info) {
-      return '<div style="font-size:12px;color:#6b7fa0;">暂无 Search Loop 信息</div>';
+      return '<div style="font-size:12px;color:#6b7fa0;">暂无搜索循环信息</div>';
     }
     const evaluations = toArray(info?.draft_evaluations);
     const evaluated = Number(info?.evaluated_drafts || 0);
@@ -1937,52 +1937,52 @@
         return `<div style="padding:6px 8px;background:#141f2f;border-radius:6px;margin-top:6px;">
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
             <span style="font-size:11px;font-weight:700;color:#c2d0e8;">${esc(row?.name || row?.draft_id || '--')}</span>
-            <span style="font-size:10px;color:#f0b429;">${esc(row?.rejection_reason || 'rejected')}</span>
+            <span style="font-size:10px;color:#f0b429;">${esc(row?.rejection_reason || '已淘汰')}</span>
           </div>
           <div style="font-size:10px;color:#7e92b2;margin-top:3px;">
             ${esc(String(row?.draft_id || '--'))} · G${Math.max(0, Math.round(Number(row?.generation || 0) || 0))}
             ${Number.isFinite(heuristic) && heuristic > 0 ? ` · H ${esc(fmtNum(heuristic, 1))}` : ''}
             ${Number.isFinite(novelty) && novelty >= 0 ? ` · N ${(novelty * 100).toFixed(0)}%` : ''}
           </div>
-          ${mutation !== '--' ? `<div style="font-size:10px;color:#7dd3fc;margin-top:3px;">Mutation: ${esc(mutation)}</div>` : ''}
-          ${critique !== '--' ? `<div style="font-size:10px;color:#f0b429;margin-top:3px;">Critique: ${esc(critique)}</div>` : ''}
+          ${mutation !== '--' ? `<div style="font-size:10px;color:#7dd3fc;margin-top:3px;">变体说明：${esc(mutation)}</div>` : ''}
+          ${critique !== '--' ? `<div style="font-size:10px;color:#f0b429;margin-top:3px;">评审意见：${esc(critique)}</div>` : ''}
         </div>`;
       }).join('');
 
-    const statusText = info?.loop_enabled ? 'Enabled' : 'Disabled';
+    const statusText = info?.loop_enabled ? '启用' : '关闭';
     const statusColor = info?.loop_enabled ? '#20bf78' : '#7e92b2';
     return `<div style="background:#141f2f;border-radius:6px;padding:8px;">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px;">
-        <div style="font-size:12px;color:#c2d0e8;font-weight:700;">Search Loop</div>
+        <div style="font-size:12px;color:#c2d0e8;font-weight:700;">搜索循环</div>
         <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:${info?.loop_enabled ? '#143224' : '#1a2436'};color:${statusColor};border:1px solid ${info?.loop_enabled ? '#245b42' : '#32475f'};">${statusText}</span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
         <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-          <div style="font-size:10px;color:#6b7fa0;">Evaluated</div>
+          <div style="font-size:10px;color:#6b7fa0;">已评估</div>
           <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${evaluated}</div>
         </div>
         <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-          <div style="font-size:10px;color:#6b7fa0;">Accepted</div>
+          <div style="font-size:10px;color:#6b7fa0;">已采纳</div>
           <div style="font-size:13px;font-weight:700;color:#20bf78;">${accepted}</div>
         </div>
         <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-          <div style="font-size:10px;color:#6b7fa0;">Rejected</div>
+          <div style="font-size:10px;color:#6b7fa0;">已淘汰</div>
           <div style="font-size:13px;font-weight:700;color:#f0b429;">${rejected}</div>
         </div>
         <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-          <div style="font-size:10px;color:#6b7fa0;">Challengers</div>
+          <div style="font-size:10px;color:#6b7fa0;">挑战方案</div>
           <div style="font-size:13px;font-weight:700;color:#7dd3fc;">${challengers.length}</div>
         </div>
       </div>
       <div style="font-size:12px;color:#b7c7e2;line-height:1.6;margin-top:8px;">
-        <div>Champion: <span style="color:#20bf78;font-weight:700;">${esc(championLabel)}</span>${championId ? `<span style="color:#7e92b2;"> (${esc(championId)})</span>` : ''}</div>
-        ${notes !== '--' ? `<div style="margin-top:4px;color:#7e92b2;">Notes: ${esc(notes)}</div>` : ''}
+        <div>主力方案：<span style="color:#20bf78;font-weight:700;">${esc(championLabel)}</span>${championId ? `<span style="color:#7e92b2;"> (${esc(championId)})</span>` : ''}</div>
+        ${notes !== '--' ? `<div style="margin-top:4px;color:#7e92b2;">备注：${esc(notes)}</div>` : ''}
       </div>
       ${reasonEntries.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:8px;">
         ${reasonEntries.map(([reason, count]) => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#35210f;color:#f0b429;border:1px solid #6c431b;">${esc(reason)} x${esc(String(count))}</span>`).join('')}
       </div>` : ''}
       ${rejectedPreview ? `<div style="margin-top:8px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:2px;">Rejected Drafts</div>
+        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:2px;">已淘汰草案</div>
         ${rejectedPreview}
       </div>` : ''}
     </div>`;
@@ -2038,12 +2038,12 @@
           <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">策略草案</div>
           ${renderStrategyDraftSummary(strategyDrafts, 4)}
           <div style="margin-top:8px;">
-            <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Search Loop</div>
+            <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">搜索循环</div>
             ${renderSearchLoopSummary(searchSummary, strategyDrafts)}
           </div>
         </div>
         <div style="margin-top:8px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Research Lineage</div>
+          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">研究谱系</div>
           ${renderResearchLineage(lineage)}
         </div>
       </div>`;
@@ -5006,7 +5006,8 @@ ${confirmHint}`,
         ? `${Number(optSkew).toFixed(3)}(${optSig || '?'})`
         : '--';
       const derivativesTxt = formatDerivativesContextLine(liveCtx.derivatives_context);
-      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dir} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · OI ${oiTxt} · 期权偏斜 ${optTxt} · 新闻事件 ${ne}${derivativesTxt ? ` · ${esc(derivativesTxt)}` : ''}`;
+      const dirLabel = { LONG: '看多', SHORT: '看空', FLAT: '观望' }[dir] || dir;
+      marketCtxEl.innerHTML = `<span style="color:${dir==='LONG'?'#20bf78':dir==='SHORT'?'#e05260':'#9fb1c9'}">方向 ${dirLabel} ${conf}%</span> · Funding ${frTxt} · OFI ${ofiTxt} · OI ${oiTxt} · 期权偏斜 ${optTxt} · 新闻事件 ${ne}${derivativesTxt ? ` · ${esc(derivativesTxt)}` : ''}`;
     }
 
     const payload = {
@@ -6265,18 +6266,18 @@ ${confirmHint}`,
       const deri = data?.coinglass || {};
       banner.innerHTML = `
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
-          <strong>Operating Mode</strong>
-          <span>trading=${esc(data?.trading_mode || '--')}</span>
+          <strong>运行模式</strong>
+          <span>交易=${esc(data?.trading_mode || '--')}</span>
           <span>AI=${esc(live.mode || '--')} / ${esc(live.provider || '--')}</span>
-          <span>agent=${esc(agent.mode || '--')} / ${agent.allow_live ? 'live allowed' : 'paper only'}</span>
-          <span>derivatives=${deri.live_gating_enabled ? 'live gating' : 'shadow-only'}</span>
-          <span style="color:${actionableDegradations.length ? '#f59e0b' : '#20bf78'};">degraded=${actionableDegradations.length}</span>
-          ${advisoryCount ? `<span>advisory=${advisoryCount}</span>` : ''}
+          <span>代理=${esc(agent.mode || '--')} / ${agent.allow_live ? '允许实盘' : '仅纸盘'}</span>
+          <span>衍生品=${deri.live_gating_enabled ? '实盘门控' : '仅影子'}</span>
+          <span style="color:${actionableDegradations.length ? '#f59e0b' : '#20bf78'};">降级=${actionableDegradations.length}</span>
+          ${advisoryCount ? `<span>提示=${advisoryCount}</span>` : ''}
         </div>`;
       return data;
     })()
       .catch((err) => {
-        const message = `Operating Mode unavailable: ${err.message || err}`;
+        const message = `运行模式不可用：${err.message || err}`;
         if (!options.preserveExisting || !String(banner.textContent || '').trim()) {
           banner.textContent = message;
         } else {
@@ -6309,15 +6310,15 @@ ${confirmHint}`,
       state.workQueueLoadedAt = Date.now();
       panel.removeAttribute('data-refresh-error');
       const items = Array.isArray(data?.items) ? data.items.slice(0, 6) : [];
-      panel.innerHTML = `<div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">Work Queue</div>
+      panel.innerHTML = `<div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">工作队列</div>
         ${items.length ? items.map(item => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #1e2d44;">
           <span>${esc(item.type || '--')} · ${esc(item.title || item.id || '--')}</span>
           <span style="color:#7e92b2;">${esc(item.next_action || '--')}</span>
-        </div>`).join('') : '<div style="color:#6b7fa0;">No queued actions.</div>'}`;
+        </div>`).join('') : '<div style="color:#6b7fa0;">暂无排队任务。</div>'}`;
       return data;
     })()
       .catch((err) => {
-        const message = `Work Queue unavailable: ${err.message || err}`;
+        const message = `工作队列不可用：${err.message || err}`;
         if (!options.preserveExisting || !String(panel.textContent || '').trim()) {
           panel.textContent = message;
         } else {
@@ -6447,6 +6448,11 @@ ${confirmHint}`,
     return direction === 'LONG' ? '#4ade80' : direction === 'SHORT' ? '#f87171' : '#6b7fa0';
   }
 
+  function liveSignalDirText(direction) {
+    const d = String(direction || '').toUpperCase();
+    return d === 'LONG' ? '看多' : d === 'SHORT' ? '看空' : d === 'FLAT' ? '观望' : (direction || '观望');
+  }
+
   function liveSignalPct(value) {
     return `${((Number(value) || 0) * 100).toFixed(0)}%`;
   }
@@ -6538,7 +6544,7 @@ ${confirmHint}`,
       <div class="live-sig-title-row">${liveSignalPrimaryTitle(item)}</div>
       ${metaText ? `<div class="live-sig-meta">${esc(metaText)}</div>` : ''}
     </div>
-    <span style="font-weight:700;font-size:13px;margin-left:auto;color:${liveSignalDirColor(signalDir)}">${liveSignalDirIcon(signalDir)} ${signalDir}</span>
+    <span style="font-weight:700;font-size:13px;margin-left:auto;color:${liveSignalDirColor(signalDir)}">${liveSignalDirIcon(signalDir)} ${liveSignalDirText(signalDir)}</span>
     ${blockedBadge}${approvalBadge}${dataBadge}
   </div>
   <div class="live-sig-bars">
@@ -6635,6 +6641,7 @@ ${confirmHint}`,
       });
       const dirColor = r.direction === 'LONG' ? '#4ade80' : r.direction === 'SHORT' ? '#f87171' : '#94a3b8';
       const dirIcon  = d => d === 'LONG' ? '▲' : d === 'SHORT' ? '▼' : '─';
+      const dirLabel = { LONG: '看多', SHORT: '看空', FLAT: '观望' }[r.direction] || (r.direction || '观望');
       const pct = v => (v * 100).toFixed(1) + '%';
       const comp = r.components || {};
       const blockedHtml = r.blocked_by_risk
@@ -6645,7 +6652,7 @@ ${confirmHint}`,
       const html = `
 <div style="font-size:13px;line-height:1.6;">
   <div style="font-size:16px;font-weight:700;color:${dirColor};margin-bottom:10px;">
-    ${dirIcon(r.direction)} ${r.direction} &nbsp; <span style="font-size:13px;font-weight:500;">置信度 ${pct(r.confidence)}</span>
+    ${dirIcon(r.direction)} ${dirLabel} &nbsp; <span style="font-size:13px;font-weight:500;">置信度 ${pct(r.confidence)}</span>
   </div>
   <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;">
     <tr><td style="color:#7e92b2;padding:2px 0;">标的</td><td style="font-weight:600;">${esc(r.symbol)}</td></tr>
@@ -6658,9 +6665,10 @@ ${confirmHint}`,
     ${['llm', 'ml', 'factor'].map(k => {
       const c = comp[k] || {};
       const dc = c.direction === 'LONG' ? '#4ade80' : c.direction === 'SHORT' ? '#f87171' : '#94a3b8';
+      const dirText = { LONG: '看多', SHORT: '看空', FLAT: '观望' }[c.direction] || (c.direction || '观望');
       return `<div style="flex:1;background:#0a1520;border:1px solid #1e3a5a;border-radius:6px;padding:6px 8px;font-size:11px;">
         <div style="font-weight:700;text-transform:uppercase;margin-bottom:3px;">${k}</div>
-        <div style="color:${dc};font-size:13px;">${dirIcon(c.direction || 'FLAT')} ${c.direction || 'FLAT'}</div>
+        <div style="color:${dc};font-size:13px;">${dirIcon(c.direction || 'FLAT')} ${dirText}</div>
         <div style="color:#7e92b2;">${pct(c.confidence || 0)}</div>
       </div>`;
     }).join('')}
