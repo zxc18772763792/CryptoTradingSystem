@@ -2052,7 +2052,6 @@ def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
         events_by_row_index[row_index] = event
         submitted_indices.append(row_index)
 
-    submitted_index_set = set(submitted_indices)
     for idx, row_index in enumerate(submitted_indices):
         event = events_by_row_index[row_index]
         next_row_index = submitted_indices[idx + 1] if idx + 1 < len(submitted_indices) else len(journal_rows)

@@ -1,11 +1,9 @@
 """
 仓位计算模块
 """
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from enum import Enum
 from loguru import logger
-
-from core.risk.risk_manager import risk_manager
 
 
 class SizingMethod(Enum):

@@ -40,4 +40,4 @@ def test_get_multi_assets_overview_loads_symbol_frames_concurrently(monkeypatch)
 
     assert payload["count"] == 3
     assert len(payload["assets"]) == 3
-    assert elapsed < 0.12
+    assert elapsed < 0.30

@@ -2119,7 +2119,6 @@ async def export_strategy(name: str):
     info = strategy_manager.get_strategy_info(name)
     if not info:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    runtime_mode = _strategy_runtime_mode(name, info)
     return {
         "strategy": _strategy_export_payload(info),
         "exported_at": info.get("last_run_at"),
@@ -2515,7 +2514,6 @@ async def get_live_vs_backtest(name: str, initial_capital: float = 10000):
     symbols = info.get("symbols") or ["BTC/USDT"]
     symbol = symbols[0]
     timeframe = info.get("timeframe", "1h")
-    exchange = info.get("exchange", "gate")
 
     params = dict(info.get("params") or {})
     df, market_bundle, resolved_symbol = await _load_backtest_inputs(

@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,7 +46,7 @@ sync_settings_to_environ(settings, _MODEL_ENV_FIELDS)
 
 from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager
-from core.news.storage import db as news_db
+
 from core.notifications import notification_manager
 from core.ops.service import create_router as create_ops_router, initialize_ops_runtime, shutdown_ops_runtime
 from core.realtime import event_bus
