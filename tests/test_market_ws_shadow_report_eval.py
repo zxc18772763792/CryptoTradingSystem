@@ -167,6 +167,17 @@ def test_market_ws_shadow_report_eval_fails_disabled_configured_stream():
     assert result["summary"]["final_configured_enabled"] is False
 
 
+def test_market_ws_shadow_report_eval_keeps_legacy_configured_enabled_compatible():
+    report = _report()
+    report["summary"].pop("final_configured_enabled")
+
+    result = _evaluate(report=report)
+
+    assert result["ok"] is True
+    assert result["errors"] == []
+    assert result["summary"]["final_configured_enabled"] is None
+
+
 def test_market_ws_shadow_report_eval_keeps_legacy_paper_summary_compatible_by_default():
     result = _evaluate(
         report=_report(final_trading_mode=None, final_paper_trading=None),
