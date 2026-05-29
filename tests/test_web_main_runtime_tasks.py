@@ -508,6 +508,7 @@ def test_market_ws_status_snapshot_exposes_force_rest_and_hub_metrics(monkeypatc
     assert payload["enabled"] is False
     assert payload["configured_enabled"] is True
     assert payload["force_rest"] is True
+    assert payload["fail_closed_for_live"] is True
     assert payload["feed_present"] is False
     assert payload["rest_fallback_count"] == 1
     assert payload["symbols"]["binance"]["BTC/USDT"]["source"] == "rest_fallback"
