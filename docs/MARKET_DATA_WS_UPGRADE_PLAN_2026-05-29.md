@@ -3675,6 +3675,11 @@ summary:
   - `python -m py_compile scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py` 通过。
   - `git diff --check -- scripts/selfcheck_market_ws_shadow.py scripts/evaluate_market_ws_shadow_report.py tests/test_market_ws_shadow_selfcheck.py tests/test_market_ws_shadow_report_eval.py` 通过。
   - 说明：该加固不改变已经在运行的第十一轮 selfcheck 进程；它适用于后续重新启动并加载当前代码的 live shadow 24 小时长跑和最终 evaluator。
+- 2026-05-30 01:08 +08:00 更新：`6843058 Expose shadow report gate summary` 已让 selfcheck/evaluator 的 stderr 摘要直接打印 `watch_symbol_errors`、`final_runtime` 和 `final_fail_closed_for_live`，方便后续最终归档不用翻完整 JSON 才能看到这些硬门禁。
+- 验证：
+  - `pytest tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py -q`，`24 passed in 3.82s`。
+  - `python -m py_compile scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py` 通过。
+  - `git diff --check -- scripts/selfcheck_market_ws_shadow.py scripts/evaluate_market_ws_shadow_report.py` 通过。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
