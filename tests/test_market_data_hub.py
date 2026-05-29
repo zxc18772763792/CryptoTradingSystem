@@ -65,6 +65,23 @@ def test_hub_counts_rest_fallback_and_preserves_source_metadata():
     assert snapshot["ws_tick_count"] == 0
 
 
+def test_get_tick_can_read_ws_source_after_rest_snapshot_overwrites_latest():
+    hub = MarketDataHub()
+
+    hub.upsert_ws_tick("binance", "BTC/USDT", {"last": 100.0})
+    hub.upsert_rest_tick("binance", "BTC/USDT", {"last": 101.0}, source="rest_snapshot")
+
+    latest = hub.get_tick("binance", "BTC/USDT")
+    ws_tick = hub.get_tick("binance", "BTC/USDT", source="ws")
+
+    assert latest is not None
+    assert latest["tick"]["last"] == 101.0
+    assert latest["meta"]["source"] == "rest_snapshot"
+    assert ws_tick is not None
+    assert ws_tick["tick"]["last"] == 100.0
+    assert ws_tick["meta"]["source"] == "ws"
+
+
 def test_hub_rejects_invalid_payloads_without_overwriting_good_tick():
     hub = MarketDataHub()
 

@@ -769,6 +769,7 @@ pytest tests/test_ccxt_pro_feed.py -q
   - `_emit_market_ticks()` 会把 REST ticker 写入 hub，并区分 `rest_snapshot` 与 `rest_fallback`。
   - `_runtime_pusher()` 在 `shadow` 模式继续保留 REST 作为 UI/runtime 行情来源；在 `ui_primary` / `strategy_primary` 模式下，只有 feed 健康且 hub 中存在新鲜 WS tick 时才抑制 REST。
   - feed 不健康时 REST fallback reason 为 `ws_unhealthy`；feed 健康但 hub stale/missing 时 reason 为 `ws_stale`。
+  - `ui_primary` / `strategy_primary` 下，若 feed 健康但只有部分 watch symbol 缺失或 stale，只对缺失/陈旧 symbol 拉 REST fallback，不全量拉取所有 watch symbol。
   - `/api/status` 已包含 `market_ws` 状态快照。
 - `web/main.py` 已新增 `/api/market-data/status`：
   - 使用 `read_trading_state` 权限保护。
@@ -3369,6 +3370,7 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
 - `76 passed in 24.43s`。
 - `28 passed in 5.48s`。
 - `39 passed in 3.55s`。
+- 2026-05-29 23:30 +08:00 续测：`pytest tests\test_web_main_runtime_tasks.py tests\test_market_data_hub.py tests\test_runtime_price_provider.py -q`，`54 passed in 18.53s`；覆盖 `get_tick(source="ws")`、UI-primary partial stale symbol targeted REST fallback、`_emit_market_ticks(symbols=...)` 子集拉取。
 - `.get_ticker(` 静态扫描无匹配；`rg` exit code 1 表示未找到直接绕过 adapter 的调用。
 
 运行日志新增观察：

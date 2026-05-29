@@ -405,10 +405,23 @@ class MarketDataHub:
             "compared_at": now.isoformat(),
         }
 
-    def get_tick(self, exchange: Any, symbol: Any, *, channel: str = "ticker", max_age_sec: Optional[float] = None) -> Optional[Dict[str, Any]]:
+    def get_tick(
+        self,
+        exchange: Any,
+        symbol: Any,
+        *,
+        channel: str = "ticker",
+        max_age_sec: Optional[float] = None,
+        source: Optional[MarketTickSource] = None,
+    ) -> Optional[Dict[str, Any]]:
         name = normalize_exchange_name(exchange)
         norm_symbol = normalize_market_symbol(symbol)
-        tick = self._ticks.get((name, norm_symbol, str(channel or "ticker")))
+        channel_key = str(channel or "ticker")
+        tick = (
+            self._source_ticks.get((source, name, norm_symbol, channel_key))
+            if source
+            else self._ticks.get((name, norm_symbol, channel_key))
+        )
         if tick is None:
             return None
         horizon = self.symbol_max_age_sec if max_age_sec is None else float(max_age_sec)
