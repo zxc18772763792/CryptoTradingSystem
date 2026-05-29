@@ -2,6 +2,7 @@
 DEX连接器模块
 支持Uniswap、SushiSwap、PancakeSwap等主流DEX
 """
+import asyncio
 from abc import abstractmethod
 from datetime import datetime
 from typing import Optional, Any, List
@@ -101,11 +102,15 @@ class BaseDEXConnector(BaseExchange):
             if not rpc_url:
                 raise ValueError(f"Unsupported chain: {self.chain}")
 
-            self.w3 = Web3(Web3.HTTPProvider(rpc_url))
+            def _connect_sync():
+                # web3 HTTPProvider + is_connected() are blocking network RPC;
+                # run off the event loop so DEX connect() can't freeze startup.
+                w3 = Web3(Web3.HTTPProvider(rpc_url))
+                if not w3.is_connected():
+                    raise ConnectionError(f"Failed to connect to {self.chain} RPC")
+                return w3
 
-            if not self.w3.is_connected():
-                raise ConnectionError(f"Failed to connect to {self.chain} RPC")
-
+            self.w3 = await asyncio.to_thread(_connect_sync)
             self._connected = True
             logger.info(f"[{self.name}] Connected to {self.chain}")
             return True
@@ -123,17 +128,20 @@ class BaseDEXConnector(BaseExchange):
         """获取代币信息"""
         try:
             _require_web3()
-            contract = self.w3.eth.contract(
-                address=Web3.to_checksum_address(token_address),
-                abi=ERC20_ABI,
-            )
 
-            return {
-                "address": token_address,
-                "symbol": contract.functions.symbol().call(),
-                "name": contract.functions.name().call(),
-                "decimals": contract.functions.decimals().call(),
-            }
+            def _fetch_sync() -> dict:
+                contract = self.w3.eth.contract(
+                    address=Web3.to_checksum_address(token_address),
+                    abi=ERC20_ABI,
+                )
+                return {
+                    "address": token_address,
+                    "symbol": contract.functions.symbol().call(),
+                    "name": contract.functions.name().call(),
+                    "decimals": contract.functions.decimals().call(),
+                }
+
+            return await asyncio.to_thread(_fetch_sync)
         except Exception as e:
             self._handle_error(e, f"get_token_info({token_address})")
 
@@ -141,17 +149,19 @@ class BaseDEXConnector(BaseExchange):
         """获取代币余额"""
         try:
             _require_web3()
-            contract = self.w3.eth.contract(
-                address=Web3.to_checksum_address(token_address),
-                abi=ERC20_ABI,
-            )
 
-            balance = contract.functions.balanceOf(
-                Web3.to_checksum_address(wallet_address)
-            ).call()
+            def _fetch_sync() -> Decimal:
+                contract = self.w3.eth.contract(
+                    address=Web3.to_checksum_address(token_address),
+                    abi=ERC20_ABI,
+                )
+                balance = contract.functions.balanceOf(
+                    Web3.to_checksum_address(wallet_address)
+                ).call()
+                decimals = contract.functions.decimals().call()
+                return Decimal(balance) / Decimal(10 ** decimals)
 
-            decimals = contract.functions.decimals().call()
-            return Decimal(balance) / Decimal(10 ** decimals)
+            return await asyncio.to_thread(_fetch_sync)
 
         except Exception as e:
             self._handle_error(e, f"get_token_balance({token_address})")
@@ -165,29 +175,33 @@ class BaseDEXConnector(BaseExchange):
         """获取兑换报价"""
         try:
             _require_web3()
-            token_in_contract = self.w3.eth.contract(
-                address=Web3.to_checksum_address(token_in),
-                abi=ERC20_ABI,
-            )
-            decimals_in = token_in_contract.functions.decimals().call()
 
-            amount_in_wei = int(amount_in * Decimal(10 ** decimals_in))
+            def _fetch_sync() -> Decimal:
+                token_in_contract = self.w3.eth.contract(
+                    address=Web3.to_checksum_address(token_in),
+                    abi=ERC20_ABI,
+                )
+                decimals_in = token_in_contract.functions.decimals().call()
 
-            amounts = self.router_contract.functions.getAmountsOut(
-                amount_in_wei,
-                [
-                    Web3.to_checksum_address(token_in),
-                    Web3.to_checksum_address(token_out),
-                ]
-            ).call()
+                amount_in_wei = int(amount_in * Decimal(10 ** decimals_in))
 
-            token_out_contract = self.w3.eth.contract(
-                address=Web3.to_checksum_address(token_out),
-                abi=ERC20_ABI,
-            )
-            decimals_out = token_out_contract.functions.decimals().call()
+                amounts = self.router_contract.functions.getAmountsOut(
+                    amount_in_wei,
+                    [
+                        Web3.to_checksum_address(token_in),
+                        Web3.to_checksum_address(token_out),
+                    ]
+                ).call()
 
-            return Decimal(amounts[-1]) / Decimal(10 ** decimals_out)
+                token_out_contract = self.w3.eth.contract(
+                    address=Web3.to_checksum_address(token_out),
+                    abi=ERC20_ABI,
+                )
+                decimals_out = token_out_contract.functions.decimals().call()
+
+                return Decimal(amounts[-1]) / Decimal(10 ** decimals_out)
+
+            return await asyncio.to_thread(_fetch_sync)
 
         except Exception as e:
             self._handle_error(e, f"get_quote({token_in}, {token_out})")

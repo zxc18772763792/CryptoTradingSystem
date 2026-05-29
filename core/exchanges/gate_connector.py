@@ -361,7 +361,7 @@ class GateConnector(BaseExchange):
             fee_currency=fee_currency,
             status=status_map.get(ccxt_order.get("status", "open"), OrderStatus.OPEN),
             timestamp=(
-                datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000)
+                datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000, tz=timezone.utc)
                 if ccxt_order.get("timestamp")
                 else None
             ),

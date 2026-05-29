@@ -3,6 +3,7 @@
 支持从多个交易所采集K线、行情等数据
 """
 import asyncio
+from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
@@ -12,6 +13,15 @@ from loguru import logger
 from core.exchanges import Kline, Ticker
 from core.exchanges.exchange_manager import exchange_manager
 from config.settings import settings
+
+# Cap the per-task in-memory sample buffer so a long-lived collector cannot grow
+# without bound (downstream callbacks already consume the data live).
+_MAX_COLLECTED_PER_TASK = 10000
+
+# Bound each live collector exchange call so a stalled / half-open socket cannot
+# hang the collection loop indefinitely (ccxt's own socket timeout is not always
+# sufficient for proxy hiccups).
+_COLLECT_CALL_TIMEOUT_SEC = 30.0
 
 
 def _utc_now() -> datetime:
@@ -56,7 +66,7 @@ class DataCollector:
             DataType.OPEN_INTEREST: [],
             DataType.FEAR_GREED: [],
         }
-        self._collected_data: Dict[str, List[Any]] = {}
+        self._collected_data: Dict[str, "deque[Any]"] = {}
         self._callback_failures: int = 0
         self._callback_failure_counts: Dict[DataType, int] = {
             data_type: 0 for data_type in DataType
@@ -103,7 +113,7 @@ class DataCollector:
             interval=interval,
         )
         self._tasks[task_id] = task
-        self._collected_data[task_id] = []
+        self._collected_data[task_id] = deque(maxlen=_MAX_COLLECTED_PER_TASK)
 
         logger.info(f"Added collection task: {task_id}")
         return task_id
@@ -131,11 +141,14 @@ class DataCollector:
 
         try:
             since = task.last_collected or _utc_now() - timedelta(days=1)
-            klines = await exchange.get_klines(
-                symbol=task.symbol,
-                timeframe=task.timeframe,
-                since=since,
-                limit=settings.MAX_CANDLES_PER_REQUEST,
+            klines = await asyncio.wait_for(
+                exchange.get_klines(
+                    symbol=task.symbol,
+                    timeframe=task.timeframe,
+                    since=since,
+                    limit=settings.MAX_CANDLES_PER_REQUEST,
+                ),
+                timeout=_COLLECT_CALL_TIMEOUT_SEC,
             )
 
             if klines:
@@ -154,7 +167,9 @@ class DataCollector:
             return None
 
         try:
-            ticker = await exchange.get_ticker(task.symbol)
+            ticker = await asyncio.wait_for(
+                exchange.get_ticker(task.symbol), timeout=_COLLECT_CALL_TIMEOUT_SEC
+            )
             task.last_collected = _utc_now()
             return ticker
 
@@ -169,7 +184,9 @@ class DataCollector:
             return None
 
         try:
-            orderbook = await exchange.get_order_book(task.symbol)
+            orderbook = await asyncio.wait_for(
+                exchange.get_order_book(task.symbol), timeout=_COLLECT_CALL_TIMEOUT_SEC
+            )
             task.last_collected = _utc_now()
             return orderbook
 
@@ -325,12 +342,12 @@ class DataCollector:
 
     def get_collected_data(self, task_id: str) -> List[Any]:
         """获取采集的数据"""
-        return self._collected_data.get(task_id, [])
+        return list(self._collected_data.get(task_id, []))
 
     def clear_collected_data(self, task_id: str) -> None:
         """清除已采集的数据"""
         if task_id in self._collected_data:
-            self._collected_data[task_id] = []
+            self._collected_data[task_id] = deque(maxlen=_MAX_COLLECTED_PER_TASK)
 
     @property
     def is_running(self) -> bool:

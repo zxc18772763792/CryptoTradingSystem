@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 import pandas as pd
 from loguru import logger
@@ -139,7 +141,13 @@ class SecondLevelBackfillManager:
 
         while since_ms < end_ms and loops < max_loops:
             loops += 1
-            batch = await fetch_trades(symbol, since=since_ms, limit=limit)
+            # Bound each REST page so a stalled socket can't hang the backfill
+            # window indefinitely (the outer _run loop treats a raise as a
+            # retryable window error).
+            batch = await asyncio.wait_for(
+                fetch_trades(symbol, since=since_ms, limit=limit),
+                timeout=45.0,
+            )
             if not batch:
                 break
 
@@ -211,11 +219,14 @@ class SecondLevelBackfillManager:
         while since_ms < end_ms and loops < max_loops:
             loops += 1
             try:
-                batch = await connector.get_klines(
-                    symbol=symbol,
-                    timeframe="1s",
-                    since=datetime.fromtimestamp(since_ms / 1000),
-                    limit=limit,
+                batch = await asyncio.wait_for(
+                    connector.get_klines(
+                        symbol=symbol,
+                        timeframe="1s",
+                        since=datetime.fromtimestamp(since_ms / 1000, tz=timezone.utc),
+                        limit=limit,
+                    ),
+                    timeout=45.0,
                 )
             except Exception:
                 return pd.DataFrame()
@@ -307,13 +318,33 @@ class SecondLevelBackfillManager:
                 before = len(old)
                 merged = pd.concat([old, write_df])
                 merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-                merged.to_parquet(fp)
+                self._atomic_write_parquet(merged, fp)
                 count += max(0, len(merged) - before)
             else:
-                write_df.to_parquet(fp)
+                self._atomic_write_parquet(write_df, fp)
                 count += len(write_df)
 
         return count
+
+    @staticmethod
+    def _atomic_write_parquet(frame: pd.DataFrame, fp: Path) -> None:
+        """Write parquet via a unique temp file + atomic os.replace.
+
+        Prevents the load path / other backfill tasks from observing a
+        half-written partition file (which previously caused silent data loss
+        for the affected day).
+        """
+        tmp_path = fp.with_name(f"{fp.name}.{uuid4().hex}.tmp")
+        try:
+            frame.to_parquet(tmp_path)
+            os.replace(tmp_path, fp)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise
 
     async def _run(self, task_id: str) -> None:
         task = self._tasks.get(task_id)
@@ -350,7 +381,9 @@ class SecondLevelBackfillManager:
                     )
                     bars_df = self._trades_to_1s(trades)
 
-                inserted = self._save_parts(task.exchange, task.symbol, bars_df)
+                inserted = await asyncio.to_thread(
+                    self._save_parts, task.exchange, task.symbol, bars_df
+                )
 
                 task.total_trades += len(trades)
                 task.total_bars += int(len(bars_df))

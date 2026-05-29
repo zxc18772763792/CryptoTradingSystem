@@ -827,6 +827,23 @@ def run_circuit_breaker_checks(
     if account_equity is None:
         account_equity = _resolve_account_equity()
 
+    # Per-strategy drawdown is measured against the capital the strategy is
+    # actually allocated (equity x allocation), NOT the whole portfolio. Using
+    # total equity made the per-strategy breaker ~1/alloc too loose: a strategy
+    # sized at DEFAULT_STRATEGY_ALLOCATION had to lose a large multiple of its own
+    # book before hitting the threshold. Mirror the allocation risk_manager uses
+    # for position sizing (allocated_capital = equity * allocation).
+    try:
+        _strategy_alloc = float(getattr(settings, "DEFAULT_STRATEGY_ALLOCATION", 0.15) or 0.15)
+    except Exception:
+        _strategy_alloc = 0.15
+    _strategy_alloc = min(1.0, max(0.01, _strategy_alloc))
+    per_strategy_base_capital = (
+        float(account_equity) * _strategy_alloc
+        if account_equity and float(account_equity) > 0
+        else None
+    )
+
     breaker = circuit_breaker
     if not breaker.enabled:
         return {"enabled": False, "skipped": True}
@@ -845,7 +862,7 @@ def run_circuit_breaker_checks(
 
     strat_dds = evaluate_strategy_drawdowns(
         trade_history,
-        base_capital=float(account_equity or 0.0) if account_equity else None,
+        base_capital=per_strategy_base_capital,
         active_strategy_names=active_names,
         runtime_mode=runtime_mode if not history_was_supplied else None,
     )
@@ -860,7 +877,7 @@ def run_circuit_breaker_checks(
         if active_names is not None:
             full_strategy_dds = evaluate_strategy_drawdowns(
                 trade_history,
-                base_capital=float(account_equity or 0.0) if account_equity else None,
+                base_capital=per_strategy_base_capital,
                 active_strategy_names=None,
                 runtime_mode=runtime_mode if not history_was_supplied else None,
             )

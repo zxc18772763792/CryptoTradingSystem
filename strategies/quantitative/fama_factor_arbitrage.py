@@ -336,12 +336,25 @@ class FamaFactorArbitrageStrategy(StrategyBase):
             },
         )
 
-    async def _load_universe_frames(self, universe: List[str]) -> Dict[str, pd.DataFrame]:
+    async def _load_universe_frames(
+        self, universe: List[str], now: Optional[datetime] = None
+    ) -> Dict[str, pd.DataFrame]:
         exchange = str(self.params.get("exchange", "binance")).strip().lower()
         timeframe = str(self.params.get("factor_timeframe", "1h")).strip().lower()
         lookback = max(120, int(self.params.get("lookback_bars", 720)))
         min_rows = max(80, int(self.params.get("min_symbol_bars", 300)))
         max_symbols = max(8, int(self.params.get("max_symbols", 100)))
+
+        # Bar size (seconds) used to drop the still-forming last candle so factor
+        # scores / the long-short basket are computed only on completed bars.
+        _tf_sec = 0
+        if len(timeframe) >= 2 and timeframe[:-1].isdigit():
+            _tf_sec = int(timeframe[:-1]) * {
+                "s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800
+            }.get(timeframe[-1], 0)
+        anchor = pd.Timestamp(now or datetime.now(timezone.utc))
+        if anchor.tzinfo is None:
+            anchor = anchor.tz_localize("UTC")
 
         out: Dict[str, pd.DataFrame] = {}
         for symbol in universe[:max_symbols]:
@@ -357,6 +370,15 @@ class FamaFactorArbitrageStrategy(StrategyBase):
                 continue
             tail.index = pd.to_datetime(tail.index)
             tail = tail.sort_index()
+            if _tf_sec > 0 and len(tail) > 1:
+                try:
+                    last_ts = pd.Timestamp(tail.index[-1])
+                    if last_ts.tzinfo is None:
+                        last_ts = last_ts.tz_localize("UTC")
+                    if last_ts + pd.Timedelta(seconds=_tf_sec) > anchor:
+                        tail = tail.iloc[:-1]
+                except Exception:
+                    pass
             if "close" not in tail.columns or "volume" not in tail.columns:
                 continue
             out[symbol] = tail
@@ -375,7 +397,7 @@ class FamaFactorArbitrageStrategy(StrategyBase):
         if not self._is_rebalance_due(now):
             return []
 
-        frames = await self._load_universe_frames(universe)
+        frames = await self._load_universe_frames(universe, now=now)
         plan = await asyncio.to_thread(
             _build_fama_rebalance_plan,
             self.name,

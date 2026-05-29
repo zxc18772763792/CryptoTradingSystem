@@ -5,12 +5,14 @@ import copy
 import hashlib
 import json
 import math
+import os
 import subprocess
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+from uuid import uuid4
 
 import httpx
 import numpy as np
@@ -1288,19 +1290,34 @@ async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd
     target = _parquet_path(exchange, symbol, timeframe)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    merged = _normalize_kline_frame_for_compare(df)
-    merged = merged.sort_index()
+    def _merge_and_write() -> None:
+        # Runs on a worker thread: the read/concat/write is synchronous disk IO
+        # (large 1m/1s history files) and must not block the event loop, which
+        # would stall API/WS traffic for ALL clients during a chart refresh.
+        merged = _normalize_kline_frame_for_compare(df)
+        merged = merged.sort_index()
+        for symbol_root in candidate_symbol_dirs(Path(settings.DATA_STORAGE_PATH), exchange, symbol):
+            existing_path = symbol_root / f"{timeframe}.parquet"
+            if not existing_path.exists():
+                continue
+            existing = pd.read_parquet(existing_path)
+            existing = _normalize_kline_frame_for_compare(existing)
+            merged = pd.concat([existing, merged])
+        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+        # Atomic publish so a concurrent reader never sees a half-written file.
+        tmp_path = target.with_name(f"{target.name}.{uuid4().hex}.tmp")
+        try:
+            merged.to_parquet(tmp_path)
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise
 
-    for symbol_root in candidate_symbol_dirs(Path(settings.DATA_STORAGE_PATH), exchange, symbol):
-        existing_path = symbol_root / f"{timeframe}.parquet"
-        if not existing_path.exists():
-            continue
-        existing = pd.read_parquet(existing_path)
-        existing = _normalize_kline_frame_for_compare(existing)
-        merged = pd.concat([existing, merged])
-    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-
-    merged.to_parquet(target)
+    await asyncio.to_thread(_merge_and_write)
 
 
 async def _safe_exchange_call(

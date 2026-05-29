@@ -1283,7 +1283,9 @@ async def enqueue_llm_tasks(news_items: List[Dict[str, Any]], min_importance: in
     return {"queued_count": queued, "requeued_count": requeued, "skipped_count": skipped}
 
 
-async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
+async def claim_llm_tasks(
+    limit: int = 10, exclude_providers: Optional[List[str]] = None
+) -> List[Dict[str, Any]]:
     """Claim LLM tasks for processing, respecting retry backoff."""
     max_rows = max(1, min(int(limit or 10), 100))
     now = datetime.now(timezone.utc)
@@ -1315,19 +1317,24 @@ async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
                 row.next_retry_at = now
                 row.last_error = f"reclaimed stale running task after {running_timeout_sec}s"
 
-        # Only claim tasks that are not in backoff period
+        # Only claim tasks that are not in backoff period, and exclude providers
+        # currently in rate-limit backoff so their high-priority tasks aren't
+        # repeatedly claimed+requeued (inflating attempt_count) and starving
+        # healthy providers within the batch budget.
+        _claim_conditions = [
+            NewsLLMTask.status.in_(["pending", "retry"]),
+            or_(
+                NewsLLMTask.next_retry_at.is_(None),
+                NewsLLMTask.next_retry_at <= now,
+            ),
+        ]
+        _exclude_set = {str(p) for p in (exclude_providers or []) if p}
+        if _exclude_set:
+            _claim_conditions.append(NewsLLMTask.source.notin_(_exclude_set))
         rows = (
             await session.execute(
                 select(NewsLLMTask)
-                .where(
-                    and_(
-                        NewsLLMTask.status.in_(["pending", "retry"]),
-                        or_(
-                            NewsLLMTask.next_retry_at.is_(None),
-                            NewsLLMTask.next_retry_at <= now,
-                        ),
-                    )
-                )
+                .where(and_(*_claim_conditions))
                 .order_by(NewsLLMTask.priority.desc(), NewsLLMTask.created_at.asc())
                 .limit(max_rows)
             )
@@ -1426,11 +1433,20 @@ async def finish_llm_tasks(
 
                 # Rate limited - set next_retry_at with exponential backoff
                 if is_rate_limited or error_type == "rate_limit":
-                    backoff_seconds = min(300, 30 * (2 ** (attempt - 1)))  # Max 5 min backoff
-                    row.next_retry_at = now + timedelta(seconds=backoff_seconds)
-                    row.last_rate_limit_at = now
-                    row.status = "retry"
-                    row.last_error = f"Rate limited, retry after {backoff_seconds}s: {error or '429'}"
+                    if attempt >= 8:
+                        # Terminal cap: a task whose provider returns persistent 429
+                        # must not churn forever (re-claimed -> requeued every poll),
+                        # permanently occupying the head of the priority queue and
+                        # starving healthy providers. Give up after enough attempts.
+                        row.status = "failed"
+                        row.last_error = f"Rate limited, gave up after {attempt} attempts: {error or '429'}"
+                        row.finished_at = now
+                    else:
+                        backoff_seconds = min(300, 30 * (2 ** (attempt - 1)))  # Max 5 min backoff
+                        row.next_retry_at = now + timedelta(seconds=backoff_seconds)
+                        row.last_rate_limit_at = now
+                        row.status = "retry"
+                        row.last_error = f"Rate limited, retry after {backoff_seconds}s: {error or '429'}"
                 # Timeout errors get more attempts (network issues are transient)
                 elif error_type == "timeout" and attempt >= 5:
                     row.status = "failed"
@@ -1832,6 +1848,19 @@ async def get_provider_backoff(provider: str) -> Optional[datetime]:
             _provider_rate_limit_backoff.pop(provider, None)
             return None
         return backoff
+
+
+async def get_backed_off_providers() -> List[str]:
+    """Return providers currently in active rate-limit backoff (and prune expired).
+
+    Used by the worker to exclude them from claim_llm_tasks up-front.
+    """
+    now = datetime.now(timezone.utc)
+    async with _get_provider_rate_limit_lock():
+        expired = [p for p, until in _provider_rate_limit_backoff.items() if until <= now]
+        for p in expired:
+            _provider_rate_limit_backoff.pop(p, None)
+        return [p for p, until in _provider_rate_limit_backoff.items() if until > now]
 
 
 async def build_daily_report(day: date) -> Dict[str, Any]:

@@ -102,12 +102,34 @@ def _state_path_or_default(app: FastAPI, attr: str, default: Path) -> Path:
     return default
 
 
+def _prune_research_jobs_inplace(jobs: Dict[str, Any], *, max_finished: int = 200) -> None:
+    """Bound the research_jobs dict: keep all active jobs + the most-recent
+    `max_finished` finished ones. Finished/cancelled/failed jobs otherwise
+    accumulate forever (only delete_proposal pruned them), growing the in-memory
+    dict and the O(n) full-file rewrite on every persist.
+    """
+    if not isinstance(jobs, dict):
+        return
+    active_states = {"pending", "running", "queued"}
+    finished_ids = [
+        jid for jid, job in jobs.items()
+        if str((job or {}).get("status") or "").lower() not in active_states
+    ]
+    overflow = len(finished_ids) - max(0, int(max_finished))
+    if overflow <= 0:
+        return
+    for jid in finished_ids[:overflow]:  # oldest finished first (insertion order)
+        jobs.pop(jid, None)
+
+
 def _persist_research_jobs(app: FastAPI) -> None:
     try:
         base_dir = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai").resolve()
         path = _state_path_or_default(app, "ai_research_jobs_path", base_dir / "research_jobs.json")
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = dict(getattr(app.state, "research_jobs", {}) or {})
+        jobs_dict = getattr(app.state, "research_jobs", {}) or {}
+        _prune_research_jobs_inplace(jobs_dict)
+        data = dict(jobs_dict)
         tmp_path = path.with_suffix(path.suffix + ".tmp")
         tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(str(tmp_path), str(path))

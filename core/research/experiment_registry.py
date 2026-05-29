@@ -7,6 +7,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Dict, Generic, List, Optional, Type, TypeVar
+from uuid import uuid4
 
 from core.ai.proposal_schemas import ResearchProposal
 from core.research.experiment_schemas import (
@@ -27,7 +28,11 @@ def _replace_with_retry(tmp_path: Path, target_path: Path) -> None:
         try:
             os.replace(str(tmp_path), str(target_path))
             return
-        except PermissionError:
+        except OSError:
+            # On Windows os.replace over a file held open by another handle most
+            # often raises PermissionError (WinError 5), but transient AV/indexer
+            # locks can surface as other OSError subtypes. Retry all of them so a
+            # flush is not aborted (which would leave a proposal/registry mid-state).
             if attempt >= attempts - 1:
                 raise
             time.sleep(delay)
@@ -87,7 +92,13 @@ class _JsonRegistry(Generic[ModelT]):
                 )
             ]
             content = json.dumps({self.root_key: rows}, ensure_ascii=False, indent=2)
-            tmp_path = self.path.with_suffix(".tmp")
+            # Unique per-writer temp name: if another process (e.g. standalone ops
+            # service) writes the same registry dir, a shared ".tmp" could be
+            # interleaved into a torn file that then fails json.loads on next boot.
+            # Atomic os.replace of a per-writer temp avoids the corruption (a lost
+            # update is still possible without a cross-process lock, but not a
+            # half-written file).
+            tmp_path = self.path.with_name(f"{self.path.name}.{os.getpid()}.{uuid4().hex}.tmp")
             tmp_path.write_text(content, encoding="utf-8")
             # os.replace is atomic on the same filesystem on both POSIX and Windows
             _replace_with_retry(tmp_path, self.path)
@@ -206,7 +217,13 @@ class LifecycleRegistry:
                 for item in sorted(self._load(), key=lambda row: row.ts, reverse=True)
             ]
             content = json.dumps({"lifecycle": rows}, ensure_ascii=False, indent=2)
-            tmp_path = self.path.with_suffix(".tmp")
+            # Unique per-writer temp name: if another process (e.g. standalone ops
+            # service) writes the same registry dir, a shared ".tmp" could be
+            # interleaved into a torn file that then fails json.loads on next boot.
+            # Atomic os.replace of a per-writer temp avoids the corruption (a lost
+            # update is still possible without a cross-process lock, but not a
+            # half-written file).
+            tmp_path = self.path.with_name(f"{self.path.name}.{os.getpid()}.{uuid4().hex}.tmp")
             tmp_path.write_text(content, encoding="utf-8")
             _replace_with_retry(tmp_path, self.path)
 
