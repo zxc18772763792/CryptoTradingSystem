@@ -3680,6 +3680,12 @@ summary:
   - `pytest tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py -q`，`24 passed in 3.82s`。
   - `python -m py_compile scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py` 通过。
   - `git diff --check -- scripts/selfcheck_market_ws_shadow.py scripts/evaluate_market_ws_shadow_report.py` 通过。
+- 2026-05-30 01:14 +08:00 更新：`dd2d8ad Require configured WS in shadow checks` 已让 selfcheck 在 `mode != off` 时每个采样点都要求 `configured_enabled=true`，并让最终 evaluator 校验 `final_configured_enabled=true`，避免只看派生 `enabled` 而漏掉配置源被关闭的情况。
+- 验证：
+  - `pytest tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py -q`，`26 passed in 4.03s`。
+  - `python -m py_compile scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py` 通过。
+  - `git diff --check -- scripts/selfcheck_market_ws_shadow.py scripts/evaluate_market_ws_shadow_report.py tests/test_market_ws_shadow_selfcheck.py tests/test_market_ws_shadow_report_eval.py` 通过。
+  - 说明：该加固不改变已经在运行的第十一轮 selfcheck 进程；它适用于后续重新启动并加载当前代码的 paper/live shadow 长跑和最终 evaluator。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
