@@ -3746,6 +3746,14 @@ summary:
   - `[PAPER] Order created`: `2`
 - 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-05-30 00:44 +08:00 轻量门禁复核：
+
+- 第十一轮仍在运行时，仅运行不接触服务进程的轻量测试/静态扫描：
+  - `pytest tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_authority_static.py -q`，`10 passed in 4.05s`。
+  - `python -m py_compile scripts\precheck_market_ws_live_shadow.py scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_authority_static.py` 通过。
+  - `rg -n "\.get_ticker\(" strategies core\trading core\utils` 无命中，`rg` exit code 为 `1`，符合预期。
+- 当前判断不变：这些只证明工具和静态门禁仍通过，不能替代第十一轮最终 JSON/evaluator，也不能作为进入 Level 2 的依据。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
