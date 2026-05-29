@@ -3820,6 +3820,54 @@ summary:
   - `[PAPER] Order created`: `2`
 - 当前判断不变：运行中证据继续健康，但仍必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 未最终通过前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-05-30 01:05 +08:00 第十一轮继续观察：
+
+- 第十一轮 selfcheck 仍在运行，最终 JSON/stderr 仍为 0 字节。
+- service stderr 新增一次 Binance REST `get_ticker(BTC/USDT)` transient 失败，随后 `exchange_manager: binance reconnected (fast path)`；WS feed/hub 未出现 timeout/error。
+- `/api/status`：`status=running`、`trading_mode=paper`、`paper_trading=true`、`exchange_status.binance=true`。
+- `/api/market-data/status`：
+  - `market_ws.mode=shadow`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.feed_watch_attempt_count=18416`
+  - `market_ws.feed_watch_timeout_count=0`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.feed_status.exchanges.binance.last_symbols=["BTC/USDT","ETH/USDT"]`
+  - `market_ws.ws_tick_count=18415`
+  - `market_ws.rest_snapshot_count=896`
+  - `market_ws.shadow_compare_count=312`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.stale_symbol_count=2`，来自 Gate REST snapshot 旧快照，不计作 WS stale 门禁。
+  - `market_ws.last_tick_age_ms=116`
+  - `market_ws.shadow_max_abs_diff_bps=12.844398929016815`
+  - `market_ws.shadow_last_compare.abs_diff_bps=1.9658048250683902`
+  - `symbols.binance.BTC/USDT.source=ws`、`is_stale=false`、`age_ms=124`
+  - `symbols.binance.ETH/USDT.source=ws`、`is_stale=false`、`age_ms=116`
+- 服务 stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `7`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `0`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `2`
+  - `Failed to persist positions`: `4`
+  - `Live kline fetch timed out`: `8`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `7`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `2`
+- 当前判断不变：这是恢复型 REST 旁路事件；WS feed/hub 和 shadow compare 继续健康。最终 selfcheck JSON/evaluator 通过前，不进入 Level 2 live shadow，不开启 `ui_primary`。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
