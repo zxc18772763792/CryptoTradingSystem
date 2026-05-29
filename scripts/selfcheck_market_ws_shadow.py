@@ -183,8 +183,16 @@ def _evaluate_samples(
             errors.append(f"{prefix}: /api/status not running")
         if sample.get("market_status_code") != 200:
             errors.append(f"{prefix}: /api/market-data/status failed")
-        if runtime == "paper" and not _as_bool(sample.get("paper_trading")):
-            errors.append(f"{prefix}: expected paper runtime")
+        trading_mode = str(sample.get("trading_mode") or "").strip().lower()
+        paper_trading = _as_bool(sample.get("paper_trading"))
+        if runtime == "paper":
+            if not paper_trading or (trading_mode and trading_mode != "paper"):
+                errors.append(f"{prefix}: expected paper runtime")
+        elif runtime == "live":
+            if paper_trading or trading_mode != "live":
+                errors.append(f"{prefix}: expected live runtime")
+        elif runtime and trading_mode != runtime:
+            errors.append(f"{prefix}: expected runtime {runtime}, got {sample.get('trading_mode')!r}")
         if str(sample.get("mode") or "").strip().lower() != mode:
             errors.append(f"{prefix}: expected market ws mode {mode}, got {sample.get('mode')!r}")
         if mode != "off" and not _as_bool(sample.get("enabled")):
@@ -288,6 +296,8 @@ def _evaluate_samples(
             default=0,
         ),
         "final_mode": samples[-1].get("mode") if samples else None,
+        "final_trading_mode": samples[-1].get("trading_mode") if samples else None,
+        "final_paper_trading": samples[-1].get("paper_trading") if samples else None,
         "final_enabled": samples[-1].get("enabled") if samples else None,
         "final_feed_healthy": samples[-1].get("feed_healthy") if samples else None,
         "final_ws_hub_healthy": samples[-1].get("ws_hub_healthy") if samples else None,
