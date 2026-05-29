@@ -136,6 +136,27 @@ def test_market_ws_shadow_report_eval_passes_live_runtime_summary():
     assert result["summary"]["final_paper_trading"] is False
 
 
+def test_market_ws_shadow_report_eval_keeps_legacy_paper_summary_compatible_by_default():
+    result = _evaluate(
+        report=_report(final_trading_mode=None, final_paper_trading=None),
+    )
+
+    assert result["ok"] is True
+    assert result["errors"] == []
+
+
+def test_market_ws_shadow_report_eval_can_require_exact_final_runtime_fields():
+    result = _evaluate(
+        report=_report(final_trading_mode=None, final_paper_trading=None),
+        require_final_runtime_fields=True,
+    )
+
+    assert result["ok"] is False
+    assert "final_trading_mode is missing" in result["errors"]
+    assert "final_paper_trading is missing" in result["errors"]
+    assert "final runtime is not paper" in result["errors"]
+
+
 def test_market_ws_shadow_report_eval_exposes_diagnostic_log_counts_without_failing():
     result = _evaluate(
         diagnostic_log_counts={
