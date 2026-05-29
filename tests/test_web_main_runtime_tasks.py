@@ -291,3 +291,65 @@ def test_guarded_startup_does_not_sync_when_live_is_allowed(monkeypatch):
 
     assert updated is False
     assert calls == []
+
+
+def test_startup_syncs_main_account_to_effective_live_mode(monkeypatch):
+    mode_calls = []
+    auto_calls = []
+
+    monkeypatch.setattr(
+        web_main.account_manager,
+        "set_mode",
+        lambda account_id, mode: mode_calls.append((account_id, mode)) or True,
+    )
+    monkeypatch.setattr(
+        web_main.account_manager,
+        "set_mode_for_auto_strategy_accounts",
+        lambda mode: auto_calls.append(mode) or 0,
+    )
+
+    result = web_main._sync_startup_account_modes(
+        StartupModeDecision(
+            configured_mode="live",
+            persisted_mode="paper",
+            effective_mode="live",
+            source="configured",
+            blocked_persisted_live_restore=False,
+        )
+    )
+
+    assert result["main_updated"] is True
+    assert result["auto_strategy_accounts_updated"] == 0
+    assert mode_calls == [("main", "live")]
+    assert auto_calls == []
+
+
+def test_startup_syncs_auto_strategy_accounts_to_paper(monkeypatch):
+    mode_calls = []
+    auto_calls = []
+
+    monkeypatch.setattr(
+        web_main.account_manager,
+        "set_mode",
+        lambda account_id, mode: mode_calls.append((account_id, mode)) or True,
+    )
+    monkeypatch.setattr(
+        web_main.account_manager,
+        "set_mode_for_auto_strategy_accounts",
+        lambda mode: auto_calls.append(mode) or 3,
+    )
+
+    result = web_main._sync_startup_account_modes(
+        StartupModeDecision(
+            configured_mode="paper",
+            persisted_mode="live",
+            effective_mode="paper",
+            source="guarded_configured",
+            blocked_persisted_live_restore=True,
+        )
+    )
+
+    assert result["main_updated"] is True
+    assert result["auto_strategy_accounts_updated"] == 3
+    assert mode_calls == [("main", "paper")]
+    assert auto_calls == ["paper"]

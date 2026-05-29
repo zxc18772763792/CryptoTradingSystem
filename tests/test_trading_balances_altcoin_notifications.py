@@ -13,6 +13,10 @@ def _build_test_client() -> TestClient:
     return TestClient(app)
 
 
+def _ops_headers() -> dict[str, str]:
+    return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
+
+
 def _configure_common_runtime(monkeypatch) -> None:
     monkeypatch.setattr(
         trading_api.execution_engine, "get_trading_mode", lambda: "paper"
@@ -78,6 +82,7 @@ def _patch_altcoin_notification_context(monkeypatch) -> None:
 def test_trading_balances_route_defers_altcoin_context_notification_evaluation(
     monkeypatch,
 ):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     client = _build_test_client()
     _configure_common_runtime(monkeypatch)
     monkeypatch.setattr(
@@ -109,7 +114,7 @@ def test_trading_balances_route_defers_altcoin_context_notification_evaluation(
     )
     _patch_altcoin_notification_context(monkeypatch)
 
-    response = client.get("/api/trading/balances")
+    response = client.get("/api/trading/balances", headers=_ops_headers())
     assert response.status_code == 200
     payload = response.json()
 
@@ -121,6 +126,7 @@ def test_trading_balances_route_defers_altcoin_context_notification_evaluation(
 def test_trading_balances_cached_response_defers_altcoin_notifications(
     monkeypatch,
 ):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     client = _build_test_client()
     _configure_common_runtime(monkeypatch)
 
@@ -154,7 +160,7 @@ def test_trading_balances_cached_response_defers_altcoin_notifications(
         },
     }
 
-    response = client.get("/api/trading/balances")
+    response = client.get("/api/trading/balances", headers=_ops_headers())
     assert response.status_code == 200
     payload = response.json()
 
@@ -169,6 +175,7 @@ def test_trading_balances_cached_response_defers_altcoin_notifications(
 def test_trading_balances_timeout_fallback_defers_altcoin_notifications(
     monkeypatch,
 ):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     client = _build_test_client()
     _configure_common_runtime(monkeypatch)
 
@@ -199,7 +206,7 @@ def test_trading_balances_timeout_fallback_defers_altcoin_notifications(
     monkeypatch.setattr(trading_balances, "_BALANCE_RESPONSE_TIMEOUT_SEC", 0.01)
     _patch_altcoin_notification_context(monkeypatch)
 
-    response = client.get("/api/trading/balances")
+    response = client.get("/api/trading/balances", headers=_ops_headers())
     assert response.status_code == 200
     payload = response.json()
 

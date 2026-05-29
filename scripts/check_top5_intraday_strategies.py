@@ -23,7 +23,6 @@ CORE_INTRADAY_STRATEGIES = [
     "ResidualMom48hStrategy",
     "Ret24hReversalStrategy",
     "RelRet24hReversalStrategy",
-    "ResidualMom24hStrategy",
     "CloseLocation48hStrategy",
 ]
 

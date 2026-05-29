@@ -19,7 +19,6 @@ INTRADAY_CROSS_SECTION_STRATEGY_IDS = [
     "ResidualMom48hStrategy",
     "Ret24hReversalStrategy",
     "RelRet24hReversalStrategy",
-    "ResidualMom24hStrategy",
     "CloseLocation48hStrategy",
     "ReturnEntropy4hStrategy",
     "FalseBreakoutSupply24hStrategy",
@@ -104,13 +103,6 @@ INTRADAY_CROSS_SECTION_SPECS: Dict[str, IntradayCrossSectionSpec] = {
         lookback_bars=288,
         direction="low",
         description="24h relative-market return reversal.",
-    ),
-    "ResidualMom24hStrategy": IntradayCrossSectionSpec(
-        strategy_id="residual_mom_24h",
-        factor_name="residual_return",
-        lookback_bars=288,
-        direction="low",
-        description="24h residual momentum placeholder, currently equal to relative-market return.",
     ),
     "CloseLocation48hStrategy": IntradayCrossSectionSpec(
         strategy_id="close_location_48h",
@@ -1558,13 +1550,6 @@ class RelRet24hReversalStrategy(IntradayCrossSectionStrategyBase):
     spec_key = "RelRet24hReversalStrategy"
 
     def __init__(self, name: str = "RelRet24hReversalStrategy", params: Optional[Dict[str, Any]] = None):
-        super().__init__(name=name, params=params)
-
-
-class ResidualMom24hStrategy(IntradayCrossSectionStrategyBase):
-    spec_key = "ResidualMom24hStrategy"
-
-    def __init__(self, name: str = "ResidualMom24hStrategy", params: Optional[Dict[str, Any]] = None):
         super().__init__(name=name, params=params)
 
 

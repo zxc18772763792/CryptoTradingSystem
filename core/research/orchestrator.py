@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import re
 import secrets
@@ -107,7 +108,9 @@ def _persist_research_jobs(app: FastAPI) -> None:
         path = _state_path_or_default(app, "ai_research_jobs_path", base_dir / "research_jobs.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         data = dict(getattr(app.state, "research_jobs", {}) or {})
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(str(tmp_path), str(path))
     except Exception:
         # best-effort: do not break the main research flow
         pass

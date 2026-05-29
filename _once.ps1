@@ -150,6 +150,16 @@ function Test-TruthyText {
     return $Value.Trim().ToLower() -in @("1", "true", "yes", "on")
 }
 
+function Get-OpsAuthHeaders {
+    $headers = @{}
+    $opsToken = [string]($env:OPS_TOKEN)
+    if (-not [string]::IsNullOrWhiteSpace($opsToken)) {
+        $headers["X-OPS-TOKEN"] = $opsToken.Trim()
+        $headers["X-OPS-CALLER"] = "web_startup"
+    }
+    return $headers
+}
+
 function Get-RequestedWorkerLabels {
     param(
         [bool]$NewsWorker,
@@ -436,7 +446,12 @@ while ((Get-Date) -lt $statusDeadline) {
                 $healthReadyAt = Get-Date
             }
             try {
-                $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec $statusTimeoutSec
+                $statusHeaders = Get-OpsAuthHeaders
+                if ($statusHeaders.Count -gt 0) {
+                    $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -Headers $statusHeaders -TimeoutSec $statusTimeoutSec
+                } else {
+                    $status = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/status" -TimeoutSec $statusTimeoutSec
+                }
             }
             catch {
                 $lastProbeError = $_.Exception.Message

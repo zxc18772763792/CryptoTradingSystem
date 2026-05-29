@@ -3,7 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from core.ai.proposal_schemas import ResearchProposal
-from core.research.experiment_registry import ProposalRegistry
+from core.research.experiment_registry import LifecycleRegistry, ProposalRegistry
+from core.research.experiment_schemas import LifecycleRecord
 
 
 def _proposal(proposal_id: str) -> ResearchProposal:
@@ -75,3 +76,40 @@ def test_registry_save_many_flushes_once(tmp_path, monkeypatch):
 
     assert calls["count"] == 1
     assert len(registry.list(limit=None)) == 3
+
+
+def test_registry_flush_does_not_reenter_public_list(tmp_path, monkeypatch):
+    registry = ProposalRegistry(tmp_path / "proposals.json")
+
+    def _fail_public_list(*_args, **_kwargs):
+        raise AssertionError("flush should not call public list() while holding the lock")
+
+    monkeypatch.setattr(registry, "list", _fail_public_list)
+
+    registry.save(_proposal("proposal-no-reenter"))
+
+    payload = json.loads((tmp_path / "proposals.json").read_text(encoding="utf-8"))
+    assert [row["proposal_id"] for row in payload["proposals"]] == ["proposal-no-reenter"]
+
+
+def test_lifecycle_flush_does_not_reenter_public_list(tmp_path, monkeypatch):
+    registry = LifecycleRegistry(tmp_path / "lifecycle.json")
+
+    def _fail_public_list(*_args, **_kwargs):
+        raise AssertionError("flush should not call public list() while holding the lock")
+
+    monkeypatch.setattr(registry, "list", _fail_public_list)
+
+    registry.append(
+        LifecycleRecord(
+            object_type="proposal",
+            object_id="proposal-no-reenter",
+            to_state="draft",
+            actor="test",
+            ts=datetime.now(timezone.utc),
+            reason="seed",
+        )
+    )
+
+    payload = json.loads((tmp_path / "lifecycle.json").read_text(encoding="utf-8"))
+    assert payload["lifecycle"][0]["object_id"] == "proposal-no-reenter"

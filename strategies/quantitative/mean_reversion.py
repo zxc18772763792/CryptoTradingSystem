@@ -190,7 +190,7 @@ class BollingerMeanReversionStrategy(StrategyBase):
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         """生成交易信号"""
-        if data.empty or len(data) < self.params["period"]:
+        if data.empty or len(data) < self.params["period"] + 1:
             return []
 
         signals = []

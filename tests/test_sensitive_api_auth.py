@@ -28,10 +28,12 @@ from web.api import (
     trading as trading_api,
     trading_analytics,
     trading_accounts,
+    trading_balances,
     trading_orders,
     trading_positions,
     trading_runtime,
 )
+from web import main as web_main
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -171,6 +173,7 @@ def test_loopback_ui_cookie_rejects_cross_port_origin(monkeypatch):
 
 
 def test_trading_stats_route_uses_short_ttl_cache(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     trading_runtime.invalidate_trading_stats_cache()
     counter = {"count": 0}
 
@@ -186,9 +189,9 @@ def test_trading_stats_route_uses_short_ttl_cache(monkeypatch):
     app = _build_app(("/api/trading", trading_runtime.router))
     client = TestClient(app)
 
-    first = client.get("/api/trading/stats")
-    second = client.get("/api/trading/stats")
-    forced = client.get("/api/trading/stats?force_refresh=true")
+    first = client.get("/api/trading/stats", headers=_ops_headers())
+    second = client.get("/api/trading/stats", headers=_ops_headers())
+    forced = client.get("/api/trading/stats?force_refresh=true", headers=_ops_headers())
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -543,6 +546,66 @@ def test_account_summary_requires_read_trading_state_permission(monkeypatch):
     )
     assert response.status_code == 200
     assert response.json()["accounts"] == []
+
+
+def test_sensitive_read_routes_are_dependency_gated():
+    expected = {
+        ("main", "GET", "/api/status"),
+        ("trading_balances", "GET", "/balances"),
+        ("trading_balances", "GET", "/balances/history"),
+        ("trading_analytics", "GET", "/analytics/overview"),
+        ("trading_analytics", "GET", "/analytics/performance"),
+        ("trading_analytics", "GET", "/analytics/risk-dashboard"),
+        ("trading_analytics", "GET", "/analytics/calendar"),
+        ("trading_analytics", "GET", "/analytics/microstructure"),
+        ("trading_analytics", "GET", "/market_microstructure"),
+        ("trading_analytics", "GET", "/analytics/behavior/report"),
+        ("trading_analytics", "GET", "/analytics/stoploss/policy"),
+        ("trading_analytics", "GET", "/analytics/equity/rebalance"),
+        ("trading_analytics", "GET", "/analytics/community/overview"),
+        ("trading_analytics", "GET", "/analytics/history/health"),
+        ("trading_analytics", "GET", "/analytics/history/status"),
+        ("trading_analytics", "GET", "/audit"),
+        ("trading_analytics", "GET", "/analytics/live-trade-review"),
+        ("trading_analytics", "GET", "/pnl/heatmap"),
+        ("trading_runtime", "GET", "/risk/report"),
+        ("trading_runtime", "GET", "/stats"),
+        ("trading_runtime", "GET", "/mode"),
+        ("trading_runtime", "GET", "/runtime/diagnostics"),
+        ("strategies", "GET", "/list"),
+        ("strategies", "GET", "/library"),
+        ("strategies", "GET", "/audit"),
+        ("strategies", "GET", "/summary"),
+        ("strategies", "GET", "/runtime"),
+        ("strategies", "GET", "/signals/aggregated"),
+        ("strategies", "GET", "/health/monitor"),
+        ("strategies", "GET", "/health"),
+        ("strategies", "GET", "/health-monitor"),
+        ("strategies", "GET", "/{name}"),
+        ("strategies", "GET", "/{name}/params/schema"),
+        ("strategies", "GET", "/{name}/sizing-preview"),
+        ("strategies", "GET", "/{name}/live-vs-backtest"),
+        ("strategies", "GET", "/{name}/signals"),
+        ("strategies", "GET", "/{name}/monitor-data"),
+        ("data", "GET", "/research/refresh/status"),
+    }
+    routers = {
+        "main": web_main.app.routes,
+        "trading_analytics": trading_analytics.router.routes,
+        "trading_balances": trading_balances.router.routes,
+        "trading_runtime": trading_runtime.router.routes,
+        "strategies": strategies.router.routes,
+        "data": data.router.routes,
+    }
+    gated = set()
+    for router_name, routes in routers.items():
+        for route in routes:
+            if not isinstance(route, APIRoute) or not route.dependencies:
+                continue
+            for method in route.methods or set():
+                gated.add((router_name, method, route.path))
+
+    assert expected <= gated
 
 
 def test_live_mode_confirm_requires_approve_live_permission_for_api_key(monkeypatch):

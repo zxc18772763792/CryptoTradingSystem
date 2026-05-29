@@ -5239,7 +5239,7 @@ async def get_research_symbols(exchange: str = "binance", include_major: bool = 
     return data
 
 
-@router.get("/research/refresh/status")
+@router.get("/research/refresh/status", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_research_refresh_status():
     return await asyncio.to_thread(_get_research_universe_refresh_status_sync)
 

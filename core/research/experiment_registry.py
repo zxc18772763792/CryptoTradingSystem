@@ -73,7 +73,19 @@ class _JsonRegistry(Generic[ModelT]):
         """D: Atomic write — write to .tmp then rename (same filesystem)."""
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            rows = [item.model_dump(mode="json") for item in self.list(limit=None)]
+            rows = [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    self._load().values(),
+                    key=lambda row: (
+                        getattr(row, "updated_at", None)
+                        or getattr(row, "created_at", None)
+                        or getattr(row, "ts", None),
+                        getattr(row, "created_at", None) or getattr(row, "ts", None),
+                    ),
+                    reverse=True,
+                )
+            ]
             content = json.dumps({self.root_key: rows}, ensure_ascii=False, indent=2)
             tmp_path = self.path.with_suffix(".tmp")
             tmp_path.write_text(content, encoding="utf-8")
@@ -189,7 +201,10 @@ class LifecycleRegistry:
         """D: Atomic write — write to .tmp then rename."""
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            rows = [item.model_dump(mode="json") for item in self.list(limit=None)]
+            rows = [
+                item.model_dump(mode="json")
+                for item in sorted(self._load(), key=lambda row: row.ts, reverse=True)
+            ]
             content = json.dumps({"lifecycle": rows}, ensure_ascii=False, indent=2)
             tmp_path = self.path.with_suffix(".tmp")
             tmp_path.write_text(content, encoding="utf-8")

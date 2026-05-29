@@ -124,6 +124,121 @@ def test_restore_strategies_from_db_passes_metadata(monkeypatch):
     assert register_mock.call_args.kwargs["metadata"]["proposal_id"] == "prop-restore"
 
 
+def test_restore_strategies_from_db_blocks_live_snapshots_in_paper_startup(monkeypatch):
+    from core.strategies import persistence
+
+    row = SimpleNamespace(
+        name="live_runtime_strategy",
+        type="MAStrategy",
+        params={
+            "user_params": {"exchange": "binance"},
+            "symbols": ["BTC/USDT"],
+            "timeframe": "15m",
+            "exchange": "binance",
+            "allocation": 0.15,
+            "state": "running",
+            "runtime_mode": "live",
+            "metadata": {"runtime_mode": "live"},
+        },
+        is_active=True,
+    )
+
+    class _FakeResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, stmt):
+            return _FakeResult()
+
+    register_mock = MagicMock(return_value=True)
+
+    monkeypatch.setattr(persistence, "_get_strategy_classes", lambda: {"MAStrategy": object})
+    monkeypatch.setattr(persistence, "async_session_maker", lambda: _FakeSession())
+    monkeypatch.setattr(persistence.strategy_manager, "get_strategy", lambda name: None)
+    monkeypatch.setattr(persistence.strategy_manager, "register_strategy", register_mock)
+    monkeypatch.setattr(persistence.strategy_manager, "start_strategy", AsyncMock(return_value=True))
+
+    result = asyncio.run(
+        persistence.restore_strategies_from_db(
+            startup_mode="paper",
+            allow_live_restore=False,
+        )
+    )
+
+    assert result["loaded"] == 1
+    assert result["restored"] == 0
+    assert {"name": "live_runtime_strategy", "reason": "live_restore_blocked_in_paper_startup"} in result["skipped"]
+    register_mock.assert_not_called()
+
+
+def test_restore_strategies_from_db_allows_live_snapshots_in_live_startup(monkeypatch):
+    from core.strategies import persistence
+
+    row = SimpleNamespace(
+        name="live_runtime_strategy",
+        type="MAStrategy",
+        params={
+            "user_params": {"exchange": "binance"},
+            "symbols": ["BTC/USDT"],
+            "timeframe": "15m",
+            "exchange": "binance",
+            "allocation": 0.15,
+            "state": "running",
+            "runtime_mode": "live",
+            "metadata": {"runtime_mode": "live"},
+        },
+        is_active=True,
+    )
+
+    class _FakeResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return [row]
+
+    class _FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, stmt):
+            return _FakeResult()
+
+    register_mock = MagicMock(return_value=True)
+    start_mock = AsyncMock(return_value=True)
+
+    monkeypatch.setattr(persistence, "_get_strategy_classes", lambda: {"MAStrategy": object})
+    monkeypatch.setattr(persistence, "async_session_maker", lambda: _FakeSession())
+    monkeypatch.setattr(persistence.strategy_manager, "get_strategy", lambda name: None)
+    monkeypatch.setattr(persistence.strategy_manager, "register_strategy", register_mock)
+    monkeypatch.setattr(persistence.strategy_manager, "start_strategy", start_mock)
+
+    result = asyncio.run(
+        persistence.restore_strategies_from_db(
+            startup_mode="live",
+            allow_live_restore=True,
+        )
+    )
+
+    assert result["restored"] == 1
+    assert result["started"] == 1
+    assert register_mock.call_args.kwargs["metadata"]["runtime_mode"] == "live"
+    start_mock.assert_awaited_once_with("live_runtime_strategy")
+
+
 def test_restore_strategies_from_db_starts_one_ai_research_duplicate(monkeypatch):
     from datetime import datetime, timezone
 

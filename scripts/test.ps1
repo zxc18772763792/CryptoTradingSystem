@@ -12,20 +12,8 @@ if ($pyVersion -ne "3.11") {
     Write-Warning "Current Python is $pyVersion. Recommended is 3.11."
 }
 
-$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD = "1"
-$hasAsyncioPlugin = $false
-python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('pytest_asyncio') else 1)"
-if ($LASTEXITCODE -eq 0) {
-    $hasAsyncioPlugin = $true
-}
-
-if ($hasAsyncioPlugin) {
-    python -m pytest -q -p pytest_asyncio tests
-}
-else {
-    Write-Warning "pytest-asyncio not installed in current environment, running tests without async plugin."
-    python -m pytest -q tests
-}
+Remove-Item Env:PYTEST_DISABLE_PLUGIN_AUTOLOAD -ErrorAction SilentlyContinue
+python -m pytest -q tests
 
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE

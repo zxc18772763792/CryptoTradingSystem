@@ -13,6 +13,7 @@ from web.api import trading_analytics
 
 
 def test_pnl_heatmap_route_passes_mode(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_analytics.router, prefix="/api/trading")
     client = TestClient(app)
@@ -34,7 +35,10 @@ def test_pnl_heatmap_route_passes_mode(monkeypatch):
 
     monkeypatch.setattr(trading_api, "get_pnl_heatmap", fake_heatmap)
 
-    response = client.get("/api/trading/pnl/heatmap?days=14&bucket=hour&mode=live")
+    response = client.get(
+        "/api/trading/pnl/heatmap?days=14&bucket=hour&mode=live",
+        headers={"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"},
+    )
     assert response.status_code == 200
     assert response.json()["days"] == 14
     assert response.json()["bucket"] == "hour"

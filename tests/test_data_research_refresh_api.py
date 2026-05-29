@@ -15,6 +15,8 @@ def _ops_headers() -> dict[str, str]:
 
 
 def test_research_refresh_status_route_returns_helper_payload(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+
     def fake_status():
         return {
             "task": {"exists": True, "state": "Ready", "state_label": "待命"},
@@ -24,7 +26,7 @@ def test_research_refresh_status_route_returns_helper_payload(monkeypatch):
     monkeypatch.setattr(data_api, "_get_research_universe_refresh_status_sync", fake_status)
 
     with TestClient(_build_app()) as client:
-        response = client.get("/api/data/research/refresh/status")
+        response = client.get("/api/data/research/refresh/status", headers=_ops_headers())
 
     assert response.status_code == 200
     assert response.json()["task"]["state_label"] == "待命"

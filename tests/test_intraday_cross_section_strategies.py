@@ -28,7 +28,6 @@ TOP5_STRATEGY_CLASSES = [
     "ResidualMom48hStrategy",
     "Ret24hReversalStrategy",
     "RelRet24hReversalStrategy",
-    "ResidualMom24hStrategy",
     "CloseLocation48hStrategy",
 ]
 SECOND_ROUND_STRATEGY_CLASSES = [
@@ -200,7 +199,6 @@ def test_rank_direction_mapping_for_existing_spread_strategies():
         "ResidualMom48hStrategy",
         "Ret24hReversalStrategy",
         "RelRet24hReversalStrategy",
-        "ResidualMom24hStrategy",
     ]:
         selection = cross_section_rank_select(factor, 0.4, 0.4, INTRADAY_CROSS_SECTION_SPECS[class_name].direction)
         assert selection["long_symbols"] == ["LOW1/USDT", "LOW2/USDT"]

@@ -11,6 +11,10 @@ from web.api import trading as trading_api
 from web.api import trading_analytics, trading_orders, trading_positions
 
 
+def _ops_headers() -> dict[str, str]:
+    return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
+
+
 def test_trading_session_name_returns_readable_chinese_labels():
     assert trading_api._session_name(datetime(2026, 1, 1, 0, tzinfo=timezone.utc)) == "亚盘"
     assert trading_api._session_name(datetime(2026, 1, 1, 8, tzinfo=timezone.utc)) == "欧盘"
@@ -80,6 +84,7 @@ def test_positions_close_route_bridges_to_service(monkeypatch):
 
 
 def test_analytics_overview_route_bridges_to_service(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_analytics.router, prefix="/api/trading")
     client = TestClient(app)
@@ -98,7 +103,8 @@ def test_analytics_overview_route_bridges_to_service(monkeypatch):
     monkeypatch.setattr(trading_api, "get_analytics_overview", fake_overview)
 
     response = client.get(
-        "/api/trading/analytics/overview?days=30&lookback=120&calendar_days=10&exchange=okx&symbol=ETH/USDT"
+        "/api/trading/analytics/overview?days=30&lookback=120&calendar_days=10&exchange=okx&symbol=ETH/USDT",
+        headers=_ops_headers(),
     )
     assert response.status_code == 200
     assert response.json() == {
@@ -113,6 +119,7 @@ def test_analytics_overview_route_bridges_to_service(monkeypatch):
 
 
 def test_analytics_overview_route_passes_mode_to_service(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_analytics.router, prefix="/api/trading")
     client = TestClient(app)
@@ -130,7 +137,10 @@ def test_analytics_overview_route_passes_mode_to_service(monkeypatch):
 
     monkeypatch.setattr(trading_api, "get_analytics_overview", fake_overview)
 
-    response = client.get("/api/trading/analytics/overview?mode=live")
+    response = client.get(
+        "/api/trading/analytics/overview?mode=live",
+        headers=_ops_headers(),
+    )
     assert response.status_code == 200
     assert response.json() == {"ok": True, "mode": "live"}
     assert captured["mode"] == "live"
@@ -142,6 +152,7 @@ def test_analytics_overview_route_passes_mode_to_service(monkeypatch):
 
 
 def test_risk_dashboard_route_passes_mode_to_service(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_analytics.router, prefix="/api/trading")
     client = TestClient(app)
@@ -155,13 +166,17 @@ def test_risk_dashboard_route_passes_mode_to_service(monkeypatch):
 
     monkeypatch.setattr(trading_api, "get_risk_dashboard", fake_risk_dashboard)
 
-    response = client.get("/api/trading/analytics/risk-dashboard?lookback=180&mode=paper")
+    response = client.get(
+        "/api/trading/analytics/risk-dashboard?lookback=180&mode=paper",
+        headers=_ops_headers(),
+    )
     assert response.status_code == 200
     assert response.json() == {"ok": True, "lookback": 180, "mode": "paper"}
     assert captured == {"lookback": 180, "mode": "paper"}
 
 
 def test_stoploss_policy_route_passes_mode_to_service(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_analytics.router, prefix="/api/trading")
     client = TestClient(app)
@@ -174,13 +189,17 @@ def test_stoploss_policy_route_passes_mode_to_service(monkeypatch):
 
     monkeypatch.setattr(trading_api, "get_stoploss_policy", fake_stoploss_policy)
 
-    response = client.get("/api/trading/analytics/stoploss/policy?mode=live")
+    response = client.get(
+        "/api/trading/analytics/stoploss/policy?mode=live",
+        headers=_ops_headers(),
+    )
     assert response.status_code == 200
     assert response.json() == {"ok": True, "mode": "live"}
     assert captured == {"mode": "live"}
 
 
 def test_analytics_history_status_route_bridges_to_service(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_analytics.router, prefix="/api/trading")
     client = TestClient(app)
@@ -195,7 +214,8 @@ def test_analytics_history_status_route_bridges_to_service(monkeypatch):
     monkeypatch.setattr(trading_api, "get_analytics_history_status", fake_status)
 
     response = client.get(
-        "/api/trading/analytics/history/status?exchange=okx&symbol=ETH/USDT"
+        "/api/trading/analytics/history/status?exchange=okx&symbol=ETH/USDT",
+        headers=_ops_headers(),
     )
     assert response.status_code == 200
     assert response.json() == {

@@ -1,6 +1,6 @@
 # Intraday Cross-Section Strategy Pack
 
-This pack adds five Binance USD-M 5m cross-sectional long/short strategy components to the existing strategy library.
+This pack originally added five Binance USD-M 5m cross-sectional long/short strategy components to the existing strategy library. As of 2026-05-29, `ResidualMom24hStrategy` was removed because it was identical to `RelRet24hReversalStrategy`; four components remain exported and registered.
 
 ## Common Trading Rules
 
@@ -21,7 +21,6 @@ This pack adds five Binance USD-M 5m cross-sectional long/short strategy compone
 | `ResidualMom48hStrategy` | `residual_mom_48h` | `close_t / close_{t-576} - 1 - market_ret_48h` | Bottom 20% | Top 20% |
 | `Ret24hReversalStrategy` | `ret_24h` | `close_t / close_{t-288} - 1` | Bottom 20% | Top 20% |
 | `RelRet24hReversalStrategy` | `rel_ret_24h` | `ret_24h - market_ret_24h` | Bottom 20% | Top 20% |
-| `ResidualMom24hStrategy` | `residual_mom_24h` | `ret_24h - market_ret_24h` | Bottom 20% | Top 20% |
 | `CloseLocation48hStrategy` | `close_location_48h` | `mean_576((close - low) / (high - low))` | Top 20% | Bottom 20% |
 
 For `close_location_48h`, zero-range bars use `0.5` to avoid infinity.
@@ -53,7 +52,6 @@ Use the existing backtest API/CLI path with `timeframe=5m`. Example strategy nam
 ResidualMom48hStrategy
 Ret24hReversalStrategy
 RelRet24hReversalStrategy
-ResidualMom24hStrategy
 CloseLocation48hStrategy
 ```
 
@@ -74,9 +72,9 @@ These are futures long/short components, not spot long-only systems. Before live
 - Watch turnover and cost drag; the 24h rebalance reduces churn but basket replacement can still be expensive.
 - Avoid treating these as independent alpha streams.
 
-The first four strategies are highly related because they all express 24h/48h cross-sectional weakness reversal. `rel_ret_24h` and `residual_mom_24h` are currently identical by definition, but the separate strategy ID is intentionally retained for compatibility and for a future beta-adjusted residual implementation.
+The first three strategies are highly related because they all express 24h/48h cross-sectional weakness reversal. The former `residual_mom_24h` variant was identical to `rel_ret_24h` and is no longer retained as a separate strategy ID. If a future beta-adjusted residual implementation is added, it should use a new spec whose factor differs from `rel_ret_24h`.
 
 Suggested live blend:
 
-- 24h/48h relative weakness reversal cluster: `residual_mom_48h`, `ret_24h`, `rel_ret_24h`, `residual_mom_24h`, total 60%-70%
+- 24h/48h relative weakness reversal cluster: `residual_mom_48h`, `ret_24h`, `rel_ret_24h`, total 60%-70%
 - Close-location control/continuation sleeve: `close_location_48h`, total 30%-40%

@@ -31,6 +31,7 @@ from strategies.factor_based.factor_strategies import (
 from strategies.quantitative.momentum import TrendFollowingStrategy
 from strategies.quantitative.pairs_trading import PairsTradingStrategy
 from strategies.technical.common_strategies import (
+    ADXTrendStrategy,
     StochasticStrategy,
     VWAPReversionStrategy,
 )
@@ -355,6 +356,30 @@ class TestStochasticEntryWindow:
         assert sells
         assert sells[0].metadata["k"] < strat.params["overbought"]
         assert sells[0].strength > 0.1
+        assert sells[0].stop_loss is not None and sells[0].stop_loss > sells[0].price
+        assert sells[0].take_profit is not None and sells[0].take_profit < sells[0].price
+
+
+class TestTechnicalSellProtection:
+    def test_adx_sell_signal_sets_symmetric_protection(self, monkeypatch):
+        closes = np.linspace(100.0, 90.0, 40)
+        df = _make_ohlcv(closes, high_offset=1.0, low_offset=1.0)
+        strat = ADXTrendStrategy(params={"period": 5, "adx_threshold": 25.0})
+
+        plus_di = pd.Series([10.0] * (len(df) - 2) + [30.0, 20.0], index=df.index)
+        minus_di = pd.Series([10.0] * (len(df) - 2) + [20.0, 30.0], index=df.index)
+        adx = pd.Series([30.0] * len(df), index=df.index)
+        monkeypatch.setattr(
+            strat,
+            "_adx",
+            lambda data, period: {"plus_di": plus_di, "minus_di": minus_di, "adx": adx},
+        )
+
+        signals = strat.generate_signals(df)
+        sells = [s for s in signals if s.signal_type == SignalType.SELL]
+        assert sells
+        assert sells[0].stop_loss is not None and sells[0].stop_loss > sells[0].price
+        assert sells[0].take_profit is not None and sells[0].take_profit < sells[0].price
 
 
 # --------------------------------------------------------------------------- #

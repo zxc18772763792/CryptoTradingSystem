@@ -113,6 +113,58 @@ def test_manual_order_does_not_open_local_position_when_live_order_is_unfilled(m
     assert notify_mock.await_args.args[0] == "manual_order_submitted"
 
 
+def test_live_reconcile_syncs_local_position_size_from_exchange(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    position_manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=0.10,
+        leverage=2.0,
+        account_id="main",
+        strategy="sync_demo",
+    )
+    connector = SimpleNamespace(
+        config=SimpleNamespace(default_type="future"),
+        get_positions=AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTCUSDT",
+                    "side": "long",
+                    "amount": 0.25,
+                    "entry_price": 105.0,
+                    "current_price": 110.0,
+                    "unrealizedPnl": 1.23,
+                    "leverage": 3.0,
+                }
+            ]
+        ),
+    )
+    notify_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(engine, "_ensure_exchange_connector", AsyncMock(return_value=connector))
+    monkeypatch.setattr(engine, "_notify_callbacks", notify_mock)
+
+    asyncio.run(engine._reconcile_local_positions_with_exchange())
+
+    updated = position_manager.get_position(
+        "binance",
+        "BTC/USDT",
+        account_id="main",
+        strategy="sync_demo",
+    )
+    assert updated is not None
+    assert updated.quantity == pytest.approx(0.25)
+    assert updated.entry_price == pytest.approx(105.0)
+    assert updated.current_price == pytest.approx(110.0)
+    assert updated.unrealized_pnl == pytest.approx(1.23)
+    assert updated.leverage == pytest.approx(3.0)
+    assert updated.metadata["last_exchange_sync_source"] == "live_position_reconcile"
+    assert notify_mock.await_count == 1
+
+
 def test_manual_live_order_records_backfilled_fee_and_slippage(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False

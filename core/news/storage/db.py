@@ -1353,7 +1353,8 @@ async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
                     started_at=now,
                     finished_at=None,
                     updated_at=now,
-                )
+                ),
+                execution_options={"synchronize_session": False},
             )
             if int(result.rowcount or 0) <= 0:
                 continue
@@ -1367,6 +1368,7 @@ async def claim_llm_tasks(limit: int = 10) -> List[Dict[str, Any]]:
                 select(NewsLLMTask)
                 .where(NewsLLMTask.id.in_(claimed_ids))
                 .order_by(NewsLLMTask.priority.desc(), NewsLLMTask.created_at.asc())
+                .execution_options(populate_existing=True)
             )
         ).scalars().all()
         news_rows = (

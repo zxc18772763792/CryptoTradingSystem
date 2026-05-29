@@ -127,6 +127,22 @@ function Get-EnvFileValues {
     return $values
 }
 
+function Get-OpsAuthHeaders {
+    param([hashtable]$EnvValues)
+
+    $opsToken = [string]($env:OPS_TOKEN)
+    if ([string]::IsNullOrWhiteSpace($opsToken) -and $EnvValues -and $EnvValues.ContainsKey("OPS_TOKEN")) {
+        $opsToken = [string]$EnvValues["OPS_TOKEN"]
+    }
+
+    $headers = @{}
+    if (-not [string]::IsNullOrWhiteSpace($opsToken)) {
+        $headers["X-OPS-TOKEN"] = $opsToken.Trim()
+        $headers["X-OPS-CALLER"] = "web_status"
+    }
+    return $headers
+}
+
 function Format-ConfigValue {
     param([AllowNull()][string]$Value)
 
@@ -226,6 +242,8 @@ function Get-HealthSummary {
 
     $healthTimeoutSec = 18
     $statusTimeoutSec = 15
+    $envValues = Get-EnvFileValues
+    $statusHeaders = Get-OpsAuthHeaders -EnvValues $envValues
 
     try {
         $health = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/health" -TimeoutSec $healthTimeoutSec
@@ -236,7 +254,11 @@ function Get-HealthSummary {
 
     $status = $null
     try {
-        $status = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/status" -TimeoutSec $statusTimeoutSec
+        if ($statusHeaders.Count -gt 0) {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/status" -Headers $statusHeaders -TimeoutSec $statusTimeoutSec
+        } else {
+            $status = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/status" -TimeoutSec $statusTimeoutSec
+        }
     }
     catch {
     }

@@ -7,7 +7,12 @@ from web.api import trading_runtime
 from web.services import trading_runtime_service
 
 
+def _ops_headers() -> dict[str, str]:
+    return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
+
+
 def test_get_trading_mode_does_not_expose_pending_token(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_runtime.router, prefix="/api/trading")
     client = TestClient(app)
@@ -28,7 +33,7 @@ def test_get_trading_mode_does_not_expose_pending_token(monkeypatch):
     )
     monkeypatch.setattr(trading_runtime, "get_mode_confirm_text", lambda: "CONFIRM LIVE TRADING")
 
-    response = client.get("/api/trading/mode")
+    response = client.get("/api/trading/mode", headers=_ops_headers())
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "live"

@@ -2082,6 +2082,10 @@ canvas {
     background: linear-gradient(135deg, #177f4e, #20bf78);
 }
 
+.status-badge.warning {
+    background: linear-gradient(135deg, #9b6a17, #d89829);
+}
+
 .status-badge.negative {
     background: linear-gradient(135deg, #a83237, #ea5b61);
 }

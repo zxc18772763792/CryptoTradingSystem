@@ -24,7 +24,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
-from core.strategies.strategy_manager import StrategyManager
+from core.strategies.strategy_manager import _SIGNAL_CONFLICT_WINDOW_SECONDS, StrategyManager
 
 
 class _StubStrategy(StrategyBase):
@@ -141,6 +141,29 @@ def test_buy_signal_still_writes_conflict_window():
 
     key = ("acct_A", "BTC/USDT", "binance")
     assert m._recent_signal_by_symbol[key] is buy
+
+
+def test_conflict_window_evicts_stale_entries():
+    m = _make_manager()
+    now = datetime.now(timezone.utc)
+    stale = _sig(
+        "BTC/USDT",
+        SignalType.BUY,
+        0.9,
+        now - timedelta(seconds=_SIGNAL_CONFLICT_WINDOW_SECONDS * 3),
+        account="acct_old",
+    )
+    recent = _sig("ETH/USDT", SignalType.BUY, 0.9, now, account="acct_new")
+    stale_key = ("acct_old", "BTC/USDT", "binance")
+    recent_key = ("acct_new", "ETH/USDT", "binance")
+    m._recent_signal_by_symbol[stale_key] = stale
+    m._recent_signal_by_symbol[recent_key] = recent
+
+    removed = m._evict_stale_signal_conflicts(now)
+
+    assert removed == 1
+    assert stale_key not in m._recent_signal_by_symbol
+    assert m._recent_signal_by_symbol[recent_key] is recent
 
 
 def test_execution_engine_submit_signal_skips_hold_queue():

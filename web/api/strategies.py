@@ -1836,7 +1836,7 @@ async def _auto_register_defaults_for_start_all() -> List[str]:
     return created
 
 
-@router.get("/list")
+@router.get("/list", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def list_strategies():
     available_map = _get_strategy_classes()
     registered = [_enrich_strategy_info(item) for item in strategy_manager.list_strategies()]
@@ -1878,7 +1878,7 @@ async def get_strategy_catalog():
     return {"strategies": rows, "total": len(rows), "generated_at": datetime.now(timezone.utc).isoformat()}
 
 
-@router.get("/library")
+@router.get("/library", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_library():
     classes = _get_strategy_classes()
     registered = strategy_manager.list_strategies()
@@ -1947,7 +1947,7 @@ async def get_strategy_library():
     }
 
 
-@router.get("/audit")
+@router.get("/audit", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def audit_strategy_library(
     symbol: str = "BTC/USDT",
     run_async_checks: bool = False,
@@ -2047,7 +2047,7 @@ async def audit_strategy_library(
     }
 
 
-@router.get("/summary")
+@router.get("/summary", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_summary(limit: int = 20):
     summary = strategy_manager.get_dashboard_summary(signal_limit=limit)
     performance = summary.get("strategy_performance")
@@ -2282,7 +2282,7 @@ async def get_strategy_ranking(
     }
 
 
-@router.get("/runtime")
+@router.get("/runtime", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_runtime_panel():
     summary = strategy_manager.get_dashboard_summary(signal_limit=10)
     return {
@@ -2294,7 +2294,7 @@ async def get_runtime_panel():
     }
 
 
-@router.get("/signals/aggregated")
+@router.get("/signals/aggregated", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_aggregated_signals(symbol: str):
     return strategy_manager.get_aggregated_signals(symbol)
 
@@ -2452,17 +2452,17 @@ async def rebalance_allocations(request: AllocationRebalanceRequest):
     }
 
 
-@router.get("/health/monitor")
+@router.get("/health/monitor", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_health_monitor():
     return strategy_health_monitor.get_status()
 
 
-@router.get("/health")
+@router.get("/health", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_health_status():
     return strategy_health_monitor.get_status()
 
 
-@router.get("/health-monitor")
+@router.get("/health-monitor", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_health_monitor_alias():
     return strategy_health_monitor.get_status()
 
@@ -2477,7 +2477,7 @@ async def run_strategy_health_check():
     }
 
 
-@router.get("/{name}")
+@router.get("/{name}", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy(name: str):
     alias = str(name or "").strip().lower()
     # Defensive aliasing: avoid accidental dynamic-route fallback for known static paths.
@@ -2492,7 +2492,7 @@ async def get_strategy(name: str):
     raise HTTPException(status_code=404, detail="Strategy not found")
 
 
-@router.get("/{name}/params/schema")
+@router.get("/{name}/params/schema", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_params_schema(name: str):
     schema = strategy_manager.get_strategy_param_schema(name)
     if schema:
@@ -2500,12 +2500,12 @@ async def get_strategy_params_schema(name: str):
     raise HTTPException(status_code=404, detail="Strategy not found")
 
 
-@router.get("/{name}/sizing-preview")
+@router.get("/{name}/sizing-preview", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_sizing_preview(name: str):
     return await _build_strategy_sizing_preview(name)
 
 
-@router.get("/{name}/live-vs-backtest")
+@router.get("/{name}/live-vs-backtest", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_live_vs_backtest(name: str, initial_capital: float = 10000):
     info = strategy_manager.get_strategy_info(name)
     if not info:
@@ -2682,7 +2682,7 @@ async def unregister_strategy(name: str):
     raise HTTPException(status_code=404, detail="Strategy not found")
 
 
-@router.get("/{name}/signals")
+@router.get("/{name}/signals", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_signals(name: str, limit: int = 100):
     strategy = strategy_manager.get_strategy(name)
     if not strategy:
@@ -2695,7 +2695,7 @@ async def get_strategy_signals(name: str, limit: int = 100):
     }
 
 
-@router.get("/{name}/monitor-data")
+@router.get("/{name}/monitor-data", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_strategy_monitor_data(name: str, bars: int = 200):
     """Return combined OHLCV + signals + equity curve for the strategy monitor panel.
 
@@ -2716,6 +2716,10 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     symbol = (info.get("symbols") or ["BTC/USDT"])[0]
     timeframe = str(info.get("timeframe") or "1h")
     is_running = bool(info.get("state") == "running")
+    runtime = dict(info.get("runtime") or {})
+    runner_alive_known = "runner_alive" in runtime
+    runner_alive = bool(runtime.get("runner_alive", False))
+    runtime_stale = bool(is_running and runner_alive_known and not runner_alive)
     exchange = str(info.get("exchange") or "binance").strip().lower() or "binance"
     strategy_type = str(info.get("strategy_type") or info.get("name") or "").strip()
     strategy_params = dict(info.get("params") or {})
@@ -2999,6 +3003,10 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         "pair_ohlcv_source_timeframe": pair_ohlcv_source_timeframe,
         "pair_metrics": (pair_monitor.get("metrics") if pair_monitor else None),
         "is_running": is_running,
+        "runner_alive": runner_alive,
+        "runner_alive_known": runner_alive_known,
+        "runtime_stale": runtime_stale,
+        "runtime": runtime,
         "signal_mode": signal_mode,
         "signal_summary": signal_summary,
         "ohlcv":      ohlcv,

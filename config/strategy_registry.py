@@ -497,15 +497,6 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
         "backtest": {"supported": True, "description": "24h return minus equal-weight market return reversal", "optimization_grid": _INTRADAY_CS_GRID},
     },
-    "ResidualMom24hStrategy": {
-        "category": "quantitative",
-        "risk": "high",
-        "usage": "Binance USD-M 5m cross-section residual 24h reversal",
-        "defaults": _intraday_cs_defaults("residual_mom_24h", 288, "low"),
-        "timeframe": "5m",
-        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT", "DOGE/USDT"],
-        "backtest": {"supported": True, "description": "24h residual return reversal, currently equal to relative-return residual", "optimization_grid": _INTRADAY_CS_GRID},
-    },
     "CloseLocation48hStrategy": {
         "category": "quantitative",
         "risk": "high",

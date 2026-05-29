@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1365,6 +1366,7 @@ def _attach_research_enrichment(
 # disk I/O and tree-deserialisation. The mtime component guarantees a stale
 # Booster is evicted if the file is retrained while the process is running.
 _XGB_BOOSTER_CACHE: Dict[tuple, Any] = {}
+_XGB_BOOSTER_CACHE_LOCK = threading.RLock()
 
 
 def _load_xgb_booster_cached(model_path: str) -> Any:
@@ -1379,19 +1381,24 @@ def _load_xgb_booster_cached(model_path: str) -> Any:
         return booster
 
     cache_key = (str(Path(model_path).resolve()), int(mtime_ns))
-    cached = _XGB_BOOSTER_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
+    with _XGB_BOOSTER_CACHE_LOCK:
+        cached = _XGB_BOOSTER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
 
     booster = xgb.Booster()
     booster.load_model(model_path)
-    # Evict any prior entry for this resolved path (the mtime differs) before
-    # inserting, so the cache does not grow unbounded across retrains.
-    stale_keys = [k for k in _XGB_BOOSTER_CACHE if k[0] == cache_key[0]]
-    for k in stale_keys:
-        _XGB_BOOSTER_CACHE.pop(k, None)
-    _XGB_BOOSTER_CACHE[cache_key] = booster
-    return booster
+    with _XGB_BOOSTER_CACHE_LOCK:
+        cached = _XGB_BOOSTER_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        # Evict any prior entry for this resolved path (the mtime differs)
+        # before inserting, so the cache does not grow unbounded across retrains.
+        stale_keys = [k for k in _XGB_BOOSTER_CACHE if k[0] == cache_key[0]]
+        for k in stale_keys:
+            _XGB_BOOSTER_CACHE.pop(k, None)
+        _XGB_BOOSTER_CACHE[cache_key] = booster
+        return booster
 
 
 def _build_positions(
@@ -2075,27 +2082,48 @@ def _build_positions(
 
 
 def _trade_stats(close: pd.Series, position: pd.Series) -> Dict[str, Any]:
-    entries = (position.diff().fillna(0) > 0).astype(int)
-    exits = (position.diff().fillna(0) < 0).astype(int)
-    entry_points = list(close[entries == 1].items())
-    exit_points = list(close[exits == 1].items())
+    aligned_position = pd.to_numeric(position.reindex(close.index), errors="coerce").fillna(0.0)
+    entries = 0
+    exits = 0
     trade_returns = []
-    exit_idx = 0
-    for entry_time, entry_price in entry_points:
-        while exit_idx < len(exit_points) and exit_points[exit_idx][0] <= entry_time:
-            exit_idx += 1
-        if exit_idx >= len(exit_points):
-            break
-        _, exit_price = exit_points[exit_idx]
-        if entry_price > 0:
-            trade_returns.append((exit_price - entry_price) / entry_price)
-        exit_idx += 1
+
+    active_side = 0
+    entry_price: Optional[float] = None
+
+    for ts, raw_side in aligned_position.items():
+        side = int(np.sign(float(raw_side or 0.0)))
+        price = float(close.loc[ts])
+        if not np.isfinite(price) or price <= 0:
+            continue
+
+        if active_side == 0:
+            if side != 0:
+                active_side = side
+                entry_price = price
+                entries += 1
+            continue
+
+        if side == active_side:
+            continue
+
+        if entry_price is not None and entry_price > 0:
+            trade_returns.append((price - entry_price) / entry_price * active_side)
+            exits += 1
+
+        if side != 0:
+            active_side = side
+            entry_price = price
+            entries += 1
+        else:
+            active_side = 0
+            entry_price = None
+
     completed = len(trade_returns)
     wins = sum(1 for r in trade_returns if r > 0)
     win_rate = (wins / completed * 100) if completed else 0.0
     return {
-        "entries": int(entries.sum()),
-        "exits": int(exits.sum()),
+        "entries": int(entries),
+        "exits": int(exits),
         "completed": int(completed),
         "win_rate": float(round(win_rate, 2)),
     }

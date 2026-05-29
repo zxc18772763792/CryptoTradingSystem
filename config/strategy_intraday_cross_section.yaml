@@ -62,10 +62,6 @@ strategies:
     class: "RelRet24hReversalStrategy"
     lookback_bars: 288
     direction: "low"
-  residual_mom_24h:
-    class: "ResidualMom24hStrategy"
-    lookback_bars: 288
-    direction: "low"
   close_location_48h:
     class: "CloseLocation48hStrategy"
     lookback_bars: 576

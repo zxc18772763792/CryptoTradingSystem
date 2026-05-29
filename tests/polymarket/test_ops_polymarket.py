@@ -1,9 +1,11 @@
 import os
 from datetime import datetime, timezone
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from core.ops.service import api as ops_api
 from core.ops.service.api import create_router
 from prediction_markets.polymarket import db as pm_db
 
@@ -24,6 +26,17 @@ def _quote(token_id: str, minute: int, bid: float, ask: float):
         "depth5": 500.0,
         "fetched_at": datetime(2026, 3, 3, 0, minute, tzinfo=timezone.utc),
     }
+
+
+def test_ops_polymarket_path_resolvers_reject_repo_escape(monkeypatch, tmp_path):
+    from core.ops.service.polymarket_routes import _resolve_report_dir, _resolve_repo_path
+
+    monkeypatch.setattr(ops_api.settings, "BASE_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="escapes repository root"):
+        _resolve_repo_path(str(tmp_path.parent / "outside.json"))
+    with pytest.raises(ValueError, match="escapes repository root"):
+        _resolve_report_dir("../outside")
 
 
 def test_ops_polymarket_status_route(monkeypatch):
@@ -207,6 +220,7 @@ def test_ops_polymarket_paper_strategy_once_execute(monkeypatch, tmp_path):
 
 def test_ops_polymarket_profile_promote_and_strategy_once_profile_path(monkeypatch, tmp_path):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
+    monkeypatch.setattr(ops_api.settings, "BASE_DIR", tmp_path)
     pm_db.configure_pm_db(f"sqlite+aiosqlite:///{(tmp_path / 'ops_pm_profile.db').as_posix()}")
 
     import asyncio
@@ -281,6 +295,7 @@ def test_ops_polymarket_profile_promote_and_strategy_once_profile_path(monkeypat
 
 def test_ops_polymarket_profile_promote_rejects_failed_guardrails(monkeypatch, tmp_path):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
+    monkeypatch.setattr(ops_api.settings, "BASE_DIR", tmp_path)
     pm_db.configure_pm_db(f"sqlite+aiosqlite:///{(tmp_path / 'ops_pm_profile_reject.db').as_posix()}")
 
     import asyncio
@@ -397,6 +412,7 @@ def test_ops_polymarket_replay_batch_route_auto_selects_tokens(monkeypatch, tmp_
 
 def test_ops_polymarket_replay_grid_route_writes_report(monkeypatch, tmp_path):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
+    monkeypatch.setattr(ops_api.settings, "BASE_DIR", tmp_path)
     pm_db.configure_pm_db(f"sqlite+aiosqlite:///{(tmp_path / 'ops_pm_replay_grid.db').as_posix()}")
 
     import asyncio
@@ -451,6 +467,7 @@ def test_ops_polymarket_replay_grid_route_writes_report(monkeypatch, tmp_path):
 
 def test_ops_polymarket_replay_walk_forward_route(monkeypatch, tmp_path):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
+    monkeypatch.setattr(ops_api.settings, "BASE_DIR", tmp_path)
     pm_db.configure_pm_db(f"sqlite+aiosqlite:///{(tmp_path / 'ops_pm_replay_wf.db').as_posix()}")
 
     import asyncio

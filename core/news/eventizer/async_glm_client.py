@@ -185,6 +185,10 @@ def _truthy_text(value: Any, *, default: bool = False) -> bool:
     return text in {"1", "true", "yes", "on", "y"}
 
 
+def _aiohttp_trust_env() -> bool:
+    return _truthy_text(os.getenv("NEWS_LLM_AIOHTTP_TRUST_ENV"), default=True)
+
+
 def _news_llm_override_enabled() -> bool:
     return bool(
         _runtime_setting("NEWS_LLM_API_KEY")
@@ -624,7 +628,7 @@ class AsyncGLMClient:
         if not await rate_limiter.wait_for_token(timeout=30.0):
             raise RuntimeError("rate_limit_timeout")
 
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=_aiohttp_trust_env()) as session:
             total_targets = len(targets)
             last_error_type = "other"
             for idx, target in enumerate(targets):

@@ -8,7 +8,9 @@ from web.api import trading as trading_api
 from web.api.auth import require_sensitive_ops_permissions
 
 
-router = APIRouter()
+router = APIRouter(
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))]
+)
 
 
 @router.get("/analytics/overview")

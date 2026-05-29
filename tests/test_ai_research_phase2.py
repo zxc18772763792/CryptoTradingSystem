@@ -558,6 +558,36 @@ def test_run_backtest_core_with_params():
     assert "total_return" in result
 
 
+def test_research_trade_stats_count_short_round_trip():
+    from core.research.strategy_research import _trade_stats
+
+    index = pd.date_range("2024-01-01", periods=4, freq="1h")
+    close = pd.Series([100.0, 100.0, 98.0, 97.0], index=index)
+    position = pd.Series([0.0, -1.0, -1.0, 0.0], index=index)
+
+    assert _trade_stats(close, position) == {
+        "entries": 1,
+        "exits": 1,
+        "completed": 1,
+        "win_rate": 100.0,
+    }
+
+
+def test_research_trade_stats_counts_same_bar_reversal_as_close_then_open():
+    from core.research.strategy_research import _trade_stats
+
+    index = pd.date_range("2024-01-01", periods=4, freq="1h")
+    close = pd.Series([100.0, 101.0, 99.0, 98.0], index=index)
+    position = pd.Series([0.0, 1.0, -1.0, 0.0], index=index)
+
+    assert _trade_stats(close, position) == {
+        "entries": 2,
+        "exits": 2,
+        "completed": 2,
+        "win_rate": 50.0,
+    }
+
+
 def test_run_backtest_core_supports_strategy_programs():
     """B+: _run_backtest_core should execute AI-authored strategy programs outside the fixed library."""
     from core.ai.proposal_schemas import StrategyCondition, StrategyProgram
