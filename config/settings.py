@@ -67,6 +67,7 @@ class Settings(BaseSettings):
     COINGLASS_INCLUDE_RADAR: bool = True
     COINGLASS_INCLUDE_STRATEGIES: bool = False
     COINGLASS_LIVE_GATING_ENABLED: bool = False
+    COINGLASS_WORKER_ENABLED: bool = True
     PUBLIC_MACRO_WORKERS_ENABLED: bool = False
     PREMIUM_EXTERNAL_WORKERS_ENABLED: bool = False
 
@@ -184,6 +185,7 @@ class Settings(BaseSettings):
     GATE_DEFAULT_TYPE: str = "spot"
     BYBIT_DEFAULT_TYPE: str = "spot"
     EXCHANGE_STARTUP_CONNECT_TIMEOUT_SEC: float = 18.0
+    EXCHANGE_WATCHDOG_ENABLED: bool = True
     # Live kline fetch (strategy runtime). On timeout/failure the (exchange,
     # symbol, timeframe) is put in backoff and served from local/cache data
     # instead of re-hammering a slow endpoint every cycle.
@@ -195,9 +197,18 @@ class Settings(BaseSettings):
     # updates are pushed over a persistent socket instead of polled via REST;
     # the REST fan-out becomes an automatic fallback while the socket is down.
     MARKET_WS_ENABLED: bool = False
+    MARKET_WS_MODE: str = "off"  # off/shadow/ui_primary/strategy_primary
+    MARKET_WS_FORCE_REST: bool = False
     MARKET_WS_EXCHANGES: str = "binance"  # comma-separated; blank = all connected
     MARKET_WS_WATCH_TIMEOUT_SEC: float = 25.0
     MARKET_WS_HEALTH_MAX_AGE_SEC: float = 15.0
+    MARKET_WS_SYMBOL_LIMIT: int = 16
+    MARKET_WS_SYMBOL_MAX_AGE_SEC: float = 10.0
+    MARKET_WS_RECONNECT_MIN_SEC: float = 1.0
+    MARKET_WS_RECONNECT_MAX_SEC: float = 30.0
+    MARKET_WS_REST_RECONCILE_SEC: float = 30.0
+    MARKET_WS_MAX_PRICE_DIFF_BPS: float = 20.0
+    MARKET_WS_FAIL_CLOSED_FOR_LIVE: bool = True
     # When True, a parquet index that looks local-stamped (runs ahead of real
     # UTC) raises instead of being silently shifted — use to flush out any
     # remaining non-UTC kline writer in CI / debugging.
@@ -390,6 +401,14 @@ class Settings(BaseSettings):
         text = aliases.get(text, text)
         if text not in {"spot", "future", "swap", "margin"}:
             raise ValueError("exchange default type must be one of: spot/future/swap/margin")
+        return text
+
+    @field_validator("MARKET_WS_MODE")
+    @classmethod
+    def validate_market_ws_mode(cls, v: str) -> str:
+        text = str(v or "off").strip().lower()
+        if text not in {"off", "shadow", "ui_primary", "strategy_primary"}:
+            raise ValueError("MARKET_WS_MODE must be one of: off/shadow/ui_primary/strategy_primary")
         return text
 
     @field_validator("EXCHANGE_STARTUP_CONNECT_TIMEOUT_SEC")

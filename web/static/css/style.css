@@ -78,6 +78,10 @@ header h1 {
     background: linear-gradient(135deg, #d98c29, #f59f3a);
 }
 
+.market-data-status {
+    background: linear-gradient(135deg, #31506c, #4f7c9b);
+}
+
 .tabs {
     display: flex;
     gap: 8px;

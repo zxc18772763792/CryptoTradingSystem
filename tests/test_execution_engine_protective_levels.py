@@ -61,7 +61,7 @@ def _make_signal(
     )
 
 
-def test_background_tick_checks_paper_and_live_scopes_when_default_is_paper(monkeypatch):
+def test_background_tick_checks_default_scope_only_when_no_cross_mode_work(monkeypatch):
     engine = ExecutionEngine()
     engine.set_paper_trading(True, sync_runtime_state=False)
     engine._bg_check_interval_seconds = 0
@@ -79,6 +79,40 @@ def test_background_tick_checks_paper_and_live_scopes_when_default_is_paper(monk
     monkeypatch.setattr(engine, "_reconcile_local_positions_with_exchange", fake_reconcile)
     monkeypatch.setattr(engine, "_check_conditional_orders", fake_conditional)
     monkeypatch.setattr(engine, "_check_protective_orders", fake_protective)
+    monkeypatch.setattr(position_manager, "get_all_positions", lambda scope=None: [])
+
+    asyncio.run(engine._background_tick())
+
+    assert events == [
+        "paper:conditional",
+        "paper:protective",
+    ]
+
+
+def test_background_tick_checks_live_scope_when_live_work_exists(monkeypatch):
+    engine = ExecutionEngine()
+    engine.set_paper_trading(True, sync_runtime_state=False)
+    engine._bg_check_interval_seconds = 0
+    engine._conditional_orders["live_cond"] = SimpleNamespace(account_id="acct_live")
+    events = []
+
+    async def fake_reconcile():
+        events.append("live:reconcile")
+
+    async def fake_conditional():
+        events.append(f"{engine._current_trading_mode()}:conditional")
+
+    async def fake_protective():
+        events.append(f"{engine._current_trading_mode()}:protective")
+
+    def fake_resolve_mode(account_id, *, metadata=None, fallback=None):
+        return "live" if account_id == "acct_live" else (fallback or "paper")
+
+    monkeypatch.setattr(engine, "_resolve_account_trading_mode", fake_resolve_mode)
+    monkeypatch.setattr(engine, "_reconcile_local_positions_with_exchange", fake_reconcile)
+    monkeypatch.setattr(engine, "_check_conditional_orders", fake_conditional)
+    monkeypatch.setattr(engine, "_check_protective_orders", fake_protective)
+    monkeypatch.setattr(position_manager, "get_all_positions", lambda scope=None: [])
 
     asyncio.run(engine._background_tick())
 

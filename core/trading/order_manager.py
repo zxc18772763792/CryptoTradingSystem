@@ -16,6 +16,7 @@ from loguru import logger
 from config.settings import settings
 from core.exchanges.exchange_manager import exchange_manager
 from core.governance.decision_engine import decision_engine
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.risk.risk_manager import risk_manager
 from core.exchanges.base_exchange import Order, OrderSide, OrderType, OrderStatus
 from core.trading.binance_rest import (
@@ -241,6 +242,7 @@ class OrderManager:
 
     async def create_order(self, request: OrderRequest) -> Optional[Order]:
         self._last_error = ""
+        self._evict_terminal_orders()
         if self._resolve_request_mode(request) == "paper":
             return await self._create_paper_order(request)
         return await self._create_real_order(request)
@@ -362,8 +364,14 @@ class OrderManager:
             connector = self._resolve_cached_exchange(request.exchange, account_id=request.account_id)
             if connector:
                 try:
-                    ticker = await connector.get_ticker(request.symbol)
-                    fill_price = float(ticker.last or 0.0)
+                    price_read = await get_realtime_price(
+                        request.exchange,
+                        request.symbol,
+                        connector=connector,
+                        max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                        allow_rest_fallback=True,
+                    )
+                    fill_price = float(price_read.price or 0.0) if price_read.ok else 0.0
                 except Exception as e:
                     logger.warning(
                         f"[PAPER] Failed to fetch ticker for {request.symbol} "
@@ -536,10 +544,23 @@ class OrderManager:
             # (order_value=0 would fail-open through every cap).
             valuation_price = float(request.price or 0.0)
             if valuation_price <= 0:
+                fail_closed = bool(
+                    str(getattr(settings, "MARKET_WS_MODE", "off") or "off").strip().lower() == "strategy_primary"
+                    and bool(getattr(settings, "MARKET_WS_FAIL_CLOSED_FOR_LIVE", True))
+                )
                 try:
-                    ticker = await exchange.get_ticker(request.symbol)
-                    valuation_price = float(getattr(ticker, "last", 0.0) or 0.0)
+                    price_read = await get_realtime_price(
+                        request.exchange,
+                        request.symbol,
+                        connector=exchange,
+                        max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                        allow_rest_fallback=True,
+                        fail_closed=fail_closed,
+                    )
+                    valuation_price = float(price_read.price or 0.0) if price_read.ok else 0.0
                 except Exception as e:
+                    if fail_closed:
+                        raise
                     logger.warning(
                         f"order_manager: failed to resolve market price for "
                         f"{request.symbol}: {e}"
@@ -928,6 +949,38 @@ class OrderManager:
             "buy_orders": len([o for o in orders if o.side == OrderSide.BUY]),
             "sell_orders": len([o for o in orders if o.side == OrderSide.SELL]),
         }
+
+    def _evict_terminal_orders(self, max_keep: int = 5000) -> None:
+        """Bound in-memory order history so live trading cannot grow it without
+        bound (clear_paper_history only clears *paper* orders, so live orders
+        otherwise accumulate forever -> eventual OOM). Once the total exceeds
+        max_keep, drop the OLDEST terminal orders (closed/canceled/expired/
+        rejected). OPEN orders are always retained regardless of count.
+        """
+        total = len(self._orders)
+        if total <= max_keep:
+            return
+        terminal = {
+            OrderStatus.CLOSED,
+            OrderStatus.CANCELED,
+            OrderStatus.EXPIRED,
+            OrderStatus.REJECTED,
+        }
+        overflow = total - max_keep
+        removed = 0
+        # dict preserves insertion order -> iterate oldest-first.
+        for order_id in list(self._orders.keys()):
+            if removed >= overflow:
+                break
+            order = self._orders.get(order_id)
+            if getattr(order, "status", None) in terminal:
+                self._orders.pop(order_id, None)
+                self._order_meta.pop(order_id, None)
+                removed += 1
+        if removed:
+            logger.debug(
+                f"Evicted {removed} terminal order(s) from in-memory history (cap={max_keep})"
+            )
 
     def clear_paper_history(self, mode: str = "paper") -> Dict[str, int]:
         """Clear in-memory order history for the requested runtime mode."""

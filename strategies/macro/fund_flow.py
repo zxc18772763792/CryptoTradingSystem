@@ -8,6 +8,7 @@ import pandas as pd
 from loguru import logger
 
 from core.exchanges import exchange_manager
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
 
 
@@ -414,8 +415,13 @@ class WhaleActivityStrategy(StrategyBase):
             connector = exchange_manager.get_exchange(exchange)
             if connector:
                 try:
-                    ticker = await connector.get_ticker(symbol)
-                    latest_px = float(ticker.last or 0.0)
+                    price_read = await get_realtime_price(
+                        exchange,
+                        symbol,
+                        connector=connector,
+                        allow_rest_fallback=True,
+                    )
+                    latest_px = float(price_read.price or 0.0) if price_read.ok else 0.0
                 except Exception:
                     latest_px = 0.0
         if latest_px <= 0:

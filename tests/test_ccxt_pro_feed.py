@@ -20,12 +20,14 @@ class _FakeProClient:
         self._batches = list(batches)
         self.closed = False
         self.load_markets_called = False
+        self.watch_symbols = []
 
     async def load_markets(self):
         self.load_markets_called = True
         return {}
 
     async def watch_tickers(self, symbols):
+        self.watch_symbols.append(list(symbols))
         if self._batches:
             return self._batches.pop(0)
         # Emulate a quiet market: block until the caller's wait_for times out
@@ -102,6 +104,82 @@ async def test_is_healthy_reflects_recent_push():
     assert feed.is_healthy() is False
 
 
+async def test_status_snapshot_records_watch_success():
+    client = _FakeProClient([{"BTC/USDT": {"last": 100.0, "timestamp": 1_700_000_000_000}}])
+    received: list = []
+    feed = _make_feed(client, received)
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(feed.run(stop))
+    for _ in range(50):
+        if received:
+            break
+        await asyncio.sleep(0.02)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    status = feed.status_snapshot()
+    assert status["watch_attempt_count"] >= 1
+    assert status["watch_timeout_count"] == 0
+    assert status["watch_error_count"] == 0
+    assert status["last_error"] is None
+    assert status["exchanges"]["binance"]["last_symbols"] == ["BTC/USDT"]
+    assert status["exchanges"]["binance"]["last_payload_symbol_count"] == 1
+    assert status["exchanges"]["binance"]["last_watch_started_at"]
+    assert status["exchanges"]["binance"]["last_watch_completed_at"]
+
+
+async def test_status_snapshot_records_watch_timeout():
+    client = _FakeProClient([])
+    received: list = []
+    feed = _make_feed(client, received)
+    feed._watch_timeout_sec = 0.01
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(feed.run(stop))
+    for _ in range(100):
+        if feed.status_snapshot()["watch_timeout_count"] >= 1:
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    status = feed.status_snapshot()
+    assert received == []
+    assert status["watch_attempt_count"] >= 1
+    assert status["watch_timeout_count"] >= 1
+    assert status["exchanges"]["binance"]["last_symbols"] == ["BTC/USDT"]
+    assert status["exchanges"]["binance"]["last_watch_timeout_at"]
+
+
+async def test_status_snapshot_records_watch_error():
+    class _BrokenClient(_FakeProClient):
+        async def watch_tickers(self, symbols):
+            self.watch_symbols.append(list(symbols))
+            raise RuntimeError("socket dropped")
+
+    client = _BrokenClient([])
+    received: list = []
+    feed = _make_feed(client, received)
+    feed._reconnect_min_sec = 0.01
+    feed._reconnect_max_sec = 0.02
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(feed.run(stop))
+    for _ in range(100):
+        if feed.status_snapshot()["watch_error_count"] >= 1:
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    status = feed.status_snapshot()
+    assert received == []
+    assert status["watch_error_count"] >= 1
+    assert "RuntimeError: socket dropped" in status["last_error"]
+    assert status["exchanges"]["binance"]["last_error"] == status["last_error"]
+
+
 async def test_normalize_skips_zero_and_nonnumeric():
     out = CcxtProMarketFeed._normalize_tickers(
         "binance",
@@ -128,6 +206,14 @@ async def test_normalize_strips_perp_settlement_suffix():
     )
     assert set(out.keys()) == {"BTC/USDT", "ETH/USDT"}
     assert out["BTC/USDT"]["last"] == 50000.0
+
+
+def test_binance_rest_future_maps_to_ccxt_pro_swap():
+    assert CcxtProMarketFeed._ws_default_type("binance", "future") == "swap"
+    assert CcxtProMarketFeed._ws_default_type("binance", "futures") == "swap"
+    assert CcxtProMarketFeed._ws_default_type("binance", "perpetual") == "swap"
+    assert CcxtProMarketFeed._ws_default_type("binance", "spot") == "spot"
+    assert CcxtProMarketFeed._ws_default_type("okx", "future") == "future"
 
 
 async def test_watch_error_triggers_reconnect_then_recovers():

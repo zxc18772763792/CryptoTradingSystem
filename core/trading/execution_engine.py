@@ -21,6 +21,7 @@ from core.audit import audit_logger
 from core.exchanges.exchange_manager import exchange_manager
 from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.governance.decision_engine import decision_engine
+from core.marketdata.runtime_price_provider import PriceUnavailableError, get_realtime_price
 from core.risk.risk_manager import risk_manager
 from core.runtime import runtime_state
 from core.strategies import Signal, SignalType
@@ -140,6 +141,7 @@ class ExecutionEngine:
         self._running: bool = False
         self._signal_queue: Optional[asyncio.Queue] = None
         self._signal_queue_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._prime_task: Optional[asyncio.Task] = None
         self._queue_task: Optional[asyncio.Task] = None
         self._execution_callbacks: List[callable] = []
         self._paper_trading: bool = True
@@ -852,7 +854,10 @@ class ExecutionEngine:
                 f"dropped {dropped} pending signal(s)"
             )
 
-        self._signal_queue = asyncio.Queue()
+        # Bounded so a signal storm (many strategies x symbols) cannot grow the
+        # queue without bound or force the single worker to act on arbitrarily
+        # stale signals. Overflow drops the oldest pending signal (see submit_signal).
+        self._signal_queue = asyncio.Queue(maxsize=2000)
         self._signal_queue_loop = loop
         return self._signal_queue
 
@@ -889,7 +894,22 @@ class ExecutionEngine:
             await self._ensure_queue_worker()
         queue = self._ensure_signal_queue()
         if self._queue_task and not self._queue_task.done():
-            await queue.put(signal)
+            try:
+                queue.put_nowait(signal)
+            except asyncio.QueueFull:
+                # Drop the oldest pending signal rather than block signal
+                # generation or grow without bound. Prefer the freshest signal.
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    queue.get_nowait()
+                self._signal_diagnostics["dropped_overflow"] = int(
+                    self._signal_diagnostics.get("dropped_overflow", 0)
+                ) + 1
+                with contextlib.suppress(asyncio.QueueFull):
+                    queue.put_nowait(signal)
+                logger.warning(
+                    f"Signal queue full (maxsize={queue.maxsize}); dropped oldest "
+                    f"to enqueue {signal.signal_type.value} {signal.symbol}"
+                )
             logger.debug(
                 f"Signal queued: {signal.signal_type.value} {signal.symbol} "
                 f"(queue_size={queue.qsize()})"
@@ -1159,14 +1179,30 @@ class ExecutionEngine:
         *,
         account_id: Optional[str] = None,
     ) -> float:
-        if preferred_price and preferred_price > 0:
+        fail_closed = bool(
+            self._current_trading_mode() == "live"
+            and str(getattr(settings, "MARKET_WS_MODE", "off") or "off").strip().lower() == "strategy_primary"
+            and bool(getattr(settings, "MARKET_WS_FAIL_CLOSED_FOR_LIVE", True))
+        )
+        if preferred_price and preferred_price > 0 and not fail_closed:
             return float(preferred_price)
         connector = self._resolve_cached_exchange(exchange, account_id=account_id)
-        if not connector:
+        if not connector and not fail_closed:
             return 0.0
         try:
-            ticker = await connector.get_ticker(symbol)
-            return float(ticker.last or 0.0)
+            result = await get_realtime_price(
+                exchange,
+                symbol,
+                connector=connector,
+                max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                allow_rest_fallback=True,
+                fail_closed=fail_closed,
+            )
+            return float(result.price or 0.0) if result.ok else 0.0
+        except PriceUnavailableError:
+            if fail_closed:
+                raise
+            return 0.0
         except Exception:
             return 0.0
 
@@ -3671,6 +3707,7 @@ class ExecutionEngine:
             cb_signal_meta = signal.metadata or {}
             is_close_signal = signal.signal_type in (SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT)
             is_reduce_only_meta = bool(cb_signal_meta.get("close_only") or cb_signal_meta.get("reduce_only"))
+            cb_eval_failed = False
             try:
                 from core.risk.circuit_breaker import circuit_breaker as _cb  # noqa: PLC0415
                 cb_decision = _cb.evaluate(
@@ -3678,9 +3715,19 @@ class ExecutionEngine:
                     is_reduce_only=is_close_signal or is_reduce_only_meta,
                 )
             except Exception as exc:
-                logger.debug(f"circuit_breaker evaluation failed: {exc}")
+                logger.warning(f"circuit_breaker evaluation failed: {exc}")
                 cb_decision = None
-            if cb_decision is not None and not cb_decision.is_allow:
+                cb_eval_failed = True
+            # Fail CLOSED for new entries: if the breaker could not be evaluated
+            # (module reload / corrupted state), do NOT silently let a fresh entry
+            # through — that would bypass a tripped breaker. Risk-reducing closes /
+            # reduce-only orders remain allowed (the breaker exists to stop bleeding,
+            # not to lock positions in). evaluate() only reads in-memory state under
+            # a lock, so this path triggers solely on genuine errors, not normally.
+            allow_on_failure = is_close_signal or is_reduce_only_meta
+            cb_blocked_by_decision = cb_decision is not None and not cb_decision.is_allow
+            cb_blocked_on_failure = cb_eval_failed and not allow_on_failure
+            if cb_blocked_by_decision or cb_blocked_on_failure:
                 self._signal_diagnostics["risk_rejected"] = int(
                     self._signal_diagnostics.get("risk_rejected", 0)
                 ) + 1
@@ -3688,16 +3735,21 @@ class ExecutionEngine:
                     "status": "circuit_breaker_blocked",
                     "strategy": signal.strategy_name,
                     "symbol": signal.symbol,
-                    "scope": cb_decision.scope,
-                    "reason": cb_decision.reason,
-                    "tripped_at": cb_decision.tripped_at,
-                    "action": cb_decision.action,
+                    "scope": cb_decision.scope if cb_decision is not None else "evaluation_error",
+                    "reason": (
+                        cb_decision.reason if cb_decision is not None
+                        else "circuit breaker evaluation failed (fail-closed for new entries)"
+                    ),
+                    "tripped_at": cb_decision.tripped_at if cb_decision is not None else None,
+                    "action": cb_decision.action if cb_decision is not None else "block",
                 }
                 self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                _cb_scope = cb_decision.scope if cb_decision is not None else "evaluation_error"
+                _cb_reason = cb_decision.reason if cb_decision is not None else "evaluation_failed"
                 logger.warning(
-                    f"Signal blocked by circuit breaker ({cb_decision.scope}): "
+                    f"Signal blocked by circuit breaker ({_cb_scope}): "
                     f"strategy={signal.strategy_name} symbol={signal.symbol} "
-                    f"reason={cb_decision.reason}"
+                    f"reason={_cb_reason}"
                 )
                 return None
 
@@ -6165,12 +6217,37 @@ class ExecutionEngine:
                 )
                 self._conditional_orders.pop(cid, None)
 
+    def _background_tick_modes(self) -> List[str]:
+        current = self._normalize_trading_mode(self.get_trading_mode())
+        other = "live" if current == "paper" else "paper"
+        modes = [current]
+        if self._has_background_work_for_mode(other, fallback=current):
+            modes.append(other)
+        return modes
+
+    def _has_background_work_for_mode(self, mode: str, *, fallback: str) -> bool:
+        target = self._normalize_trading_mode(mode)
+        for cond in self._conditional_orders.values():
+            try:
+                cond_mode = self._resolve_account_trading_mode(
+                    getattr(cond, "account_id", "main"),
+                    fallback=fallback,
+                )
+            except Exception:
+                cond_mode = fallback
+            if cond_mode == target:
+                return True
+        try:
+            return bool(position_manager.get_all_positions(scope=target))
+        except Exception:
+            return False
+
     async def _background_tick(self) -> None:
         now = datetime.now(timezone.utc)
         if self._last_bg_check_at and (now - self._last_bg_check_at).total_seconds() < self._bg_check_interval_seconds:
             return
         self._last_bg_check_at = now
-        modes = ("paper", "live")
+        modes = self._background_tick_modes()
         for mode in modes:
             async with self._mode_guard(mode):
                 if mode == "live":
@@ -6218,7 +6295,11 @@ class ExecutionEngine:
         self._activate_runtime_mode("paper" if self._default_paper_trading else "live", reset_baseline=False)
         await self._ensure_queue_worker()
         if not self._default_paper_trading:
-            asyncio.create_task(self._prime_live_equity(), name="execution_prime_live_equity")
+            # Keep a strong reference so the one-shot prime task can't be
+            # garbage-collected (and silently cancelled) mid-flight.
+            self._prime_task = asyncio.create_task(
+                self._prime_live_equity(), name="execution_prime_live_equity"
+            )
         logger.info(f"Execution engine started (default trading mode: {self.get_trading_mode()})")
 
     async def stop(self) -> None:

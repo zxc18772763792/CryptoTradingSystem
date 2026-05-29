@@ -6,6 +6,7 @@ import pandas as pd
 from loguru import logger
 
 from core.exchanges import exchange_manager
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
 
 
@@ -79,19 +80,27 @@ class CEXArbitrageStrategy(StrategyBase):
             return prices
 
         results = await asyncio.gather(
-            *(connector.get_ticker(symbol) for _, connector in ready),
+            *(
+                get_realtime_price(
+                    exchange_name,
+                    symbol,
+                    connector=connector,
+                    allow_rest_fallback=True,
+                )
+                for exchange_name, connector in ready
+            ),
             return_exceptions=True,
         )
-        for (exchange_name, _), ticker in zip(ready, results):
-            if isinstance(ticker, BaseException):
+        for (exchange_name, _), price_read in zip(ready, results):
+            if isinstance(price_read, BaseException):
                 logger.debug(
-                    f"{self.name} ticker unavailable on {exchange_name}: {ticker}"
+                    f"{self.name} ticker unavailable on {exchange_name}: {price_read}"
                 )
                 continue
             try:
-                bid = float(ticker.bid or 0.0)
-                ask = float(ticker.ask or 0.0)
-                last = float(ticker.last or 0.0)
+                bid = float(price_read.bid or 0.0)
+                ask = float(price_read.ask or 0.0)
+                last = float(price_read.price or 0.0)
             except Exception as e:  # malformed ticker payload
                 logger.debug(f"{self.name} malformed ticker from {exchange_name}: {e}")
                 continue
@@ -341,15 +350,30 @@ class TriangularArbitrageStrategy(StrategyBase):
                 continue
             direct_pair, mid_base_pair, mid_quote_pair = tri
             try:
-                t_direct = await connector.get_ticker(direct_pair)
-                t_mid_base = await connector.get_ticker(mid_base_pair)
-                t_mid_quote = await connector.get_ticker(mid_quote_pair)
+                t_direct = await get_realtime_price(
+                    exchange_name,
+                    direct_pair,
+                    connector=connector,
+                    allow_rest_fallback=True,
+                )
+                t_mid_base = await get_realtime_price(
+                    exchange_name,
+                    mid_base_pair,
+                    connector=connector,
+                    allow_rest_fallback=True,
+                )
+                t_mid_quote = await get_realtime_price(
+                    exchange_name,
+                    mid_quote_pair,
+                    connector=connector,
+                    allow_rest_fallback=True,
+                )
             except Exception:
                 continue
 
-            direct = float(t_direct.last or 0.0)
-            mid_base = float(t_mid_base.last or 0.0)
-            mid_quote = float(t_mid_quote.last or 0.0)
+            direct = float(t_direct.price or 0.0)
+            mid_base = float(t_mid_base.price or 0.0)
+            mid_quote = float(t_mid_quote.price or 0.0)
             edge, implied = self._edge_from_prices(direct, mid_base, mid_quote)
             edge_after_fee = edge - fee_drag if edge > 0 else edge + fee_drag
             if abs(edge_after_fee) < min_profit:

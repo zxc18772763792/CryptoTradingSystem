@@ -1,16 +1,32 @@
 """持仓管理模块。"""
 import asyncio
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from loguru import logger
 
 from config.settings import settings
+
+
+def _replace_with_retry(tmp_path: Path, target_path: Path) -> None:
+    attempts = 6
+    delay = 0.02
+    for attempt in range(attempts):
+        try:
+            os.replace(str(tmp_path), str(target_path))
+            return
+        except OSError:
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
 
 
 class PositionSide(Enum):
@@ -403,12 +419,12 @@ class PositionManager:
         try:
             path = self._scope_state_path(self._scope)
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
             tmp.write_text(
                 json.dumps(self._snapshot_scope_state(), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            tmp.replace(path)
+            _replace_with_retry(tmp, path)
             self._last_persist_at = now
             self._dirty = False
         except Exception as e:

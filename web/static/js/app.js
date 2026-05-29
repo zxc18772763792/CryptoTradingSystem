@@ -2336,6 +2336,62 @@ window.addEventListener('hashchange',()=>{const t=String((window.location.hash||
 window.addEventListener('resize',()=>{schedulePlotlyResize(document.querySelector('.tab-content.active')||document);if(equityChart?.type==='fallback')renderEquityFallback(equityChart.rows||[]);});
 }
 function initClock(){const f=()=>{const t=document.getElementById('current-time');if(t)t.textContent=fmtDateTime(new Date());};f();setInterval(f,1000);}
+function renderMarketDataStatus(marketWs,{statusStale=false}={}){
+const el=document.getElementById('market-data-status');
+if(!el)return;
+const mw=marketWs&&typeof marketWs==='object'?marketWs:{};
+const mode=String(mw.mode||'off').trim().toLowerCase();
+const enabled=!!mw.enabled;
+const configured=!!mw.configured_enabled;
+const forceRest=!!mw.force_rest;
+const feedHealthy=!!mw.feed_healthy;
+const hubHealthy=!!mw.hub_healthy;
+const wsHubHealthy=!!mw.ws_hub_healthy;
+const staleCount=Number(mw.stale_symbol_count||0);
+const fallbackCount=Number(mw.rest_fallback_count||0);
+const violationCount=Number(mw.shadow_compare_violation_count||0);
+let text='行情: REST';
+let tone='';
+if(statusStale){
+  text='行情: 状态延迟';
+  tone='warning';
+}else if(forceRest){
+  text='行情: REST';
+  tone='';
+}else if(!enabled||mode==='off'){
+  text=configured?'行情: REST':'行情: REST';
+  tone='';
+}else if(staleCount>0){
+  text='行情: stale';
+  tone='negative';
+}else if(mode==='shadow'){
+  text=(feedHealthy||wsHubHealthy)?'行情: WS shadow':'行情: REST shadow';
+  tone=(feedHealthy||wsHubHealthy)?'warning':'';
+}else if(mode==='ui_primary'||mode==='strategy_primary'){
+  if(feedHealthy&&wsHubHealthy){
+    text=mode==='strategy_primary'?'行情: WS strategy':'行情: WS primary';
+    tone='connected';
+  }else{
+    text='行情: REST fallback';
+    tone='warning';
+  }
+}
+el.textContent=text;
+el.className=`status-badge market-data-status${tone?` ${tone}`:''}`;
+el.dataset.marketWsMode=mode||'off';
+el.dataset.marketWsEnabled=enabled?'true':'false';
+el.title=[
+  `mode=${mode||'off'}`,
+  `enabled=${enabled}`,
+  `force_rest=${forceRest}`,
+  `feed_healthy=${feedHealthy}`,
+  `hub_healthy=${hubHealthy}`,
+  `ws_hub_healthy=${wsHubHealthy}`,
+  `stale_symbols=${Number.isFinite(staleCount)?staleCount:0}`,
+  `rest_fallback_count=${Number.isFinite(fallbackCount)?fallbackCount:0}`,
+  `shadow_violations=${Number.isFinite(violationCount)?violationCount:0}`
+].join(' | ');
+}
 async function loadSystemStatus(){
 if(state._systemStatusInFlight)return;
 state._systemStatusInFlight=true;
@@ -2347,6 +2403,7 @@ state._systemStatusLastOkAt=Date.now();
 const st=document.getElementById('system-status'),m=document.getElementById('trading-mode');
 if(st)st.textContent=s.status==='running'?'运行中':s.status;
 if(m)m.textContent=s.trading_mode==='paper'?'模拟盘':'实盘';
+renderMarketDataStatus(s.market_ws);
 const exCountEl=document.getElementById('exchange-status-count');
 if(exCountEl){
 const totalRaw=Number(s?.total_exchange_count??Object.keys(s?.exchange_status||{}).length);
@@ -2366,9 +2423,11 @@ const isStatusTimeout=/接口超时\(\d+ms\): \/status/.test(errMessage);
 if(last){
   if(st)st.textContent=(state._systemStatusFailCount>=3 || !recentOk)?`运行中(状态延迟，重试中)`:'运行中';
   if(m)m.textContent=last.trading_mode==='paper'?'模拟盘':'实盘';
+  renderMarketDataStatus(last.market_ws,{statusStale:state._systemStatusFailCount>=3||!recentOk});
 }else{
   if(st)st.textContent='状态获取失败(自动重试)';
   if(m)m.textContent='未知';
+  renderMarketDataStatus(null,{statusStale:true});
 }
 const shouldWarn=!isStatusTimeout||!recentOk||Number(state._systemStatusFailCount||0)>=3;
 if(shouldWarn&&Number(state._systemStatusFailCount||0)%4===1){

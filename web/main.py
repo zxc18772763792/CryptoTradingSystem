@@ -20,6 +20,7 @@ from fastapi.templating import Jinja2Templates
 from loguru import logger
 
 from config.env_utils import env_bool as _env_bool
+from config.env_utils import env_float as _env_float
 from config.env_utils import env_int as _env_int
 from config.env_utils import sync_settings_to_environ
 from config.settings import settings
@@ -46,6 +47,7 @@ sync_settings_to_environ(settings, _MODEL_ENV_FIELDS)
 
 from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager
+from core.marketdata.hub import market_data_hub
 
 from core.notifications import notification_manager
 from core.ops.service import create_router as create_ops_router, initialize_ops_runtime, shutdown_ops_runtime
@@ -101,9 +103,86 @@ _PREMIUM_EXTERNAL_WORKERS_ENABLED = _env_bool(
     "PREMIUM_EXTERNAL_WORKERS_ENABLED",
     bool(getattr(settings, "PREMIUM_EXTERNAL_WORKERS_ENABLED", False)),
 )
+_COINGLASS_WORKER_ENABLED = _env_bool(
+    "COINGLASS_WORKER_ENABLED",
+    bool(getattr(settings, "COINGLASS_WORKER_ENABLED", True)),
+)
+_EXCHANGE_WATCHDOG_ENABLED = _env_bool(
+    "EXCHANGE_WATCHDOG_ENABLED",
+    bool(getattr(settings, "EXCHANGE_WATCHDOG_ENABLED", True)),
+)
 _MARKET_WS_ENABLED = _env_bool(
     "MARKET_WS_ENABLED",
     bool(getattr(settings, "MARKET_WS_ENABLED", False)),
+)
+_MARKET_WS_ALLOWED_MODES = {"off", "shadow", "ui_primary", "strategy_primary"}
+_MARKET_WS_MODE = str(os.getenv("MARKET_WS_MODE", getattr(settings, "MARKET_WS_MODE", "off")) or "off").strip().lower()
+if _MARKET_WS_MODE not in _MARKET_WS_ALLOWED_MODES:
+    _MARKET_WS_MODE = "off"
+# Backwards compatibility: before MARKET_WS_MODE existed, MARKET_WS_ENABLED=true
+# meant "start the experimental WS feed". Treat that as shadow unless the mode
+# was explicitly set.
+if _MARKET_WS_ENABLED and "MARKET_WS_MODE" not in os.environ and _MARKET_WS_MODE == "off":
+    _MARKET_WS_MODE = "shadow"
+_MARKET_WS_FORCE_REST = _env_bool(
+    "MARKET_WS_FORCE_REST",
+    bool(getattr(settings, "MARKET_WS_FORCE_REST", False)),
+)
+_MARKET_WS_STREAM_ENABLED = bool(
+    _MARKET_WS_ENABLED and not _MARKET_WS_FORCE_REST and _MARKET_WS_MODE != "off"
+)
+_MARKET_WS_SYMBOL_LIMIT = max(
+    1,
+    _env_int("MARKET_WS_SYMBOL_LIMIT", int(getattr(settings, "MARKET_WS_SYMBOL_LIMIT", 16) or 16)),
+)
+_MARKET_WS_SYMBOL_MAX_AGE_SEC = max(
+    0.5,
+    _env_float(
+        "MARKET_WS_SYMBOL_MAX_AGE_SEC",
+        float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+    ),
+)
+_MARKET_WS_HEALTH_MAX_AGE_SEC = max(
+    0.5,
+    _env_float(
+        "MARKET_WS_HEALTH_MAX_AGE_SEC",
+        float(getattr(settings, "MARKET_WS_HEALTH_MAX_AGE_SEC", 15.0) or 15.0),
+    ),
+)
+_MARKET_WS_RECONNECT_MIN_SEC = max(
+    0.5,
+    _env_float(
+        "MARKET_WS_RECONNECT_MIN_SEC",
+        float(getattr(settings, "MARKET_WS_RECONNECT_MIN_SEC", 1.0) or 1.0),
+    ),
+)
+_MARKET_WS_RECONNECT_MAX_SEC = max(
+    _MARKET_WS_RECONNECT_MIN_SEC,
+    _env_float(
+        "MARKET_WS_RECONNECT_MAX_SEC",
+        float(getattr(settings, "MARKET_WS_RECONNECT_MAX_SEC", 30.0) or 30.0),
+    ),
+)
+_MARKET_WS_MAX_PRICE_DIFF_BPS = max(
+    0.0,
+    _env_float(
+        "MARKET_WS_MAX_PRICE_DIFF_BPS",
+        float(getattr(settings, "MARKET_WS_MAX_PRICE_DIFF_BPS", 20.0) or 20.0),
+    ),
+)
+_MARKET_WS_REST_RECONCILE_SEC = max(
+    1.0,
+    _env_float(
+        "MARKET_WS_REST_RECONCILE_SEC",
+        float(getattr(settings, "MARKET_WS_REST_RECONCILE_SEC", 30.0) or 30.0),
+    ),
+)
+market_data_hub.symbol_max_age_sec = _MARKET_WS_SYMBOL_MAX_AGE_SEC
+market_data_hub.exchange_max_age_sec = _MARKET_WS_HEALTH_MAX_AGE_SEC
+market_data_hub.max_price_diff_bps = _MARKET_WS_MAX_PRICE_DIFF_BPS
+market_data_hub.shadow_compare_max_age_sec = max(
+    _MARKET_WS_SYMBOL_MAX_AGE_SEC,
+    _MARKET_WS_REST_RECONCILE_SEC * 2.0,
 )
 _ANALYTICS_HISTORY_ENABLED = _env_bool(
     "ANALYTICS_HISTORY_ENABLED",
@@ -169,6 +248,22 @@ runtime_state.register_cache(
     inspect=_inspect_status_cache,
     scope="global",
 )
+
+
+def _is_market_ws_stream_enabled() -> bool:
+    """Runtime gate for exchange WS feed, kept dynamic for tests and rollback."""
+    return bool(_MARKET_WS_ENABLED and not _MARKET_WS_FORCE_REST and _MARKET_WS_MODE != "off")
+
+
+def _sync_market_data_hub_runtime_config() -> None:
+    market_data_hub.symbol_max_age_sec = _MARKET_WS_SYMBOL_MAX_AGE_SEC
+    market_data_hub.exchange_max_age_sec = _MARKET_WS_HEALTH_MAX_AGE_SEC
+    market_data_hub.max_price_diff_bps = _MARKET_WS_MAX_PRICE_DIFF_BPS
+    market_data_hub.shadow_compare_max_age_sec = max(
+        _MARKET_WS_SYMBOL_MAX_AGE_SEC,
+        _MARKET_WS_REST_RECONCILE_SEC * 2.0,
+    )
+    market_data_hub.shadow_compare_enabled = _is_market_ws_stream_enabled()
 
 
 def _touch_runtime_task(task_name: str, *, success: bool = False) -> None:
@@ -433,10 +528,12 @@ def _collect_watch_symbols() -> List[str]:
                     symbols.add(str(symbol))
     except Exception:
         pass
-    return list(symbols)[:8]
+    return list(symbols)[:_MARKET_WS_SYMBOL_LIMIT]
 
 
 _MARKET_TICK_PER_CALL_TIMEOUT_SEC = 3.0
+_MARKET_TICK_RECONNECT_MIN_SEC = 60.0
+_market_tick_reconnect_last_attempt: Dict[str, float] = {}
 
 
 async def _fetch_one_ticker(connector: Any, symbol: str) -> Optional[Dict[str, Any]]:
@@ -455,8 +552,60 @@ async def _fetch_one_ticker(connector: Any, symbol: str) -> Optional[Dict[str, A
         return None
 
 
-async def _emit_market_ticks() -> None:
-    if not event_bus.has_subscribers():
+def _configured_market_ws_exchange_names() -> List[str]:
+    configured = str(getattr(settings, "MARKET_WS_EXCHANGES", "") or "").strip()
+    if not configured:
+        return []
+    return [name.strip().lower() for name in configured.split(",") if name.strip()]
+
+
+async def _market_tick_connector_items() -> List[Tuple[str, Any]]:
+    names: List[str] = []
+    seen = set()
+    try:
+        candidates = list(exchange_manager.get_connected_exchanges())
+    except Exception:
+        candidates = []
+    try:
+        candidates.extend(list(exchange_manager.get_all_exchanges().keys()))
+    except Exception:
+        pass
+    if _is_market_ws_stream_enabled():
+        candidates.extend(_configured_market_ws_exchange_names())
+    for name in candidates:
+        exchange_name = str(name)
+        if exchange_name in seen:
+            continue
+        seen.add(exchange_name)
+        names.append(exchange_name)
+
+    connectors: List[Tuple[str, Any]] = []
+    now = time.monotonic()
+    for exchange_name in names:
+        connector = exchange_manager.get_exchange(exchange_name)
+        if connector is None or not bool(getattr(connector, "is_connected", True)):
+            last_attempt = _market_tick_reconnect_last_attempt.get(exchange_name, 0.0)
+            if now - last_attempt >= _MARKET_TICK_RECONNECT_MIN_SEC:
+                _market_tick_reconnect_last_attempt[exchange_name] = now
+                try:
+                    connector = await exchange_manager.ensure_exchange(exchange_name)
+                except Exception as exc:
+                    logger.debug(f"market_tick reconnect skipped for {exchange_name}: {exc}")
+                    connector = None
+        if connector is not None and bool(getattr(connector, "is_connected", True)):
+            connectors.append((exchange_name, connector))
+    return connectors
+
+
+async def _emit_market_ticks(
+    *,
+    hub_source: str = "rest_snapshot",
+    fallback_reason: str = "periodic_rest_snapshot",
+    publish: bool = True,
+    require_subscribers: bool = True,
+) -> None:
+    _sync_market_data_hub_runtime_config()
+    if require_subscribers and not event_bus.has_subscribers():
         return
     symbols = _collect_watch_symbols()
     if not symbols:
@@ -467,10 +616,7 @@ async def _emit_market_ticks() -> None:
     # spending ~16 calls × per-call latency every cycle and starving other
     # Binance traffic of rate-limit budget.
     jobs: List[Tuple[str, str, asyncio.Task]] = []
-    for exchange_name in exchange_manager.get_connected_exchanges():
-        connector = exchange_manager.get_exchange(exchange_name)
-        if not connector:
-            continue
+    for exchange_name, connector in await _market_tick_connector_items():
         for symbol in symbols:
             jobs.append(
                 (
@@ -495,10 +641,20 @@ async def _emit_market_ticks() -> None:
     for (exchange_name, symbol, _task), result in zip(jobs, results):
         if isinstance(result, BaseException) or not isinstance(result, dict):
             continue
+        market_data_hub.upsert_rest_tick(
+            exchange_name,
+            symbol,
+            result,
+            source=hub_source,  # type: ignore[arg-type]
+            reason=fallback_reason,
+        )
         payload.setdefault(exchange_name, {})[symbol] = result
 
-    if payload:
-        await event_bus.publish_nowait_safe(event="market_tick", payload=payload)
+    if payload and publish and event_bus.has_subscribers():
+        try:
+            await event_bus.publish_nowait_safe(event="market_tick", payload=payload)
+        except Exception as exc:
+            logger.warning(f"market_tick REST publish failed after hub write: {exc}")
 
 
 # Push snapshots every 2s (in-memory data, cheap) but only fan out REST-heavy
@@ -515,22 +671,55 @@ _market_ws_feed: Optional[Any] = None
 
 async def _runtime_pusher(stop_event: asyncio.Event) -> None:
     last_market_tick_at = 0.0
+    last_rest_reconcile_at = 0.0
     while not stop_event.is_set():
         try:
-            if not event_bus.has_subscribers():
-                await asyncio.sleep(2)
-                continue
-            await _emit_runtime_snapshot()
             now = asyncio.get_event_loop().time()
-            if now - last_market_tick_at >= _MARKET_TICK_INTERVAL_SEC:
-                # When the WS feed is healthy it is already pushing ticks, so
-                # skip the REST fan-out. If the socket is down (or feed
-                # disabled) fall through to REST as the automatic backfill.
+            has_subscribers = event_bus.has_subscribers()
+            if has_subscribers:
+                await _emit_runtime_snapshot()
+            if has_subscribers and now - last_market_tick_at >= _MARKET_TICK_INTERVAL_SEC:
+                # In shadow mode REST remains the UI/runtime tick source while
+                # WS only feeds the hub. In ui_primary/strategy_primary, a
+                # fresh hub tick is allowed to suppress REST fan-out.
+                _sync_market_data_hub_runtime_config()
                 feed = _market_ws_feed
-                ws_healthy = bool(feed is not None and feed.is_healthy())
-                if not ws_healthy:
-                    await _emit_market_ticks()
+                feed_healthy = bool(feed is not None and feed.is_healthy())
+                hub_healthy = market_data_hub.has_fresh_tick(
+                    max_age_sec=_MARKET_WS_SYMBOL_MAX_AGE_SEC,
+                    source="ws",
+                )
+                ws_can_suppress_rest = bool(
+                    _is_market_ws_stream_enabled()
+                    and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
+                    and feed_healthy
+                    and hub_healthy
+                )
+                if not ws_can_suppress_rest:
+                    fallback_active = bool(
+                        _is_market_ws_stream_enabled()
+                        and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
+                    )
+                    reason = "ws_unhealthy" if not feed_healthy else "ws_stale"
+                    await _emit_market_ticks(
+                        hub_source="rest_fallback" if fallback_active else "rest_snapshot",
+                        fallback_reason=reason if fallback_active else "periodic_rest_snapshot",
+                    )
+                    if _is_market_ws_stream_enabled() and _MARKET_WS_MODE == "shadow":
+                        last_rest_reconcile_at = now
                 last_market_tick_at = now
+            if (
+                _is_market_ws_stream_enabled()
+                and _MARKET_WS_MODE == "shadow"
+                and now - last_rest_reconcile_at >= _MARKET_WS_REST_RECONCILE_SEC
+            ):
+                await _emit_market_ticks(
+                    hub_source="rest_snapshot",
+                    fallback_reason="shadow_rest_reconcile",
+                    publish=False,
+                    require_subscribers=False,
+                )
+                last_rest_reconcile_at = now
             _touch_runtime_task("runtime", success=True)
         except Exception as e:
             logger.debug(f"runtime snapshot push failed: {e}")
@@ -538,9 +727,75 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
 
 
 async def _publish_market_ticks(payload: Dict[str, Dict[str, Any]]) -> None:
-    """Callback for the WS feed — forward normalized ticks to subscribers."""
-    if payload and event_bus.has_subscribers():
-        await event_bus.publish_nowait_safe(event="market_tick", payload=payload)
+    """Callback for the WS feed — cache ticks and optionally forward to UI."""
+    if not payload:
+        return
+    _sync_market_data_hub_runtime_config()
+    normalized_payload: Dict[str, Dict[str, Any]] = {}
+    for exchange_name, symbols in payload.items():
+        if not isinstance(symbols, dict):
+            continue
+        for symbol, tick_payload in symbols.items():
+            if not isinstance(tick_payload, dict):
+                market_data_hub.upsert_ws_tick(exchange_name, symbol, {})
+                continue
+            tick = market_data_hub.upsert_ws_tick(exchange_name, symbol, tick_payload)
+            if tick is None:
+                continue
+            normalized_payload.setdefault(tick.exchange, {})[tick.symbol] = tick.to_payload()
+    if (
+        normalized_payload
+        and event_bus.has_subscribers()
+        and _is_market_ws_stream_enabled()
+        and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
+    ):
+        try:
+            await event_bus.publish_nowait_safe(event="market_tick", payload=normalized_payload)
+        except Exception as exc:
+            logger.warning(f"market_tick WS publish failed after hub write: {exc}")
+
+
+def _market_ws_status_snapshot(*, include_symbols: bool = False) -> Dict[str, Any]:
+    _sync_market_data_hub_runtime_config()
+    feed = _market_ws_feed
+    feed_healthy = bool(feed is not None and getattr(feed, "is_healthy", lambda: False)())
+    try:
+        feed_exchanges = (
+            list(feed.healthy_exchanges(max_age_sec=_MARKET_WS_HEALTH_MAX_AGE_SEC))
+            if feed is not None and hasattr(feed, "healthy_exchanges")
+            else []
+        )
+    except Exception:
+        feed_exchanges = []
+    feed_status: Dict[str, Any] = {}
+    if feed is not None and hasattr(feed, "status_snapshot"):
+        try:
+            raw_feed_status = feed.status_snapshot()
+            if isinstance(raw_feed_status, dict):
+                feed_status = raw_feed_status
+        except Exception as exc:
+            feed_status = {"snapshot_error": str(exc)}
+    hub_snapshot = market_data_hub.snapshot(include_symbols=include_symbols)
+    return {
+        "enabled": bool(_is_market_ws_stream_enabled()),
+        "configured_enabled": bool(_MARKET_WS_ENABLED),
+        "mode": _MARKET_WS_MODE,
+        "force_rest": bool(_MARKET_WS_FORCE_REST),
+        "feed_present": feed is not None,
+        "feed_healthy": feed_healthy,
+        "feed_healthy_exchanges": feed_exchanges,
+        "feed_status": feed_status,
+        "feed_watch_attempt_count": int(feed_status.get("watch_attempt_count") or 0),
+        "feed_watch_timeout_count": int(feed_status.get("watch_timeout_count") or 0),
+        "feed_watch_error_count": int(feed_status.get("watch_error_count") or 0),
+        "feed_watch_empty_count": int(feed_status.get("watch_empty_count") or 0),
+        "feed_last_error": feed_status.get("last_error"),
+        "symbol_limit": _MARKET_WS_SYMBOL_LIMIT,
+        "symbol_max_age_sec": _MARKET_WS_SYMBOL_MAX_AGE_SEC,
+        "health_max_age_sec": _MARKET_WS_HEALTH_MAX_AGE_SEC,
+        "max_price_diff_bps": _MARKET_WS_MAX_PRICE_DIFF_BPS,
+        **hub_snapshot,
+    }
 
 
 async def _market_ws_feed_worker(stop_event: asyncio.Event) -> None:
@@ -555,11 +810,10 @@ async def _market_ws_feed_worker(stop_event: asyncio.Event) -> None:
         logger.warning("market_ws_feed: ccxt.pro unavailable, staying on REST ticks")
         return
 
-    configured = str(getattr(settings, "MARKET_WS_EXCHANGES", "") or "").strip()
-
     def _resolve_exchanges() -> List[str]:
+        configured = _configured_market_ws_exchange_names()
         if configured:
-            return [e.strip().lower() for e in configured.split(",") if e.strip()]
+            return configured
         return list(exchange_manager.get_connected_exchanges())
 
     # When the list is sourced from live connections it can be empty at boot
@@ -583,8 +837,13 @@ async def _market_ws_feed_worker(stop_event: asyncio.Event) -> None:
         on_tick=_publish_market_ticks,
         symbols_provider=_collect_watch_symbols,
         exchanges=exchanges,
-        watch_timeout_sec=float(getattr(settings, "MARKET_WS_WATCH_TIMEOUT_SEC", 25.0) or 25.0),
-        health_max_age_sec=float(getattr(settings, "MARKET_WS_HEALTH_MAX_AGE_SEC", 15.0) or 15.0),
+        watch_timeout_sec=_env_float(
+            "MARKET_WS_WATCH_TIMEOUT_SEC",
+            float(getattr(settings, "MARKET_WS_WATCH_TIMEOUT_SEC", 25.0) or 25.0),
+        ),
+        reconnect_min_sec=_MARKET_WS_RECONNECT_MIN_SEC,
+        reconnect_max_sec=_MARKET_WS_RECONNECT_MAX_SEC,
+        health_max_age_sec=_MARKET_WS_HEALTH_MAX_AGE_SEC,
     )
     _market_ws_feed = feed
     try:
@@ -1387,10 +1646,6 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "factory": lambda stop_event: _runtime_pusher(stop_event),
             "restart_on_failure": True,
         },
-        "exchange_watchdog": {
-            "factory": lambda stop_event: _exchange_watchdog_worker(stop_event),
-            "restart_on_failure": True,  # must stay alive for the session lifetime
-        },
         "ai_research_scheduler": {
             "factory": lambda stop_event: _ai_research_scheduler_worker(app, stop_event),
             "restart_on_failure": True,
@@ -1403,12 +1658,18 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "factory": lambda stop_event: _circuit_breaker_monitor_worker(stop_event, app),
             "restart_on_failure": True,
         },
-        "coinglass": {
+    }
+    if _COINGLASS_WORKER_ENABLED:
+        factories["coinglass"] = {
             "factory": lambda stop_event: _coinglass_worker(stop_event),
             "restart_on_failure": False,
-        },
-    }
-    if _MARKET_WS_ENABLED:
+        }
+    if _EXCHANGE_WATCHDOG_ENABLED:
+        factories["exchange_watchdog"] = {
+            "factory": lambda stop_event: _exchange_watchdog_worker(stop_event),
+            "restart_on_failure": True,  # must stay alive for the session lifetime
+        }
+    if _is_market_ws_stream_enabled():
         factories["market_ws_feed"] = {
             "factory": lambda stop_event: _market_ws_feed_worker(stop_event),
             # Keep retrying: it may start before exchanges finish connecting,
@@ -1747,7 +2008,7 @@ async def get_status():
         connected = [name for name, ok in exchange_status.items() if ok]
         payload = {
             "status": "running",
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "trading_mode": execution_engine.get_trading_mode(),
             "paper_trading": execution_engine.is_paper_mode(),
             "runtime": {
@@ -1791,6 +2052,7 @@ async def get_status():
             "exchange_targets": exchange_targets,
             "exchange_status": exchange_status,
             "exchange_default_type": exchange_default_type,
+            "market_ws": _market_ws_status_snapshot(),
         }
         _status_cache_payload = payload
         _status_cache_at = now_mono
@@ -1800,10 +2062,15 @@ async def get_status():
         if _status_cache_payload is not None:
             return {
                 **_status_cache_payload,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "status": _status_cache_payload.get("status", "running"),
             }
         raise
+
+
+@app.get("/api/market-data/status", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
+async def get_market_data_status():
+    return _market_ws_status_snapshot(include_symbols=True)
 
 
 _WS_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
@@ -1955,9 +2222,10 @@ async def readyz_check():
     overall_ready = True
     # DB ping
     try:
-        from config.database import get_session  # noqa: PLC0415
-        with get_session() as session:
-            session.execute("SELECT 1") if hasattr(session, "execute") else None
+        from config.database import async_session_maker  # noqa: PLC0415
+        from sqlalchemy import text  # noqa: PLC0415
+        async with async_session_maker() as session:
+            await session.execute(text("SELECT 1"))
         checks["db"] = "ok"
     except Exception as exc:
         overall_ready = False
@@ -2001,7 +2269,7 @@ async def readyz_check():
 @app.get("/health")
 async def health_check():
     """Alias of /livez for backwards compatibility. Use /livez or /readyz instead."""
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 
 if __name__ == "__main__":
