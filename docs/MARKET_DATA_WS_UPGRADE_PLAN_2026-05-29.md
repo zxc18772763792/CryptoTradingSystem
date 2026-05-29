@@ -3625,7 +3625,7 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
 ok=false
 errors:
 - runtime is not live
-- MARKET_WS_FAIL_CLOSED_FOR_LIVE must be true
+- market WS status is missing fail_closed_for_live
 summary:
 - trading_mode=paper
 - paper_trading=true
@@ -3637,6 +3637,7 @@ summary:
 ```
 
 说明：当前运行中的第十一轮服务尚未加载新增 `fail_closed_for_live` 状态字段，因此该字段为 `null`；下一次启动加载新代码后，预检会直接从状态接口确认该配置。此失败是正确的防越级行为，不能把当前 paper shadow 当作 Level 2 live shadow。
+- 2026-05-30 00:23 +08:00 更新：`a0f1957 Clarify live shadow precheck status field` 已把缺失字段和显式关闭配置区分为不同错误；当前旧服务上的预期失败文案为 `market WS status is missing fail_closed_for_live`。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
