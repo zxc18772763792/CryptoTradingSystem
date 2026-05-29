@@ -268,6 +268,8 @@ def _evaluate_samples(
             errors.append(f"{prefix}: expected market ws mode {mode}, got {sample.get('mode')!r}")
         if mode != "off" and not _as_bool(sample.get("enabled")):
             errors.append(f"{prefix}: expected market ws enabled")
+        if mode != "off" and not _as_bool(sample.get("configured_enabled")):
+            errors.append(f"{prefix}: expected configured market ws enabled")
         if _as_bool(sample.get("force_rest")):
             errors.append(f"{prefix}: force_rest is true")
         if runtime == "live" and not _as_bool(sample.get("fail_closed_for_live")):
@@ -378,6 +380,7 @@ def _evaluate_samples(
         "final_trading_mode": samples[-1].get("trading_mode") if samples else None,
         "final_paper_trading": samples[-1].get("paper_trading") if samples else None,
         "final_enabled": samples[-1].get("enabled") if samples else None,
+        "final_configured_enabled": samples[-1].get("configured_enabled") if samples else None,
         "final_fail_closed_for_live": samples[-1].get("fail_closed_for_live") if samples else None,
         "final_feed_healthy": samples[-1].get("feed_healthy") if samples else None,
         "final_ws_hub_healthy": samples[-1].get("ws_hub_healthy") if samples else None,

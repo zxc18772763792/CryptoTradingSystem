@@ -25,6 +25,7 @@ def _report(*, expect_mode="shadow", expect_runtime="paper", **summary_overrides
         "final_trading_mode": "paper",
         "final_paper_trading": True,
         "final_enabled": True,
+        "final_configured_enabled": True,
         "final_fail_closed_for_live": True,
         "final_feed_healthy": True,
         "final_ws_hub_healthy": True,
@@ -154,6 +155,16 @@ def test_market_ws_shadow_report_eval_fails_live_runtime_without_fail_closed():
     assert result["ok"] is False
     assert "final_fail_closed_for_live is not true" in result["errors"]
     assert result["summary"]["final_fail_closed_for_live"] is False
+
+
+def test_market_ws_shadow_report_eval_fails_disabled_configured_stream():
+    result = _evaluate(
+        report=_report(final_configured_enabled=False),
+    )
+
+    assert result["ok"] is False
+    assert "final_configured_enabled is not true" in result["errors"]
+    assert result["summary"]["final_configured_enabled"] is False
 
 
 def test_market_ws_shadow_report_eval_keeps_legacy_paper_summary_compatible_by_default():
