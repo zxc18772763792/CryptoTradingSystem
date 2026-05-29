@@ -50,6 +50,36 @@ def _summary_rows(target: Path, limit: Optional[int]) -> List[Dict[str, Any]]:
     return list(rows)
 
 
+_MAX_AUDIT_ROWS = 10000
+_MAX_AUDIT_BYTES = 16 * 1024 * 1024  # ~16 MB
+
+
+def _trim_audit_file(target: Path, max_rows: int = _MAX_AUDIT_ROWS) -> None:
+    """Keep only the most recent ``max_rows`` rows once the append-only log grows
+    past a size threshold, so it can't grow without bound and the O(n) outcome
+    backfill rewrite stays bounded. Best-effort; never breaks recording.
+    """
+    try:
+        if not target.exists() or target.stat().st_size <= _MAX_AUDIT_BYTES:
+            return
+        rows = deque(_iter_jsonl_rows(target), maxlen=max(1, int(max_rows)))
+        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for row in rows:
+                    fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
+            os.replace(tmp_name, target)
+        except Exception:
+            try:
+                if os.path.exists(tmp_name):
+                    os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
+    except Exception:
+        pass
+
+
 def record_gate_counterfactual(
     *,
     trace: Dict[str, Any],
@@ -80,6 +110,7 @@ def record_gate_counterfactual(
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
+    _trim_audit_file(target)
     return row
 
 
