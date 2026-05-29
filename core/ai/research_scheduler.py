@@ -108,8 +108,17 @@ class ResearchScheduler:
             if job.get("status") in {"pending", "running"} and job.get("proposal_id"):
                 running_ids.add(str(job["proposal_id"]))
 
+        # Bound concurrent research jobs: each job offloads heavy compute to a
+        # worker thread, so unbounded dispatch would oversubscribe CPU and pile up
+        # ResearchConfig/result objects in memory. Account for already-running jobs.
+        max_concurrent = 2
+        available_slots = max(0, max_concurrent - len(running_ids))
+        if available_slots <= 0:
+            return
         dispatched = 0
         for proposal in queued:
+            if dispatched >= available_slots:
+                break
             if proposal.proposal_id in running_ids:
                 continue
             try:

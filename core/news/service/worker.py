@@ -434,7 +434,12 @@ async def process_llm_batch(cfg: Dict[str, Any], limit: int = 8) -> Dict[str, An
             "backoff_until": global_backoff.isoformat(),
         }
 
-    batch = await news_db.claim_llm_tasks(limit=limit)
+    # Exclude providers currently in backoff up-front so we don't claim + requeue
+    # (and inflate attempt_count on) their tasks every poll, which would starve
+    # healthy providers within the batch budget. The per-item filter below remains
+    # a safety net for the payload.provider edge case.
+    backed_off_providers = await news_db.get_backed_off_providers()
+    batch = await news_db.claim_llm_tasks(limit=limit, exclude_providers=backed_off_providers)
     if not batch:
         return {"claimed": 0, "events_count": 0, "llm_used": False, "errors": []}
 

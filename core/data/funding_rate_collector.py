@@ -109,7 +109,7 @@ class FundingRateCollector:
                     exchange="binance",
                     symbol=symbol,
                     funding_rate=float(latest["fundingRate"]),
-                    funding_time=datetime.fromtimestamp(latest["fundingTime"] / 1000),
+                    funding_time=datetime.fromtimestamp(latest["fundingTime"] / 1000, tz=timezone.utc),
                     timestamp=datetime.now(timezone.utc),
                 )
                 
@@ -152,7 +152,7 @@ class FundingRateCollector:
                         exchange="binance",
                         symbol=symbol,
                         funding_rate=float(item["fundingRate"]),
-                        funding_time=datetime.fromtimestamp(item["fundingTime"] / 1000),
+                        funding_time=datetime.fromtimestamp(item["fundingTime"] / 1000, tz=timezone.utc),
                         timestamp=datetime.now(timezone.utc),
                     ))
                     
@@ -192,7 +192,7 @@ class FundingRateCollector:
                     "index_price": float(data.get("indexPrice", 0)),
                     "estimated_settle_price": float(data.get("estimatedSettlePrice", 0)),
                     "last_funding_rate": float(data.get("lastFundingRate", 0)),
-                    "next_funding_time": datetime.fromtimestamp(data.get("nextFundingTime", 0) / 1000),
+                    "next_funding_time": datetime.fromtimestamp(data.get("nextFundingTime", 0) / 1000, tz=timezone.utc),
                     "timestamp": datetime.now(timezone.utc),
                 }
                 
@@ -414,7 +414,7 @@ class FundingRateCollector:
                     exchange="gate",
                     symbol=symbol,
                     funding_rate=float(funding_rate),
-                    funding_time=datetime.fromtimestamp(funding_ts),
+                    funding_time=datetime.fromtimestamp(funding_ts, tz=timezone.utc),
                     timestamp=datetime.now(timezone.utc),
                     estimated_rate=float(latest.get("funding_rate_indicative", funding_rate or 0)) or None,
                 )

@@ -3,11 +3,13 @@
 支持SQLite、Parquet、Redis等多种存储方式
 """
 import json
+import os
 import pickle
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
+from uuid import uuid4
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -259,12 +261,25 @@ class DataStorage:
                 merged_df = merged_df[~merged_df.index.duplicated(keep="last")]
                 merged_df = merged_df.sort_index()
                 table = pa.Table.from_pandas(merged_df)
-                pq.write_table(
-                    table,
-                    str(part_path),
-                    compression="zstd",
-                    compression_level=9,
-                )
+                # Atomic publish: write to a unique temp file then os.replace so
+                # concurrent readers (load path / backfill) never observe a
+                # half-written partition (which previously caused silent data loss).
+                tmp_path = part_path.with_name(f"{part_path.name}.{uuid4().hex}.tmp")
+                try:
+                    pq.write_table(
+                        table,
+                        str(tmp_path),
+                        compression="zstd",
+                        compression_level=9,
+                    )
+                    os.replace(tmp_path, part_path)
+                except Exception:
+                    try:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                    except OSError:
+                        pass
+                    raise
                 written_parts.append(part_path)
             return written_parts
 

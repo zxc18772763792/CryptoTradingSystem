@@ -641,11 +641,22 @@ class RiskManager:
             daily_pnl_ratio <= -2.0 * abs(self.max_daily_loss_ratio or 0.0)
             and self.max_daily_loss_ratio > 0
         )
+        # Only honour the "untracked external equity move" exemption when there is
+        # NO open *system* position. A position opened on a prior day (so no trades
+        # today and realized PnL was reset to 0 at midnight) that bleeds unrealized
+        # today would otherwise escape the daily stop entirely until the 2x
+        # catastrophic backstop — i.e. it could lose up to 2x the daily limit. An
+        # open system position's loss IS ours and must not be exempted.
+        try:
+            _open_system_positions = int(_position_manager().get_position_count())
+        except Exception:
+            _open_system_positions = 1  # fail safe: assume a position exists -> do NOT exempt
         if (
             breached
             and str(getattr(self, "_risk_scope", "paper")) == "live"
             and self._daily_trades <= 0
             and abs(float(self._daily_realized_pnl or 0.0)) < 1e-9
+            and _open_system_positions <= 0
             and not catastrophic
         ):
             # In live mode, external wallet transfers / manually-held exchange positions can move

@@ -400,7 +400,7 @@ def test_fama_runtime_rebalance_offloads_cpu_work(monkeypatch):
         },
     )
 
-    async def fake_load_universe_frames(universe):
+    async def fake_load_universe_frames(universe, now=None):
         return {sym: frames[sym] for sym in universe if sym in frames}
 
     to_thread_calls = []

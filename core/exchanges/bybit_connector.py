@@ -125,7 +125,9 @@ class BybitConnector(BaseExchange):
                 high_24h=float(ticker.get("high", 0)),
                 low_24h=float(ticker.get("low", 0)),
                 volume_24h=float(ticker.get("baseVolume", 0)),
-                timestamp=datetime.fromtimestamp(ticker.get("timestamp", 0) / 1000),
+                timestamp=datetime.fromtimestamp(ticker.get("timestamp", 0) / 1000, tz=timezone.utc)
+                if ticker.get("timestamp")
+                else datetime.now(timezone.utc),
                 exchange=self.name,
             )
         except Exception as e:
@@ -342,7 +344,7 @@ class BybitConnector(BaseExchange):
             fee=fee_cost,
             fee_currency=fee_currency,
             status=status_map.get(ccxt_order.get("status", "open"), OrderStatus.OPEN),
-            timestamp=datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000)
+            timestamp=datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000, tz=timezone.utc)
             if ccxt_order.get("timestamp")
             else None,
             exchange=self.name,

@@ -2971,7 +2971,8 @@ async def run_strategy_research(
                 opt_method = "none"
 
                 if can_split and param_grid:
-                    best_params, optimization_trials, opt_method = _optimize_params_scipy_lhs(
+                    best_params, optimization_trials, opt_method = await asyncio.to_thread(
+                        _optimize_params_scipy_lhs,
                         strategy=strategy,
                         param_grid=param_grid,
                         is_df=is_df,
@@ -2984,7 +2985,8 @@ async def run_strategy_research(
                     )
                     if best_params:
                         try:
-                            best_is_metrics = _run_backtest_core(
+                            best_is_metrics = await asyncio.to_thread(
+                                _run_backtest_core,
                                 strategy=strategy,
                                 df=is_df,
                                 timeframe=timeframe,
@@ -3004,7 +3006,8 @@ async def run_strategy_research(
                     payload["is_sharpe"] = float(best_is_metrics.get("sharpe_ratio", 0.0))
 
                 # ── Full-data run with best params ───────────────────────
-                metrics = _run_backtest_core(
+                metrics = await asyncio.to_thread(
+                    _run_backtest_core,
                     strategy=strategy,
                     df=tf_df,
                     timeframe=timeframe,
@@ -3040,7 +3043,8 @@ async def run_strategy_research(
                 oos_metrics: Optional[Dict[str, Any]] = None
                 if can_split:
                     try:
-                        oos_metrics = _run_backtest_core(
+                        oos_metrics = await asyncio.to_thread(
+                            _run_backtest_core,
                             strategy=strategy,
                             df=oos_df,
                             timeframe=timeframe,
@@ -3064,7 +3068,8 @@ async def run_strategy_research(
 
                 # ── C: Purged walk-forward stability (real IS train + OOS eval) ──
                 if can_split:
-                    wf_result = _run_purged_walk_forward(
+                    wf_result = await asyncio.to_thread(
+                        _run_purged_walk_forward,
                         strategy=strategy,
                         df=tf_df,
                         timeframe=timeframe,
@@ -3089,7 +3094,8 @@ async def run_strategy_research(
 
                 # ── Equity curve sample (50 points) ───────────────────
                 try:
-                    _pos = _build_positions(
+                    _pos = await asyncio.to_thread(
+                        _build_positions,
                         strategy,
                         tf_df,
                         params=best_params if best_params else None,
