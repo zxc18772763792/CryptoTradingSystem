@@ -3696,6 +3696,51 @@ summary:
   - `[PAPER] Order created`: `2`
 - 当前判断不变：第十一轮运行中证据仍健康，但 Level 1 只能等最终 selfcheck JSON 和 evaluator 结果；不进入 Level 2，不开启 `ui_primary`。
 
+2026-05-30 00:38 +08:00 第十一轮继续观察：
+
+- 第十一轮 selfcheck 仍在运行，最终 JSON/stderr 仍为 0 字节。
+- 服务 stdout 继续更新，service stderr 最近新增诊断项但未出现硬污染。
+- `/api/status`：`status=running`、`trading_mode=paper`、`paper_trading=true`、`exchange_status.binance=true`。
+- `/api/market-data/status`：
+  - `market_ws.mode=shadow`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.feed_watch_attempt_count=15306`
+  - `market_ws.feed_watch_timeout_count=0`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.ws_tick_count=15305`
+  - `market_ws.rest_snapshot_count=740`
+  - `market_ws.shadow_compare_count=260`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.stale_symbol_count=2`，来自 Gate REST snapshot 旧快照，不计作 WS stale 门禁。
+  - `market_ws.last_tick_age_ms=948`
+  - `market_ws.shadow_max_abs_diff_bps=12.844398929016815`
+  - `market_ws.shadow_last_compare.abs_diff_bps=5.843100476777627`
+- 服务 stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `5`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `0`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `2`
+  - `Failed to persist positions`: `4`
+  - `Live kline fetch timed out`: `6`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `5`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `2`
+- 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
