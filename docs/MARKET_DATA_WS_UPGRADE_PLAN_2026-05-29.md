@@ -3136,6 +3136,13 @@ pytest tests\test_web_main_runtime_tasks.py tests\test_exchanges.py tests\test_m
 - Level 1 paper shadow 6 小时最终通过，并把最终 JSON 摘要写入第 27 节。
 - 第 24 节回归测试和静态扫描重新通过。
 - 明确确认当前配置没有开启 `ui_primary` 或 `strategy_primary`。
+- 运行 Level 2 前置预检，要求通过：
+
+```powershell
+python scripts\precheck_market_ws_live_shadow.py --base-url http://127.0.0.1:8012 --token $env:OPS_TOKEN
+```
+
+该预检只读取 `/api/status` 和 `/api/market-data/status`，不启动服务、不下单；它要求 `trading_mode=live`、`paper_trading=false`、`MARKET_WS_MODE=shadow`、`MARKET_WS_FORCE_REST=false`、`MARKET_WS_FAIL_CLOSED_FOR_LIVE=true`，并禁止 `ui_primary` / `strategy_primary`。
 
 运行条件：
 
@@ -3600,6 +3607,37 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - `python -m py_compile scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_report_eval.py` 通过。
   - `git diff --check -- scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_report_eval.py` 通过。
 - 当前判断不变：这是 Level 2 live shadow 之前的最终评估工具保险，不改变正在运行的第十一轮 paper shadow；Level 1 通过和最终回归完成前仍不进入 Level 2，不开启 `ui_primary`。
+
+2026-05-30 00:14 +08:00 Level 2 启动前预检工具：
+
+- 已提交：`4cc17b0 Add live shadow precheck gates`。
+- 变更：
+  - `/api/status.market_ws` 和 `/api/market-data/status` 的 market WS payload 新增 `fail_closed_for_live` 字段，用于确认 `MARKET_WS_FAIL_CLOSED_FOR_LIVE=true`。
+  - 新增 `scripts\precheck_market_ws_live_shadow.py`，只读 `/api/status` 和 `/api/market-data/status`，用于 Level 2 live shadow 启动前预检。
+  - 新增 `tests\test_market_ws_live_shadow_precheck.py`，覆盖正确 live shadow 配置、paper runtime 拒绝、`ui_primary` / `force_rest` 拒绝、fail-closed 关闭拒绝。
+- 验证：
+  - `pytest tests\test_market_ws_live_shadow_precheck.py tests\test_web_main_runtime_tasks.py::test_market_ws_status_snapshot_exposes_force_rest_and_hub_metrics -q`，`6 passed in 5.42s`。
+  - `python -m py_compile scripts\precheck_market_ws_live_shadow.py web\main.py tests\test_market_ws_live_shadow_precheck.py` 通过。
+  - `git diff --check -- web\main.py scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_live_shadow_precheck.py tests\test_web_main_runtime_tasks.py` 通过。
+- 当前 paper shadow 服务上运行预检按预期失败：
+
+```text
+ok=false
+errors:
+- runtime is not live
+- MARKET_WS_FAIL_CLOSED_FOR_LIVE must be true
+summary:
+- trading_mode=paper
+- paper_trading=true
+- market_ws_mode=shadow
+- market_ws_enabled=true
+- market_ws_configured_enabled=true
+- market_ws_force_rest=false
+- market_ws_fail_closed_for_live=null
+```
+
+说明：当前运行中的第十一轮服务尚未加载新增 `fail_closed_for_live` 状态字段，因此该字段为 `null`；下一次启动加载新代码后，预检会直接从状态接口确认该配置。此失败是正确的防越级行为，不能把当前 paper shadow 当作 Level 2 live shadow。
+- 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-29 23:49 +08:00 续作追加检查：
 
