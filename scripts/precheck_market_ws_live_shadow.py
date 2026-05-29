@@ -53,6 +53,43 @@ def _has_error_text(value: Any) -> bool:
     return str(value).strip().lower() not in {"", "none", "null"}
 
 
+def _feed_watch_symbols(market_ws: Dict[str, Any]) -> List[Tuple[str, str]]:
+    feed_status = market_ws.get("feed_status") if isinstance(market_ws.get("feed_status"), dict) else {}
+    exchanges = feed_status.get("exchanges") if isinstance(feed_status.get("exchanges"), dict) else {}
+    seen: set[Tuple[str, str]] = set()
+    symbols: List[Tuple[str, str]] = []
+    for exchange, exchange_status in exchanges.items():
+        if not isinstance(exchange_status, dict):
+            continue
+        raw_symbols = exchange_status.get("last_symbols") or []
+        if isinstance(raw_symbols, str):
+            raw_symbols = [raw_symbols]
+        if not isinstance(raw_symbols, list):
+            continue
+        for raw_symbol in raw_symbols:
+            symbol = str(raw_symbol or "").strip()
+            exchange_name = str(exchange or "").strip()
+            if not exchange_name or not symbol:
+                continue
+            key = (exchange_name, symbol)
+            if key in seen:
+                continue
+            seen.add(key)
+            symbols.append(key)
+    return symbols
+
+
+def _symbol_snapshot(market_ws: Dict[str, Any], exchange: str, symbol: str) -> Dict[str, Any]:
+    symbols = market_ws.get("symbols") if isinstance(market_ws.get("symbols"), dict) else {}
+    exchange_symbols = symbols.get(exchange) if isinstance(symbols.get(exchange), dict) else {}
+    snapshot = exchange_symbols.get(symbol)
+    if isinstance(snapshot, dict):
+        return snapshot
+    normalized = symbol.split(":", 1)[0]
+    snapshot = exchange_symbols.get(normalized)
+    return snapshot if isinstance(snapshot, dict) else {}
+
+
 def _request_json(base_url: str, token: str, path: str, timeout: float) -> Dict[str, Any]:
     headers = {"X-OPS-CALLER": "precheck_market_ws_live_shadow"}
     if token:
@@ -88,6 +125,32 @@ def evaluate_precheck(
         else _as_int(market_ws.get("stale_symbol_count"))
     )
     last_tick_age_ms = _as_float(market_ws.get("last_tick_age_ms"))
+    watched_symbols = _feed_watch_symbols(market_ws)
+    watched_symbol_errors: List[str] = []
+    if _as_bool(market_ws.get("feed_healthy")) and not watched_symbols:
+        watched_symbol_errors.append("market WS feed watch symbols are missing")
+    if watched_symbols and not isinstance(market_ws.get("symbols"), dict):
+        watched_symbol_errors.append("market WS symbol details are missing")
+    for exchange, symbol in watched_symbols:
+        symbol_status = _symbol_snapshot(market_ws, exchange, symbol)
+        symbol_key = f"{exchange}:{symbol}"
+        if not symbol_status:
+            watched_symbol_errors.append(f"market WS missing watched symbol tick: {symbol_key}")
+            continue
+        source = str(symbol_status.get("source") or "").strip().lower()
+        if source != "ws":
+            watched_symbol_errors.append(
+                f"market WS watched symbol is not WS sourced: {symbol_key} source={symbol_status.get('source')!r}"
+            )
+        if _as_bool(symbol_status.get("is_stale")):
+            watched_symbol_errors.append(f"market WS watched symbol is stale: {symbol_key}")
+        symbol_age_ms = _as_float(symbol_status.get("age_ms"))
+        if symbol_age_ms is None:
+            watched_symbol_errors.append(f"market WS watched symbol age is missing: {symbol_key}")
+        elif symbol_age_ms > float(max_ws_age_ms):
+            watched_symbol_errors.append(
+                f"market WS watched symbol age {symbol_age_ms:.1f} ms exceeds {float(max_ws_age_ms):.1f} ms: {symbol_key}"
+            )
 
     if str(status_payload.get("status") or "").strip().lower() != "running":
         errors.append("api status is not running")
@@ -134,6 +197,7 @@ def evaluate_precheck(
         errors.append(f"market WS shadow compare violation count is {shadow_compare_violation_count}")
     if shadow_compare_stale_skip_count > 0:
         errors.append(f"market WS shadow stale skip count is {shadow_compare_stale_skip_count}")
+    errors.extend(watched_symbol_errors)
 
     summary = {
         "trading_mode": status_payload.get("trading_mode"),
@@ -153,6 +217,9 @@ def evaluate_precheck(
         "market_ws_feed_watch_empty_count": feed_watch_empty_count,
         "market_ws_shadow_compare_violation_count": shadow_compare_violation_count,
         "market_ws_shadow_compare_stale_skip_count": shadow_compare_stale_skip_count,
+        "market_ws_feed_watch_symbol_count": len(watched_symbols),
+        "market_ws_feed_watch_symbols": [f"{exchange}:{symbol}" for exchange, symbol in watched_symbols],
+        "market_ws_feed_watch_symbol_error_count": len(watched_symbol_errors),
     }
     return not errors, errors, summary
 
