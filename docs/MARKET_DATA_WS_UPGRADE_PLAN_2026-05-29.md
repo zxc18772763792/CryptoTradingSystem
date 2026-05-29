@@ -3486,6 +3486,50 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - `[PAPER] Order created`: `2`
 - 当前判断不变：第十一轮 selfcheck JSON/stderr 仍为 0 字节，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-05-30 00:01 +08:00 跨日续作检查：
+
+- 当前时间已跨到 2026-05-30；第十一轮 selfcheck 从 2026-05-29 22:29 左右开始，6 小时窗口尚未结束，`logs\paper_shadow_6h_selfcheck_20260529_222616.out.json` 和 `logs\paper_shadow_6h_selfcheck_20260529_222616.err.log` 仍为 0 字节符合预期。
+- 第十一轮服务与 selfcheck 仍在运行：服务 PID `76424`，selfcheck PID `163652`。
+- 服务 stdout 仍在更新，tail 显示 selfcheck 每分钟请求 `/health`、`/api/status`、`/api/market-data/status` 均返回 `200 OK`；服务 stderr 自 2026-05-29 23:46 后未继续增长。
+- `/api/status`：`status=running`、`trading_mode=paper`、`paper_trading=true`。
+- `/api/market-data/status`：
+  - `market_ws.mode=shadow`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.ws_tick_count=11022`
+  - `market_ws.rest_snapshot_count=526`
+  - `market_ws.shadow_compare_count=188`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.feed_watch_timeout_count=0`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.stale_symbol_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.last_tick_age_ms=212`
+  - `market_ws.shadow_max_abs_diff_bps=12.844398929016815`
+- 服务 stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `3`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `0`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `2`
+  - `Failed to persist positions`: `4`
+  - `Live kline fetch timed out`: `4`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `3`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `2`
+- 当前判断不变：第十一轮只能继续等待最终 JSON；Level 1 未完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
