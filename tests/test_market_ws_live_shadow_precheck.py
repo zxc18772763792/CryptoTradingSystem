@@ -32,6 +32,16 @@ def _market_ws_payload(**overrides):
         "mode": "shadow",
         "force_rest": False,
         "fail_closed_for_live": True,
+        "feed_healthy": True,
+        "ws_hub_healthy": True,
+        "feed_last_error": None,
+        "last_tick_age_ms": 500,
+        "ws_stale_symbol_count": 0,
+        "invalid_payload_count": 0,
+        "timestamp_regression_count": 0,
+        "feed_watch_empty_count": 0,
+        "shadow_compare_violation_count": 0,
+        "shadow_compare_stale_skip_count": 0,
     }
     payload.update(overrides)
     return payload
@@ -108,6 +118,38 @@ def test_live_shadow_precheck_rejects_missing_fail_closed_status():
     assert ok is False
     assert "market WS status is missing fail_closed_for_live" in errors
     assert summary["market_ws_fail_closed_for_live"] is None
+
+
+def test_live_shadow_precheck_rejects_unhealthy_market_ws_runtime():
+    ok, errors, summary = precheck.evaluate_precheck(
+        _status_payload(),
+        _market_ws_payload(
+            feed_healthy=False,
+            ws_hub_healthy=False,
+            feed_last_error="watch error",
+            last_tick_age_ms=20000,
+            ws_stale_symbol_count=1,
+            invalid_payload_count=1,
+            timestamp_regression_count=1,
+            feed_watch_empty_count=1,
+            shadow_compare_violation_count=1,
+            shadow_compare_stale_skip_count=1,
+        ),
+    )
+
+    assert ok is False
+    assert "market WS feed is not healthy" in errors
+    assert "market WS hub is not healthy" in errors
+    assert "market WS feed_last_error is not empty: 'watch error'" in errors
+    assert "market WS has stale symbols: 1" in errors
+    assert "market WS last tick age 20000.0 ms exceeds 10000.0 ms" in errors
+    assert "market WS invalid payload count is 1" in errors
+    assert "market WS timestamp regression count is 1" in errors
+    assert "market WS feed empty watch count is 1" in errors
+    assert "market WS shadow compare violation count is 1" in errors
+    assert "market WS shadow stale skip count is 1" in errors
+    assert summary["market_ws_feed_healthy"] is False
+    assert summary["market_ws_ws_hub_healthy"] is False
 
 
 def test_live_shadow_precheck_main_calls_status_endpoints(monkeypatch, capsys):
