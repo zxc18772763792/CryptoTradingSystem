@@ -89,6 +89,7 @@ def evaluate_report(
     log_counts: Optional[Dict[str, int]] = None,
     diagnostic_log_counts: Optional[Dict[str, int]] = None,
     max_log_count: int = 0,
+    require_final_runtime_fields: bool = False,
 ) -> Dict[str, Any]:
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     errors: list[str] = []
@@ -188,12 +189,30 @@ def evaluate_report(
     final_trading_mode = str(summary.get("final_trading_mode") or "").strip().lower()
     final_paper_trading = summary.get("final_paper_trading")
     expected_runtime = str(expect_runtime or "").strip().lower()
-    if expected_runtime == "paper":
+    if require_final_runtime_fields:
         _add_error(
             errors,
-            final_paper_trading is not False and (not final_trading_mode or final_trading_mode == "paper"),
-            "final runtime is not paper",
+            summary.get("final_trading_mode") is not None,
+            "final_trading_mode is missing",
         )
+        _add_error(
+            errors,
+            summary.get("final_paper_trading") is not None,
+            "final_paper_trading is missing",
+        )
+    if expected_runtime == "paper":
+        if require_final_runtime_fields:
+            _add_error(
+                errors,
+                final_paper_trading is True and final_trading_mode == "paper",
+                "final runtime is not paper",
+            )
+        else:
+            _add_error(
+                errors,
+                final_paper_trading is not False and (not final_trading_mode or final_trading_mode == "paper"),
+                "final runtime is not paper",
+            )
     elif expected_runtime == "live":
         _add_error(
             errors,
@@ -280,6 +299,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-price-diff-bps", type=float, default=20.0)
     parser.add_argument("--max-ws-age-p95-ms", type=float, default=10000.0)
     parser.add_argument("--max-log-count", type=int, default=0)
+    parser.add_argument(
+        "--require-final-runtime-fields",
+        action="store_true",
+        help="Require final_trading_mode and final_paper_trading to be present and exact.",
+    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -333,6 +357,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             log_counts=log_counts,
             diagnostic_log_counts=diagnostic_log_counts,
             max_log_count=int(args.max_log_count),
+            require_final_runtime_fields=bool(args.require_final_runtime_fields),
         )
     except Exception as exc:
         result = {
