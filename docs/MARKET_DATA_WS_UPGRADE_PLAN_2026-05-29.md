@@ -3638,6 +3638,12 @@ summary:
 
 说明：当前运行中的第十一轮服务尚未加载新增 `fail_closed_for_live` 状态字段，因此该字段为 `null`；下一次启动加载新代码后，预检会直接从状态接口确认该配置。此失败是正确的防越级行为，不能把当前 paper shadow 当作 Level 2 live shadow。
 - 2026-05-30 00:23 +08:00 更新：`a0f1957 Clarify live shadow precheck status field` 已把缺失字段和显式关闭配置区分为不同错误；当前旧服务上的预期失败文案为 `market WS status is missing fail_closed_for_live`。
+- 2026-05-30 00:31 +08:00 更新：`8124058 Prefer market data status in live shadow precheck` 已让 `scripts\precheck_market_ws_live_shadow.py` 把专用 `/api/market-data/status` payload 作为 market WS 权威来源，仅当该 payload 为空时才回退读取 `/api/status.market_ws`。这避免 `/api/status` 中缓存或较旧的 `market_ws` 快照覆盖新鲜的 market data status。
+- 验证：
+  - `pytest tests\test_market_ws_live_shadow_precheck.py -q`，`7 passed in 2.86s`。
+  - `python -m py_compile scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_live_shadow_precheck.py` 通过。
+  - `git diff --check -- scripts/precheck_market_ws_live_shadow.py tests/test_market_ws_live_shadow_precheck.py` 通过。
+  - 当前第十一轮 paper shadow 服务上复跑 Level 2 precheck 仍按预期失败：`runtime is not live`、`market WS status is missing fail_closed_for_live`；summary 为 `trading_mode=paper`、`paper_trading=true`、`market_ws_mode=shadow`、`market_ws_force_rest=false`、`market_ws_fail_closed_for_live=null`。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
