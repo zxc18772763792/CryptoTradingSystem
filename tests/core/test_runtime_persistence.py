@@ -280,6 +280,56 @@ def test_position_manager_persist_uses_unique_tmp_and_retries_replace(tmp_path, 
     assert list((tmp_path / "runtime_state").glob("positions_paper.json.*.tmp")) == []
 
 
+def test_position_manager_load_retries_transient_permission_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(position_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(position_module.settings, "TRADING_MODE", "live", raising=False)
+
+    runtime_state = tmp_path / "runtime_state"
+    runtime_state.mkdir(parents=True)
+    path = runtime_state / "positions_live.json"
+    path.write_text(
+        """
+{
+  "scope": "live",
+  "open_positions": [
+    {
+      "symbol": "ETH/USDT",
+      "exchange": "binance",
+      "side": "long",
+      "entry_price": 2000.0,
+      "current_price": 2010.0,
+      "quantity": 0.1,
+      "value": 201.0,
+      "strategy": "real_strategy",
+      "account_id": "main",
+      "metadata": {"source": "strategy"}
+    }
+  ],
+  "closed_positions": []
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    calls = []
+    original_read_text = position_module.Path.read_text
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == path:
+            calls.append(str(self))
+            if len(calls) == 1:
+                raise PermissionError("simulated transient read lock")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(position_module.Path, "read_text", flaky_read_text)
+
+    restored = position_module.PositionManager()
+
+    assert len(calls) == 2
+    assert len(restored.get_all_positions()) == 1
+    assert restored.get_all_positions()[0].symbol == "ETH/USDT"
+
+
 def test_position_manager_skips_persisted_test_stub_position(tmp_path, monkeypatch):
     monkeypatch.setattr(position_module.settings, "CACHE_PATH", tmp_path, raising=False)
     monkeypatch.setattr(position_module.settings, "TRADING_MODE", "live", raising=False)

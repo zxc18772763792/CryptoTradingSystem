@@ -3378,6 +3378,7 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
 - 第十一轮服务日志出现多次 `Failed to persist positions for scope=paper`，包含 `WinError 32`、`WinError 5` 和 `WinError 2`，发生在 `positions_paper.tmp -> positions_paper.json` 固定临时文件发布路径。
 - 本轮代码已修复 `core/trading/position_manager.py`：持仓持久化改用每次唯一 tmp 文件，并对 `os.replace` 做短重试，降低 Windows 文件锁、杀软或并发读写导致的污染。
 - 修复单测：`tests\core\test_runtime_persistence.py::test_position_manager_persist_uses_unique_tmp_and_retries_replace`。
+- 2026-05-29 23:36 +08:00 后续抽样又出现一次 `positions_live.json` 读取 `Permission denied`，同属 Windows 瞬时文件占用污染；代码已追加 `_load_scope_state()` 读取短重试，并补 `tests\core\test_runtime_persistence.py::test_position_manager_load_retries_transient_permission_error`。
 - 注意：正在运行的第十一轮服务尚未加载此修复，最终日志仍应按原服务版本如实归档；修复在下一次 clean shadow 运行中验证。
 
 当前结论：
