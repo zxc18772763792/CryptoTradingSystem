@@ -6,6 +6,8 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Set
 
 from loguru import logger
 
+from core.marketdata.runtime_price_provider import get_realtime_price
+
 STABLE_COINS: Set[str] = {"USDT", "USDC", "USD", "BUSD"}
 _STABLE_ORDER: Sequence[str] = ("USDT", "USDC", "BUSD", "USD")
 _BRIDGE_ASSETS: Sequence[str] = ("BTC", "ETH", "BNB", "OKB")
@@ -45,8 +47,27 @@ async def _fetch_last_price(
         return 0.0
 
     try:
-        ticker = await asyncio.wait_for(connector.get_ticker(key), timeout=max(0.1, float(timeout_sec)))
-        last = float((ticker.last if ticker else 0.0) or 0.0)
+        exchange_name = str(
+            getattr(connector, "name", "")
+            or getattr(getattr(connector, "config", None), "name", "")
+            or ""
+        ).strip()
+        if exchange_name:
+            price_read = await get_realtime_price(
+                exchange_name,
+                key,
+                connector=connector,
+                allow_rest_fallback=True,
+                rest_timeout_sec=max(0.1, float(timeout_sec)),
+            )
+            last = float(price_read.price or 0.0) if price_read.ok else 0.0
+        else:
+            fetcher = getattr(connector, "get_ticker", None)
+            if not callable(fetcher):
+                last = 0.0
+            else:
+                ticker = await asyncio.wait_for(fetcher(key), timeout=max(0.1, float(timeout_sec)))
+                last = float((ticker.last if ticker else 0.0) or 0.0)
         if last > 0:
             price_cache[key] = last
             return last

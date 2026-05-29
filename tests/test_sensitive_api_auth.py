@@ -551,6 +551,7 @@ def test_account_summary_requires_read_trading_state_permission(monkeypatch):
 def test_sensitive_read_routes_are_dependency_gated():
     expected = {
         ("main", "GET", "/api/status"),
+        ("main", "GET", "/api/market-data/status"),
         ("trading_balances", "GET", "/balances"),
         ("trading_balances", "GET", "/balances/history"),
         ("trading_analytics", "GET", "/analytics/overview"),

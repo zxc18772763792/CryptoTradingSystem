@@ -28,6 +28,33 @@ _FUNDING_FETCH_TIMEOUT_SEC = 2.8
 _FUNDING_CACHE_TTL_SEC = 300.0
 _BALANCE_CACHE_TTL_SEC = 90.0
 
+
+def _consume_close_result(task: asyncio.Task) -> None:
+    with contextlib.suppress(BaseException):
+        task.result()
+
+
+async def _close_client_safely(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if not callable(close):
+        return
+    try:
+        result = close()
+    except Exception:
+        return
+    if result is None:
+        return
+    if asyncio.iscoroutine(result):
+        task = asyncio.create_task(result)
+    elif isinstance(result, asyncio.Future):
+        task = result
+    else:
+        return
+    task.add_done_callback(_consume_close_result)
+    with contextlib.suppress(BaseException):
+        await asyncio.shield(task)
+
+
 # Symbol mapping: spot symbol -> futures symbol (for low-price tokens)
 _FUTURES_SYMBOL_MAP = {
     "PEPE/USDT": "1000PEPE/USDT",
@@ -225,18 +252,18 @@ class BinanceConnector(BaseExchange):
                 self._client = candidate_client
                 self._connected = True
                 if existing_client is not None and existing_client is not candidate_client:
-                    with contextlib.suppress(Exception):
-                        await existing_client.close()
+                    await _close_client_safely(existing_client)
                 logger.info(f"[{self.name}] Connected successfully")
                 return True
             except BaseException as e:
                 if candidate_client is not None and candidate_client is not existing_client:
-                    with contextlib.suppress(Exception):
-                        await candidate_client.close()
+                    await _close_client_safely(candidate_client)
                 if existing_connected:
                     self._client = existing_client
                     self._connected = True
                 else:
+                    if existing_client is not None and existing_client is not candidate_client:
+                        await _close_client_safely(existing_client)
                     self._client = None
                     self._connected = False
                 if isinstance(e, asyncio.CancelledError):
@@ -250,8 +277,7 @@ class BinanceConnector(BaseExchange):
             self._client = None
             self._connected = False
             if client:
-                with contextlib.suppress(Exception):
-                    await client.close()
+                await _close_client_safely(client)
         logger.info(f"[{self.name}] Disconnected")
 
     async def get_ticker(self, symbol: str) -> Ticker:
@@ -701,7 +727,7 @@ class BinanceConnector(BaseExchange):
             fee=fee_cost,
             fee_currency=fee_currency,
             status=status_map.get(ccxt_order.get("status", "open"), OrderStatus.OPEN),
-            timestamp=datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000)
+            timestamp=datetime.fromtimestamp(ccxt_order.get("timestamp", 0) / 1000, tz=timezone.utc)
             if ccxt_order.get("timestamp")
             else None,
             exchange=self.name,

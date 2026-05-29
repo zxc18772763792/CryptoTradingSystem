@@ -244,6 +244,42 @@ def test_position_manager_persists_multiple_strategies_per_symbol(tmp_path, monk
     assert len(restored.get_positions("binance", "BTC/USDT", account_id="main")) == 2
 
 
+def test_position_manager_persist_uses_unique_tmp_and_retries_replace(tmp_path, monkeypatch):
+    monkeypatch.setattr(position_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(position_module.settings, "TRADING_MODE", "paper", raising=False)
+
+    manager = position_module.PositionManager()
+    manager.open_position(
+        exchange="binance",
+        symbol="BTC/USDT",
+        side=PositionSide.LONG,
+        entry_price=100.0,
+        quantity=1.0,
+        strategy="alpha_strategy",
+        account_id="main",
+    )
+
+    calls = []
+    original_replace = position_module.os.replace
+
+    def flaky_replace(src, dst):
+        calls.append((src, dst))
+        if len(calls) == 1:
+            raise PermissionError("simulated transient lock")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(position_module.os, "replace", flaky_replace)
+    manager._dirty = True
+    manager.flush()
+
+    assert len(calls) == 2
+    assert calls[0][0] == calls[1][0]
+    assert calls[0][0].endswith(".tmp")
+    assert calls[0][0] != str(manager._scope_state_path("paper").with_suffix(".tmp"))
+    assert manager._scope_state_path("paper").exists()
+    assert list((tmp_path / "runtime_state").glob("positions_paper.json.*.tmp")) == []
+
+
 def test_position_manager_skips_persisted_test_stub_position(tmp_path, monkeypatch):
     monkeypatch.setattr(position_module.settings, "CACHE_PATH", tmp_path, raising=False)
     monkeypatch.setattr(position_module.settings, "TRADING_MODE", "live", raising=False)

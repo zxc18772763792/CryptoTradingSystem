@@ -317,6 +317,64 @@ class TestBinanceConnector:
         assert existing.closed is False
         assert broken.closed is True
 
+    def test_connect_cancellation_closes_candidate_client(self, connector, monkeypatch):
+        class CandidateClient:
+            def __init__(self):
+                self.options = {}
+                self.close_started = False
+                self.closed = False
+
+            async def close(self):
+                self.close_started = True
+                await asyncio.sleep(0)
+                self.closed = True
+
+        candidate = CandidateClient()
+
+        async def cancel_prepare(client):
+            assert client is candidate
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr("core.exchanges.binance_connector.ccxt.binance", lambda _: candidate)
+        monkeypatch.setattr(connector, "_prepare_client", cancel_prepare)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(connector.connect())
+
+        assert candidate.close_started is True
+        assert candidate.closed is True
+        assert connector._client is None
+        assert connector._connected is False
+
+    def test_connect_cancellation_closes_existing_disconnected_client(self, connector, monkeypatch):
+        class Client:
+            def __init__(self):
+                self.options = {}
+                self.closed = False
+
+            async def close(self):
+                self.closed = True
+
+        existing = Client()
+        candidate = Client()
+        connector._client = existing
+        connector._connected = False
+
+        async def cancel_prepare(client):
+            assert client is candidate
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr("core.exchanges.binance_connector.ccxt.binance", lambda _: candidate)
+        monkeypatch.setattr(connector, "_prepare_client", cancel_prepare)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(connector.connect())
+
+        assert candidate.closed is True
+        assert existing.closed is True
+        assert connector._client is None
+        assert connector._connected is False
+
     def test_get_positions_default_type_fallback_does_not_pollute_balance_fetch(self):
         config = ExchangeConfig(
             name="binance",

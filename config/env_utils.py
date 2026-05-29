@@ -37,6 +37,18 @@ def env_int(
         return int(default)
 
 
+def env_float(
+    name: str,
+    default: float,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> float:
+    try:
+        return float(_resolve_environ(environ).get(name) or default)
+    except Exception:
+        return float(default)
+
+
 def has_configured_value(*values: Any) -> bool:
     return any(str(value or "").strip() for value in values)
 

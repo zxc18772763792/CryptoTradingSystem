@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from fastapi import FastAPI
 from starlette.middleware import Middleware
@@ -32,6 +33,7 @@ def test_news_llm_task_can_be_forced_external_only(monkeypatch):
 def test_optional_external_data_workers_are_disabled_by_default(monkeypatch):
     monkeypatch.setattr(web_main, "_PUBLIC_MACRO_WORKERS_ENABLED", False)
     monkeypatch.setattr(web_main, "_PREMIUM_EXTERNAL_WORKERS_ENABLED", False)
+    monkeypatch.setattr(web_main, "_COINGLASS_WORKER_ENABLED", True)
 
     factories = web_main._build_runtime_task_factories(FastAPI())
 
@@ -44,12 +46,22 @@ def test_optional_external_data_workers_are_disabled_by_default(monkeypatch):
     assert "kaiko" not in factories
 
 
+def test_coinglass_worker_factory_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(web_main, "_COINGLASS_WORKER_ENABLED", False)
+
+    factories = web_main._build_runtime_task_factories(FastAPI())
+
+    assert "coinglass" not in factories
+
+
 def test_optional_external_data_workers_can_be_enabled(monkeypatch):
+    monkeypatch.setattr(web_main, "_COINGLASS_WORKER_ENABLED", True)
     monkeypatch.setattr(web_main, "_PUBLIC_MACRO_WORKERS_ENABLED", True)
     monkeypatch.setattr(web_main, "_PREMIUM_EXTERNAL_WORKERS_ENABLED", True)
 
     factories = web_main._build_runtime_task_factories(FastAPI())
 
+    assert "coinglass" in factories
     assert "google_trends" in factories
     assert "macro_cache" in factories
     assert "glassnode" in factories
@@ -58,8 +70,20 @@ def test_optional_external_data_workers_can_be_enabled(monkeypatch):
     assert "kaiko" in factories
 
 
+def test_exchange_watchdog_factory_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(web_main, "_EXCHANGE_WATCHDOG_ENABLED", True)
+    factories = web_main._build_runtime_task_factories(FastAPI())
+    assert "exchange_watchdog" in factories
+
+    monkeypatch.setattr(web_main, "_EXCHANGE_WATCHDOG_ENABLED", False)
+    factories = web_main._build_runtime_task_factories(FastAPI())
+    assert "exchange_watchdog" not in factories
+
+
 def test_market_ws_feed_factory_gated_by_flag(monkeypatch):
     monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", False)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "shadow")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
     factories = web_main._build_runtime_task_factories(FastAPI())
     assert "market_ws_feed" not in factories
 
@@ -67,6 +91,10 @@ def test_market_ws_feed_factory_gated_by_flag(monkeypatch):
     factories = web_main._build_runtime_task_factories(FastAPI())
     assert "market_ws_feed" in factories
     assert factories["market_ws_feed"]["restart_on_failure"] is True
+
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", True)
+    factories = web_main._build_runtime_task_factories(FastAPI())
+    assert "market_ws_feed" not in factories
 
 
 async def test_market_ws_feed_waits_for_late_exchange_connections(monkeypatch):
@@ -108,21 +136,27 @@ async def test_market_ws_feed_waits_for_late_exchange_connections(monkeypatch):
     assert web_main._market_ws_feed is None
 
 
-def test_runtime_pusher_skips_rest_when_ws_healthy(monkeypatch):
-    """When the WS feed reports healthy, the REST market-tick fan-out is skipped."""
+def test_runtime_pusher_keeps_rest_in_shadow_mode_even_when_ws_healthy(monkeypatch):
+    """Shadow mode records WS ticks but keeps REST as the UI/runtime source."""
 
     class _HealthyFeed:
         def is_healthy(self):
             return True
 
-    emit_calls = {"n": 0}
+    emit_calls = []
 
-    async def _fake_emit_market_ticks():
-        emit_calls["n"] += 1
+    async def _fake_emit_market_ticks(**kwargs):
+        emit_calls.append(kwargs)
 
     async def _fake_emit_runtime_snapshot():
         return None
 
+    web_main.market_data_hub.clear()
+    web_main.market_data_hub.upsert_ws_tick("binance", "BTC/USDT", {"last": 50000.0})
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "shadow")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main, "_MARKET_TICK_INTERVAL_SEC", 0.0)
     monkeypatch.setattr(web_main, "_market_ws_feed", _HealthyFeed())
     monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
     monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
@@ -136,15 +170,54 @@ def test_runtime_pusher_skips_rest_when_ws_healthy(monkeypatch):
         await asyncio.wait_for(task, timeout=5.0)
 
     asyncio.run(_run())
-    assert emit_calls["n"] == 0, "REST ticks should be skipped while WS is healthy"
+    assert emit_calls, "REST ticks should continue in shadow mode"
+    assert emit_calls[-1]["hub_source"] == "rest_snapshot"
+    assert emit_calls[-1]["fallback_reason"] == "periodic_rest_snapshot"
+    web_main.market_data_hub.clear()
 
 
-def test_runtime_pusher_uses_rest_when_ws_unhealthy(monkeypatch):
-    """When the WS feed is down/absent, REST market ticks are used as fallback."""
+def test_runtime_pusher_runs_shadow_rest_reconcile_without_ui_subscribers(monkeypatch):
+    emit_calls = []
 
-    class _DeadFeed:
+    async def _fake_emit_market_ticks(**kwargs):
+        emit_calls.append(kwargs)
+
+    async def _fake_emit_runtime_snapshot():
+        raise AssertionError("runtime snapshot should not fan out without subscribers")
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "shadow")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main, "_MARKET_WS_REST_RECONCILE_SEC", 0.01)
+    monkeypatch.setattr(web_main, "_MARKET_TICK_INTERVAL_SEC", 1000.0)
+    monkeypatch.setattr(web_main, "_market_ws_feed", None)
+    monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
+    monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: False)
+
+    async def _run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(web_main._runtime_pusher(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(_run())
+    assert emit_calls, "shadow REST reconciliation should run without UI subscribers"
+    assert emit_calls[-1]["hub_source"] == "rest_snapshot"
+    assert emit_calls[-1]["fallback_reason"] == "shadow_rest_reconcile"
+    assert emit_calls[-1]["publish"] is False
+    assert emit_calls[-1]["require_subscribers"] is False
+    web_main.market_data_hub.clear()
+
+
+def test_runtime_pusher_skips_rest_when_ui_primary_ws_and_hub_are_healthy(monkeypatch):
+    """UI-primary mode can suppress REST only when feed and hub freshness agree."""
+
+    class _HealthyFeed:
         def is_healthy(self):
-            return False
+            return True
 
     emit_calls = {"n": 0}
 
@@ -154,6 +227,48 @@ def test_runtime_pusher_uses_rest_when_ws_unhealthy(monkeypatch):
     async def _fake_emit_runtime_snapshot():
         return None
 
+    web_main.market_data_hub.clear()
+    web_main.market_data_hub.upsert_ws_tick("binance", "BTC/USDT", {"last": 50000.0})
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main, "_MARKET_TICK_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(web_main, "_market_ws_feed", _HealthyFeed())
+    monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
+    monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+
+    async def _run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(web_main._runtime_pusher(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(_run())
+    assert emit_calls["n"] == 0, "REST ticks should be skipped only in ui_primary with fresh hub data"
+    web_main.market_data_hub.clear()
+
+
+def test_runtime_pusher_uses_rest_when_ws_unhealthy(monkeypatch):
+    """When the WS feed is down/absent, REST market ticks are used as fallback."""
+
+    class _DeadFeed:
+        def is_healthy(self):
+            return False
+
+    emit_calls = []
+
+    async def _fake_emit_market_ticks(**kwargs):
+        emit_calls.append(kwargs)
+
+    async def _fake_emit_runtime_snapshot():
+        return None
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
     monkeypatch.setattr(web_main, "_market_ws_feed", _DeadFeed())
     monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
     monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
@@ -168,7 +283,406 @@ def test_runtime_pusher_uses_rest_when_ws_unhealthy(monkeypatch):
         await asyncio.wait_for(task, timeout=5.0)
 
     asyncio.run(_run())
-    assert emit_calls["n"] >= 1, "REST ticks should run as fallback when WS is down"
+    assert emit_calls, "REST ticks should run as fallback when WS is down"
+    assert emit_calls[-1]["hub_source"] == "rest_fallback"
+    assert emit_calls[-1]["fallback_reason"] == "ws_unhealthy"
+
+
+def test_runtime_pusher_uses_rest_fallback_when_ui_primary_hub_is_stale(monkeypatch):
+    """A healthy feed alone is not enough; stale hub data must trigger REST fallback."""
+
+    class _HealthyFeed:
+        def is_healthy(self):
+            return True
+
+    emit_calls = []
+
+    async def _fake_emit_market_ticks(**kwargs):
+        emit_calls.append(kwargs)
+
+    async def _fake_emit_runtime_snapshot():
+        return None
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main, "_MARKET_TICK_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(web_main, "_market_ws_feed", _HealthyFeed())
+    monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
+    monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+
+    async def _run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(web_main._runtime_pusher(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(_run())
+    assert emit_calls, "stale/missing WS hub data should trigger REST fallback"
+    assert emit_calls[-1]["hub_source"] == "rest_fallback"
+    assert emit_calls[-1]["fallback_reason"] == "ws_stale"
+
+
+def test_publish_market_ticks_writes_hub_without_ui_fanout_in_shadow(monkeypatch):
+    published = []
+
+    async def _fake_publish(event, payload=None):
+        published.append((event, payload))
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "shadow")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+    monkeypatch.setattr(web_main.event_bus, "publish_nowait_safe", _fake_publish)
+
+    asyncio.run(
+        web_main._publish_market_ticks(
+            {"binance": {"BTC/USDT:USDT": {"last": 50000.0, "bid": 49999.0, "ask": 50001.0}}}
+        )
+    )
+
+    assert published == []
+    current = web_main.market_data_hub.get_tick("binance", "BTCUSDT")
+    assert current is not None
+    assert current["tick"]["source"] == "ws"
+    assert current["tick"]["last"] == 50000.0
+    web_main.market_data_hub.clear()
+
+
+def test_publish_market_ticks_fans_out_normalized_payload_in_ui_primary(monkeypatch):
+    published = []
+
+    async def _fake_publish(event, payload=None):
+        published.append((event, payload))
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+    monkeypatch.setattr(web_main.event_bus, "publish_nowait_safe", _fake_publish)
+
+    asyncio.run(
+        web_main._publish_market_ticks(
+            {"binance": {"BTC/USDT:USDT": {"last": 50000.0, "bid": 49999.0, "ask": 50001.0}}}
+        )
+    )
+
+    assert len(published) == 1
+    assert published[0][0] == "market_tick"
+    assert published[0][1]["binance"]["BTC/USDT"]["source"] == "ws"
+    assert published[0][1]["binance"]["BTC/USDT"]["last"] == 50000.0
+    web_main.market_data_hub.clear()
+
+
+def test_publish_market_ticks_keeps_hub_write_when_event_bus_publish_fails(monkeypatch):
+    async def _failing_publish(event, payload=None):
+        raise RuntimeError("event bus down")
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+    monkeypatch.setattr(web_main.event_bus, "publish_nowait_safe", _failing_publish)
+
+    asyncio.run(
+        web_main._publish_market_ticks(
+            {"binance": {"BTC/USDT": {"last": 50000.0, "bid": 49999.0, "ask": 50001.0}}}
+        )
+    )
+
+    current = web_main.market_data_hub.get_tick("binance", "BTC/USDT")
+    assert current is not None
+    assert current["tick"]["source"] == "ws"
+    assert current["tick"]["last"] == 50000.0
+    web_main.market_data_hub.clear()
+
+
+def test_emit_market_ticks_keeps_hub_write_when_event_bus_publish_fails(monkeypatch):
+    class _Connector:
+        async def get_ticker(self, symbol):
+            return SimpleNamespace(
+                last=50000.0,
+                bid=49999.0,
+                ask=50001.0,
+                timestamp=None,
+            )
+
+    async def _failing_publish(event, payload=None):
+        raise RuntimeError("event bus down")
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+    monkeypatch.setattr(web_main.event_bus, "publish_nowait_safe", _failing_publish)
+    monkeypatch.setattr(web_main, "_collect_watch_symbols", lambda: ["BTC/USDT"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_connected_exchanges", lambda: ["binance"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_exchange", lambda name: _Connector())
+
+    asyncio.run(web_main._emit_market_ticks(hub_source="rest_fallback", fallback_reason="test"))
+
+    snapshot = web_main.market_data_hub.snapshot(include_symbols=True)
+    assert snapshot["rest_fallback_count"] == 1
+    assert snapshot["fallback_reasons"] == {"test": 1}
+    assert snapshot["symbols"]["binance"]["BTC/USDT"]["source"] == "rest_fallback"
+    web_main.market_data_hub.clear()
+
+
+def test_market_ws_status_snapshot_exposes_force_rest_and_hub_metrics(monkeypatch):
+    web_main.market_data_hub.clear()
+    web_main.market_data_hub.upsert_rest_tick(
+        "binance",
+        "BTC/USDT",
+        {"last": 50000.0, "bid": 49999.0, "ask": 50001.0},
+        reason="test",
+    )
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", True)
+    monkeypatch.setattr(web_main, "_market_ws_feed", None)
+
+    payload = web_main._market_ws_status_snapshot(include_symbols=True)
+
+    assert payload["enabled"] is False
+    assert payload["configured_enabled"] is True
+    assert payload["force_rest"] is True
+    assert payload["feed_present"] is False
+    assert payload["rest_fallback_count"] == 1
+    assert payload["symbols"]["binance"]["BTC/USDT"]["source"] == "rest_fallback"
+    web_main.market_data_hub.clear()
+
+
+def test_market_ws_status_snapshot_exposes_feed_diagnostics(monkeypatch):
+    class _DiagnosticFeed:
+        def is_healthy(self):
+            return False
+
+        def healthy_exchanges(self, **_kwargs):
+            return []
+
+        def status_snapshot(self):
+            return {
+                "watch_attempt_count": 5,
+                "watch_timeout_count": 2,
+                "watch_error_count": 1,
+                "watch_empty_count": 3,
+                "last_error": "RuntimeError: socket dropped",
+                "exchanges": {
+                    "binance": {
+                        "last_symbols": ["BTC/USDT"],
+                        "watch_timeout_count": 2,
+                    }
+                },
+            }
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "shadow")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main, "_market_ws_feed", _DiagnosticFeed())
+
+    payload = web_main._market_ws_status_snapshot(include_symbols=True)
+
+    assert payload["enabled"] is True
+    assert payload["feed_present"] is True
+    assert payload["feed_healthy"] is False
+    assert payload["feed_watch_attempt_count"] == 5
+    assert payload["feed_watch_timeout_count"] == 2
+    assert payload["feed_watch_error_count"] == 1
+    assert payload["feed_watch_empty_count"] == 3
+    assert payload["feed_last_error"] == "RuntimeError: socket dropped"
+    assert payload["feed_status"]["exchanges"]["binance"]["last_symbols"] == ["BTC/USDT"]
+    web_main.market_data_hub.clear()
+
+
+def test_market_data_status_route_includes_symbol_details(monkeypatch):
+    web_main.market_data_hub.clear()
+    web_main.market_data_hub.upsert_ws_tick(
+        "binance",
+        "BTC/USDT:USDT",
+        {"last": 50000.0, "bid": 49999.0, "ask": 50001.0},
+    )
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "shadow")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+
+    payload = asyncio.run(web_main.get_market_data_status())
+
+    assert payload["enabled"] is True
+    assert payload["mode"] == "shadow"
+    assert payload["symbols"]["binance"]["BTC/USDT"]["source"] == "ws"
+    web_main.market_data_hub.clear()
+
+
+def test_emit_market_ticks_records_rest_snapshot_without_fallback_count(monkeypatch):
+    published = []
+
+    class _Connector:
+        async def get_ticker(self, symbol):
+            return SimpleNamespace(
+                last=50000.0,
+                bid=49999.0,
+                ask=50001.0,
+                timestamp=None,
+            )
+
+    async def _fake_publish(event, payload=None):
+        published.append((event, payload))
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+    monkeypatch.setattr(web_main.event_bus, "publish_nowait_safe", _fake_publish)
+    monkeypatch.setattr(web_main, "_collect_watch_symbols", lambda: ["BTC/USDT"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_connected_exchanges", lambda: ["binance"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_exchange", lambda name: _Connector())
+
+    asyncio.run(web_main._emit_market_ticks(hub_source="rest_snapshot"))
+
+    snapshot = web_main.market_data_hub.snapshot()
+    assert snapshot["rest_snapshot_count"] == 1
+    assert snapshot["rest_fallback_count"] == 0
+    assert published[0][0] == "market_tick"
+    assert published[0][1]["binance"]["BTC/USDT"]["last"] == 50000.0
+    web_main.market_data_hub.clear()
+
+
+def test_emit_market_ticks_can_reconcile_without_subscribers(monkeypatch):
+    published = []
+
+    class _Connector:
+        async def get_ticker(self, symbol):
+            return SimpleNamespace(
+                last=50000.0,
+                bid=49999.0,
+                ask=50001.0,
+                timestamp=None,
+            )
+
+    async def _fake_publish(event, payload=None):
+        published.append((event, payload))
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: False)
+    monkeypatch.setattr(web_main.event_bus, "publish_nowait_safe", _fake_publish)
+    monkeypatch.setattr(web_main, "_collect_watch_symbols", lambda: ["BTC/USDT"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_connected_exchanges", lambda: ["binance"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_exchange", lambda name: _Connector())
+
+    asyncio.run(
+        web_main._emit_market_ticks(
+            hub_source="rest_snapshot",
+            fallback_reason="shadow_rest_reconcile",
+            publish=False,
+            require_subscribers=False,
+        )
+    )
+
+    snapshot = web_main.market_data_hub.snapshot(include_symbols=True)
+    assert snapshot["rest_snapshot_count"] == 1
+    assert snapshot["rest_fallback_count"] == 0
+    assert snapshot["symbols"]["binance"]["BTC/USDT"]["source"] == "rest_snapshot"
+    assert published == []
+    web_main.market_data_hub.clear()
+
+
+def test_emit_market_ticks_reconnects_disconnected_exchange_for_shadow_reconcile(monkeypatch):
+    class _DisconnectedConnector:
+        is_connected = False
+
+    class _ConnectedConnector:
+        is_connected = True
+
+        async def get_ticker(self, symbol):
+            return SimpleNamespace(
+                last=50000.0,
+                bid=49999.0,
+                ask=50001.0,
+                timestamp=None,
+            )
+
+    reconnects = []
+    disconnected = _DisconnectedConnector()
+    connected = _ConnectedConnector()
+
+    async def _ensure_exchange(name):
+        reconnects.append(name)
+        return connected
+
+    web_main.market_data_hub.clear()
+    web_main._market_tick_reconnect_last_attempt.clear()
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: False)
+    monkeypatch.setattr(web_main, "_collect_watch_symbols", lambda: ["BTC/USDT"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_connected_exchanges", lambda: [])
+    monkeypatch.setattr(web_main.exchange_manager, "get_all_exchanges", lambda: {"binance": disconnected})
+    monkeypatch.setattr(web_main.exchange_manager, "get_exchange", lambda name: disconnected)
+    monkeypatch.setattr(web_main.exchange_manager, "ensure_exchange", _ensure_exchange)
+
+    asyncio.run(
+        web_main._emit_market_ticks(
+            hub_source="rest_snapshot",
+            fallback_reason="shadow_rest_reconcile",
+            publish=False,
+            require_subscribers=False,
+        )
+    )
+
+    snapshot = web_main.market_data_hub.snapshot()
+    assert reconnects == ["binance"]
+    assert snapshot["rest_snapshot_count"] == 1
+    web_main.market_data_hub.clear()
+    web_main._market_tick_reconnect_last_attempt.clear()
+
+
+def test_emit_market_ticks_reconnects_missing_configured_exchange_for_shadow_reconcile(monkeypatch):
+    class _ConnectedConnector:
+        is_connected = True
+
+        async def get_ticker(self, symbol):
+            return SimpleNamespace(
+                last=50000.0,
+                bid=49999.0,
+                ask=50001.0,
+                timestamp=None,
+            )
+
+    reconnects = []
+    connected = _ConnectedConnector()
+
+    async def _ensure_exchange(name):
+        reconnects.append(name)
+        return connected
+
+    web_main.market_data_hub.clear()
+    web_main._market_tick_reconnect_last_attempt.clear()
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "shadow")
+    monkeypatch.setattr(web_main.settings, "MARKET_WS_EXCHANGES", "binance")
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: False)
+    monkeypatch.setattr(web_main, "_collect_watch_symbols", lambda: ["BTC/USDT"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_connected_exchanges", lambda: [])
+    monkeypatch.setattr(web_main.exchange_manager, "get_all_exchanges", lambda: {})
+    monkeypatch.setattr(web_main.exchange_manager, "get_exchange", lambda name: None)
+    monkeypatch.setattr(web_main.exchange_manager, "ensure_exchange", _ensure_exchange)
+
+    asyncio.run(
+        web_main._emit_market_ticks(
+            hub_source="rest_snapshot",
+            fallback_reason="shadow_rest_reconcile",
+            publish=False,
+            require_subscribers=False,
+        )
+    )
+
+    snapshot = web_main.market_data_hub.snapshot()
+    assert reconnects == ["binance"]
+    assert snapshot["rest_snapshot_count"] == 1
+    web_main.market_data_hub.clear()
+    web_main._market_tick_reconnect_last_attempt.clear()
 
 
 def test_cors_does_not_allow_wildcard_with_credentials():

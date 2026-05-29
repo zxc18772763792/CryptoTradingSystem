@@ -90,6 +90,19 @@ class CcxtProMarketFeed:
         # Per-exchange monotonic timestamp of the last successful push.
         self._last_push_monotonic: Dict[str, float] = {}
         self._clients: Dict[str, Any] = {}
+        self._watch_attempt_count: Dict[str, int] = {}
+        self._watch_timeout_count: Dict[str, int] = {}
+        self._watch_error_count: Dict[str, int] = {}
+        self._watch_empty_count: Dict[str, int] = {}
+        self._last_error: Dict[str, str] = {}
+        self._last_symbols: Dict[str, List[str]] = {}
+        self._last_watch_started_at: Dict[str, str] = {}
+        self._last_watch_completed_at: Dict[str, str] = {}
+        self._last_watch_timeout_at: Dict[str, str] = {}
+        self._last_watch_started_monotonic: Dict[str, float] = {}
+        self._last_payload_symbol_count: Dict[str, int] = {}
+        self._client_default_type: Dict[str, str] = {}
+        self._client_rest_default_type: Dict[str, str] = {}
 
     # ── public API ────────────────────────────────────────────────────────
     def is_healthy(self, *, max_age_sec: Optional[float] = None) -> bool:
@@ -108,6 +121,43 @@ class CcxtProMarketFeed:
             for name, ts in self._last_push_monotonic.items()
             if (now - ts) <= horizon
         ]
+
+    def status_snapshot(self) -> Dict[str, Any]:
+        """Return feed-loop diagnostics for status APIs and smoke checks."""
+        now = time.monotonic()
+        exchanges: Dict[str, Dict[str, Any]] = {}
+        for name in self._exchanges:
+            last_push = self._last_push_monotonic.get(name)
+            last_started = self._last_watch_started_monotonic.get(name)
+            exchanges[name] = {
+                "healthy": bool(last_push is not None and (now - last_push) <= self._health_max_age_sec),
+                "last_push_age_ms": round((now - last_push) * 1000.0, 3) if last_push is not None else None,
+                "watch_attempt_count": int(self._watch_attempt_count.get(name, 0)),
+                "watch_timeout_count": int(self._watch_timeout_count.get(name, 0)),
+                "watch_error_count": int(self._watch_error_count.get(name, 0)),
+                "watch_empty_count": int(self._watch_empty_count.get(name, 0)),
+                "last_error": self._last_error.get(name),
+                "last_symbols": list(self._last_symbols.get(name, [])),
+                "last_watch_started_at": self._last_watch_started_at.get(name),
+                "last_watch_completed_at": self._last_watch_completed_at.get(name),
+                "last_watch_timeout_at": self._last_watch_timeout_at.get(name),
+                "active_watch_age_ms": (
+                    round((now - last_started) * 1000.0, 3) if last_started is not None else None
+                ),
+                "last_payload_symbol_count": int(self._last_payload_symbol_count.get(name, 0)),
+                "default_type": self._client_default_type.get(name),
+                "rest_default_type": self._client_rest_default_type.get(name),
+            }
+        errors = [err for err in self._last_error.values() if err]
+        return {
+            "exchange_count": len(self._exchanges),
+            "watch_attempt_count": sum(self._watch_attempt_count.values()),
+            "watch_timeout_count": sum(self._watch_timeout_count.values()),
+            "watch_error_count": sum(self._watch_error_count.values()),
+            "watch_empty_count": sum(self._watch_empty_count.values()),
+            "last_error": errors[-1] if errors else None,
+            "exchanges": exchanges,
+        }
 
     async def run(self, stop_event: asyncio.Event) -> None:
         """Run all per-exchange watch loops until ``stop_event`` is set."""
@@ -151,14 +201,24 @@ class CcxtProMarketFeed:
             return None
 
         cfg = get_exchange_config(name)
-        default_type = "spot"
+        rest_default_type = "spot"
         if cfg is not None:
             # Mirror the REST connector's market type so unified symbols resolve
             # to the same instrument (perp vs spot) the strategies trade.
-            default_type = str(
+            rest_default_type = str(
                 getattr(settings, f"{name.upper()}_DEFAULT_TYPE", cfg.default_type)
                 or cfg.default_type
                 or "spot"
+            )
+        default_type = self._ws_default_type(name, rest_default_type)
+        self._client_rest_default_type[name] = rest_default_type
+        self._client_default_type[name] = default_type
+        if default_type != rest_default_type:
+            logger.info(
+                "ccxt_pro_feed[{}]: using ccxt.pro defaultType={} for REST defaultType={}",
+                name,
+                default_type,
+                rest_default_type,
             )
 
         options: Dict[str, Any] = {
@@ -197,6 +257,10 @@ class CcxtProMarketFeed:
 
             # Race the watch against the stop signal so shutdown is immediate
             # rather than blocked for up to watch_timeout_sec inside the socket.
+            self._watch_attempt_count[name] = self._watch_attempt_count.get(name, 0) + 1
+            self._last_symbols[name] = list(symbols)
+            self._last_watch_started_at[name] = self._now_iso()
+            self._last_watch_started_monotonic[name] = time.monotonic()
             watch_task = asyncio.ensure_future(client.watch_tickers(symbols))
             stop_task = asyncio.ensure_future(stop_event.wait())
             done, _pending = await asyncio.wait(
@@ -212,6 +276,14 @@ class CcxtProMarketFeed:
             if watch_task not in done:
                 # Timed out with no update — normal in quiet markets. Cancel the
                 # in-flight watch and loop to re-evaluate symbols.
+                self._watch_timeout_count[name] = self._watch_timeout_count.get(name, 0) + 1
+                self._last_watch_timeout_at[name] = self._now_iso()
+                logger.debug(
+                    "ccxt_pro_feed[{}]: watch_tickers timeout after {:.1f}s for {}",
+                    name,
+                    self._watch_timeout_sec,
+                    symbols,
+                )
                 await _cancel_task(watch_task)
                 await _cancel_task(stop_task)
                 continue
@@ -219,10 +291,13 @@ class CcxtProMarketFeed:
             await _cancel_task(stop_task)
             try:
                 tickers = watch_task.result()
+                self._last_watch_completed_at[name] = self._now_iso()
                 backoff = self._reconnect_min_sec  # healthy → reset backoff
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._watch_error_count[name] = self._watch_error_count.get(name, 0) + 1
+                self._last_error[name] = f"{type(exc).__name__}: {exc}"
                 logger.debug(f"ccxt_pro_feed[{name}]: watch error: {exc}; reconnecting in {backoff:.1f}s")
                 await self._reset_client(name)
                 await self._sleep_or_stop(stop_event, backoff)
@@ -230,9 +305,12 @@ class CcxtProMarketFeed:
                 continue
 
             payload = self._normalize_tickers(name, tickers)
+            self._last_payload_symbol_count[name] = len(payload)
             if not payload:
+                self._watch_empty_count[name] = self._watch_empty_count.get(name, 0) + 1
                 continue
             self._last_push_monotonic[name] = time.monotonic()
+            self._last_error.pop(name, None)
             try:
                 await self._on_tick({name: payload})
             except Exception as exc:  # never let a consumer error kill the loop
@@ -250,6 +328,17 @@ class CcxtProMarketFeed:
             if key and key not in seen:
                 seen[key] = None
         return list(seen.keys())[:16]
+
+    @staticmethod
+    def _ws_default_type(exchange: str, default_type: str) -> str:
+        """Translate REST connector market type to ccxt.pro's WS type naming."""
+        name = str(exchange or "").strip().lower()
+        kind = str(default_type or "spot").strip().lower()
+        if name == "binance" and kind in {"future", "futures", "perp", "perpetual"}:
+            # ccxt REST configs often use "future" for Binance USD-M perpetuals,
+            # while ccxt.pro public ticker streams return promptly under "swap".
+            return "swap"
+        return kind or "spot"
 
     @staticmethod
     def _spot_style_symbol(symbol: str) -> str:
@@ -304,3 +393,7 @@ class CcxtProMarketFeed:
     async def _sleep_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(stop_event.wait(), timeout=max(0.0, seconds))
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
