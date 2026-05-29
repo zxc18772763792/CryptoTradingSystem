@@ -3651,6 +3651,11 @@ summary:
   - `python -m py_compile scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_live_shadow_precheck.py` 通过。
   - `git diff --check -- scripts/precheck_market_ws_live_shadow.py tests/test_market_ws_live_shadow_precheck.py` 通过。
   - 当前第十一轮 paper shadow 服务上复跑 Level 2 precheck 仍按预期失败：`runtime is not live`、`market WS status is missing fail_closed_for_live`；新增 summary 确认 `market_ws_feed_healthy=true`、`market_ws_ws_hub_healthy=true`、`market_ws_stale_symbol_count=0`、`market_ws_invalid_payload_count=0`、`market_ws_timestamp_regression_count=0`、`market_ws_feed_watch_empty_count=0`、`market_ws_shadow_compare_violation_count=0`、`market_ws_shadow_compare_stale_skip_count=0`。
+- 2026-05-30 00:42 +08:00 更新：`c337cf5 Allow strict final runtime evaluation` 已为 `scripts\evaluate_market_ws_shadow_report.py` 增加可选 `--require-final-runtime-fields`，后续 clean run 可显式要求最终 JSON 同时包含准确的 `final_trading_mode` 和 `final_paper_trading`。为避免改变第十一轮已启动长跑的评估契约，该选项默认关闭。
+- 验证：
+  - `pytest tests\test_market_ws_shadow_report_eval.py -q`，`12 passed in 2.48s`。
+  - `python -m py_compile scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_report_eval.py` 通过。
+  - `git diff --check -- scripts/evaluate_market_ws_shadow_report.py tests/test_market_ws_shadow_report_eval.py` 通过。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
