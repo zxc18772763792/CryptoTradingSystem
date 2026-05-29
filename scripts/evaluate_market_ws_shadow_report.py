@@ -117,6 +117,7 @@ def evaluate_report(
     feed_watch_timeout_delta = _safe_int(summary.get("feed_watch_timeout_delta"))
     feed_watch_error_delta = _safe_int(summary.get("feed_watch_error_delta"))
     feed_watch_empty_delta = _safe_int(summary.get("feed_watch_empty_delta"))
+    max_feed_watch_symbol_errors = _safe_int(summary.get("max_feed_watch_symbol_error_count_observed"))
     max_stale_observed = _safe_int(summary.get("max_stale_symbol_count_observed"))
     p99_abs_diff_bps = _safe_float(summary.get("p99_abs_diff_bps"))
     p95_ws_age_ms = _safe_float(summary.get("p95_ws_age_ms"))
@@ -164,6 +165,11 @@ def evaluate_report(
         errors,
         feed_watch_empty_delta <= int(max_feed_watch_empty_delta),
         f"feed_watch_empty_delta {feed_watch_empty_delta} > allowed {max_feed_watch_empty_delta}",
+    )
+    _add_error(
+        errors,
+        max_feed_watch_symbol_errors == 0,
+        f"max_feed_watch_symbol_error_count_observed {max_feed_watch_symbol_errors} > allowed 0",
     )
     _add_error(
         errors,
@@ -253,6 +259,7 @@ def evaluate_report(
             "feed_watch_timeout_delta": feed_watch_timeout_delta,
             "feed_watch_error_delta": feed_watch_error_delta,
             "feed_watch_empty_delta": feed_watch_empty_delta,
+            "max_feed_watch_symbol_error_count_observed": max_feed_watch_symbol_errors,
             "max_stale_symbol_count_observed": max_stale_observed,
             "p99_abs_diff_bps": p99_abs_diff_bps,
             "p95_ws_age_ms": p95_ws_age_ms,
@@ -262,6 +269,8 @@ def evaluate_report(
             "final_enabled": summary.get("final_enabled"),
             "final_feed_healthy": summary.get("final_feed_healthy"),
             "final_ws_hub_healthy": summary.get("final_ws_hub_healthy"),
+            "final_feed_watch_symbols": summary.get("final_feed_watch_symbols"),
+            "final_feed_watch_symbol_errors": summary.get("final_feed_watch_symbol_errors"),
             "final_feed_last_error": summary.get("final_feed_last_error"),
         },
         "log_counts": log_counts,

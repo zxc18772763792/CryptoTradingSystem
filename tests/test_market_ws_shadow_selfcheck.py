@@ -63,6 +63,7 @@ def _status_payload(
         "ws_hub_healthy": True,
         "healthy_exchanges": ["binance"],
         "ws_healthy_exchanges": ["binance"],
+        "symbol_max_age_sec": 10.0,
         "symbol_count": 1,
         "ws_symbol_count": 1,
         "stale_symbol_count": stale,
@@ -84,6 +85,22 @@ def _status_payload(
         "feed_watch_error_count": feed_errors,
         "feed_watch_empty_count": feed_empty,
         "feed_last_error": None,
+        "feed_status": {
+            "exchanges": {
+                "binance": {
+                    "last_symbols": ["BTC/USDT"],
+                }
+            }
+        },
+        "symbols": {
+            "binance": {
+                "BTC/USDT": {
+                    "source": "ws",
+                    "is_stale": False,
+                    "age_ms": 200,
+                }
+            }
+        },
         "shadow_last_compare": {
             "abs_diff_bps": 1.5,
             "ws_age_ms": 200,
@@ -411,6 +428,80 @@ def test_market_ws_shadow_selfcheck_still_fails_empty_feed_batches(monkeypatch):
 
     assert report["overall_ok"] is False
     assert "feed_watch_empty_delta 1 > allowed 0" in report["errors"]
+
+
+def test_market_ws_shadow_selfcheck_rejects_unhealthy_watched_symbols(monkeypatch):
+    bad_payload = _status_payload(ws_tick_count=14, compare_count=5)
+    bad_payload["feed_status"] = {
+        "exchanges": {
+            "binance": {
+                "last_symbols": ["BTC/USDT", "ETH/USDT:USDT", "SOL/USDT"],
+            }
+        }
+    }
+    bad_payload["symbols"] = {
+        "binance": {
+            "BTC/USDT": {
+                "source": "rest_snapshot",
+                "is_stale": False,
+                "age_ms": 200,
+            },
+            "ETH/USDT": {
+                "source": "ws",
+                "is_stale": True,
+                "age_ms": 20_000,
+            },
+        }
+    }
+
+    routes = {
+        ("GET", "/health"): [FakeResponse(200, {"status": "healthy"}), FakeResponse(200, {"status": "healthy"})],
+        ("GET", "/api/status"): [
+            FakeResponse(200, {"status": "running", "paper_trading": True, "trading_mode": "paper", "market_ws": {"mode": "shadow"}}),
+            FakeResponse(200, {"status": "running", "paper_trading": True, "trading_mode": "paper", "market_ws": {"mode": "shadow"}}),
+        ],
+        ("GET", "/api/market-data/status"): [
+            FakeResponse(200, _status_payload(ws_tick_count=10, compare_count=3)),
+            FakeResponse(200, bad_payload),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, []))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=1,
+        interval_sec=1,
+        min_samples=2,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=1,
+        min_shadow_compare_delta=1,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is False
+    assert "sample[1]: market WS watched symbol is not WS sourced: binance:BTC/USDT source='rest_snapshot'" in report["errors"]
+    assert "sample[1]: market WS watched symbol is stale: binance:ETH/USDT:USDT" in report["errors"]
+    assert "sample[1]: market WS watched symbol age 20000.0 ms exceeds 10000.0 ms: binance:ETH/USDT:USDT" in report["errors"]
+    assert "sample[1]: market WS missing watched symbol tick: binance:SOL/USDT" in report["errors"]
+    assert report["summary"]["max_feed_watch_symbol_error_count_observed"] == 4
+    assert report["summary"]["final_feed_watch_symbols"] == [
+        "binance:BTC/USDT",
+        "binance:ETH/USDT:USDT",
+        "binance:SOL/USDT",
+    ]
 
 
 def test_market_ws_shadow_selfcheck_main_outputs_json(monkeypatch, capsys):
