@@ -29,6 +29,7 @@ def test_market_data_ws_status_uses_exchange_ws_metrics_not_browser_ws_badge():
         "hub_healthy",
         "ws_hub_healthy",
         "rest_fallback_count",
+        "ws_stale_symbol_count",
         "stale_symbol_count",
         "shadow_compare_violation_count",
     ]
@@ -39,3 +40,5 @@ def test_market_data_ws_status_uses_exchange_ws_metrics_not_browser_ws_badge():
     assert "行情: WS primary" in app_js
     assert "行情: REST fallback" in app_js
     assert "行情: stale" in app_js
+    assert "ws_stale_symbols" in app_js
+    assert "stale_symbols_total" in app_js

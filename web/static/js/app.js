@@ -2347,7 +2347,10 @@ const forceRest=!!mw.force_rest;
 const feedHealthy=!!mw.feed_healthy;
 const hubHealthy=!!mw.hub_healthy;
 const wsHubHealthy=!!mw.ws_hub_healthy;
-const staleCount=Number(mw.stale_symbol_count||0);
+const allStaleCount=Number(mw.stale_symbol_count||0);
+const wsStaleRaw=mw.ws_stale_symbol_count;
+const wsStaleCount=Number(wsStaleRaw==null?allStaleCount:wsStaleRaw);
+const staleCount=(enabled&&mode!=='off')?wsStaleCount:allStaleCount;
 const fallbackCount=Number(mw.rest_fallback_count||0);
 const violationCount=Number(mw.shadow_compare_violation_count||0);
 let text='行情: REST';
@@ -2387,7 +2390,8 @@ el.title=[
   `feed_healthy=${feedHealthy}`,
   `hub_healthy=${hubHealthy}`,
   `ws_hub_healthy=${wsHubHealthy}`,
-  `stale_symbols=${Number.isFinite(staleCount)?staleCount:0}`,
+  `ws_stale_symbols=${Number.isFinite(wsStaleCount)?wsStaleCount:0}`,
+  `stale_symbols_total=${Number.isFinite(allStaleCount)?allStaleCount:0}`,
   `rest_fallback_count=${Number.isFinite(fallbackCount)?fallbackCount:0}`,
   `shadow_violations=${Number.isFinite(violationCount)?violationCount:0}`
 ].join(' | ');
