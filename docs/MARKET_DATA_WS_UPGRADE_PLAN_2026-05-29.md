@@ -3434,6 +3434,58 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - `[PAPER] Order created`: `2`
 - 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-05-29 23:56 +08:00 续作追加检查：
+
+- 已提交最终验收工具加固：`e51a43d Report shadow evaluator diagnostic log counts`。
+- 背景：第十一轮结束后需要把最终 JSON 摘要、硬污染日志计数、timeout/error 诊断计数、`Unclosed client session`、`positions_live.json`、`get_ticker(` 等旁路计数一并归档。为降低人工漏数风险，`scripts\evaluate_market_ws_shadow_report.py` 已新增 `diagnostic_log_counts` 输出。
+- 语义：
+  - `log_counts` 仍是硬污染门禁，继续受 `--max-log-count 0` 约束。
+  - `diagnostic_log_counts` 只记录，不默认判失败；是否阻断由最终审计结合硬门禁、最终健康、p95 age、stale、价差和资源泄漏风险判断。
+- 验证：
+  - `pytest tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_shadow_selfcheck.py -q`，`13 passed in 5.11s`。
+  - `python -m py_compile scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_report_eval.py` 通过。
+  - `git diff --check -- scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_report_eval.py` 通过。
+  - 在当前 0 字节 selfcheck JSON 上运行 evaluator 按预期失败：`empty JSON report: logs\paper_shadow_6h_selfcheck_20260529_222616.out.json`，确认最终报告未生成时不会误判通过。
+- 第十一轮服务与 selfcheck 仍在运行：服务 PID `76424`，selfcheck PID `163652`。
+- `/api/status`：`status=running`、`trading_mode=paper`、`paper_trading=true`。
+- `/api/market-data/status`：
+  - `market_ws.mode=shadow`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.ws_tick_count=10430`
+  - `market_ws.rest_snapshot_count=496`
+  - `market_ws.shadow_compare_count=178`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.feed_watch_timeout_count=0`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.stale_symbol_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.last_tick_age_ms=106`
+  - `market_ws.shadow_max_abs_diff_bps=12.844398929016815`
+- 服务 stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `3`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `0`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `2`
+  - `Failed to persist positions`: `4`
+  - `Live kline fetch timed out`: `4`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `3`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `2`
+- 当前判断不变：第十一轮 selfcheck JSON/stderr 仍为 0 字节，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
