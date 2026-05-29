@@ -3587,6 +3587,20 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - `[PAPER] Order created`: `2`
 - 当前判断：这是恢复型 REST 旁路事件，WS feed/hub 和 shadow compare 继续健康推进；最终 evaluator 会通过 `diagnostic_log_counts` 归档该事件频率。第十一轮结束前仍不进入 Level 2，不开启 `ui_primary`。
 
+2026-05-30 00:09 +08:00 Level 2 最终评估门禁补强：
+
+- 已提交 evaluator 修复：`5da848a Validate final runtime in shadow report evaluator`。
+- 背景：`6b6701c` 已让 selfcheck 在采样阶段拒绝错误 runtime，并把 `final_trading_mode` / `final_paper_trading` 写入 summary；但 `scripts\evaluate_market_ws_shadow_report.py` 仍未校验这些 summary 字段。
+- 修复：
+  - `expect_runtime=paper` 时，最终 summary 不能声明 `final_paper_trading=false`，且 `final_trading_mode` 为空或为 `paper`。
+  - `expect_runtime=live` 时，最终 summary 必须是 `final_paper_trading=false` 且 `final_trading_mode=live`。
+  - evaluator 输出 summary 透传 `final_trading_mode` 和 `final_paper_trading`。
+- 验证：
+  - `pytest tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_shadow_selfcheck.py -q`，`18 passed in 3.77s`。
+  - `python -m py_compile scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_report_eval.py` 通过。
+  - `git diff --check -- scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_report_eval.py` 通过。
+- 当前判断不变：这是 Level 2 live shadow 之前的最终评估工具保险，不改变正在运行的第十一轮 paper shadow；Level 1 通过和最终回归完成前仍不进入 Level 2，不开启 `ui_primary`。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
