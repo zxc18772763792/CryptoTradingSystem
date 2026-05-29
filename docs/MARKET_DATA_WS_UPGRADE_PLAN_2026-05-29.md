@@ -3544,6 +3544,49 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - `git diff --check -- scripts\selfcheck_market_ws_shadow.py tests\test_market_ws_shadow_selfcheck.py` 通过。
 - 当前判断不变：该修复是 Level 2 live shadow 前置工具加固，不改变正在运行的第十一轮 paper shadow；第十一轮最终 JSON 通过前仍不进入 Level 2，不开启 `ui_primary`。
 
+2026-05-30 00:07 +08:00 第十一轮恢复事件观察：
+
+- 第十一轮 selfcheck 仍在运行，最终 JSON/stderr 仍为 0 字节。
+- 服务 stderr 在 00:05-00:06 新增一次 Binance REST transient `get_ticker(BTC/USDT)` 失败，随后自动重连成功：
+  - `2026-05-30 00:05:15`：`get_ticker(BTC/USDT) failed`
+  - `2026-05-30 00:05:27`：策略 kline timeout 旁路日志
+  - `2026-05-30 00:06:00`：`exchange_manager: binance reconnected (fast path)`
+- `/api/market-data/status` 复查：
+  - `market_ws.mode=shadow`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.ws_tick_count=11695`
+  - `market_ws.rest_snapshot_count=560`
+  - `market_ws.shadow_compare_count=200`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.feed_watch_timeout_count=0`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.stale_symbol_count=2`，来自 Gate REST snapshot 旧快照，不计作 WS stale 门禁。
+- 服务 stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `4`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `0`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `2`
+  - `Failed to persist positions`: `4`
+  - `Live kline fetch timed out`: `5`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `4`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `2`
+- 当前判断：这是恢复型 REST 旁路事件，WS feed/hub 和 shadow compare 继续健康推进；最终 evaluator 会通过 `diagnostic_log_counts` 归档该事件频率。第十一轮结束前仍不进入 Level 2，不开启 `ui_primary`。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
