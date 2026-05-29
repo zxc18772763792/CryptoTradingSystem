@@ -3669,6 +3669,12 @@ summary:
   - `python -m py_compile scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py` 通过。
   - `git diff --check -- scripts/selfcheck_market_ws_shadow.py scripts/evaluate_market_ws_shadow_report.py tests/test_market_ws_shadow_selfcheck.py tests/test_market_ws_shadow_report_eval.py` 通过。
   - 说明：该加固不会改变已经在运行的第十一轮 selfcheck 进程；它适用于后续重新启动并加载当前代码的 paper/live shadow 长跑和最终 evaluator。
+- 2026-05-30 01:02 +08:00 更新：`857819f Require fail closed during live shadow checks` 已让 live shadow selfcheck 在每个采样点要求 `fail_closed_for_live=true`，并让最终 evaluator 在 `--expect-runtime live` 时校验 `final_fail_closed_for_live=true`。
+- 验证：
+  - `pytest tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py -q`，`24 passed in 4.85s`。
+  - `python -m py_compile scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py` 通过。
+  - `git diff --check -- scripts/selfcheck_market_ws_shadow.py scripts/evaluate_market_ws_shadow_report.py tests/test_market_ws_shadow_selfcheck.py tests/test_market_ws_shadow_report_eval.py` 通过。
+  - 说明：该加固不改变已经在运行的第十一轮 selfcheck 进程；它适用于后续重新启动并加载当前代码的 live shadow 24 小时长跑和最终 evaluator。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
