@@ -3530,6 +3530,20 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - `[PAPER] Order created`: `2`
 - 当前判断不变：第十一轮只能继续等待最终 JSON；Level 1 未完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-05-30 00:03 +08:00 Level 2 前置门禁修复：
+
+- 已提交自检门禁修复：`6b6701c Enforce live runtime in WS shadow selfcheck`。
+- 问题：`scripts\selfcheck_market_ws_shadow.py` 之前支持 `--expect-runtime live`，但 `_evaluate_samples()` 只在 `expect_runtime=paper` 时校验 `paper_trading=true`，没有在 `expect_runtime=live` 时反向拒绝 `paper_trading=true` / `trading_mode=paper`。这会让 Level 2 live shadow 24 小时自检存在被 paper runtime 误放行的风险。
+- 修复：
+  - `expect_runtime=paper` 时要求 `paper_trading=true` 且 `trading_mode` 为空或为 `paper`。
+  - `expect_runtime=live` 时要求 `paper_trading=false` 且 `trading_mode=live`。
+  - selfcheck summary 新增 `final_trading_mode` 和 `final_paper_trading`，便于最终归档明确证明运行环境。
+- 验证：
+  - `pytest tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py -q`，`16 passed in 3.64s`。
+  - `python -m py_compile scripts\selfcheck_market_ws_shadow.py tests\test_market_ws_shadow_selfcheck.py` 通过。
+  - `git diff --check -- scripts\selfcheck_market_ws_shadow.py tests\test_market_ws_shadow_selfcheck.py` 通过。
+- 当前判断不变：该修复是 Level 2 live shadow 前置工具加固，不改变正在运行的第十一轮 paper shadow；第十一轮最终 JSON 通过前仍不进入 Level 2，不开启 `ui_primary`。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
