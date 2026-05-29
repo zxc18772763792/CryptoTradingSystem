@@ -33,6 +33,13 @@ def _market_ws_payload(**overrides):
         "force_rest": False,
         "fail_closed_for_live": True,
         "feed_healthy": True,
+        "feed_status": {
+            "exchanges": {
+                "binance": {
+                    "last_symbols": ["BTC/USDT", "ETH/USDT"],
+                }
+            }
+        },
         "ws_hub_healthy": True,
         "feed_last_error": None,
         "last_tick_age_ms": 500,
@@ -42,6 +49,20 @@ def _market_ws_payload(**overrides):
         "feed_watch_empty_count": 0,
         "shadow_compare_violation_count": 0,
         "shadow_compare_stale_skip_count": 0,
+        "symbols": {
+            "binance": {
+                "BTC/USDT": {
+                    "source": "ws",
+                    "is_stale": False,
+                    "age_ms": 450,
+                },
+                "ETH/USDT": {
+                    "source": "ws",
+                    "is_stale": False,
+                    "age_ms": 500,
+                },
+            }
+        },
     }
     payload.update(overrides)
     return payload
@@ -150,6 +171,45 @@ def test_live_shadow_precheck_rejects_unhealthy_market_ws_runtime():
     assert "market WS shadow stale skip count is 1" in errors
     assert summary["market_ws_feed_healthy"] is False
     assert summary["market_ws_ws_hub_healthy"] is False
+
+
+def test_live_shadow_precheck_rejects_unhealthy_watched_symbols():
+    payload = _market_ws_payload(
+        feed_status={
+            "exchanges": {
+                "binance": {
+                    "last_symbols": ["BTC/USDT", "ETH/USDT:USDT", "SOL/USDT"],
+                }
+            }
+        },
+        symbols={
+            "binance": {
+                "BTC/USDT": {
+                    "source": "rest_snapshot",
+                    "is_stale": False,
+                    "age_ms": 400,
+                },
+                "ETH/USDT": {
+                    "source": "ws",
+                    "is_stale": True,
+                    "age_ms": 20_000,
+                },
+            }
+        },
+    )
+
+    ok, errors, summary = precheck.evaluate_precheck(
+        _status_payload(),
+        payload,
+    )
+
+    assert ok is False
+    assert "market WS watched symbol is not WS sourced: binance:BTC/USDT source='rest_snapshot'" in errors
+    assert "market WS watched symbol is stale: binance:ETH/USDT:USDT" in errors
+    assert "market WS watched symbol age 20000.0 ms exceeds 10000.0 ms: binance:ETH/USDT:USDT" in errors
+    assert "market WS missing watched symbol tick: binance:SOL/USDT" in errors
+    assert summary["market_ws_feed_watch_symbol_count"] == 3
+    assert summary["market_ws_feed_watch_symbol_error_count"] == 4
 
 
 def test_live_shadow_precheck_main_calls_status_endpoints(monkeypatch, capsys):
