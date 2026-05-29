@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -559,6 +559,46 @@ def _configured_market_ws_exchange_names() -> List[str]:
     return [name.strip().lower() for name in configured.split(",") if name.strip()]
 
 
+def _symbols_requiring_ws_fallback(symbols: Iterable[str]) -> List[str]:
+    _sync_market_data_hub_runtime_config()
+    missing_or_stale: List[str] = []
+    seen = set()
+    exchanges = _configured_market_ws_exchange_names()
+    if not exchanges:
+        exchanges = market_data_hub.healthy_exchanges(
+            max_age_sec=_MARKET_WS_HEALTH_MAX_AGE_SEC,
+            source="ws",
+        )
+    for symbol in symbols:
+        normalized = str(symbol or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        has_fresh_ws = False
+        for exchange_name in exchanges:
+            current = market_data_hub.get_tick(
+                exchange_name,
+                normalized,
+                max_age_sec=_MARKET_WS_SYMBOL_MAX_AGE_SEC,
+                source="ws",
+            )
+            if not current:
+                continue
+            meta = current.get("meta") if isinstance(current, dict) else {}
+            tick = current.get("tick") if isinstance(current, dict) else {}
+            if (
+                isinstance(meta, dict)
+                and isinstance(tick, dict)
+                and str(meta.get("source") or tick.get("source") or "").lower() == "ws"
+                and not bool(meta.get("is_stale", True))
+            ):
+                has_fresh_ws = True
+                break
+        if not has_fresh_ws:
+            missing_or_stale.append(normalized)
+    return missing_or_stale
+
+
 async def _market_tick_connector_items() -> List[Tuple[str, Any]]:
     names: List[str] = []
     seen = set()
@@ -603,12 +643,13 @@ async def _emit_market_ticks(
     fallback_reason: str = "periodic_rest_snapshot",
     publish: bool = True,
     require_subscribers: bool = True,
+    symbols: Optional[Iterable[str]] = None,
 ) -> None:
     _sync_market_data_hub_runtime_config()
     if require_subscribers and not event_bus.has_subscribers():
         return
-    symbols = _collect_watch_symbols()
-    if not symbols:
+    watch_symbols = list(symbols) if symbols is not None else _collect_watch_symbols()
+    if not watch_symbols:
         return
 
     payload: Dict[str, Dict[str, Any]] = {}
@@ -617,7 +658,7 @@ async def _emit_market_ticks(
     # Binance traffic of rate-limit budget.
     jobs: List[Tuple[str, str, asyncio.Task]] = []
     for exchange_name, connector in await _market_tick_connector_items():
-        for symbol in symbols:
+        for symbol in watch_symbols:
             jobs.append(
                 (
                     exchange_name,
@@ -685,10 +726,13 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
                 _sync_market_data_hub_runtime_config()
                 feed = _market_ws_feed
                 feed_healthy = bool(feed is not None and feed.is_healthy())
-                hub_healthy = market_data_hub.has_fresh_tick(
-                    max_age_sec=_MARKET_WS_SYMBOL_MAX_AGE_SEC,
-                    source="ws",
+                watch_symbols = _collect_watch_symbols()
+                fallback_symbols = (
+                    _symbols_requiring_ws_fallback(watch_symbols)
+                    if feed_healthy
+                    else list(watch_symbols)
                 )
+                hub_healthy = not fallback_symbols
                 ws_can_suppress_rest = bool(
                     _is_market_ws_stream_enabled()
                     and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
@@ -704,6 +748,7 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
                     await _emit_market_ticks(
                         hub_source="rest_fallback" if fallback_active else "rest_snapshot",
                         fallback_reason=reason if fallback_active else "periodic_rest_snapshot",
+                        symbols=fallback_symbols if fallback_active else None,
                     )
                     if _is_market_ws_stream_enabled() and _MARKET_WS_MODE == "shadow":
                         last_rest_reconcile_at = now

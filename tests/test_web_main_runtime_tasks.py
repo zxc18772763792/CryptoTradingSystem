@@ -326,6 +326,64 @@ def test_runtime_pusher_uses_rest_fallback_when_ui_primary_hub_is_stale(monkeypa
     assert emit_calls[-1]["fallback_reason"] == "ws_stale"
 
 
+def test_symbols_requiring_ws_fallback_uses_ws_source_not_latest_rest_snapshot(monkeypatch):
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main.settings, "MARKET_WS_EXCHANGES", "binance")
+    web_main.market_data_hub.upsert_ws_tick("binance", "BTC/USDT", {"last": 50000.0})
+    web_main.market_data_hub.upsert_rest_tick(
+        "binance",
+        "BTC/USDT",
+        {"last": 50010.0},
+        source="rest_snapshot",
+    )
+
+    missing = web_main._symbols_requiring_ws_fallback(["BTC/USDT", "ETH/USDT"])
+
+    assert missing == ["ETH/USDT"]
+    web_main.market_data_hub.clear()
+
+
+def test_runtime_pusher_falls_back_only_missing_ws_symbols_in_ui_primary(monkeypatch):
+    class _HealthyFeed:
+        def is_healthy(self):
+            return True
+
+    emit_calls = []
+
+    async def _fake_emit_market_ticks(**kwargs):
+        emit_calls.append(kwargs)
+
+    async def _fake_emit_runtime_snapshot():
+        return None
+
+    web_main.market_data_hub.clear()
+    web_main.market_data_hub.upsert_ws_tick("binance", "BTC/USDT", {"last": 50000.0})
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main, "_MARKET_TICK_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(web_main.settings, "MARKET_WS_EXCHANGES", "binance")
+    monkeypatch.setattr(web_main, "_collect_watch_symbols", lambda: ["BTC/USDT", "ETH/USDT"])
+    monkeypatch.setattr(web_main, "_market_ws_feed", _HealthyFeed())
+    monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
+    monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+
+    async def _run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(web_main._runtime_pusher(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(_run())
+    assert emit_calls, "missing WS symbols should trigger a targeted REST fallback"
+    assert emit_calls[-1]["hub_source"] == "rest_fallback"
+    assert emit_calls[-1]["fallback_reason"] == "ws_stale"
+    assert emit_calls[-1]["symbols"] == ["ETH/USDT"]
+    web_main.market_data_hub.clear()
+
+
 def test_publish_market_ticks_writes_hub_without_ui_fanout_in_shadow(monkeypatch):
     published = []
 
@@ -547,6 +605,43 @@ def test_emit_market_ticks_records_rest_snapshot_without_fallback_count(monkeypa
     assert snapshot["rest_fallback_count"] == 0
     assert published[0][0] == "market_tick"
     assert published[0][1]["binance"]["BTC/USDT"]["last"] == 50000.0
+    web_main.market_data_hub.clear()
+
+
+def test_emit_market_ticks_honors_target_symbol_subset(monkeypatch):
+    calls = []
+
+    class _Connector:
+        async def get_ticker(self, symbol):
+            calls.append(symbol)
+            return SimpleNamespace(
+                last=50000.0,
+                bid=49999.0,
+                ask=50001.0,
+                timestamp=None,
+            )
+
+    web_main.market_data_hub.clear()
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: False)
+    monkeypatch.setattr(web_main, "_collect_watch_symbols", lambda: ["BTC/USDT", "ETH/USDT"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_connected_exchanges", lambda: ["binance"])
+    monkeypatch.setattr(web_main.exchange_manager, "get_exchange", lambda name: _Connector())
+
+    asyncio.run(
+        web_main._emit_market_ticks(
+            hub_source="rest_fallback",
+            fallback_reason="ws_stale",
+            publish=False,
+            require_subscribers=False,
+            symbols=["ETH/USDT"],
+        )
+    )
+
+    snapshot = web_main.market_data_hub.snapshot(include_symbols=True)
+    assert calls == ["ETH/USDT"]
+    assert snapshot["rest_fallback_count"] == 1
+    assert "BTC/USDT" not in snapshot["symbols"]["binance"]
+    assert snapshot["symbols"]["binance"]["ETH/USDT"]["source"] == "rest_fallback"
     web_main.market_data_hub.clear()
 
 
