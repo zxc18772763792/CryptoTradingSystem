@@ -29,6 +29,20 @@ def _replace_with_retry(tmp_path: Path, target_path: Path) -> None:
             delay *= 2
 
 
+def _read_text_with_retry(path: Path, *, encoding: str = "utf-8") -> str:
+    attempts = 6
+    delay = 0.02
+    for attempt in range(attempts):
+        try:
+            return path.read_text(encoding=encoding)
+        except OSError:
+            if attempt >= attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    return path.read_text(encoding=encoding)
+
+
 class PositionSide(Enum):
     """持仓方向。"""
 
@@ -404,7 +418,7 @@ class PositionManager:
         try:
             if not path.exists():
                 return None
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(_read_text_with_retry(path, encoding="utf-8"))
             return payload if isinstance(payload, dict) else None
         except Exception as e:
             logger.warning(f"Failed to load persisted positions for scope={scope or self._scope}: {e}")
