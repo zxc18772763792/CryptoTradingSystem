@@ -70,6 +70,71 @@ def _percentile(values: List[float], pct: float) -> Optional[float]:
     return clean[low] * (1.0 - fraction) + clean[high] * fraction
 
 
+def _feed_watch_symbols(market_ws: Dict[str, Any]) -> List[Tuple[str, str]]:
+    feed_status = market_ws.get("feed_status") if isinstance(market_ws.get("feed_status"), dict) else {}
+    exchanges = feed_status.get("exchanges") if isinstance(feed_status.get("exchanges"), dict) else {}
+    seen: set[Tuple[str, str]] = set()
+    symbols: List[Tuple[str, str]] = []
+    for exchange, exchange_status in exchanges.items():
+        if not isinstance(exchange_status, dict):
+            continue
+        raw_symbols = exchange_status.get("last_symbols") or []
+        if isinstance(raw_symbols, str):
+            raw_symbols = [raw_symbols]
+        if not isinstance(raw_symbols, list):
+            continue
+        for raw_symbol in raw_symbols:
+            exchange_name = str(exchange or "").strip()
+            symbol = str(raw_symbol or "").strip()
+            if not exchange_name or not symbol:
+                continue
+            key = (exchange_name, symbol)
+            if key in seen:
+                continue
+            seen.add(key)
+            symbols.append(key)
+    return symbols
+
+
+def _symbol_snapshot(market_ws: Dict[str, Any], exchange: str, symbol: str) -> Dict[str, Any]:
+    symbols = market_ws.get("symbols") if isinstance(market_ws.get("symbols"), dict) else {}
+    exchange_symbols = symbols.get(exchange) if isinstance(symbols.get(exchange), dict) else {}
+    snapshot = exchange_symbols.get(symbol)
+    if isinstance(snapshot, dict):
+        return snapshot
+    normalized = symbol.split(":", 1)[0]
+    snapshot = exchange_symbols.get(normalized)
+    return snapshot if isinstance(snapshot, dict) else {}
+
+
+def _watched_symbol_errors(market_ws: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    watched_symbols = _feed_watch_symbols(market_ws)
+    errors: List[str] = []
+    if _as_bool(market_ws.get("feed_healthy")) and not watched_symbols:
+        errors.append("market WS feed watch symbols are missing")
+    if watched_symbols and not isinstance(market_ws.get("symbols"), dict):
+        errors.append("market WS symbol details are missing")
+    max_age_ms = _as_float(market_ws.get("symbol_max_age_sec"))
+    max_age_ms = max_age_ms * 1000.0 if max_age_ms is not None else None
+    for exchange, symbol in watched_symbols:
+        symbol_status = _symbol_snapshot(market_ws, exchange, symbol)
+        symbol_key = f"{exchange}:{symbol}"
+        if not symbol_status:
+            errors.append(f"market WS missing watched symbol tick: {symbol_key}")
+            continue
+        source = str(symbol_status.get("source") or "").strip().lower()
+        if source != "ws":
+            errors.append(f"market WS watched symbol is not WS sourced: {symbol_key} source={symbol_status.get('source')!r}")
+        if _as_bool(symbol_status.get("is_stale")):
+            errors.append(f"market WS watched symbol is stale: {symbol_key}")
+        symbol_age_ms = _as_float(symbol_status.get("age_ms"))
+        if symbol_age_ms is None:
+            errors.append(f"market WS watched symbol age is missing: {symbol_key}")
+        elif max_age_ms is not None and symbol_age_ms > max_age_ms:
+            errors.append(f"market WS watched symbol age {symbol_age_ms:.1f} ms exceeds {max_age_ms:.1f} ms: {symbol_key}")
+    return [f"{exchange}:{symbol}" for exchange, symbol in watched_symbols], errors
+
+
 def _request_json(base_url: str, token: str, path: str, timeout: float) -> Dict[str, Any]:
     headers = {"X-OPS-CALLER": "selfcheck_market_ws_shadow"}
     if token:
@@ -94,6 +159,7 @@ def _extract_sample(base_url: str, token: str, timeout: float) -> Dict[str, Any]
     status_market_ws = status_body.get("market_ws") if isinstance(status_body.get("market_ws"), dict) else {}
     market_ws = market_body if isinstance(market_body, dict) else {}
     shadow_last = market_ws.get("shadow_last_compare") if isinstance(market_ws.get("shadow_last_compare"), dict) else {}
+    watched_symbols, watched_symbol_errors = _watched_symbol_errors(market_ws)
     return {
         "sampled_at": sampled_at,
         "health_status_code": health["status_code"],
@@ -145,6 +211,10 @@ def _extract_sample(base_url: str, token: str, timeout: float) -> Dict[str, Any]
         "feed_watch_error_count": _as_int(market_ws.get("feed_watch_error_count")),
         "feed_watch_empty_count": _as_int(market_ws.get("feed_watch_empty_count")),
         "feed_last_error": market_ws.get("feed_last_error"),
+        "feed_watch_symbols": watched_symbols,
+        "feed_watch_symbol_count": len(watched_symbols),
+        "feed_watch_symbol_errors": watched_symbol_errors,
+        "feed_watch_symbol_error_count": len(watched_symbol_errors),
     }
 
 
@@ -208,6 +278,8 @@ def _evaluate_samples(
         )
         if stale_for_check > max_stale_symbol_count:
             errors.append(f"{prefix}: ws_stale_symbol_count>{max_stale_symbol_count}")
+        for watched_symbol_error in sample.get("feed_watch_symbol_errors") or []:
+            errors.append(f"{prefix}: {watched_symbol_error}")
 
     ws_tick_delta = _delta(samples, "ws_tick_count")
     shadow_compare_delta = _delta(samples, "shadow_compare_count")
@@ -284,6 +356,10 @@ def _evaluate_samples(
         "feed_watch_timeout_delta": feed_watch_timeout_delta,
         "feed_watch_error_delta": feed_watch_error_delta,
         "feed_watch_empty_delta": feed_watch_empty_delta,
+        "max_feed_watch_symbol_error_count_observed": max(
+            (_as_int(sample.get("feed_watch_symbol_error_count")) for sample in samples),
+            default=0,
+        ),
         "p99_abs_diff_bps": diff_p99,
         "p95_ws_age_ms": ws_age_p95,
         "max_stale_symbol_count_observed": max(
@@ -301,6 +377,8 @@ def _evaluate_samples(
         "final_enabled": samples[-1].get("enabled") if samples else None,
         "final_feed_healthy": samples[-1].get("feed_healthy") if samples else None,
         "final_ws_hub_healthy": samples[-1].get("ws_hub_healthy") if samples else None,
+        "final_feed_watch_symbols": samples[-1].get("feed_watch_symbols") if samples else [],
+        "final_feed_watch_symbol_errors": samples[-1].get("feed_watch_symbol_errors") if samples else [],
         "final_fallback_reasons": samples[-1].get("fallback_reasons") if samples else {},
         "final_feed_last_error": samples[-1].get("feed_last_error") if samples else None,
     }

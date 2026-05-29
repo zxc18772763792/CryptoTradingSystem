@@ -17,6 +17,7 @@ def _report(*, expect_mode="shadow", expect_runtime="paper", **summary_overrides
         "feed_watch_timeout_delta": 0,
         "feed_watch_error_delta": 0,
         "feed_watch_empty_delta": 0,
+        "max_feed_watch_symbol_error_count_observed": 0,
         "max_stale_symbol_count_observed": 0,
         "p99_abs_diff_bps": 4.2,
         "p95_ws_age_ms": 300.0,
@@ -26,6 +27,8 @@ def _report(*, expect_mode="shadow", expect_runtime="paper", **summary_overrides
         "final_enabled": True,
         "final_feed_healthy": True,
         "final_ws_hub_healthy": True,
+        "final_feed_watch_symbols": ["binance:BTC/USDT"],
+        "final_feed_watch_symbol_errors": [],
         "final_feed_last_error": None,
     }
     summary.update(summary_overrides)
@@ -186,6 +189,23 @@ def test_market_ws_shadow_report_eval_can_strictly_fail_watch_errors_when_reques
     assert result["ok"] is False
     assert "feed_watch_timeout_delta 1 > allowed 0" in result["errors"]
     assert "feed_watch_error_delta 1 > allowed 0" in result["errors"]
+
+
+def test_market_ws_shadow_report_eval_fails_watched_symbol_errors():
+    report = _report(
+        max_feed_watch_symbol_error_count_observed=2,
+        final_feed_watch_symbol_errors=[
+            "market WS watched symbol is not WS sourced: binance:BTC/USDT source='rest_snapshot'",
+        ],
+    )
+
+    result = _evaluate(report)
+
+    assert result["ok"] is False
+    assert "max_feed_watch_symbol_error_count_observed 2 > allowed 0" in result["errors"]
+    assert result["summary"]["final_feed_watch_symbol_errors"] == [
+        "market WS watched symbol is not WS sourced: binance:BTC/USDT source='rest_snapshot'",
+    ]
 
 
 def test_market_ws_shadow_report_eval_main_outputs_json(tmp_path, capsys):
