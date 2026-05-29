@@ -171,3 +171,35 @@ def test_market_ws_shadow_report_eval_main_outputs_json(tmp_path, capsys):
     assert payload["diagnostic_log_counts"]["unclosed_client_session"] == 1
     assert payload["diagnostic_log_counts"]["positions_live_json"] == 1
     assert payload["diagnostic_log_counts"]["get_ticker_call"] == 1
+
+
+def test_market_ws_shadow_report_eval_main_counts_logs_for_empty_report(tmp_path, capsys):
+    report_path = tmp_path / "shadow.json"
+    log_path = tmp_path / "service.err.log"
+    report_path.write_text("", encoding="utf-8")
+    log_path.write_text(
+        "\n".join(
+            [
+                "Paper trading mode: False",
+                "Unclosed client session",
+                "positions_live.json Permission denied",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    code = evaluator.main([
+        "--report",
+        str(report_path),
+        "--service-err-log",
+        str(log_path),
+    ])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "empty JSON report" in captured.err
+    payload = json.loads(captured.out)
+    assert payload["ok"] is False
+    assert payload["log_counts"]["paper_false"] == 1
+    assert payload["diagnostic_log_counts"]["unclosed_client_session"] == 1
+    assert payload["diagnostic_log_counts"]["positions_live_json"] == 1

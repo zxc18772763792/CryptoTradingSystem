@@ -286,10 +286,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
     report_path = Path(args.report)
     service_err_log = Path(args.service_err_log) if str(args.service_err_log or "").strip() else None
+    log_counts = _count_log_patterns(service_err_log)
+    diagnostic_log_counts = _count_log_patterns(service_err_log, DIAGNOSTIC_LOG_PATTERNS)
     try:
         report = _read_json(report_path)
-        log_counts = _count_log_patterns(service_err_log)
-        diagnostic_log_counts = _count_log_patterns(service_err_log, DIAGNOSTIC_LOG_PATTERNS)
         result = evaluate_report(
             report,
             expect_mode=str(args.expect_mode),
@@ -316,8 +316,8 @@ def main(argv: Iterable[str] | None = None) -> int:
             "ok": False,
             "errors": [str(exc)],
             "summary": {},
-            "log_counts": {},
-            "diagnostic_log_counts": {},
+            "log_counts": log_counts,
+            "diagnostic_log_counts": diagnostic_log_counts,
         }
     result["report"] = str(report_path)
     if service_err_log is not None:
