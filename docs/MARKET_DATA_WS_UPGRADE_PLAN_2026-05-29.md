@@ -3761,6 +3761,53 @@ summary:
   - `rg -n "\.get_ticker\(" strategies core\trading core\utils` 无命中，`rg` exit code 为 `1`，符合预期。
 - 当前判断不变：这些只证明工具和静态门禁仍通过，不能替代第十一轮最终 JSON/evaluator，也不能作为进入 Level 2 的依据。
 
+2026-05-30 00:51 +08:00 第十一轮继续观察：
+
+- 第十一轮 selfcheck 仍在运行，最终 JSON/stderr 仍为 0 字节。
+- `/api/status`：`status=running`、`trading_mode=paper`、`paper_trading=true`、`exchange_status.binance=true`。
+- `/api/market-data/status`：
+  - `market_ws.mode=shadow`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.feed_watch_attempt_count=16785`
+  - `market_ws.feed_watch_timeout_count=0`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.feed_status.exchanges.binance.last_symbols=["BTC/USDT","ETH/USDT"]`
+  - `market_ws.ws_tick_count=16784`
+  - `market_ws.rest_snapshot_count=816`
+  - `market_ws.shadow_compare_count=286`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.stale_symbol_count=0`
+  - `market_ws.last_tick_age_ms=511`
+  - `market_ws.shadow_max_abs_diff_bps=12.844398929016815`
+  - `market_ws.shadow_last_compare.abs_diff_bps=4.907806848353677`
+  - `symbols.binance.BTC/USDT.source=ws`、`is_stale=false`、`age_ms=520`
+  - `symbols.binance.ETH/USDT.source=ws`、`is_stale=false`、`age_ms=511`
+- 服务 stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `6`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `0`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `2`
+  - `Failed to persist positions`: `4`
+  - `Live kline fetch timed out`: `7`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `6`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `2`
+- 当前判断不变：运行中证据继续健康，但仍必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 未最终通过前，不进入 Level 2 live shadow，不开启 `ui_primary`。
+
 2026-05-29 23:49 +08:00 续作追加检查：
 
 - 已提交门禁测试护栏：`1583bbd Lock WS stale count shadow gate`。
