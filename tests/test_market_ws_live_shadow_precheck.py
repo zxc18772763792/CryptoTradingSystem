@@ -61,6 +61,18 @@ def test_live_shadow_precheck_rejects_paper_runtime():
     assert summary["paper_trading"] is True
 
 
+def test_live_shadow_precheck_prefers_market_data_status_over_status_cache():
+    ok, errors, summary = precheck.evaluate_precheck(
+        _status_payload(market_ws=_market_ws_payload(mode="ui_primary", force_rest=True)),
+        _market_ws_payload(mode="shadow", force_rest=False),
+    )
+
+    assert ok is True
+    assert errors == []
+    assert summary["market_ws_mode"] == "shadow"
+    assert summary["market_ws_force_rest"] is False
+
+
 def test_live_shadow_precheck_rejects_primary_modes_and_force_rest():
     ok, errors, summary = precheck.evaluate_precheck(
         _status_payload(market_ws=_market_ws_payload(mode="ui_primary", force_rest=True)),

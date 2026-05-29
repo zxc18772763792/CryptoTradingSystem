@@ -48,8 +48,9 @@ def _request_json(base_url: str, token: str, path: str, timeout: float) -> Dict[
 
 def evaluate_precheck(status_payload: Dict[str, Any], market_payload: Dict[str, Any]) -> Tuple[bool, List[str], Dict[str, Any]]:
     errors: List[str] = []
-    market_ws = status_payload.get("market_ws") if isinstance(status_payload.get("market_ws"), dict) else market_payload
-    market_ws = market_ws if isinstance(market_ws, dict) else {}
+    market_ws = market_payload if isinstance(market_payload, dict) else {}
+    if not market_ws and isinstance(status_payload.get("market_ws"), dict):
+        market_ws = status_payload["market_ws"]
     trading_mode = str(status_payload.get("trading_mode") or "").strip().lower()
     market_mode = str(market_ws.get("mode") or "").strip().lower()
 
