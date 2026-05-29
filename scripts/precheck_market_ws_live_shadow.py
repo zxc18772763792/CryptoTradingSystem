@@ -10,6 +10,7 @@ import requests
 
 
 DEFAULT_BASE_URL = os.getenv("MARKET_WS_SHADOW_BASE_URL") or os.getenv("WEB_BASE_URL") or "http://127.0.0.1:8000"
+DEFAULT_MAX_WS_AGE_MS = float(os.getenv("MARKET_WS_LIVE_SHADOW_PRECHECK_MAX_WS_AGE_MS", "10000"))
 
 
 def _join_url(base_url: str, path: str) -> str:
@@ -32,6 +33,26 @@ def _as_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _has_error_text(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"", "none", "null"}
+
+
 def _request_json(base_url: str, token: str, path: str, timeout: float) -> Dict[str, Any]:
     headers = {"X-OPS-CALLER": "precheck_market_ws_live_shadow"}
     if token:
@@ -46,13 +67,27 @@ def _request_json(base_url: str, token: str, path: str, timeout: float) -> Dict[
     }
 
 
-def evaluate_precheck(status_payload: Dict[str, Any], market_payload: Dict[str, Any]) -> Tuple[bool, List[str], Dict[str, Any]]:
+def evaluate_precheck(
+    status_payload: Dict[str, Any],
+    market_payload: Dict[str, Any],
+    *,
+    max_ws_age_ms: float = DEFAULT_MAX_WS_AGE_MS,
+) -> Tuple[bool, List[str], Dict[str, Any]]:
     errors: List[str] = []
     market_ws = market_payload if isinstance(market_payload, dict) else {}
     if not market_ws and isinstance(status_payload.get("market_ws"), dict):
         market_ws = status_payload["market_ws"]
     trading_mode = str(status_payload.get("trading_mode") or "").strip().lower()
     market_mode = str(market_ws.get("mode") or "").strip().lower()
+    hub_healthy = market_ws.get("ws_hub_healthy")
+    if hub_healthy is None:
+        hub_healthy = market_ws.get("hub_healthy")
+    stale_symbol_count = (
+        _as_int(market_ws.get("ws_stale_symbol_count"))
+        if "ws_stale_symbol_count" in market_ws
+        else _as_int(market_ws.get("stale_symbol_count"))
+    )
+    last_tick_age_ms = _as_float(market_ws.get("last_tick_age_ms"))
 
     if str(status_payload.get("status") or "").strip().lower() != "running":
         errors.append("api status is not running")
@@ -72,6 +107,33 @@ def evaluate_precheck(status_payload: Dict[str, Any], market_payload: Dict[str, 
         errors.append("market WS status is missing fail_closed_for_live")
     elif not _as_bool(market_ws.get("fail_closed_for_live")):
         errors.append("MARKET_WS_FAIL_CLOSED_FOR_LIVE must be true")
+    if not _as_bool(market_ws.get("feed_healthy")):
+        errors.append("market WS feed is not healthy")
+    if not _as_bool(hub_healthy):
+        errors.append("market WS hub is not healthy")
+    if _has_error_text(market_ws.get("feed_last_error")):
+        errors.append(f"market WS feed_last_error is not empty: {market_ws.get('feed_last_error')!r}")
+    if stale_symbol_count > 0:
+        errors.append(f"market WS has stale symbols: {stale_symbol_count}")
+    if last_tick_age_ms is None:
+        errors.append("market WS last tick age is missing")
+    elif last_tick_age_ms > float(max_ws_age_ms):
+        errors.append(f"market WS last tick age {last_tick_age_ms:.1f} ms exceeds {float(max_ws_age_ms):.1f} ms")
+    invalid_payload_count = _as_int(market_ws.get("invalid_payload_count"))
+    timestamp_regression_count = _as_int(market_ws.get("timestamp_regression_count"))
+    feed_watch_empty_count = _as_int(market_ws.get("feed_watch_empty_count"))
+    shadow_compare_violation_count = _as_int(market_ws.get("shadow_compare_violation_count"))
+    shadow_compare_stale_skip_count = _as_int(market_ws.get("shadow_compare_stale_skip_count"))
+    if invalid_payload_count > 0:
+        errors.append(f"market WS invalid payload count is {invalid_payload_count}")
+    if timestamp_regression_count > 0:
+        errors.append(f"market WS timestamp regression count is {timestamp_regression_count}")
+    if feed_watch_empty_count > 0:
+        errors.append(f"market WS feed empty watch count is {feed_watch_empty_count}")
+    if shadow_compare_violation_count > 0:
+        errors.append(f"market WS shadow compare violation count is {shadow_compare_violation_count}")
+    if shadow_compare_stale_skip_count > 0:
+        errors.append(f"market WS shadow stale skip count is {shadow_compare_stale_skip_count}")
 
     summary = {
         "trading_mode": status_payload.get("trading_mode"),
@@ -81,11 +143,21 @@ def evaluate_precheck(status_payload: Dict[str, Any], market_payload: Dict[str, 
         "market_ws_configured_enabled": market_ws.get("configured_enabled"),
         "market_ws_force_rest": market_ws.get("force_rest"),
         "market_ws_fail_closed_for_live": market_ws.get("fail_closed_for_live"),
+        "market_ws_feed_healthy": market_ws.get("feed_healthy"),
+        "market_ws_ws_hub_healthy": hub_healthy,
+        "market_ws_feed_last_error": market_ws.get("feed_last_error"),
+        "market_ws_last_tick_age_ms": last_tick_age_ms,
+        "market_ws_stale_symbol_count": stale_symbol_count,
+        "market_ws_invalid_payload_count": invalid_payload_count,
+        "market_ws_timestamp_regression_count": timestamp_regression_count,
+        "market_ws_feed_watch_empty_count": feed_watch_empty_count,
+        "market_ws_shadow_compare_violation_count": shadow_compare_violation_count,
+        "market_ws_shadow_compare_stale_skip_count": shadow_compare_stale_skip_count,
     }
     return not errors, errors, summary
 
 
-def run_precheck(*, base_url: str, token: str, timeout: float) -> Dict[str, Any]:
+def run_precheck(*, base_url: str, token: str, timeout: float, max_ws_age_ms: float) -> Dict[str, Any]:
     status = _request_json(base_url, token, "/api/status", timeout)
     market = _request_json(base_url, token, "/api/market-data/status", timeout)
     errors: List[str] = []
@@ -93,7 +165,11 @@ def run_precheck(*, base_url: str, token: str, timeout: float) -> Dict[str, Any]
         errors.append(f"/api/status returned {status['status_code']}")
     if market["status_code"] != 200:
         errors.append(f"/api/market-data/status returned {market['status_code']}")
-    ok, eval_errors, summary = evaluate_precheck(status["body"], market["body"])
+    ok, eval_errors, summary = evaluate_precheck(
+        status["body"],
+        market["body"],
+        max_ws_age_ms=float(max_ws_age_ms),
+    )
     errors.extend(eval_errors)
     return {
         "ok": not errors and ok,
@@ -108,6 +184,7 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--token", default=os.getenv("OPS_TOKEN", ""))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("MARKET_WS_SHADOW_REQUEST_TIMEOUT_SEC", "5")))
+    parser.add_argument("--max-ws-age-ms", type=float, default=DEFAULT_MAX_WS_AGE_MS)
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -118,6 +195,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             base_url=str(args.base_url),
             token=str(args.token or ""),
             timeout=float(args.timeout),
+            max_ws_age_ms=float(args.max_ws_age_ms),
         )
     except Exception as exc:
         result = {"ok": False, "errors": [str(exc)], "summary": {}, "base_url": str(args.base_url)}
