@@ -3144,6 +3144,7 @@ python scripts\precheck_market_ws_live_shadow.py --base-url http://127.0.0.1:801
 
 该预检只读取 `/api/status` 和 `/api/market-data/status`，不启动服务、不下单；它要求 `trading_mode=live`、`paper_trading=false`、`MARKET_WS_MODE=shadow`、`MARKET_WS_FORCE_REST=false`、`MARKET_WS_FAIL_CLOSED_FOR_LIVE=true`，并禁止 `ui_primary` / `strategy_primary`。
 该预检还要求启动 24 小时 live shadow 前的当前 market WS feed/hub 已健康、`feed_last_error` 为空、WS stale symbol 为 0、最近 tick age 不超过 10000 ms，且 invalid payload、timestamp regression、feed empty watch、shadow compare violation、shadow stale skip 计数均为 0。
+该预检会读取 feed 最近实际 watch 的 exchange/symbol，并要求这些 symbol 在 `/api/market-data/status.symbols` 中都有 `source=ws`、`is_stale=false` 且 age 未超阈值的 tick，避免“只有任意一个 WS tick 新鲜”时误放行 24 小时 live shadow。
 
 运行条件：
 
@@ -3656,6 +3657,12 @@ summary:
   - `pytest tests\test_market_ws_shadow_report_eval.py -q`，`12 passed in 2.48s`。
   - `python -m py_compile scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_report_eval.py` 通过。
   - `git diff --check -- scripts/evaluate_market_ws_shadow_report.py tests/test_market_ws_shadow_report_eval.py` 通过。
+- 2026-05-30 00:49 +08:00 更新：`c41a788 Check watched WS symbols in live shadow precheck` 已让 Level 2 precheck 逐个确认 feed 最近 watch 的 exchange/symbol 在 `/api/market-data/status.symbols` 中有新鲜 WS tick；`BTC/USDT:USDT` 这类 perp suffix 会归一到 `BTC/USDT` 查询。
+- 验证：
+  - `pytest tests\test_market_ws_live_shadow_precheck.py -q`，`9 passed in 3.55s`。
+  - `python -m py_compile scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_live_shadow_precheck.py` 通过。
+  - `git diff --check -- scripts/precheck_market_ws_live_shadow.py tests/test_market_ws_live_shadow_precheck.py` 通过。
+  - 当前第十一轮 paper shadow 服务上复跑 Level 2 precheck 仍按预期失败：`runtime is not live`、`market WS status is missing fail_closed_for_live`；新增 summary 确认 `market_ws_feed_watch_symbol_count=2`、`market_ws_feed_watch_symbols=["binance:BTC/USDT","binance:ETH/USDT"]`、`market_ws_feed_watch_symbol_error_count=0`。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
