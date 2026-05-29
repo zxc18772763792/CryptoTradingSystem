@@ -327,5 +327,26 @@ class AccountManager:
             self._save()
         return updated
 
+    def set_mode_for_auto_strategy_accounts(self, mode: str) -> int:
+        target = self._normalize_mode(mode, default="paper")
+        updated = 0
+        now = datetime.now(timezone.utc).isoformat()
+        for item in self._accounts.values():
+            if item.account_id == "main":
+                continue
+            metadata = dict(item.metadata or {})
+            if not metadata.get("auto_created") or not metadata.get("strategy_name"):
+                continue
+            if item.mode == target and metadata.get("runtime_mode") == target:
+                continue
+            item.mode = target
+            metadata["runtime_mode"] = target
+            item.metadata = metadata
+            item.updated_at = now
+            updated += 1
+        if updated > 0:
+            self._save()
+        return updated
+
 
 account_manager = AccountManager()

@@ -1002,6 +1002,7 @@ class StrategyManager:
                 str(signal.symbol or "").strip().upper(),
                 str(meta.get("exchange") or default_exchange).strip().lower(),
             )
+            self._evict_stale_signal_conflicts(signal.timestamp)
             # Conflict detection: drop weaker conflicting signals within the window
             prior = self._recent_signal_by_symbol.get(conflict_key)
             if prior is not None:
@@ -1059,6 +1060,37 @@ class StrategyManager:
                     )
                 except Exception as e:
                     logger.error(f"Fallback strategy signal dispatch failed: {e}")
+
+    def _evict_stale_signal_conflicts(self, current_timestamp: datetime) -> int:
+        """Remove old conflict-window entries so long-running processes do not leak signals."""
+        if not self._recent_signal_by_symbol:
+            return 0
+
+        max_age_sec = float(_SIGNAL_CONFLICT_WINDOW_SECONDS * 2)
+
+        def _as_aware_utc(value: Any) -> Optional[datetime]:
+            if not isinstance(value, datetime):
+                return None
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+
+        current = _as_aware_utc(current_timestamp)
+        if current is None:
+            return 0
+
+        removed = 0
+        for key, prior in list(self._recent_signal_by_symbol.items()):
+            prior_ts = _as_aware_utc(getattr(prior, "timestamp", None))
+            if prior_ts is None:
+                self._recent_signal_by_symbol.pop(key, None)
+                removed += 1
+                continue
+            age = (current - prior_ts).total_seconds()
+            if age > max_age_sec:
+                self._recent_signal_by_symbol.pop(key, None)
+                removed += 1
+        return removed
 
     async def _close_positions_for_strategy_stop(self, name: str, reason: str = "strategy_stopped") -> Dict[str, Any]:
         from core.strategies import Signal, SignalType

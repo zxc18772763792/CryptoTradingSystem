@@ -808,35 +808,7 @@ async def _load_preferred_coinglass_overview(
     except Exception:
         return {}
 
-    try:
-        freshness_sec = (
-            float(overview.get("freshness_sec"))
-            if overview.get("freshness_sec") is not None
-            else None
-        )
-    except Exception:
-        freshness_sec = None
-
-    degraded_reason = str(overview.get("degraded_reason") or "").strip()
-    should_refresh = bool(overview.get("key_configured")) and (
-        not bool(overview.get("available"))
-        or degraded_reason
-        or freshness_sec is None
-        or freshness_sec > float(max_age_sec)
-    )
-    if not should_refresh:
-        return overview
-
-    try:
-        refreshed = dict(
-            await build_coinglass_overview_payload(
-                symbol=symbol, refresh=True, manual=False
-            )
-            or {}
-        )
-    except Exception:
-        return overview
-    return refreshed or overview
+    return overview
 
 
 def _merge_nested_payload(primary: Any, fallback: Any) -> Any:

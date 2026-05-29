@@ -170,6 +170,8 @@ class StochasticStrategy(StrategyBase):
                     timestamp=now,
                     strategy_name=self.name,
                     strength=min(max((k_prev - overbought) / max(100 - overbought, 1e-9), 0.1), 1.0),
+                    stop_loss=c * (1 + float(self.params["stop_loss_pct"])),
+                    take_profit=c * (1 - float(self.params["take_profit_pct"])),
                     metadata={"k": k_now, "d": d_now},
                 )
             )
@@ -255,6 +257,8 @@ class ADXTrendStrategy(StrategyBase):
                     timestamp=now,
                     strategy_name=self.name,
                     strength=min(max((a_now - float(self.params["adx_threshold"])) / 25, 0.2), 1.0),
+                    stop_loss=c * (1 + float(self.params["stop_loss_pct"])),
+                    take_profit=c * (1 - float(self.params["take_profit_pct"])),
                     metadata={"adx": a_now, "plus_di": p_now, "minus_di": m_now},
                 )
             )

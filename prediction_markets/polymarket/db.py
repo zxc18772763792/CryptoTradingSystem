@@ -10,6 +10,7 @@ import pandas as pd
 from sqlalchemy import and_, event, func, insert, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from config.settings import settings
 from prediction_markets.polymarket.models import (
@@ -46,6 +47,13 @@ def _create_pm_engine(database_url: str):
     engine_kwargs: Dict[str, Any] = {"echo": False, "future": True}
     if database_url.startswith("sqlite"):
         engine_kwargs["connect_args"] = {"timeout": 30}
+        # NullPool (matching the main + news engines): do not pool aiosqlite
+        # connections. A pooled async-SQLite connection binds its worker thread
+        # to the event loop that created it; when that loop closes (e.g. a test
+        # using asyncio.run, or reconfigure_pm_db swapping the engine), the
+        # lingering thread raises "Event loop is closed" on the next delivery.
+        # Short-lived connections sidestep the cross-loop thread leak entirely.
+        engine_kwargs["poolclass"] = NullPool
     engine = create_async_engine(database_url, **engine_kwargs)
     if database_url.startswith("sqlite"):
         @event.listens_for(engine.sync_engine, "connect")

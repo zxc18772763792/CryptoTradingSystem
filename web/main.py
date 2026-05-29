@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -60,7 +60,11 @@ from core.trading import account_manager, execution_engine, order_manager, posit
 from web.asset_versions import static_asset_url
 from web.api import ai_research
 from web.api import ml
-from web.api.auth import _has_valid_local_ui_session, set_local_ui_session_cookie
+from web.api.auth import (
+    _has_valid_local_ui_session,
+    require_sensitive_ops_permissions,
+    set_local_ui_session_cookie,
+)
 from web.startup_mode import StartupModeDecision, resolve_startup_trading_mode
 
 _AUTO_SYNC_SYMBOLS = [
@@ -186,6 +190,39 @@ def _sync_guarded_startup_account_mode(decision: StartupModeDecision | None) -> 
     except Exception as exc:
         logger.warning(f"Failed to synchronize main account mode during guarded startup: {exc}")
         return False
+
+
+def _sync_startup_account_modes(decision: StartupModeDecision | None) -> Dict[str, Any]:
+    result = {
+        "main_updated": False,
+        "auto_strategy_accounts_updated": 0,
+    }
+    if decision is None:
+        return result
+
+    try:
+        result["main_updated"] = bool(account_manager.set_mode("main", decision.effective_mode))
+        if result["main_updated"]:
+            logger.warning(
+                f"Synchronized main account mode to {decision.effective_mode} during startup."
+            )
+    except Exception as exc:
+        logger.warning(f"Failed to synchronize main account mode during startup: {exc}")
+
+    if decision.effective_mode == "paper":
+        try:
+            sync_auto_accounts = getattr(account_manager, "set_mode_for_auto_strategy_accounts", None)
+            if callable(sync_auto_accounts):
+                result["auto_strategy_accounts_updated"] = int(sync_auto_accounts("paper") or 0)
+                if result["auto_strategy_accounts_updated"] > 0:
+                    logger.warning(
+                        "Synchronized {} auto-created strategy account(s) to paper mode during startup.",
+                        result["auto_strategy_accounts_updated"],
+                    )
+        except Exception as exc:
+            logger.warning(f"Failed to synchronize strategy account modes during startup: {exc}")
+
+    return result
 
 
 def _safe_json(obj: Any) -> Dict[str, Any]:
@@ -1488,7 +1525,7 @@ async def lifespan(app: FastAPI):
         _startup_mode_decision.effective_mode != "live",
         sync_runtime_state=False,
     )
-    _sync_guarded_startup_account_mode(_startup_mode_decision)
+    _sync_startup_account_modes(_startup_mode_decision)
     logger.info(
         "Startup trading mode resolved: effective={}, configured={}, persisted={}, source={}",
         _startup_mode_decision.effective_mode,
@@ -1512,7 +1549,10 @@ async def lifespan(app: FastAPI):
         position_manager.register_callback(_on_position_event)
         app.state.runtime_callbacks_hooked = True
 
-    restore_result = await restore_strategies_from_db()
+    restore_result = await restore_strategies_from_db(
+        startup_mode=_startup_mode_decision.effective_mode,
+        allow_live_restore=_startup_mode_decision.effective_mode == "live",
+    )
     logger.info(
         "Strategy restore summary: "
         f"loaded={restore_result.get('loaded', 0)}, "
@@ -1580,6 +1620,8 @@ async def lifespan(app: FastAPI):
         )
     with contextlib.suppress(Exception):
         await asyncio.wait_for(execution_engine.stop(), timeout=15)
+    with contextlib.suppress(Exception):
+        position_manager.flush()
     with contextlib.suppress(Exception):
         await asyncio.wait_for(
             runtime_bootstrap.shutdown_shared_runtime(
@@ -1683,7 +1725,7 @@ async def ai_page(request: Request):
     return RedirectResponse(url="/?tab=ai-research", status_code=307)
 
 
-@app.get("/api/status")
+@app.get("/api/status", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_status():
     global _status_cache_payload, _status_cache_at
     now_mono = time.monotonic()

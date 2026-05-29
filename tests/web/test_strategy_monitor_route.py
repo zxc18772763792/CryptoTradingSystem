@@ -74,6 +74,7 @@ def test_monitor_data_falls_back_to_fresh_ohlcv_and_prefers_executed_trades(monk
             "timeframe": "15m",
             "state": "running",
             "exchange": "binance",
+            "runtime": {"runner_alive": False, "run_count": 5},
         },
     )
     monkeypatch.setattr(
@@ -156,6 +157,9 @@ def test_monitor_data_falls_back_to_fresh_ohlcv_and_prefers_executed_trades(monk
     assert payload["return_denominator"]["source"] == "current_equity_allocation"
     assert payload["signal_mode"] == "executed_trade"
     assert payload["signal_summary"]["open_order_count"] == 0
+    assert payload["runner_alive_known"] is True
+    assert payload["runner_alive"] is False
+    assert payload["runtime_stale"] is True
 
 
 def test_monitor_data_restores_persisted_trade_markers_and_positions(monkeypatch):

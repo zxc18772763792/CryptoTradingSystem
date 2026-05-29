@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urljoin
-from xml.etree import ElementTree as ET
+from defusedxml import ElementTree as ET
 
 import requests
 from dateutil import parser as dt_parser

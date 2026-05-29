@@ -90,7 +90,7 @@ For daily use, remember this small command family:
 .\web.bat stop -IncludeWorkers
 ```
 
-`.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and blocks persisted `live`-mode restore unless you explicitly allow it.
+`.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and starts in `paper` mode by default. It will not enter or restore `live` mode unless you explicitly pass `-AllowPersistedLiveMode`.
 
 When analytics-history is enabled, `.\web.bat status` may briefly show the service as `warming_up` while `/health` or `/api/status` finishes coming online. That is expected during heavier startup paths and is different from a true stopped state.
 
@@ -98,6 +98,12 @@ To start the service and explicitly request the AI autonomous agent too:
 
 ```bat
 .\web.bat start -StartAutonomousAgent
+```
+
+To intentionally start the managed service in `live` mode:
+
+```bat
+.\web.bat start -AllowPersistedLiveMode
 ```
 
 Useful variants:
@@ -128,7 +134,12 @@ After startup, always verify the runtime mode and agent state with:
 .\web.bat status
 ```
 
-The default managed start now falls back to `paper` if the last persisted account mode was `live`. To intentionally honor a persisted `live` mode, use `.\web.bat start -AllowPersistedLiveMode` or launch with `TRADING_MODE=live`. The autonomous agent does not start with the default boot path unless `AI_AUTONOMOUS_AGENT_AUTO_START=true` is present in the launching environment or you pass `-StartAutonomousAgent`.
+Managed mode rule:
+
+- `.\web.bat` and `.\web.bat start` default to `paper`
+- `.\web.bat start -AllowPersistedLiveMode` is the managed `live` startup path
+- `TRADING_MODE=live` is only for direct CLI startup outside the managed path
+- the autonomous agent does not start with the default boot path unless `AI_AUTONOMOUS_AGENT_AUTO_START=true` is present in the launching environment or you pass `-StartAutonomousAgent`
 
 For the full startup matrix, script responsibilities, and troubleshooting flow, see [STARTUP.md](STARTUP.md).
 
@@ -172,6 +183,7 @@ Startup and control:
 .\web.bat start
 .\web.bat status
 .\web.bat stop -IncludeWorkers
+.\web.bat start -AllowPersistedLiveMode
 .\web.bat start -StartAutonomousAgent
 .\web.bat start -NoNewsWorkers
 .\web.bat start -NoNewsLlmWorker

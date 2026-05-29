@@ -832,20 +832,28 @@ def test_build_derivatives_snapshot_adds_optional_coinglass_context(monkeypatch)
     assert context["option_put_call_ratio"] == 1.35
 
 
-def test_latest_payload_rows_prefers_latest_ingested_request_and_filters_mismatched_symbol(monkeypatch):
+def test_latest_payload_rows_prefers_latest_source_request_and_filters_mismatched_symbol(monkeypatch):
     frame = pd.DataFrame(
         [
             {
                 "normalized_symbol": "BTC",
-                "request_key": "req-old",
+                "request_key": "req-source-new",
                 "source_ts": "2026-04-18T12:30:00+00:00",
                 "ingested_at": "2026-04-18T11:00:00+00:00",
                 "exchange": "aggregate",
-                "payload_json": '{"symbol":"ALLINDEX","spread":0.5}',
+                "payload_json": '{"symbol":"BTC","spread":0.5}',
             },
             {
                 "normalized_symbol": "BTC",
-                "request_key": "req-new",
+                "request_key": "req-source-new",
+                "source_ts": "2026-04-18T12:30:00+00:00",
+                "ingested_at": "2026-04-18T11:00:00+00:00",
+                "exchange": "aggregate",
+                "payload_json": '{"symbol":"ETH","spread":0.7}',
+            },
+            {
+                "normalized_symbol": "BTC",
+                "request_key": "req-ingest-new",
                 "source_ts": "2026-04-17T20:00:00+00:00",
                 "ingested_at": "2026-04-18T12:00:00+00:00",
                 "exchange": "aggregate",
@@ -859,6 +867,7 @@ def test_latest_payload_rows_prefers_latest_ingested_request_and_filters_mismatc
 
     assert len(rows) == 1
     assert rows[0]["symbol"] == "BTC"
+    assert rows[0]["spread"] == 0.5
 
 
 def test_build_coinglass_overview_prefers_snapshot_active_datasets(monkeypatch):

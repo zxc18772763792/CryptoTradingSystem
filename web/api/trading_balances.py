@@ -315,7 +315,7 @@ async def _balance_response_fallback_with_notifications(
         )
     # Notification eval can fan out into altcoin scans + cross-exchange ticker
     # fetches when rules are configured. The outer endpoint already took the
-    # 18s `_BALANCE_RESPONSE_TIMEOUT_SEC` hit before deciding to enter
+    # 5s `_BALANCE_RESPONSE_TIMEOUT_SEC` hit before deciding to enter
     # fallback — we must NOT let the notification chain re-do slow work that
     # would push the total response time past the client's 18-25s budget.
     # Cap at 2s; if it doesn't finish, return the stale payload anyway and
@@ -1155,7 +1155,7 @@ async def _build_all_balances_payload():
     return payload
 
 
-@router.get("/balances")
+@router.get("/balances", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_all_balances(force_refresh: bool = False):
     mode_name = (
         str(trading_api.execution_engine.get_trading_mode() or "paper").strip().lower()
@@ -1220,7 +1220,7 @@ async def get_all_balances(force_refresh: bool = False):
             mode_name, f"资产快照刷新失败: {exc}"
         )
 
-@router.get("/balances/history")
+@router.get("/balances/history", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_balance_history(
     hours: int = 24,
     exchange: str = "all",

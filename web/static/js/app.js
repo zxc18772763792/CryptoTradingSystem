@@ -150,6 +150,7 @@ const fmtMaybe=v=>(v===null||v===undefined||Number.isNaN(Number(v)))?'--':fmt(v)
 const fmtCompactUsd=v=>(v===null||v===undefined||Number.isNaN(Number(v)))?'--':new Intl.NumberFormat('en-US',{notation:'compact',maximumFractionDigits:2}).format(Number(v||0));
 function fmtDurationSec(v){const sec=Math.max(0,Math.floor(Number(v||0)));const d=Math.floor(sec/86400),h=Math.floor((sec%86400)/3600),m=Math.floor((sec%3600)/60),s=sec%60;const out=[];if(d>0)out.push(`${d}d`);if(h>0||d>0)out.push(`${h}h`);if(m>0||h>0||d>0)out.push(`${m}m`);out.push(`${s}s`);return out.join(' ');}
 const esc=v=>String(v??'').replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+const jsArg=v=>esc(JSON.stringify(String(v??'')));
 const TIME_LOCALE='zh-CN';
 const TIME_ZONE='Asia/Shanghai';
 const TIME_ZONE_LABEL='上海时间 (UTC+8)';
@@ -160,7 +161,7 @@ window.CTS_UI_TIMEZONE_LABEL=TIME_ZONE_LABEL;
 }
 const BACKTEST_COMPARE_PRESET_KEY='cts_backtest_compare_presets_v1';
 const BACKTEST_FACTOR_NAME_HINTS=[
-'ResidualMom48hStrategy','Ret24hReversalStrategy','RelRet24hReversalStrategy','ResidualMom24hStrategy',
+'ResidualMom48hStrategy','Ret24hReversalStrategy','RelRet24hReversalStrategy',
 'CloseLocation48hStrategy','ReturnEntropy4hStrategy','FalseBreakoutSupply24hStrategy','RangeAsymmetry48hStrategy',
 'SessionAsiaFlow24hStrategy','SessionFlowRotation24hStrategy','VolumeWeightedReturn24hStrategy','WickImbalance48hStrategy',
 'TurnoverEntropy48hStrategy','BodyVolumeCorr24hStrategy','CorrBreakdown24h72hStrategy','ExtremeRecency48hStrategy',
@@ -2299,6 +2300,16 @@ try{
   if(timer)clearTimeout(timer);
 }
 }
+async function runBusyButton(btn,busyText,fn){
+if(btn&&btn.disabled)return;
+const oldText=btn?btn.textContent:'';
+try{
+  if(btn){btn.disabled=true;if(busyText)btn.textContent=busyText;}
+  return await fn();
+}finally{
+  if(btn){btn.disabled=false;btn.textContent=oldText;}
+}
+}
 
 function activateTab(tabName){
 if(!tabName)return;
@@ -2834,7 +2845,7 @@ const protectMemo=[
 ].filter(Boolean).join(' / ');
 const memo=[reason,costMemo,protectMemo].filter(Boolean).join(' | ');
 const statusCell=`${mapSide(o.side)}/${mapOrderStatus(o.status)}${reason?`<div class="order-reject-reason">${reason}</div>`:''}`;
-return `<tr><td>${o.exchange||'-'} ${o.symbol}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${o.status==='open'?`<button class="btn btn-danger btn-sm" onclick="cancelOrder('${o.id}','${o.symbol}','${o.exchange||'binance'}')">撤销</button>`:'<span style="color:#8b949e">--</span>'}</td><td>${memo||'--'}</td></tr>`;
+return `<tr><td>${esc(o.exchange||'-')} ${esc(o.symbol||'')}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${o.status==='open'?`<button class="btn btn-danger btn-sm" onclick="cancelOrder(${jsArg(o.id)},${jsArg(o.symbol)},${jsArg(o.exchange||'binance')})">撤销</button>`:'<span style="color:#8b949e">--</span>'}</td><td>${memo||'--'}</td></tr>`;
 }).join('');
 }catch(e){console.error(e);const t=document.getElementById('orders-tbody');if(t)t.innerHTML=`<tr><td colspan="8">订单加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function loadOpenOrders(){return runRequestSingleFlight('openOrders',async()=>{try{
@@ -2860,7 +2871,7 @@ const protect=[
   trailDist>0?`追踪距 ${trailDist.toFixed(2)}`:''
 ].filter(Boolean);
 const protectCell=protect.length?protect.map(x=>`<div>${x}</div>`).join(''):'--';
-return `<tr><td>${o.exchange||'-'} ${o.symbol}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${protectCell}</td><td><button class="btn btn-danger btn-sm" onclick="cancelOrder('${o.id}','${o.symbol}','${o.exchange||'binance'}')">撤销</button></td></tr>`;
+return `<tr><td>${esc(o.exchange||'-')} ${esc(o.symbol||'')}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${protectCell}</td><td><button class="btn btn-danger btn-sm" onclick="cancelOrder(${jsArg(o.id)},${jsArg(o.symbol)},${jsArg(o.exchange||'binance')})">撤销</button></td></tr>`;
 }).join('')+(note?`<tr><td colspan="8">${note}</td></tr>`:'');
 }catch(e){
 console.error(e);
@@ -2887,7 +2898,19 @@ if(strategy)strategy.addEventListener('keydown',e=>{
   }
 });
 }
-async function cancelOrder(id,symbol,exchange){try{await api(`/trading/order/${id}?symbol=${encodeURIComponent(symbol)}&exchange=${exchange}`,{method:'DELETE'});notify('订单已撤销');await Promise.allSettled([loadOrders(),loadOpenOrders(),loadConditionalOrders()]);}catch(e){notify(`撤销失败: ${e.message}`,true);}}
+async function cancelOrder(id,symbol,exchange){
+const key=`${exchange||'binance'}:${symbol||''}:${id||''}`;
+state.cancelingOrders=state.cancelingOrders||{};
+if(state.cancelingOrders[key])return;
+if(!confirm(`确认撤销订单？\n${exchange||'binance'} ${symbol||''}\n${id||''}`))return;
+state.cancelingOrders[key]=true;
+try{
+await api(`/trading/order/${encodeURIComponent(id)}?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange||'binance')}`,{method:'DELETE'});
+notify('订单已撤销');
+await Promise.allSettled([loadOrders(),loadOpenOrders(),loadConditionalOrders()]);
+}catch(e){notify(`撤销失败: ${e.message}`,true);}
+finally{delete state.cancelingOrders[key];}
+}
 
 async function loadStrategies(){return runRequestSingleFlight('strategies',async()=>{try{
 await ensureStrategyCatalog();
@@ -2904,7 +2927,7 @@ const libraryRows=availableTypes.map(s=>{
   const m=getStrategyMeta(s);
   const groupLabel=(catalog.byValue?.[s]?.groupLabel)||mapStrategyCatToBacktestGroup(row.category||m.cat);
   const desc=String(row.usage||m.desc||s);
-  const card=`<div class="strategy-card" onclick="registerStrategy('${s}')"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${s}</h4><span class="status-badge">${row.category||m.cat}</span></div><p>${desc}</p><p style="font-size:11px;color:#8fa6c0;">点击卡片注册到策略池（模拟盘）</p></div>`;
+  const card=`<div class="strategy-card" onclick="registerStrategy(${jsArg(s)})"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(s)}</h4><span class="status-badge">${esc(row.category||m.cat)}</span></div><p>${esc(desc)}</p><p style="font-size:11px;color:#8fa6c0;">点击卡片注册到策略池（模拟盘）</p></div>`;
   return {strategy:s,groupLabel,card};
 });
 if(!libraryRows.length){pool.innerHTML='<div class="list-item">暂无可用策略</div>';}
@@ -2967,6 +2990,9 @@ typeSeen[stype]=(typeSeen[stype]||0)+1;
 const r=s.runtime||{},a=Number(s.allocation||0),m=getStrategyMeta(s.strategy_type);
 const uptime=fmtDurationSec(r.uptime_seconds||0),accountId=String(r.account_id||s.account_id||'main');
 const isolated=Boolean(r.isolated_account),runnerAlive=Boolean(r.runner_alive);
+const stateName=String(s.state||'').toLowerCase();
+const runnerLabel=stateName==='running'?(runnerAlive?'runner在线':'runner异常'):'runner待机';
+const stateBadgeClass=stateName==='running'?(runnerAlive?'connected':'warning'):'';
 const typeCount=Number(typeCounts[stype]||1),typeIndex=Number(typeSeen[stype]||1);
 const shortLabel=buildStrategyShortDisplayLabel(s,typeIndex,typeCount);
 const shortType=strategyTypeShortName(stype);
@@ -2979,10 +3005,10 @@ const active=String(state.selectedStrategyName||'')===String(s.name||'');
 const pnlPerf=(state.summary?.strategy_performance||{})[s.name]||{};
 const rp=Number(pnlPerf.return_pct);
 const rpText=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';
-return `<div class="registered-strategy-card ${active?'active':''}" onclick="selectRegisteredStrategy('${esc(String(s.name||''))}')">
+return `<div class="registered-strategy-card ${active?'active':''}" onclick="selectRegisteredStrategy(${jsArg(s.name)})">
   <div class="topline">
     <div class="name" title="${esc(String(s.name||''))}">${esc(shortLabel)}</div>
-    <span class="status-badge ${String(s.state||'')==='running'?'connected':''}">${mapState(s.state)}</span>
+    <span class="status-badge ${stateBadgeClass}">${mapState(s.state)}</span>
   </div>
   <div class="subline">
     <div class="sub" title="${esc(String(s.name||''))}">${esc(shortType)} · 实例 ${esc(shortInstanceId(s.name))}</div>
@@ -3000,7 +3026,7 @@ return `<div class="registered-strategy-card ${active?'active':''}" onclick="sel
     <span title="signal_count">sig:${r.signal_count||0}</span>
     <span title="error_count">err:${r.error_count||0}</span>
     <span title="${isolated?'独立账户':'共享账户'}">${isolated?'独立':'共享'}:${esc(accountId)}</span>
-    <span>${runnerAlive?'runner在线':'runner离线'}</span>
+    <span>${runnerLabel}</span>
   </div>
 </div>`;
   }).join('');
@@ -3159,8 +3185,17 @@ const panel=document.getElementById('strategy-edit-panel');
 if(panel)panel.scrollIntoView({behavior:'smooth',block:'nearest'});
 await loadStrategies();
 }
-async function saveAllocation(name){const i=document.querySelector(`input[data-alloc='${name}']`);if(!i)return;try{await api(`/strategies/${name}/allocation`,{method:'PUT',body:JSON.stringify({allocation:Number(i.value||0)})});notify(`策略 ${name} 资金占比已更新`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`更新资金占比失败: ${e.message}`,true);}}
-async function toggleStrategy(name,st){const act=st==='running'?'stop':'start';try{await api(`/strategies/${encodeURIComponent(name)}/${act}`,{method:'POST',timeoutMs:15000});notify(`策略已${act==='start'?'启动':'停止'}`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`策略${act}失败: ${e.message}`,true);}}
+async function saveAllocation(name){const safeName=String(name||'');const i=document.querySelector(`input[data-alloc="${CSS.escape(safeName)}"]`);if(!i)return;try{await api(`/strategies/${encodeURIComponent(safeName)}/allocation`,{method:'PUT',body:JSON.stringify({allocation:Number(i.value||0)})});notify(`策略 ${safeName} 资金占比已更新`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`更新资金占比失败: ${e.message}`,true);}}
+async function toggleStrategy(name,st){
+const act=st==='running'?'stop':'start';
+const key=`${act}:${name}`;
+state.strategyBusy=state.strategyBusy||{};
+if(state.strategyBusy[key])return;
+if(!confirm(`确认${act==='start'?'启动':'停止'}策略？\n${name}`))return;
+state.strategyBusy[key]=true;
+try{await api(`/strategies/${encodeURIComponent(name)}/${act}`,{method:'POST',timeoutMs:15000});notify(`策略已${act==='start'?'启动':'停止'}`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`策略${act}失败: ${e.message}`,true);}
+finally{delete state.strategyBusy[key];}
+}
 
 async function loadStrategySummary(){return runRequestSingleFlight('strategySummary',async()=>{try{
 const d=await api('/strategies/summary?limit=20',{timeoutMs:STRATEGY_SUMMARY_TIMEOUT_MS});
@@ -3236,18 +3271,19 @@ const rr=document.getElementById('btn-registered-refresh'),rs=document.getElemen
 const fSearch=document.getElementById('registered-strategy-search'),fCat=document.getElementById('registered-strategy-cat-filter'),fState=document.getElementById('registered-strategy-state-filter');
 let filterTimer=null;
 const queueFilterRender=()=>{ if(filterTimer)clearTimeout(filterTimer); filterTimer=setTimeout(()=>{loadStrategies().catch(()=>{});},120); };
-if(sAll)sAll.onclick=async()=>{
+if(sAll)sAll.onclick=()=>runBusyButton(sAll,'启动中...',async()=>{
+if(!confirm('确认启动全部已注册策略？'))return;
 try{
 const res=await api('/strategies/start-all',{method:'POST'});
 const autoCount=(res?.auto_registered||[]).length||0;
 notify(autoCount?`已启动全部策略（自动注册 ${autoCount} 个）`:'已启动全部策略');
 await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
 }catch(e){notify(`启动全部失败: ${e.message}`,true);}
-};
-if(pAll)pAll.onclick=async()=>{try{await api('/strategies/stop-all',{method:'POST'});notify('已停止全部策略');await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);}catch(e){notify(`停止全部失败: ${e.message}`,true);}};
+});
+if(pAll)pAll.onclick=()=>runBusyButton(pAll,'停止中...',async()=>{if(!confirm('确认停止全部策略？'))return;try{await api('/strategies/stop-all',{method:'POST'});notify('已停止全部策略');await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);}catch(e){notify(`停止全部失败: ${e.message}`,true);}});
 if(chk)chk.onclick=async()=>{try{const r=await api('/strategies/health/check',{method:'POST'});if(out)out.textContent=JSON.stringify(r,null,2);notify('策略健康检查完成');await Promise.all([loadStrategySummary(),loadStrategyHealth(),loadNotificationCenter()]);}catch(e){if(out)out.textContent=`健康检查失败: ${e.message}`;notify(`健康检查失败: ${e.message}`,true);}};
 if(rr)rr.onclick=()=>Promise.all([loadStrategies(),loadStrategySummary()]).catch(()=>{});
-if(rs)rs.onclick=async()=>{try{await api('/strategies/stop-all',{method:'POST'});notify('已停止全部策略');await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);}catch(e){notify(`停止全部失败: ${e.message}`,true);}};
+if(rs)rs.onclick=()=>runBusyButton(rs,'停止中...',async()=>{if(!confirm('确认停止全部已注册策略？'))return;try{await api('/strategies/stop-all',{method:'POST'});notify('已停止全部策略');await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);}catch(e){notify(`停止全部失败: ${e.message}`,true);}});
 if(rc)rc.onclick=clearAllRegisteredStrategies;
 if(fSearch)fSearch.addEventListener('input',queueFilterRender);
 if(fCat)fCat.addEventListener('change',queueFilterRender);
@@ -3258,10 +3294,11 @@ async function openEditor(name){
 const panel=document.getElementById('strategy-edit-panel');if(!panel)return;
 try{
 state.selectedStrategyName=String(name||'');
+const encodedName=encodeURIComponent(state.selectedStrategyName);
 const [info,schema,sizing]=await Promise.all([
-  api(`/strategies/${name}`),
-  api(`/strategies/${name}/params/schema`),
-  api(`/strategies/${name}/sizing-preview`,{timeoutMs:8000}).catch(()=>null),
+  api(`/strategies/${encodedName}`),
+  api(`/strategies/${encodedName}/params/schema`),
+  api(`/strategies/${encodedName}/sizing-preview`,{timeoutMs:8000}).catch(()=>null),
 ]);
 const runtime=info.runtime||{};
 const ownership=normalizeStrategyOwnership(info);
@@ -3311,9 +3348,9 @@ const collectEditorDraft=()=>{
 document.getElementById('edit-save').onclick=async()=>{
 try{
 const draft=collectEditorDraft();
-await api(`/strategies/${name}/config`,{method:'PUT',body:JSON.stringify({timeframe:draft.timeframe,symbols:draft.symbols,runtime_limit_minutes:draft.runtime_limit_minutes})});
-await api(`/strategies/${name}/params`,{method:'PUT',body:JSON.stringify({params:draft.params})});
-await api(`/strategies/${name}/allocation`,{method:'PUT',body:JSON.stringify({allocation:draft.allocation})});
+await api(`/strategies/${encodedName}/config`,{method:'PUT',body:JSON.stringify({timeframe:draft.timeframe,symbols:draft.symbols,runtime_limit_minutes:draft.runtime_limit_minutes})});
+await api(`/strategies/${encodedName}/params`,{method:'PUT',body:JSON.stringify({params:draft.params})});
+await api(`/strategies/${encodedName}/allocation`,{method:'PUT',body:JSON.stringify({allocation:draft.allocation})});
 notify(`策略 ${name} 参数已更新`);
 await Promise.all([loadStrategies(),loadStrategySummary()]);
 await openEditor(name);
@@ -3357,7 +3394,7 @@ if(canApplyBestOpt && document.getElementById('edit-apply-best-opt')){
 loadStrategies().catch(()=>{});
 }catch(e){panel.classList.remove('strategy-edit-active');delete panel.dataset.strategyName;delete panel.dataset.strategyType;panel.innerHTML=`<div class="list-item">加载策略参数失败: ${e.message}</div>`;}
 }
-async function compareLive(name){try{const d=await api(`/strategies/${name}/live-vs-backtest`);(document.getElementById('editor-compare-output')||document.getElementById('backtest-extra-output')).textContent=JSON.stringify(d,null,2);notify(`策略 ${name} 实盘/回测对比已刷新`);}catch(e){notify(`策略对比失败: ${e.message}`,true);}}
+async function compareLive(name){try{const d=await api(`/strategies/${encodeURIComponent(String(name||''))}/live-vs-backtest`);(document.getElementById('editor-compare-output')||document.getElementById('backtest-extra-output')).textContent=JSON.stringify(d,null,2);notify(`策略 ${name} 实盘/回测对比已刷新`);}catch(e){notify(`策略对比失败: ${e.message}`,true);}}
 
 const marketDataState={exchange:'',symbol:'',timeframe:'',limit:1200,bars:[],isLoading:false,isLoadingLeft:false,isLoadingRight:false,lastRange:null,realtimeTimer:null,chartBound:false,realtimeInFlight:false,lastRealtimePollAt:0,lastChartKey:'',loadSeq:0};
 const autoDataOpsState={downloadAt:new Map(),repairAt:new Map(),lastHintAt:0};
@@ -6064,7 +6101,7 @@ try{
 }catch(e){notify(`预览回测失败: ${e.message}`,true);}
 }
 function buildNotifyRulePayload(){const name=(document.getElementById('notify-rule-name')?.value||'自定义规则').trim(),rule_type=(document.getElementById('notify-rule-type')?.value||'price_above').trim(),symbol=(document.getElementById('notify-rule-symbol')?.value||'BTC/USDT').trim(),thresholdRaw=document.getElementById('notify-rule-threshold')?.value||'0',threshold=Number(thresholdRaw||0);let params={channels:['feishu']};if(rule_type==='price_above'||rule_type==='price_below'){params={...params,symbol,threshold};}if(rule_type==='daily_pnl_below_pct'){params={...params,threshold_pct:threshold||-2};}if(rule_type==='position_count_above'){params={...params,threshold:Math.max(1,parseInt(String(threshold||1),10))};}if(rule_type==='exchange_disconnected'){params={...params,exchanges:symbol.split(',').map(x=>x.trim().toLowerCase()).filter(Boolean)};}if(rule_type==='stale_strategy_count_above'||rule_type==='running_strategy_count_below'){params={...params,threshold:Math.max(1,parseInt(String(threshold||1),10))};}if(rule_type==='strategy_not_running'){params={...params,strategies:symbol.split(',').map(x=>x.trim()).filter(Boolean)};}return{name,rule_type,params,enabled:true,cooldown_seconds:300};}
-function renderNotifyRules(rules){const box=document.getElementById('notify-rules-list');if(!box)return;if(!rules?.length){box.innerHTML='<div class="list-item">暂无规则</div>';return;}box.innerHTML=rules.map(r=>`<div class="list-item"><span>${esc(r.name)} | ${esc(r.rule_type)} | ${r.enabled?'启用':'停用'}</span><span class="inline-actions"><button class="btn btn-primary btn-sm" onclick="editNotifyRule('${esc(r.id)}')">编辑</button><button class="btn btn-primary btn-sm" onclick="toggleNotifyRule('${esc(r.id)}')">${r.enabled?'停用':'启用'}</button><button class="btn btn-danger btn-sm" onclick="deleteNotifyRule('${esc(r.id)}')">删除</button></span></div>`).join('');}
+function renderNotifyRules(rules){const box=document.getElementById('notify-rules-list');if(!box)return;if(!rules?.length){box.innerHTML='<div class="list-item">暂无规则</div>';return;}box.innerHTML=rules.map(r=>`<div class="list-item"><span>${esc(r.name)} | ${esc(r.rule_type)} | ${r.enabled?'启用':'停用'}</span><span class="inline-actions"><button class="btn btn-primary btn-sm" onclick="editNotifyRule(${jsArg(r.id)})">编辑</button><button class="btn btn-primary btn-sm" onclick="toggleNotifyRule(${jsArg(r.id)})">${r.enabled?'停用':'启用'}</button><button class="btn btn-danger btn-sm" onclick="deleteNotifyRule(${jsArg(r.id)})">删除</button></span></div>`).join('');}
 async function loadNotificationCenter(){return runRequestSingleFlight('notificationCenter',async()=>{const out=document.getElementById('notify-output');if(!out)return;try{const [ch,rules,events]=await Promise.all([api('/notifications/channels'),api('/notifications/rules'),api('/notifications/events?limit=20')]);const list=rules.rules||[];state.notifyRules=Object.fromEntries(list.map(x=>[x.id,x]));renderNotifyRules(list);out.textContent=JSON.stringify({channels:ch.channels||{},rules:list.slice(-20),recent_events:(events.events||[]).slice(-20)},null,2);}catch(e){out.textContent=`加载通知中心失败: ${e.message}`;}});}
 async function sendTestNotification(channel){const msg=(document.getElementById('notify-test-msg')?.value||'系统测试通知').trim();const out=document.getElementById('notify-output');try{const r=await api('/notifications/test',{method:'POST',body:JSON.stringify({title:'交易系统测试通知',message:msg,channels:[channel]})});if(out)out.textContent=JSON.stringify(r,null,2);notify(`${channel} 测试通知已发送`);await loadNotificationCenter();}catch(e){if(out)out.textContent=`测试通知失败: ${e.message}`;notify(`测试通知失败: ${e.message}`,true);}}
 async function createNotifyRule(){const out=document.getElementById('notify-output');try{const payload=buildNotifyRulePayload();const r=await api('/notifications/rules',{method:'POST',body:JSON.stringify(payload)});if(out)out.textContent=JSON.stringify(r,null,2);notify('通知规则创建成功');await loadNotificationCenter();}catch(e){if(out)out.textContent=`创建规则失败: ${e.message}`;notify(`创建规则失败: ${e.message}`,true);}}
@@ -6216,7 +6253,23 @@ socket.onerror=()=>{setWsBadge(false);};
 }catch{setWsBadge(false);}
 }
 
-async function loadConditionalOrders(){return runRequestSingleFlight('conditionalOrders',async()=>{try{const d=await api('/trading/orders/conditional',{timeoutMs:TRADING_OPEN_ORDERS_TIMEOUT_MS});const t=document.getElementById('conditional-orders-tbody');if(!t)return;const rows=d.orders||[];const fb=d.cache_fallback||{};const note=fb.used?`<div class="order-reject-reason">使用缓存 ${Number(fb.age_sec||0).toFixed(1)}s：${esc(fb.reason||'交易所暂不可用')}</div>`:(fb.reason?`<div class="order-reject-reason">交易所条件单同步异常：${esc(fb.reason)}</div>`:'');if(!rows.length){t.innerHTML=`<tr><td colspan=\"7\">暂无条件单${note}</td></tr>`;return;}t.innerHTML=rows.map(o=>{const isExchange=String(o.source||'').toLowerCase()==='exchange';const oid=esc(o.exchange_order_id||o.conditional_id||'');const cid=esc(o.conditional_id||'');const sym=esc(o.symbol||'');const ex=esc(o.exchange||'binance');const action=isExchange?`<button class=\"btn btn-danger btn-sm\" onclick=\"cancelOrder('${oid}','${sym}','${ex}')\">撤销</button>`:`<button class=\"btn btn-danger btn-sm\" onclick=\"cancelConditional('${cid}')\">取消</button>`;return `<tr><td>${cid}</td><td>${ex} ${sym}</td><td>${mapSide(o.side)}</td><td>${Number(o.trigger_price||0).toFixed(4)}</td><td>${Number(o.amount||0)}</td><td>${esc(o.account_id||'main')}</td><td>${action}</td></tr>`;}).join('')+(note?`<tr><td colspan=\"7\">${note}</td></tr>`:'');}catch(e){console.error(e);const t=document.getElementById('conditional-orders-tbody');if(t)t.innerHTML=`<tr><td colspan=\"7\">条件单加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
+async function loadConditionalOrders(){return runRequestSingleFlight('conditionalOrders',async()=>{try{
+const d=await api('/trading/orders/conditional',{timeoutMs:TRADING_OPEN_ORDERS_TIMEOUT_MS});
+const t=document.getElementById('conditional-orders-tbody');if(!t)return;
+const rows=d.orders||[];
+const fb=d.cache_fallback||{};
+const note=fb.used?`<div class="order-reject-reason">使用缓存 ${Number(fb.age_sec||0).toFixed(1)}s：${esc(fb.reason||'交易所暂不可用')}</div>`:(fb.reason?`<div class="order-reject-reason">交易所条件单同步异常：${esc(fb.reason)}</div>`:'');
+if(!rows.length){t.innerHTML=`<tr><td colspan="7">暂无条件单${note}</td></tr>`;return;}
+t.innerHTML=rows.map(o=>{
+const isExchange=String(o.source||'').toLowerCase()==='exchange';
+const oid=String(o.exchange_order_id||o.conditional_id||'');
+const cid=String(o.conditional_id||'');
+const sym=String(o.symbol||'');
+const ex=String(o.exchange||'binance');
+const action=isExchange?`<button class="btn btn-danger btn-sm" onclick="cancelOrder(${jsArg(oid)},${jsArg(sym)},${jsArg(ex)})">撤销</button>`:`<button class="btn btn-danger btn-sm" onclick="cancelConditional(${jsArg(cid)})">取消</button>`;
+return `<tr><td>${esc(cid)}</td><td>${esc(ex)} ${esc(sym)}</td><td>${mapSide(o.side)}</td><td>${Number(o.trigger_price||0).toFixed(4)}</td><td>${Number(o.amount||0)}</td><td>${esc(o.account_id||'main')}</td><td>${action}</td></tr>`;
+}).join('')+(note?`<tr><td colspan="7">${note}</td></tr>`:'');
+}catch(e){console.error(e);const t=document.getElementById('conditional-orders-tbody');if(t)t.innerHTML=`<tr><td colspan="7">条件单加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function cancelConditional(id){try{await api(`/trading/orders/conditional/${encodeURIComponent(id)}`,{method:'DELETE'});notify('条件单已取消');await loadConditionalOrders();}catch(e){notify(`取消条件单失败: ${e.message}`,true);}}
 
 async function loadAccounts(){return runRequestSingleFlight('accounts',async()=>{try{const d=await api('/trading/accounts/summary');const out=document.getElementById('accounts-output');if(out)out.textContent=JSON.stringify(d,null,2);}catch(e){const out=document.getElementById('accounts-output');if(out)out.textContent=`账户加载失败: ${e.message}`;}});}
@@ -8789,7 +8842,11 @@ finally{
 };
 const b2=document.getElementById('btn-backtest-optimize');
 if(b2)b2.onclick=async()=>{
+if(b2.disabled)return;
+const prevText=b2.textContent;
 try{
+b2.disabled=true;
+b2.textContent='优化中...';
 const selectedSt=await ensureSelectedBacktestStrategy();
 const displayedSt=String(backtestUIState?.lastRenderedBacktest?.strategy||'').trim();
 const st=displayedSt||selectedSt;
@@ -8809,6 +8866,10 @@ const d=await api(ou,{method:'POST',timeoutMs:90000});
 renderBacktestOptimizeOutput(d);
 notify('参数优化完成');
 }catch(err){renderBacktestExtraError(err);notify(`参数优化失败: ${err.message}`,true);}
+finally{
+  b2.disabled=false;
+  b2.textContent=prevText;
+}
 };
 const b3=document.getElementById('btn-backtest-export');
 if(b3)b3.onclick=()=>{
@@ -8846,19 +8907,22 @@ const submitBtn=b.querySelector('button[type="submit"]');
 try{
 if(submitBtn){submitBtn.disabled=true;submitBtn.textContent='下单中...';}
 const payload={exchange:document.getElementById('order-exchange').value,symbol:document.getElementById('order-symbol').value,side:document.getElementById('order-side').value,order_type:document.getElementById('order-type').value,amount:parseFloat(document.getElementById('order-amount').value),leverage:parseFloat(document.getElementById('order-leverage').value||'1'),price:document.getElementById('order-price').value?parseFloat(document.getElementById('order-price').value):null,stop_loss:document.getElementById('order-stop-loss').value?parseFloat(document.getElementById('order-stop-loss').value):null,take_profit:document.getElementById('order-take-profit').value?parseFloat(document.getElementById('order-take-profit').value):null,trailing_stop_pct:document.getElementById('order-trailing-pct').value?parseFloat(document.getElementById('order-trailing-pct').value):null,trailing_stop_distance:document.getElementById('order-trailing-dist').value?parseFloat(document.getElementById('order-trailing-dist').value):null,trigger_price:document.getElementById('order-trigger-price').value?parseFloat(document.getElementById('order-trigger-price').value):null,order_mode:document.getElementById('order-mode').value,iceberg_parts:parseInt(document.getElementById('order-iceberg-parts').value||'1',10),algo_slices:parseInt(document.getElementById('order-algo-slices').value||'1',10),algo_interval_sec:parseInt(document.getElementById('order-algo-interval').value||'0',10),account_id:document.getElementById('order-account').value||'main',reduce_only:!!document.getElementById('order-reduce-only').checked};
+if(!confirm(`确认提交订单？\n${payload.exchange} ${payload.symbol} ${payload.side.toUpperCase()} ${payload.amount}\n账户: ${payload.account_id}`))return;
 const r=await api('/trading/order',{method:'POST',timeoutMs:60000,body:JSON.stringify(payload)});
 notify(r.status==='queued'?'条件单已创建':'下单成功');
 await Promise.all([loadOrders(),loadOpenOrders(),loadPositions(),loadSummary(),loadRisk(),loadConditionalOrders(),loadAccounts()]);
 }catch(err){notify(`下单失败: ${err.message}`,true);}
 finally{if(submitBtn){submitBtn.disabled=false;submitBtn.textContent='提交订单';}}
 };
-document.querySelectorAll('[data-quick]').forEach(btn=>btn.onclick=async()=>{
+document.querySelectorAll('[data-quick]').forEach(btn=>btn.onclick=()=>runBusyButton(btn,'提交中...',async()=>{
+const payload={exchange:'gate',symbol:document.getElementById('quick-symbol').value||'BTC/USDT',side:btn.dataset.quick,order_type:'market',amount:.01,leverage:1,price:null,account_id:'main',order_mode:'normal'};
+if(!confirm(`确认快捷${payload.side==='buy'?'买入':'卖出'}？\n${payload.exchange} ${payload.symbol} ${payload.amount}`))return;
 try{
-await api('/trading/order',{method:'POST',timeoutMs:30000,body:JSON.stringify({exchange:'gate',symbol:document.getElementById('quick-symbol').value||'BTC/USDT',side:btn.dataset.quick,order_type:'market',amount:.01,leverage:1,price:null,account_id:'main',order_mode:'normal'})});
+await api('/trading/order',{method:'POST',timeoutMs:30000,body:JSON.stringify(payload)});
 notify(`快捷${btn.dataset.quick==='buy'?'买入':'卖出'}成功`);
 await Promise.all([loadOrders(),loadOpenOrders(),loadPositions(),loadSummary(),loadRisk(),loadAccounts()]);
 }catch(err){notify(`快捷交易失败: ${err.message}`,true);}
-});
+}));
 const rb=document.getElementById('risk-reset-btn');
 if(rb)rb.onclick=async()=>{
 try{

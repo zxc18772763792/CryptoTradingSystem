@@ -217,6 +217,9 @@ def test_market_microstructure_prefers_coinglass_derivatives_when_available(monk
     assert payload["aggressor_flow"]["source"] == "coinglass_cache"
     assert payload["aggressor_flow"]["imbalance"] == pytest.approx(0.21, rel=1e-9)
     assert payload["derivatives_context"]["available"] is True
+    assert payload["derivatives_context"]["preferred_provider"] == "coinglass"
+    assert payload["derivatives_context"]["refresh_recommended"] is False
+    assert payload["source_status"] == "live_coinglass_preferred"
     assert payload["derivatives_context"]["orderbook_agg_imbalance"] == pytest.approx(0.2, rel=1e-9)
     assert payload["derivatives_context"]["liquidity_heatmap_total_usd"] == pytest.approx(420_000_000.0, rel=1e-9)
     assert payload["derivatives_context"]["liquidity_wall_nearest_above_price"] == pytest.approx(103.0, rel=1e-9)
@@ -299,7 +302,10 @@ def test_market_microstructure_falls_back_when_coinglass_overview_is_slow(monkey
     assert payload["spot_futures_basis"]["basis_pct"] == pytest.approx(-0.043151)
     assert payload["derivatives_context"]["available"] is True
     assert payload["derivatives_context"]["provider"] == "exchange_public"
+    assert payload["derivatives_context"]["preferred_provider"] == "coinglass"
+    assert payload["derivatives_context"]["fallback_used"] is True
     assert payload["derivatives_context"]["status"] == "public_fallback"
+    assert payload["source_status"] == "live_public_fallback"
     assert "spot_futures_basis" in payload["derivatives_context"]["active_datasets"]
 
 

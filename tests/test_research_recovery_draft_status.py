@@ -1,9 +1,11 @@
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from core.ai.proposal_schemas import ResearchProposal
 from core.research.experiment_registry import ExperimentRunRegistry, LifecycleRegistry, ProposalRegistry
 from core.research.experiment_schemas import ExperimentRun
+from core.research import orchestrator as orchestrator_module
 from core.research.orchestrator import _prune_finished_research_job_tasks, _recover_stale_jobs_on_startup
 
 
@@ -83,3 +85,27 @@ def test_prune_finished_research_job_tasks_clears_done_entries():
     assert removed == 1
     assert "done-job" not in app.state.research_job_tasks
     assert "active-job" in app.state.research_job_tasks
+
+
+def test_persist_research_jobs_uses_atomic_tmp_replace(tmp_path, monkeypatch):
+    target = tmp_path / "research_jobs.json"
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            ai_research_jobs_path=target,
+            research_jobs={"job-1": {"status": "running"}},
+        )
+    )
+    calls = []
+    original_replace = orchestrator_module.os.replace
+
+    def _capture_replace(src: str, dst: str) -> None:
+        calls.append((src, dst))
+        original_replace(src, dst)
+
+    monkeypatch.setattr(orchestrator_module.os, "replace", _capture_replace)
+
+    orchestrator_module._persist_research_jobs(app)
+
+    assert calls == [(str(target.with_suffix(target.suffix + ".tmp")), str(target))]
+    assert json.loads(target.read_text(encoding="utf-8")) == {"job-1": {"status": "running"}}
+    assert not target.with_suffix(target.suffix + ".tmp").exists()

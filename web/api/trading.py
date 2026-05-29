@@ -1509,20 +1509,7 @@ async def _load_preferred_coinglass_overview(
         logger.debug(f"coinglass overview unavailable for {symbol}: {exc}")
         return {}
 
-    if not _should_refresh_coinglass_overview(overview, max_age_sec=max_age_sec):
-        return overview
-
-    try:
-        refreshed = dict(
-            await build_coinglass_overview_payload(
-                symbol=symbol, refresh=True, manual=False
-            )
-            or {}
-        )
-    except Exception as exc:
-        logger.debug(f"coinglass overview refresh failed for {symbol}: {exc}")
-        return overview
-    return refreshed or overview
+    return overview
 
 
 def _apply_coinglass_derivatives_overlay(
@@ -1536,10 +1523,15 @@ def _apply_coinglass_derivatives_overlay(
     freshness_sec = _optional_finite_float(overview.get("freshness_sec"))
     context = {
         "provider": "coinglass",
+        "preferred_provider": "coinglass",
         "available": bool(overview.get("available")),
         "key_configured": bool(overview.get("key_configured")),
         "freshness_sec": freshness_sec,
         "degraded_reason": str(overview.get("degraded_reason") or "").strip() or None,
+        "refresh_recommended": _should_refresh_coinglass_overview(
+            overview,
+            max_age_sec=_ANALYTICS_COINGLASS_REFRESH_MAX_AGE_SEC,
+        ),
         "active_datasets": list(overview.get("active_datasets") or []),
         "snapshot_at": snapshot.get("timestamp"),
     }
@@ -1813,6 +1805,9 @@ def _apply_public_derivatives_context(payload: Dict[str, Any]) -> Dict[str, Any]
     out["derivatives_context"] = {
         **existing,
         "provider": "exchange_public",
+        "preferred_provider": "coinglass",
+        "fallback_provider": "exchange_public",
+        "fallback_used": True,
         "available": True,
         "status": "public_fallback",
         "key_configured": False,
@@ -1824,6 +1819,19 @@ def _apply_public_derivatives_context(payload: Dict[str, Any]) -> Dict[str, Any]
         "note": "CoinGlass enhanced context unavailable; using exchange public derivatives fields.",
     }
     return out
+
+
+def _microstructure_live_source_status(payload: Dict[str, Any]) -> str:
+    context = dict((payload or {}).get("derivatives_context") or {})
+    provider = str(context.get("provider") or "").strip().lower()
+    status = str(context.get("status") or "").strip().lower()
+    if provider == "coinglass" and bool(context.get("available")):
+        return "live_coinglass_preferred"
+    if status == "public_fallback" or bool(context.get("fallback_used")):
+        return "live_public_fallback"
+    if bool(context):
+        return "live_coinglass_unavailable"
+    return "live"
 
 
 def _utc_now_naive() -> datetime:
@@ -5156,6 +5164,11 @@ async def _precheck_binance_futures_order(request: OrderRequest) -> None:
 
 
 async def create_order(request: OrderRequest):
+    async with execution_engine.mode_access_guard():
+        return await _create_order_locked(request)
+
+
+async def _create_order_locked(request: OrderRequest):
     mode = str(request.order_mode or "normal").lower()
     timeout_sec = 30.0
     if mode in {"iceberg", "twap", "vwap"}:
@@ -5256,6 +5269,21 @@ async def create_order(request: OrderRequest):
 
 
 async def get_orders(
+    symbol: Optional[str] = None,
+    exchange: Optional[str] = None,
+    include_history: bool = True,
+    limit: int = 100,
+):
+    async with execution_engine.mode_access_guard():
+        return await _get_orders_locked(
+            symbol=symbol,
+            exchange=exchange,
+            include_history=include_history,
+            limit=limit,
+        )
+
+
+async def _get_orders_locked(
     symbol: Optional[str] = None,
     exchange: Optional[str] = None,
     include_history: bool = True,
@@ -5386,6 +5414,11 @@ async def get_orders(
 
 
 async def get_conditional_orders():
+    async with execution_engine.mode_access_guard():
+        return await _get_conditional_orders_locked()
+
+
+async def _get_conditional_orders_locked():
     local_orders = execution_engine.list_conditional_orders()
     if execution_engine.is_paper_mode():
         return {
@@ -5452,6 +5485,11 @@ async def get_conditional_orders():
 
 
 async def cancel_conditional_order(conditional_id: str):
+    async with execution_engine.mode_access_guard():
+        return await _cancel_conditional_order_locked(conditional_id)
+
+
+async def _cancel_conditional_order_locked(conditional_id: str):
     ok = execution_engine.cancel_conditional_order(conditional_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Conditional order not found")
@@ -5459,6 +5497,15 @@ async def cancel_conditional_order(conditional_id: str):
 
 
 async def cancel_order(
+    order_id: str,
+    symbol: str,
+    exchange: str = "binance",
+):
+    async with execution_engine.mode_access_guard():
+        return await _cancel_order_locked(order_id=order_id, symbol=symbol, exchange=exchange)
+
+
+async def _cancel_order_locked(
     order_id: str,
     symbol: str,
     exchange: str = "binance",
@@ -5487,6 +5534,14 @@ async def cancel_all_orders(
     symbol: Optional[str] = None,
     exchange: str = "binance",
 ):
+    async with execution_engine.mode_access_guard():
+        return await _cancel_all_orders_locked(symbol=symbol, exchange=exchange)
+
+
+async def _cancel_all_orders_locked(
+    symbol: Optional[str] = None,
+    exchange: str = "binance",
+):
     count = await order_manager.cancel_all_orders(symbol, exchange)
     _schedule_audit_log(
         module="trading",
@@ -5499,6 +5554,11 @@ async def cancel_all_orders(
 
 
 async def get_positions(mode: Optional[str] = None):
+    async with execution_engine.mode_access_guard():
+        return await _get_positions_locked(mode=mode)
+
+
+async def _get_positions_locked(mode: Optional[str] = None):
     now_ts = time.time()
     cached_positions = list(_LIVE_POSITION_DETAILS_CACHE.get("positions") or [])
     cached_diagnostics = _LIVE_POSITION_DETAILS_CACHE.get("diagnostics")
@@ -5936,6 +5996,11 @@ async def get_positions(mode: Optional[str] = None):
 
 
 async def close_position(req: PositionCloseRequest):
+    async with execution_engine.mode_access_guard():
+        return await _close_position_locked(req)
+
+
+async def _close_position_locked(req: PositionCloseRequest):
     exchange = str(req.exchange or "").strip().lower()
     symbol = str(req.symbol or "").strip().upper()
     side = str(req.side or "").strip().lower()
@@ -8473,7 +8538,7 @@ async def get_market_microstructure(
         cache_hit=False,
         cache_age_sec=0.0,
         stale=False,
-        source_status="live",
+        source_status=_microstructure_live_source_status(payload),
     )
 
 

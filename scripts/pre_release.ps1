@@ -19,6 +19,42 @@ function Invoke-Step {
     & $Action
 }
 
+function Get-OpsAuthHeaders {
+    $opsToken = [string]($env:OPS_TOKEN)
+    if ([string]::IsNullOrWhiteSpace($opsToken)) {
+        foreach ($path in @((Join-Path $ProjectRoot ".env"), (Join-Path $ProjectRoot ".env.local"))) {
+            if (-not (Test-Path $path)) {
+                continue
+            }
+            foreach ($line in Get-Content $path) {
+                $text = [string]$line
+                if (-not $text) {
+                    continue
+                }
+                $trimmed = $text.Trim()
+                if (-not $trimmed -or $trimmed.StartsWith("#")) {
+                    continue
+                }
+                $eq = $trimmed.IndexOf("=")
+                if ($eq -lt 1) {
+                    continue
+                }
+                $name = $trimmed.Substring(0, $eq).Trim()
+                if ($name -ne "OPS_TOKEN") {
+                    continue
+                }
+                $opsToken = $trimmed.Substring($eq + 1).Trim().Trim('"').Trim("'")
+            }
+        }
+    }
+    $headers = @{}
+    if (-not [string]::IsNullOrWhiteSpace($opsToken)) {
+        $headers["X-OPS-TOKEN"] = $opsToken.Trim()
+        $headers["X-OPS-CALLER"] = "pre_release"
+    }
+    return $headers
+}
+
 $failures = New-Object System.Collections.Generic.List[string]
 
 try {
@@ -71,7 +107,12 @@ try {
 
 try {
     Invoke-Step -Name "Status Endpoint" -Action {
-        $status = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/api/status" -f $Port) -TimeoutSec 15
+        $headers = Get-OpsAuthHeaders
+        if ($headers.Count -gt 0) {
+            $status = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/api/status" -f $Port) -Headers $headers -TimeoutSec 15
+        } else {
+            $status = Invoke-RestMethod -Uri ("http://127.0.0.1:{0}/api/status" -f $Port) -TimeoutSec 15
+        }
         Write-Host ($status | ConvertTo-Json -Depth 8)
         $mode = [string]($status.trading_mode)
         if ($mode.Trim().ToLowerInvariant() -eq "live" -and (-not $AllowLiveMode.IsPresent)) {

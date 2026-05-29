@@ -63,6 +63,16 @@ Important behavior while the service is already running:
 - `start` does not rewire the worker mix for an already-running service
 - if you need a different worker profile, run `.\web.bat stop -IncludeWorkers` first, then start again with the flags you want
 
+## Managed Trading Mode Rule
+
+The managed path has one default and one explicit live override:
+
+- `.\web.bat` and `.\web.bat start` start in `paper` mode and block persisted `live`-mode restore
+- `.\web.bat start -AllowPersistedLiveMode` intentionally starts in `live` mode and allows persisted live restore
+- changing between `paper` and `live` requires a clean restart: stop first, then start with the command for the mode you want
+
+Always confirm the effective mode with `.\web.bat status` after startup.
+
 ## AI Autonomous Agent Rule
 
 The AI autonomous agent is intentionally separate from the default startup profile.
@@ -85,6 +95,12 @@ Open the browser too:
 
 ```bat
 .\web.bat start -OpenBrowser
+```
+
+Start intentionally in live mode:
+
+```bat
+.\web.bat start -AllowPersistedLiveMode
 ```
 
 Start web only without the news engine:
@@ -124,6 +140,13 @@ Clean restart:
 .\web.bat start
 ```
 
+Clean live restart:
+
+```bat
+.\web.bat stop -IncludeWorkers
+.\web.bat start -AllowPersistedLiveMode
+```
+
 ## What `status` Should Tell You
 
 After every startup, run:
@@ -141,7 +164,7 @@ Check these fields before doing anything sensitive:
 - AI Agent `symbol_mode`
 - observed worker state for news, LLM, and PM workers
 
-Managed restarts now come up in `live` by default. Treat that as real state before changing strategies or credentials.
+Default managed restarts come up in `paper`. A `live` managed restart requires `.\web.bat start -AllowPersistedLiveMode`. Treat any `mode=live` status as real state before changing strategies or credentials.
 
 ## Troubleshooting
 
@@ -162,7 +185,14 @@ If the service should not be in `live`:
 
 1. Treat that as real state, not a display bug
 2. Review the persisted runtime mode and credentials
-3. Start outside the managed path with `TRADING_MODE=paper` only when you intentionally want paper mode
+3. Run `.\web.bat stop -IncludeWorkers`
+4. Start with the default managed command: `.\web.bat start`
+
+If the service should be in `live`:
+
+1. Run `.\web.bat stop -IncludeWorkers`
+2. Start with the explicit live command: `.\web.bat start -AllowPersistedLiveMode`
+3. Run `.\web.bat status` and confirm `mode=live`
 
 ## Script Stack
 

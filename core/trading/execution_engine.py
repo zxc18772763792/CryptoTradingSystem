@@ -379,6 +379,14 @@ class ExecutionEngine:
             finally:
                 self._release_mode_lock()
 
+    @contextlib.asynccontextmanager
+    async def mode_access_guard(self):
+        await self._acquire_mode_lock()
+        try:
+            yield
+        finally:
+            self._release_mode_lock()
+
     def _load_live_trade_counts(self) -> Dict[str, int]:
         try:
             if not self._live_trade_counts_path.exists():
@@ -2749,6 +2757,9 @@ class ExecutionEngine:
             same_direction_limit_notional = position_cap_notional * same_direction_limit_ratio
             same_direction_remaining_cap = max(0.0, same_direction_limit_notional - same_direction_existing_notional)
 
+        if equity <= 0 and not self._paper_trading:
+            return 0.0
+
         if signal.quantity is not None:
             qty = max(0.0, float(signal.quantity))
             if qty <= 0:
@@ -3320,6 +3331,57 @@ class ExecutionEngine:
         text = str(error_text or "").lower()
         return ("reduceonly order is rejected" in text) or ("\"code\":-2022" in text) or ("code:-2022" in text)
 
+    def _sync_local_position_from_exchange(
+        self,
+        local_pos: Any,
+        snapshot: Dict[str, Any],
+    ) -> bool:
+        quantity = abs(float(snapshot.get("quantity") or 0.0))
+        if quantity <= 1e-12:
+            return False
+
+        entry_price = float(snapshot.get("entry_price") or 0.0)
+        current_price = float(snapshot.get("current_price") or 0.0)
+        if current_price <= 0:
+            current_price = entry_price
+        if entry_price <= 0:
+            entry_price = float(getattr(local_pos, "entry_price", 0.0) or 0.0)
+        if current_price <= 0:
+            current_price = float(getattr(local_pos, "current_price", 0.0) or entry_price or 0.0)
+
+        old_quantity = float(getattr(local_pos, "quantity", 0.0) or 0.0)
+        old_entry = float(getattr(local_pos, "entry_price", 0.0) or 0.0)
+        old_current = float(getattr(local_pos, "current_price", 0.0) or 0.0)
+        quantity_changed = abs(old_quantity - quantity) > max(1e-12, abs(old_quantity) * 1e-6)
+        entry_changed = entry_price > 0 and abs(old_entry - entry_price) > max(1e-9, abs(old_entry) * 1e-6)
+        price_changed = current_price > 0 and abs(old_current - current_price) > max(1e-9, abs(old_current) * 1e-6)
+        if not (quantity_changed or entry_changed or price_changed):
+            return False
+
+        leverage = max(1e-9, float(snapshot.get("leverage") or getattr(local_pos, "leverage", 1.0) or 1.0))
+        local_pos.quantity = quantity
+        local_pos.entry_price = entry_price
+        local_pos.current_price = current_price
+        local_pos.value = current_price * quantity
+        local_pos.leverage = leverage
+        local_pos.margin = local_pos.value / leverage
+        local_pos.unrealized_pnl = float(snapshot.get("unrealized_pnl") or 0.0)
+        if entry_price > 0:
+            if getattr(local_pos, "side", None) == PositionSide.SHORT:
+                local_pos.unrealized_pnl_pct = (entry_price - current_price) / entry_price
+            else:
+                local_pos.unrealized_pnl_pct = (current_price - entry_price) / entry_price
+        else:
+            local_pos.unrealized_pnl_pct = 0.0
+        local_pos.updated_at = datetime.now(timezone.utc)
+        metadata = dict(getattr(local_pos, "metadata", {}) or {})
+        metadata["last_exchange_sync_at"] = local_pos.updated_at.isoformat()
+        metadata["last_exchange_sync_source"] = "live_position_reconcile"
+        local_pos.metadata = metadata
+        position_manager._dirty = True
+        position_manager._persist_scope_state(force=True)
+        return True
+
     async def _reconcile_local_positions_with_exchange(self) -> None:
         """In live mode, drop stale local positions that no longer exist on exchange."""
         if self._paper_trading:
@@ -3364,7 +3426,7 @@ class ExecutionEngine:
                 logger.debug(f"Skip local position reconcile for {exchange_name}: {e}")
                 continue
 
-            exchange_side_keys: set[Tuple[str, str]] = set()
+            exchange_side_snapshots: Dict[Tuple[str, str], Dict[str, Any]] = {}
             for ex_pos in exchange_positions or []:
                 symbol_raw = str((ex_pos.get("symbol") if isinstance(ex_pos, dict) else getattr(ex_pos, "symbol", "")) or "")
                 symbol_key = self._canonical_symbol(symbol_raw)
@@ -3372,13 +3434,52 @@ class ExecutionEngine:
                     continue
                 amount = float((ex_pos.get("amount") if isinstance(ex_pos, dict) else getattr(ex_pos, "amount", 0.0)) or 0.0)
                 if abs(amount) <= 1e-12:
+                    amount = float((ex_pos.get("quantity") if isinstance(ex_pos, dict) else getattr(ex_pos, "quantity", 0.0)) or 0.0)
+                if abs(amount) <= 1e-12:
                     continue
                 side = str((ex_pos.get("side") if isinstance(ex_pos, dict) else getattr(ex_pos, "side", "")) or "").strip().lower()
                 if not side:
                     side = "short" if amount < 0 else "long"
                 if side not in {"long", "short"}:
                     continue
-                exchange_side_keys.add((symbol_key, side))
+                entry_price = float(
+                    (ex_pos.get("entry_price") if isinstance(ex_pos, dict) else getattr(ex_pos, "entry_price", 0.0))
+                    or 0.0
+                )
+                current_price = float(
+                    (ex_pos.get("current_price") if isinstance(ex_pos, dict) else getattr(ex_pos, "current_price", 0.0))
+                    or 0.0
+                )
+                if current_price <= 0:
+                    current_price = float(
+                        (ex_pos.get("markPrice") if isinstance(ex_pos, dict) else getattr(ex_pos, "markPrice", 0.0))
+                        or 0.0
+                    )
+                if current_price <= 0:
+                    current_price = entry_price
+                unrealized_pnl = float(
+                    (
+                        ex_pos.get("unrealized_pnl")
+                        if isinstance(ex_pos, dict)
+                        else getattr(ex_pos, "unrealized_pnl", 0.0)
+                    )
+                    or (
+                        ex_pos.get("unrealizedPnl")
+                        if isinstance(ex_pos, dict)
+                        else getattr(ex_pos, "unrealizedPnl", 0.0)
+                    )
+                    or 0.0
+                )
+                exchange_side_snapshots[(symbol_key, side)] = {
+                    "quantity": abs(float(amount)),
+                    "entry_price": entry_price,
+                    "current_price": current_price,
+                    "unrealized_pnl": unrealized_pnl,
+                    "leverage": float(
+                        (ex_pos.get("leverage") if isinstance(ex_pos, dict) else getattr(ex_pos, "leverage", 1.0))
+                        or 1.0
+                    ),
+                }
 
             for local_pos in positions:
                 metadata = getattr(local_pos, "metadata", {}) or {}
@@ -3389,6 +3490,29 @@ class ExecutionEngine:
                 if not local_symbol or local_side not in {"long", "short"}:
                     continue
                 position_key = (account_id, exchange_name, local_symbol, local_side)
+                exchange_snapshot = exchange_side_snapshots.get((local_symbol, local_side))
+                if exchange_snapshot is not None:
+                    self._live_reconcile_absence_counts.pop(position_key, None)
+                    if self._sync_local_position_from_exchange(local_pos, exchange_snapshot):
+                        logger.warning(
+                            "Synchronized local live position from exchange snapshot: "
+                            f"exchange={exchange_name} symbol={getattr(local_pos, 'symbol', local_symbol)} "
+                            f"side={local_side} account_id={account_id} quantity={exchange_snapshot.get('quantity')}"
+                        )
+                        await self._notify_callbacks(
+                            "position_reconciled",
+                            {
+                                "exchange": exchange_name,
+                                "symbol": getattr(local_pos, "symbol", local_symbol),
+                                "side": local_side,
+                                "account_id": account_id,
+                                "reason": "exchange_position_size_changed",
+                                "quantity": float(exchange_snapshot.get("quantity") or 0.0),
+                                "entry_price": float(exchange_snapshot.get("entry_price") or 0.0),
+                                "current_price": float(exchange_snapshot.get("current_price") or 0.0),
+                            },
+                        )
+                    continue
                 if source == "exchange_live":
                     self._live_reconcile_absence_counts.pop(position_key, None)
                     continue
@@ -3399,10 +3523,6 @@ class ExecutionEngine:
                     if age < self._live_reconcile_grace_seconds:
                         self._live_reconcile_absence_counts.pop(position_key, None)
                         continue
-
-                if (local_symbol, local_side) in exchange_side_keys:
-                    self._live_reconcile_absence_counts.pop(position_key, None)
-                    continue
 
                 absence_count = int(self._live_reconcile_absence_counts.get(position_key, 0) or 0) + 1
                 self._live_reconcile_absence_counts[position_key] = absence_count
@@ -3793,9 +3913,25 @@ class ExecutionEngine:
                     else 0.0
                 )
                 cached_eq = self._get_cached_equity_value(account_id)
-                fallback_eq = max(report_eq, cached_eq, 1000.0 if not self._paper_trading else 0.0)
-                if fallback_eq <= 0:
-                    raise
+                fallback_eq = max(report_eq, cached_eq)
+                if fallback_eq <= 0 and not self._paper_trading:
+                    self._signal_diagnostics["skipped_live_equity_unavailable"] = int(
+                        self._signal_diagnostics.get("skipped_live_equity_unavailable", 0)
+                    ) + 1
+                    self._signal_diagnostics["last_result"] = {
+                        "status": "skipped_live_equity_unavailable",
+                        "strategy": signal.strategy_name,
+                        "symbol": signal.symbol,
+                        "exchange": exchange,
+                        "account_id": account_id,
+                        "reason": "equity_snapshot_timeout_without_cached_equity",
+                    }
+                    self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                    logger.warning(
+                        "Skip live strategy order because equity snapshot timed out and no cached equity is available: "
+                        f"strategy={signal.strategy_name} symbol={signal.symbol} exchange={exchange} account={account_id}"
+                    )
+                    return None
                 account_equity = float(fallback_eq)
                 logger.warning(
                     f"Strategy equity snapshot timed out, fallback used: "
@@ -6099,6 +6235,8 @@ class ExecutionEngine:
         self._queue_task = None
         for exchange in exchange_manager.get_connected_exchanges():
             await order_manager.cancel_all_orders(exchange=exchange)
+        with contextlib.suppress(Exception):
+            position_manager.flush()
         logger.info("Execution engine stopped")
 
     def list_conditional_orders(self) -> List[Dict[str, Any]]:

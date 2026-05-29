@@ -907,6 +907,100 @@ def test_async_glm_client_openai_fails_over_to_backup_relay(monkeypatch):
     ]
 
 
+def test_async_glm_client_aiohttp_uses_proxy_environment_by_default(monkeypatch):
+    import core.news.eventizer.async_glm_client as module
+
+    monkeypatch.delenv("NEWS_LLM_AIOHTTP_TRUST_ENV", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {}
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(
+            capture=capture,
+            responses=[
+                _FakeResponse(
+                    {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {"type": "output_text", "text": '{"summary":"ok","sentiment":"neutral"}'}
+                                ],
+                            }
+                        ]
+                    },
+                    status=200,
+                )
+            ],
+            **kwargs,
+        ),
+    )
+
+    client = module.AsyncGLMClient({})
+    _, error_type = asyncio.run(
+        client.chat_completions(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=64,
+        )
+    )
+
+    assert error_type == "none"
+    assert capture["session_kwargs"]["trust_env"] is True
+
+
+def test_async_glm_client_aiohttp_trust_env_can_be_disabled(monkeypatch):
+    import core.news.eventizer.async_glm_client as module
+
+    monkeypatch.setenv("NEWS_LLM_AIOHTTP_TRUST_ENV", "0")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "https://primary.test/v1", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    capture = {}
+    monkeypatch.setattr(
+        module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: _FakeSequenceSession(
+            capture=capture,
+            responses=[
+                _FakeResponse(
+                    {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {"type": "output_text", "text": '{"summary":"ok","sentiment":"neutral"}'}
+                                ],
+                            }
+                        ]
+                    },
+                    status=200,
+                )
+            ],
+            **kwargs,
+        ),
+    )
+
+    client = module.AsyncGLMClient({})
+    _, error_type = asyncio.run(
+        client.chat_completions(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=64,
+        )
+    )
+
+    assert error_type == "none"
+    assert capture["session_kwargs"]["trust_env"] is False
+
+
 def test_async_glm_client_openai_sticks_to_backup_until_next_day(monkeypatch, tmp_path):
     import core.news.eventizer.async_glm_client as module
     import core.utils.openai_responses as response_helpers

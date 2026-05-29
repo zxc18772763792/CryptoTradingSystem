@@ -14,6 +14,11 @@ from core.ai.runtime_strategy_metadata import build_ai_research_runtime_fingerpr
 from core.strategies.strategy_manager import strategy_manager
 
 
+def _normalize_restore_mode(value: Any, default: str = "paper") -> str:
+    text = str(value or default).strip().lower()
+    return "live" if text == "live" else "paper"
+
+
 def _get_strategy_classes() -> Dict[str, Any]:
     classes: Dict[str, Any] = {}
     try:
@@ -171,8 +176,13 @@ async def delete_strategy_snapshot(name: str) -> bool:
         return False
 
 
-async def restore_strategies_from_db() -> Dict[str, Any]:
+async def restore_strategies_from_db(
+    *,
+    startup_mode: str = "paper",
+    allow_live_restore: bool = False,
+) -> Dict[str, Any]:
     """Restore persisted strategies and recover running state."""
+    effective_startup_mode = _normalize_restore_mode(startup_mode, default="paper")
     strategy_classes = _get_strategy_classes()
     restored: List[str] = []
     started: List[str] = []
@@ -217,6 +227,13 @@ async def restore_strategies_from_db() -> Dict[str, Any]:
         runtime_mode = str(payload.get("runtime_mode") or metadata.get("runtime_mode") or "").strip().lower()
         if runtime_mode in {"paper", "live"}:
             metadata.setdefault("runtime_mode", runtime_mode)
+        if (
+            runtime_mode == "live"
+            and effective_startup_mode != "live"
+            and not allow_live_restore
+        ):
+            skipped.append({"name": name, "reason": "live_restore_blocked_in_paper_startup"})
+            continue
         ai_runtime_fingerprint = _ai_runtime_fingerprint_from_payload(
             name=name,
             strategy_type=strategy_type,

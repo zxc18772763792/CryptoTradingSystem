@@ -556,6 +556,27 @@ def test_calculate_quantity_respects_total_exposure_cap_from_signal_metadata(mon
     assert qty == 0.0
 
 
+def test_live_calculate_quantity_fails_closed_when_equity_unavailable(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+
+    signal = _make_signal(signal_type=SignalType.BUY)
+    signal.quantity = 0.5
+
+    monkeypatch.setattr(engine, "_resolve_price", AsyncMock(return_value=100.0))
+
+    qty = asyncio.run(
+        engine._calculate_quantity(
+            signal=signal,
+            exchange="binance",
+            account_equity=0.0,
+            strategy_allocation=0.2,
+        )
+    )
+
+    assert qty == 0.0
+
+
 def test_close_signal_requires_local_strategy_position_when_local_missing(monkeypatch):
     engine = ExecutionEngine()
     engine._paper_trading = False

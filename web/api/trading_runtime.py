@@ -135,7 +135,7 @@ def _pending_mode_target(token: str) -> str:
     return ""
 
 
-@router.get("/risk/report")
+@router.get("/risk/report", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_risk_report():
     return await _build_effective_risk_report(force_live_refresh=False)
 
@@ -192,7 +192,7 @@ async def reset_paper_trading_state(clear_snapshots: bool = True):
     return {"success": True, "result": payload}
 
 
-@router.get("/stats")
+@router.get("/stats", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_trading_stats(force_refresh: bool = False):
     global _trading_stats_cache_payload, _trading_stats_cache_at
     if not force_refresh:
@@ -228,7 +228,7 @@ async def get_trading_stats(force_refresh: bool = False):
         return payload
 
 
-@router.get("/mode")
+@router.get("/mode", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_trading_mode():
     now = datetime.now(timezone.utc).isoformat()
     return {
@@ -294,6 +294,6 @@ async def cancel_trading_mode_switch(token: str, request: Request):
     raise HTTPException(status_code=404, detail="Mode switch token not found")
 
 
-@router.get("/runtime/diagnostics")
+@router.get("/runtime/diagnostics", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_runtime_diagnostics_endpoint():
     return build_runtime_diagnostics()

@@ -45,6 +45,8 @@ _BALANCE_RESPONSE_TIMEOUT_SEC = 5.0
 # The outer endpoint already took the 5s `_BALANCE_RESPONSE_TIMEOUT_SEC` hit …
 ```
 
+**状态 2026-05-29：**已修复，注释中的响应预算已从 18s 更新为 5s。
+
 ---
 
 ### Bug 2 — 死代码：`risk_manager.py:869` 的中文标注永不出现
@@ -64,6 +66,8 @@ if not allow_close and equity > 0 and notional > 0:   # line 861
 整个 `if not allow_close:` 块在 `allow_close=True` 时不会执行，所以 `("（平仓单）" if allow_close else "")` 只能是 `""` 。这个三元表达式是无效的残留代码，且稍显混乱。
 
 **建议修复：** 删除 `+ ("（平仓单）" if allow_close else "")` 这一行。
+
+**状态 2026-05-29：**已修复，死代码后缀已删除。
 
 ---
 
@@ -88,6 +92,8 @@ rebalance_bars: 288            ← 相同
 Spec 描述也承认这一问题："currently equal to relative-market return."
 
 **建议：** 从 `strategies/quantitative/intraday_cross_section.py`、`strategies/quantitative/__init__.py`、`strategies/__init__.py` 和 `config/strategy_registry.py` 中删除 `ResidualMom24hStrategy` 相关条目，并更新 `INTRADAY_CROSS_SECTION_STRATEGY_IDS` 列表。注意先确认没有已注册的运行实例，防止误删活跃策略。
+
+**状态 2026-05-29：**已修复，`ResidualMom24hStrategy` 已从 intraday cross-section specs、包导出、策略注册表、YAML 默认配置和测试清单中删除；`python scripts\check_backtest_supported_strategies.py` 通过，当前 backtest-supported 策略数为 70。
 
 ---
 
@@ -156,8 +162,8 @@ Spec 描述也承认这一问题："currently equal to relative-market return."
 | 编号 | 问题 | 状态 | 紧迫度 |
 |---|---|---|---|
 | P1 | **退出信号缺口**：27/37 经典策略无 CLOSE_LONG/CLOSE_SHORT；factor_based 策略仅部分覆盖；event_driven 的 `supply_event_strategy.py` 完全无退出信号 | 未处理 | 极高 |
-| P2 | **回测引擎忽略 SL/TP**：`backtest_engine._execute_buy` 不触发 `signal.stop_loss` / `signal.take_profit` | 未处理 | 极高 |
-| P3 | **VWAPReversionStrategy 退出信号修复**：均值回归完成后发 SELL 而非 CLOSE_LONG | 未处理 | 高 |
+| P2 | **回测引擎忽略 SL/TP**：`backtest_engine._execute_buy` 不触发 `signal.stop_loss` / `signal.take_profit` | 已验证 2026-05-29：当前实现已写入并触发 `signal.stop_loss` / `signal.take_profit`，`tests/test_backtest_engine_protective_exits.py` 通过 | 已完成 |
+| P3 | **VWAPReversionStrategy 退出信号修复**：均值回归完成后发 SELL 而非 CLOSE_LONG | 已验证 2026-05-29：当前实现已发 `CLOSE_LONG` / `CLOSE_SHORT` 并带 `vwap_mean_reversion_completed`，相关回归通过 | 已完成 |
 | P4 | **存量 Parquet UTC 迁移**：`scripts/migrate_parquet_klines_to_utc.py` 尚未执行 | 未处理 | 高 |
 | P5 | **F401 未使用 import 清理** | 未处理 | 中 |
 
@@ -166,9 +172,9 @@ Spec 描述也承认这一问题："currently equal to relative-market return."
 ## 六、建议行动项（按优先级）
 
 1. **立即（生产告警）**：确认 2026-05-25 的 5.11% 回撤是否属于正常交易亏损。若是，人工重置熔断器。若是数据问题，检查权益来源后再重置。
-2. **本周**：删除 `ResidualMom24hStrategy`（Bug 3），其 spec 描述已承认这是临时占位符。
-3. **本周**：修复两处低风险 bug（Bug 1 注释 + Bug 2 死代码），5 分钟内完成。
-4. **下周**：开始 P1 退出信号补全（先从 `supply_event_strategy.py` 和 VWAPReversionStrategy 入手）。
+2. **已完成 2026-05-29**：删除 `ResidualMom24hStrategy`（Bug 3），其 spec 描述已承认这是临时占位符。
+3. **已完成 2026-05-29**：修复两处低风险 bug（Bug 1 注释 + Bug 2 死代码）。
+4. **下周**：继续 P1 退出信号补全（先从 `supply_event_strategy.py` 和剩余经典/因子策略缺口入手；VWAPReversionStrategy 已验证完成）。
 5. **持续**：每次新建遵循"从磁盘加载状态"模式的 singleton 时，同步更新 `conftest.py` 隔离块。
 
 ---

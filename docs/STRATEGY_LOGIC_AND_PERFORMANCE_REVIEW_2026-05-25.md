@@ -6,7 +6,7 @@ after the second-round intraday cross-section strategy pack was connected.
 Validation already completed:
 
 - Import/export/instantiation parity: 74 registry entries, 74 package exports, no missing classes, no instantiation failures after duplicate strategy removal.
-- Backtest smoke: 70 strategies marked backtest-supported completed `_run_backtest_core` with valid final capital before the duplicate removal. Post-cleanup rerun on 2026-05-26: `python scripts/check_backtest_supported_strategies.py` passed for 71 backtest-supported strategies.
+- Backtest smoke: 70 strategies marked backtest-supported completed `_run_backtest_core` with valid final capital before the duplicate removal. Post-cleanup rerun on 2026-05-29 after removing `ResidualMom24hStrategy`: `python scripts/check_backtest_supported_strategies.py` passed for 70 backtest-supported strategies.
 - Live-only by design: 4 arbitrage strategies depend on live order books or on-chain execution and are not suitable for single-OHLCV backtests.
 - Focused tests: intraday cross-section, strategy library/factors, backtest runtime consistency, signal regressions, and specialty strategy tests passed.
 
@@ -18,7 +18,7 @@ Important distinction: these checks prove runtime compatibility and catch many i
 2. Several macro/proxy strategies are correctly wired but rely on fallback proxies. Their live quality depends more on source freshness and point-in-time data quality than indicator math.
 3. `MLXGBoostStrategy` is wired and smoke-tested. 2026-05-27 follow-up restored the canonical `models/ml_signal_xgb.manifest.json` sidecar and made registry support validate the manifest before counting the strategy as backtest-supported; calibration and drift checks remain required before live priority.
 4. Intraday cross-section strategies are framework-correct and backtestable. Their next validation step is IC/turnover/slippage stability across symbols, market regimes, and listing-age filters.
-5. `ResidualMom24hStrategy` was removed because it was identical to `RelRet24hReversalStrategy` in factor, lookback, direction, and execution behavior.
+5. `ResidualMom24hStrategy` was removed because it was identical to `RelRet24hReversalStrategy` in factor, lookback, direction, and execution behavior; as of 2026-05-29 it is no longer exported or registered.
 
 ## Per-Strategy Review
 

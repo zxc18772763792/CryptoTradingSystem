@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -66,6 +67,30 @@ def test_xgb_booster_cache_invalidates_on_mtime_change(tmp_path, monkeypatch):
     resolved = str(Path(fake_path).resolve())
     matching = [k for k in strategy_research._XGB_BOOSTER_CACHE if k[0] == resolved]
     assert len(matching) == 1, "stale entry should be evicted when mtime changes"
+
+
+def test_xgb_booster_cache_concurrent_miss_returns_one_cached_instance(tmp_path, monkeypatch):
+    """Concurrent first loads should converge on one cached Booster object."""
+    from core.research import strategy_research
+
+    fake_path = tmp_path / "model_concurrent.json"
+    fake_path.write_text("{}", encoding="utf-8")
+    with strategy_research._XGB_BOOSTER_CACHE_LOCK:
+        strategy_research._XGB_BOOSTER_CACHE.clear()
+
+    _install_fake_xgboost(monkeypatch, [f"booster-{idx}" for idx in range(32)])
+
+    def _load_once():
+        return strategy_research._load_xgb_booster_cached(str(fake_path))
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        boosters = list(pool.map(lambda _idx: _load_once(), range(16)))
+
+    assert len({id(booster) for booster in boosters}) == 1
+    resolved = str(fake_path.resolve())
+    with strategy_research._XGB_BOOSTER_CACHE_LOCK:
+        matching = [k for k in strategy_research._XGB_BOOSTER_CACHE if k[0] == resolved]
+    assert len(matching) == 1
 
 
 def test_cex_arbitrage_update_prices_runs_concurrent():

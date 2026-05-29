@@ -158,18 +158,26 @@ def _sanitize_report_name(value: str, default: str) -> str:
     return (cleaned or default)[:120]
 
 
+def _resolve_under_repo(value: str, *, default: str = "") -> Path:
+    base_dir = Path(ops_api.settings.BASE_DIR).resolve()
+    text = str(value or default).strip() or default
+    if not text:
+        raise ValueError("path must not be empty")
+    raw = Path(text)
+    candidate = raw.resolve() if raw.is_absolute() else (base_dir / raw).resolve()
+    try:
+        candidate.relative_to(base_dir)
+    except ValueError as exc:
+        raise ValueError(f"path escapes repository root: {text}") from exc
+    return candidate
+
+
 def _resolve_report_dir(value: str) -> Path:
-    raw = Path(str(value or "data/reports").strip() or "data/reports")
-    if raw.is_absolute():
-        return raw
-    return (ops_api.settings.BASE_DIR / raw).resolve()
+    return _resolve_under_repo(value, default="data/reports")
 
 
 def _resolve_repo_path(value: str) -> Path:
-    raw = Path(str(value or "").strip())
-    if raw.is_absolute():
-        return raw
-    return (ops_api.settings.BASE_DIR / raw).resolve()
+    return _resolve_under_repo(value)
 
 
 def _replay_batch_config_from_payload(payload: Any) -> ReplayBatchConfig:

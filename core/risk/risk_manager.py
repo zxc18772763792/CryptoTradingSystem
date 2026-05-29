@@ -866,7 +866,6 @@ class RiskManager:
                     message=(
                         f"订单价值 {notional:.2f} USDT 超过单笔上限 {single_limit:.2f} USDT "
                         f"({self.max_position_size * 100:.1f}% 账户权益)"
-                        + ("（平仓单）" if allow_close else "")
                     ),
                     severity="critical",
                 )

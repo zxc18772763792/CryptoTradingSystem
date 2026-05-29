@@ -11,7 +11,12 @@ from web.api import trading as trading_api
 from web.api import trading_balances
 
 
+def _ops_headers() -> dict[str, str]:
+    return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
+
+
 def test_balance_history_route_uses_resolved_mode(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = FastAPI()
     app.include_router(trading_balances.router, prefix="/api/trading")
     client = TestClient(app)
@@ -28,7 +33,10 @@ def test_balance_history_route_uses_resolved_mode(monkeypatch):
     monkeypatch.setattr(trading_api.execution_engine, "is_paper_mode", lambda: True)
     monkeypatch.setattr(trading_api.account_snapshot_manager, "get_history", fake_get_history)
 
-    response = client.get("/api/trading/balances/history?hours=48&exchange=binance&limit=10&mode=invalid")
+    response = client.get(
+        "/api/trading/balances/history?hours=48&exchange=binance&limit=10&mode=invalid",
+        headers=_ops_headers(),
+    )
     assert response.status_code == 200
     payload = response.json()
     assert payload["mode"] == "paper"

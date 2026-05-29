@@ -8,6 +8,7 @@ import requests
 
 from core.news.collectors.jin10 import Jin10Collector
 from core.news.collectors.newsapi import NewsAPICollector
+from core.news.collectors.common import parse_rss_items
 from core.news.collectors.rss import RSSNewsCollector
 
 
@@ -113,3 +114,13 @@ def test_rss_parser_rejects_external_entities() -> None:
 
     with pytest.raises(Exception):
         collector._parse_feed("unit", "https://example.test/feed", malicious_xml)
+
+
+def test_common_rss_parser_rejects_external_entities() -> None:
+    malicious_xml = """<?xml version="1.0"?>
+<!DOCTYPE foo [ <!ENTITY xxe SYSTEM "file:///etc/passwd"> ]>
+<rss><channel><item><title>&xxe;</title><link>https://example.test/x</link></item></channel></rss>
+"""
+
+    with pytest.raises(Exception):
+        parse_rss_items(malicious_xml, "unit", "unit-feed", "https://example.test/feed")

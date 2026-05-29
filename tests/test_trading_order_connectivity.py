@@ -1,10 +1,32 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from unittest.mock import AsyncMock
 
 from web.api import trading as trading_api
+
+
+def test_order_reads_use_execution_mode_access_guard(monkeypatch):
+    events: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def fake_mode_access_guard():
+        events.append("enter")
+        try:
+            yield
+        finally:
+            events.append("exit")
+
+    monkeypatch.setattr(trading_api.execution_engine, "mode_access_guard", fake_mode_access_guard)
+    monkeypatch.setattr(trading_api.execution_engine, "is_paper_mode", lambda: True)
+    monkeypatch.setattr(trading_api.order_manager, "get_recent_orders", lambda **kwargs: [])
+
+    payload = asyncio.run(trading_api.get_orders(include_history=True, limit=20))
+
+    assert payload == {"orders": []}
+    assert events == ["enter", "exit"]
 
 
 def test_live_open_orders_reports_fast_path_failure_without_connector_hang(monkeypatch):

@@ -193,14 +193,19 @@ def _latest_payload_rows(dataset: str, symbol: str) -> List[Dict[str, Any]]:
     if frame.empty:
         return []
     latest_request_key = ""
-    if "ingested_at" in frame.columns:
+    if "source_ts" in frame.columns:
+        source_ts = pd.to_datetime(frame["source_ts"], utc=True, errors="coerce")
+        if not source_ts.dropna().empty:
+            latest_idx = source_ts.fillna(pd.Timestamp.min.tz_localize("UTC")).idxmax()
+            latest_request_key = str(frame.loc[latest_idx].get("request_key") or "")
+    if not latest_request_key and "ingested_at" in frame.columns:
         ingested = pd.to_datetime(frame["ingested_at"], utc=True, errors="coerce")
         if not ingested.dropna().empty:
             latest_idx = ingested.fillna(pd.Timestamp.min.tz_localize("UTC")).idxmax()
             latest_request_key = str(frame.loc[latest_idx].get("request_key") or "")
     if not latest_request_key:
         latest_request_key = str(frame.iloc[-1].get("request_key") or "")
-    if latest_request_key:
+    if latest_request_key and "request_key" in frame.columns:
         frame = frame[frame["request_key"].astype(str) == latest_request_key]
     rows: List[Dict[str, Any]] = []
     for _, row in frame.iterrows():
