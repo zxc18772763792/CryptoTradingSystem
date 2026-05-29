@@ -259,7 +259,53 @@ def test_market_ws_shadow_selfcheck_accepts_live_runtime_when_expected(monkeypat
     assert report["overall_ok"] is True
     assert report["summary"]["final_trading_mode"] == "live"
     assert report["summary"]["final_paper_trading"] is False
+    assert report["summary"]["final_configured_enabled"] is True
     assert report["summary"]["final_fail_closed_for_live"] is True
+
+
+def test_market_ws_shadow_selfcheck_rejects_disabled_configured_stream(monkeypatch):
+    payload = _status_payload(ws_tick_count=14, compare_count=5)
+    payload["configured_enabled"] = False
+    routes = {
+        ("GET", "/health"): [FakeResponse(200, {"status": "healthy"}), FakeResponse(200, {"status": "healthy"})],
+        ("GET", "/api/status"): [
+            FakeResponse(200, _api_status_payload(paper_trading=True, trading_mode="paper")),
+            FakeResponse(200, _api_status_payload(paper_trading=True, trading_mode="paper")),
+        ],
+        ("GET", "/api/market-data/status"): [
+            FakeResponse(200, _status_payload(ws_tick_count=10, compare_count=3)),
+            FakeResponse(200, payload),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, []))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=1,
+        interval_sec=1,
+        min_samples=2,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=1,
+        min_shadow_compare_delta=1,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is False
+    assert "sample[1]: expected configured market ws enabled" in report["errors"]
+    assert report["summary"]["final_configured_enabled"] is False
 
 
 def test_market_ws_shadow_selfcheck_rejects_live_runtime_without_fail_closed(monkeypatch):

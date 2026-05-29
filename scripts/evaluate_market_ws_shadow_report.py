@@ -238,6 +238,7 @@ def evaluate_report(
             f"final runtime mismatch: {summary.get('final_trading_mode')!r}",
         )
     _add_error(errors, bool(summary.get("final_enabled")) is True, "final_enabled is not true")
+    _add_error(errors, bool(summary.get("final_configured_enabled")) is True, "final_configured_enabled is not true")
     _add_error(errors, bool(summary.get("final_feed_healthy")) is True, "final_feed_healthy is not true")
     _add_error(errors, bool(summary.get("final_ws_hub_healthy")) is True, "final_ws_hub_healthy is not true")
     _add_error(errors, not summary.get("final_feed_last_error"), f"final_feed_last_error not empty: {summary.get('final_feed_last_error')!r}")
@@ -273,6 +274,7 @@ def evaluate_report(
             "final_trading_mode": summary.get("final_trading_mode"),
             "final_paper_trading": summary.get("final_paper_trading"),
             "final_enabled": summary.get("final_enabled"),
+            "final_configured_enabled": summary.get("final_configured_enabled"),
             "final_fail_closed_for_live": summary.get("final_fail_closed_for_live"),
             "final_feed_healthy": summary.get("final_feed_healthy"),
             "final_ws_hub_healthy": summary.get("final_ws_hub_healthy"),
