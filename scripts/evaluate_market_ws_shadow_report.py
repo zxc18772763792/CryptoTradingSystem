@@ -15,6 +15,22 @@ DEFAULT_LOG_PATTERNS = {
 }
 
 
+DIAGNOSTIC_LOG_PATTERNS = {
+    "connector_binance_connect_timeout": "Connector binance connect timed out",
+    "exchange_manager_binance_reconnected": "exchange_manager: binance reconnected",
+    "watch_tickers_timeout": "watch_tickers timeout",
+    "ccxt_pro_feed_binance_watch_error": "ccxt_pro_feed[binance]: watch error",
+    "coinglass_rate_limit_backoff": "coinglass: rate-limit backoff",
+    "positions_live_json": "positions_live.json",
+    "failed_to_persist_positions": "Failed to persist positions",
+    "live_kline_fetch_timed_out": "Live kline fetch timed out",
+    "get_klines_btc_15m_failed": "get_klines(BTC/USDT, 15m) failed",
+    "get_ticker_call": "get_ticker(",
+    "unclosed_client_session": "Unclosed client session",
+    "paper_order_created": "[PAPER] Order created",
+}
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(float(value))
@@ -39,11 +55,12 @@ def _read_json(path: Path) -> Dict[str, Any]:
     return payload
 
 
-def _count_log_patterns(path: Optional[Path]) -> Dict[str, int]:
+def _count_log_patterns(path: Optional[Path], patterns: Dict[str, str] | None = None) -> Dict[str, int]:
     if path is None:
         return {}
     text = path.read_text(encoding="utf-8-sig", errors="replace") if path.exists() else ""
-    return {name: text.count(pattern) for name, pattern in DEFAULT_LOG_PATTERNS.items()}
+    patterns = patterns or DEFAULT_LOG_PATTERNS
+    return {name: text.count(pattern) for name, pattern in patterns.items()}
 
 
 def _add_error(errors: list[str], condition: bool, message: str) -> None:
@@ -70,6 +87,7 @@ def evaluate_report(
     max_price_diff_bps: float,
     max_ws_age_p95_ms: float,
     log_counts: Optional[Dict[str, int]] = None,
+    diagnostic_log_counts: Optional[Dict[str, int]] = None,
     max_log_count: int = 0,
 ) -> Dict[str, Any]:
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
@@ -205,6 +223,7 @@ def evaluate_report(
             "final_feed_last_error": summary.get("final_feed_last_error"),
         },
         "log_counts": log_counts,
+        "diagnostic_log_counts": dict(diagnostic_log_counts or {}),
     }
 
 
@@ -270,6 +289,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         report = _read_json(report_path)
         log_counts = _count_log_patterns(service_err_log)
+        diagnostic_log_counts = _count_log_patterns(service_err_log, DIAGNOSTIC_LOG_PATTERNS)
         result = evaluate_report(
             report,
             expect_mode=str(args.expect_mode),
@@ -288,6 +308,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             max_price_diff_bps=float(args.max_price_diff_bps),
             max_ws_age_p95_ms=float(args.max_ws_age_p95_ms),
             log_counts=log_counts,
+            diagnostic_log_counts=diagnostic_log_counts,
             max_log_count=int(args.max_log_count),
         )
     except Exception as exc:
@@ -296,6 +317,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             "errors": [str(exc)],
             "summary": {},
             "log_counts": {},
+            "diagnostic_log_counts": {},
         }
     result["report"] = str(report_path)
     if service_err_log is not None:
