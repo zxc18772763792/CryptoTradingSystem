@@ -3143,6 +3143,7 @@ python scripts\precheck_market_ws_live_shadow.py --base-url http://127.0.0.1:801
 ```
 
 该预检只读取 `/api/status` 和 `/api/market-data/status`，不启动服务、不下单；它要求 `trading_mode=live`、`paper_trading=false`、`MARKET_WS_MODE=shadow`、`MARKET_WS_FORCE_REST=false`、`MARKET_WS_FAIL_CLOSED_FOR_LIVE=true`，并禁止 `ui_primary` / `strategy_primary`。
+该预检还要求启动 24 小时 live shadow 前的当前 market WS feed/hub 已健康、`feed_last_error` 为空、WS stale symbol 为 0、最近 tick age 不超过 10000 ms，且 invalid payload、timestamp regression、feed empty watch、shadow compare violation、shadow stale skip 计数均为 0。
 
 运行条件：
 
@@ -3644,6 +3645,12 @@ summary:
   - `python -m py_compile scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_live_shadow_precheck.py` 通过。
   - `git diff --check -- scripts/precheck_market_ws_live_shadow.py tests/test_market_ws_live_shadow_precheck.py` 通过。
   - 当前第十一轮 paper shadow 服务上复跑 Level 2 precheck 仍按预期失败：`runtime is not live`、`market WS status is missing fail_closed_for_live`；summary 为 `trading_mode=paper`、`paper_trading=true`、`market_ws_mode=shadow`、`market_ws_force_rest=false`、`market_ws_fail_closed_for_live=null`。
+- 2026-05-30 00:36 +08:00 更新：`29a7ea8 Enforce live shadow precheck health` 已把 Level 2 precheck 扩展为启动前实时健康门禁：要求 feed/hub healthy、`feed_last_error` 为空、WS stale symbol 为 0、最近 tick age 不超过 10000 ms，且 invalid payload、timestamp regression、feed empty watch、shadow compare violation、shadow stale skip 计数均为 0。
+- 验证：
+  - `pytest tests\test_market_ws_live_shadow_precheck.py -q`，`8 passed in 3.46s`。
+  - `python -m py_compile scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_live_shadow_precheck.py` 通过。
+  - `git diff --check -- scripts/precheck_market_ws_live_shadow.py tests/test_market_ws_live_shadow_precheck.py` 通过。
+  - 当前第十一轮 paper shadow 服务上复跑 Level 2 precheck 仍按预期失败：`runtime is not live`、`market WS status is missing fail_closed_for_live`；新增 summary 确认 `market_ws_feed_healthy=true`、`market_ws_ws_hub_healthy=true`、`market_ws_stale_symbol_count=0`、`market_ws_invalid_payload_count=0`、`market_ws_timestamp_regression_count=0`、`market_ws_feed_watch_empty_count=0`、`market_ws_shadow_compare_violation_count=0`、`market_ws_shadow_compare_stale_skip_count=0`。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
