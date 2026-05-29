@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from dataclasses import dataclass
 
 from fastapi import HTTPException, Request, status
@@ -59,7 +60,9 @@ async def require_ops_auth(request: Request) -> OpsAuthContext:
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
     received = str(request.headers.get("X-OPS-TOKEN") or "").strip()
-    if not received or received != expected:
+    if not received or not secrets.compare_digest(
+        received.encode("utf-8"), str(expected).encode("utf-8")
+    ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid ops token")
 
     ctx = OpsAuthContext(

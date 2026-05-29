@@ -39,12 +39,13 @@ class MeanReversionStrategy(StrategyBase):
         period = self.params["lookback_period"]
         rolling_mean = data["close"].rolling(period).mean()
         rolling_std = data["close"].rolling(period).std()
-        z_score = (data["close"] - rolling_mean) / rolling_std
+        # Avoid inf z-scores on a flat window (rolling_std == 0).
+        z_score = (data["close"] - rolling_mean) / rolling_std.replace(0, np.nan)
         return z_score
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         """Generate trading signals."""
-        if data.empty or len(data) < self.params["lookback_period"]:
+        if data.empty or len(data) < self.params["lookback_period"] + 1:
             return []
 
         signals = []
@@ -101,7 +102,7 @@ class MeanReversionStrategy(StrategyBase):
 
     def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
         """Close an existing mean-reversion position when z-score normalizes."""
-        if data is None or data.empty or len(data) < self.params["lookback_period"]:
+        if data is None or data.empty or len(data) < self.params["lookback_period"] + 1:
             return None
 
         z_score = self._calculate_z_score(data)

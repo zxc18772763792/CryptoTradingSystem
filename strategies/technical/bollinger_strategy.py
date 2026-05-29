@@ -235,7 +235,9 @@ class BollingerSqueezeStrategy(StrategyBase):
 
         upper = middle + num_std * std
         lower = middle - num_std * std
-        bandwidth = (upper - lower) / middle
+        # Guard against a zero middle band (flat/zero-price window) producing
+        # inf/NaN bandwidth that slips past downstream isfinite filters.
+        bandwidth = (upper - lower) / middle.replace(0, np.nan)
 
         return upper, middle, lower, bandwidth
 

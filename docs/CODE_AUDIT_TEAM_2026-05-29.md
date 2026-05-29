@@ -35,6 +35,7 @@
 - **P1-G**：G1 Fama 加载后丢未收盘末 bar（因子只用完成 K 线）✅
 - **P1-H**：H1 `/readyz` 改 `async_session_maker`+`text` ✅
 - **P2 附带**：`/api/status`+`/health` UTC 时间戳 · `_prime_live_equity` 任务保引用 · `get_collected_data` 返回 list 拷贝
+- **P2（批次6，clean 文件，codex 暂停后补）**：Bollinger 带宽除零守卫(`middle.replace(0,nan)`) · MeanReversion `rolling_std` 除零守卫 + min_bars `+1` · OPS token `secrets.compare_digest` 常数时间比较 · `gate_counterfactuals.jsonl` 超 16MB 自动裁剪到末 1万行
 
 **已修复合计：3 P0 + 21 P1（含 C1 验证免改）+ 若干 P2。**
 
