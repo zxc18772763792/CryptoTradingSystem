@@ -775,7 +775,7 @@ pytest tests/test_ccxt_pro_feed.py -q
   - 默认返回 `include_symbols=True` 的 per-symbol market data 状态。
 - 前端顶栏已新增独立 `market-data-status` badge：
   - 与浏览器内部 `/ws` 的 `system-status` 分开展示。
-  - 根据 `market_ws.mode`、`feed_healthy`、`ws_hub_healthy`、`stale_symbol_count`、`rest_fallback_count` 展示 `REST`、`WS shadow`、`WS primary`、`REST fallback`、`stale`。
+  - 根据 `market_ws.mode`、`feed_healthy`、`ws_hub_healthy`、`ws_stale_symbol_count`、`rest_fallback_count` 展示 `REST`、`WS shadow`、`WS primary`、`REST fallback`、`stale`；`stale_symbol_count` 作为全源诊断保留在 tooltip，避免 REST/Gate 旧快照把健康的 exchange WS badge 误报为红色。
 - `core/marketdata/runtime_price_provider.py` 已新增策略/执行侧价格读取 adapter：
   - 返回 `PriceReadResult`，包含 price、bid/ask、source、age_ms、is_stale、fallback_required、reason。
   - 优先读取 hub 新鲜 tick；缺失、stale 或 malformed 时可走 REST fallback 并写回 hub。
