@@ -5,7 +5,7 @@ import json
 import scripts.evaluate_market_ws_shadow_report as evaluator
 
 
-def _report(**summary_overrides):
+def _report(*, expect_mode="shadow", expect_runtime="paper", **summary_overrides):
     summary = {
         "sample_count": 361,
         "ws_tick_delta": 100,
@@ -21,6 +21,8 @@ def _report(**summary_overrides):
         "p99_abs_diff_bps": 4.2,
         "p95_ws_age_ms": 300.0,
         "final_mode": "shadow",
+        "final_trading_mode": "paper",
+        "final_paper_trading": True,
         "final_enabled": True,
         "final_feed_healthy": True,
         "final_ws_hub_healthy": True,
@@ -29,8 +31,8 @@ def _report(**summary_overrides):
     summary.update(summary_overrides)
     return {
         "overall_ok": True,
-        "expect_mode": "shadow",
-        "expect_runtime": "paper",
+        "expect_mode": expect_mode,
+        "expect_runtime": expect_runtime,
         "summary": summary,
         "errors": [],
         "samples": [{"mode": "shadow"}, {"mode": "shadow"}],
@@ -106,6 +108,32 @@ def test_market_ws_shadow_report_eval_treats_recovered_watch_errors_as_diagnosti
 
     assert result["ok"] is True
     assert result["errors"] == []
+
+
+def test_market_ws_shadow_report_eval_fails_live_expected_with_paper_summary():
+    result = _evaluate(
+        expect_runtime="live",
+        report=_report(expect_runtime="live"),
+    )
+
+    assert result["ok"] is False
+    assert "final runtime is not live" in result["errors"]
+
+
+def test_market_ws_shadow_report_eval_passes_live_runtime_summary():
+    result = _evaluate(
+        expect_runtime="live",
+        report=_report(
+            expect_runtime="live",
+            final_trading_mode="live",
+            final_paper_trading=False,
+        ),
+    )
+
+    assert result["ok"] is True
+    assert result["errors"] == []
+    assert result["summary"]["final_trading_mode"] == "live"
+    assert result["summary"]["final_paper_trading"] is False
 
 
 def test_market_ws_shadow_report_eval_exposes_diagnostic_log_counts_without_failing():

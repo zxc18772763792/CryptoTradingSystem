@@ -185,6 +185,27 @@ def evaluate_report(
         )
 
     _add_error(errors, str(summary.get("final_mode") or "").lower() == str(expect_mode).lower(), "final_mode mismatch")
+    final_trading_mode = str(summary.get("final_trading_mode") or "").strip().lower()
+    final_paper_trading = summary.get("final_paper_trading")
+    expected_runtime = str(expect_runtime or "").strip().lower()
+    if expected_runtime == "paper":
+        _add_error(
+            errors,
+            final_paper_trading is not False and (not final_trading_mode or final_trading_mode == "paper"),
+            "final runtime is not paper",
+        )
+    elif expected_runtime == "live":
+        _add_error(
+            errors,
+            final_paper_trading is False and final_trading_mode == "live",
+            "final runtime is not live",
+        )
+    elif expected_runtime:
+        _add_error(
+            errors,
+            final_trading_mode == expected_runtime,
+            f"final runtime mismatch: {summary.get('final_trading_mode')!r}",
+        )
     _add_error(errors, bool(summary.get("final_enabled")) is True, "final_enabled is not true")
     _add_error(errors, bool(summary.get("final_feed_healthy")) is True, "final_feed_healthy is not true")
     _add_error(errors, bool(summary.get("final_ws_hub_healthy")) is True, "final_ws_hub_healthy is not true")
@@ -217,6 +238,8 @@ def evaluate_report(
             "p99_abs_diff_bps": p99_abs_diff_bps,
             "p95_ws_age_ms": p95_ws_age_ms,
             "final_mode": summary.get("final_mode"),
+            "final_trading_mode": summary.get("final_trading_mode"),
+            "final_paper_trading": summary.get("final_paper_trading"),
             "final_enabled": summary.get("final_enabled"),
             "final_feed_healthy": summary.get("final_feed_healthy"),
             "final_ws_hub_healthy": summary.get("final_ws_hub_healthy"),
