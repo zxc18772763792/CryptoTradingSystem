@@ -174,6 +174,7 @@ def _extract_sample(base_url: str, token: str, timeout: float) -> Dict[str, Any]
         "enabled": market_ws.get("enabled"),
         "configured_enabled": market_ws.get("configured_enabled"),
         "force_rest": market_ws.get("force_rest"),
+        "fail_closed_for_live": market_ws.get("fail_closed_for_live"),
         "feed_present": market_ws.get("feed_present"),
         "feed_healthy": market_ws.get("feed_healthy"),
         "hub_healthy": market_ws.get("hub_healthy"),
@@ -269,6 +270,8 @@ def _evaluate_samples(
             errors.append(f"{prefix}: expected market ws enabled")
         if _as_bool(sample.get("force_rest")):
             errors.append(f"{prefix}: force_rest is true")
+        if runtime == "live" and not _as_bool(sample.get("fail_closed_for_live")):
+            errors.append(f"{prefix}: fail_closed_for_live is not true")
         if mode != "strategy_primary" and str(sample.get("mode") or "").strip().lower() == "strategy_primary":
             errors.append(f"{prefix}: strategy_primary must not be enabled during shadow check")
         stale_for_check = (
@@ -375,6 +378,7 @@ def _evaluate_samples(
         "final_trading_mode": samples[-1].get("trading_mode") if samples else None,
         "final_paper_trading": samples[-1].get("paper_trading") if samples else None,
         "final_enabled": samples[-1].get("enabled") if samples else None,
+        "final_fail_closed_for_live": samples[-1].get("fail_closed_for_live") if samples else None,
         "final_feed_healthy": samples[-1].get("feed_healthy") if samples else None,
         "final_ws_hub_healthy": samples[-1].get("ws_hub_healthy") if samples else None,
         "final_feed_watch_symbols": samples[-1].get("feed_watch_symbols") if samples else [],

@@ -194,6 +194,7 @@ def evaluate_report(
     _add_error(errors, str(summary.get("final_mode") or "").lower() == str(expect_mode).lower(), "final_mode mismatch")
     final_trading_mode = str(summary.get("final_trading_mode") or "").strip().lower()
     final_paper_trading = summary.get("final_paper_trading")
+    final_fail_closed_for_live = summary.get("final_fail_closed_for_live")
     expected_runtime = str(expect_runtime or "").strip().lower()
     if require_final_runtime_fields:
         _add_error(
@@ -224,6 +225,11 @@ def evaluate_report(
             errors,
             final_paper_trading is False and final_trading_mode == "live",
             "final runtime is not live",
+        )
+        _add_error(
+            errors,
+            final_fail_closed_for_live is True,
+            "final_fail_closed_for_live is not true",
         )
     elif expected_runtime:
         _add_error(
@@ -267,6 +273,7 @@ def evaluate_report(
             "final_trading_mode": summary.get("final_trading_mode"),
             "final_paper_trading": summary.get("final_paper_trading"),
             "final_enabled": summary.get("final_enabled"),
+            "final_fail_closed_for_live": summary.get("final_fail_closed_for_live"),
             "final_feed_healthy": summary.get("final_feed_healthy"),
             "final_ws_hub_healthy": summary.get("final_ws_hub_healthy"),
             "final_feed_watch_symbols": summary.get("final_feed_watch_symbols"),

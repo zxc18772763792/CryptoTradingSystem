@@ -25,6 +25,7 @@ def _report(*, expect_mode="shadow", expect_runtime="paper", **summary_overrides
         "final_trading_mode": "paper",
         "final_paper_trading": True,
         "final_enabled": True,
+        "final_fail_closed_for_live": True,
         "final_feed_healthy": True,
         "final_ws_hub_healthy": True,
         "final_feed_watch_symbols": ["binance:BTC/USDT"],
@@ -137,6 +138,22 @@ def test_market_ws_shadow_report_eval_passes_live_runtime_summary():
     assert result["errors"] == []
     assert result["summary"]["final_trading_mode"] == "live"
     assert result["summary"]["final_paper_trading"] is False
+
+
+def test_market_ws_shadow_report_eval_fails_live_runtime_without_fail_closed():
+    result = _evaluate(
+        expect_runtime="live",
+        report=_report(
+            expect_runtime="live",
+            final_trading_mode="live",
+            final_paper_trading=False,
+            final_fail_closed_for_live=False,
+        ),
+    )
+
+    assert result["ok"] is False
+    assert "final_fail_closed_for_live is not true" in result["errors"]
+    assert result["summary"]["final_fail_closed_for_live"] is False
 
 
 def test_market_ws_shadow_report_eval_keeps_legacy_paper_summary_compatible_by_default():
