@@ -826,6 +826,7 @@ def _market_ws_status_snapshot(*, include_symbols: bool = False) -> Dict[str, An
         "configured_enabled": bool(_MARKET_WS_ENABLED),
         "mode": _MARKET_WS_MODE,
         "force_rest": bool(_MARKET_WS_FORCE_REST),
+        "fail_closed_for_live": bool(getattr(settings, "MARKET_WS_FAIL_CLOSED_FOR_LIVE", True)),
         "feed_present": feed is not None,
         "feed_healthy": feed_healthy,
         "feed_healthy_exchanges": feed_exchanges,
