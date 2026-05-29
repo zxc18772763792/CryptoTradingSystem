@@ -108,6 +108,23 @@ def test_market_ws_shadow_report_eval_treats_recovered_watch_errors_as_diagnosti
     assert result["errors"] == []
 
 
+def test_market_ws_shadow_report_eval_exposes_diagnostic_log_counts_without_failing():
+    result = _evaluate(
+        diagnostic_log_counts={
+            "unclosed_client_session": 1,
+            "positions_live_json": 2,
+            "get_ticker_call": 3,
+        },
+        log_counts={name: 0 for name in evaluator.DEFAULT_LOG_PATTERNS},
+    )
+
+    assert result["ok"] is True
+    assert result["errors"] == []
+    assert result["diagnostic_log_counts"]["unclosed_client_session"] == 1
+    assert result["diagnostic_log_counts"]["positions_live_json"] == 2
+    assert result["diagnostic_log_counts"]["get_ticker_call"] == 3
+
+
 def test_market_ws_shadow_report_eval_can_strictly_fail_watch_errors_when_requested():
     report = _report(feed_watch_timeout_delta=1, feed_watch_error_delta=1)
 
@@ -126,7 +143,17 @@ def test_market_ws_shadow_report_eval_main_outputs_json(tmp_path, capsys):
     report_path = tmp_path / "shadow.json"
     log_path = tmp_path / "service.err.log"
     report_path.write_text(json.dumps(_report(), ensure_ascii=False), encoding="utf-8")
-    log_path.write_text("ordinary log line\n", encoding="utf-8")
+    log_path.write_text(
+        "\n".join(
+            [
+                "ordinary log line",
+                "Unclosed client session",
+                "positions_live.json Permission denied",
+                "get_ticker(BTC/USDT) failed",
+            ]
+        ),
+        encoding="utf-8",
+    )
 
     code = evaluator.main([
         "--report",
@@ -141,3 +168,6 @@ def test_market_ws_shadow_report_eval_main_outputs_json(tmp_path, capsys):
     payload = json.loads(captured.out)
     assert payload["ok"] is True
     assert payload["report"] == str(report_path)
+    assert payload["diagnostic_log_counts"]["unclosed_client_session"] == 1
+    assert payload["diagnostic_log_counts"]["positions_live_json"] == 1
+    assert payload["diagnostic_log_counts"]["get_ticker_call"] == 1
