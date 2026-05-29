@@ -3386,3 +3386,50 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
 - 代码级 Phase 1 shadow 基建、Phase 2 UI primary gating、状态展示、adapter/fail-closed 保护和静态禁越级检查均已有测试覆盖。
 - 运行级仍停在 Level 1 paper shadow 长跑中；必须等待第十一轮结束并评估最终 JSON 后，才能判断是否准备 Level 2 live shadow。
 - live shadow 24 小时通过前，不开启 `ui_primary`；即使代码已有 `ui_primary` gating，也只能作为受配置保护的待验收能力保留。
+
+2026-05-29 23:43 +08:00 续作追加检查：
+
+- 已提交代码修复：`dfb8511 Retry transient position state reads`。
+- 提交前验证：
+  - `git diff --check` 通过。
+  - `pytest tests\core\test_runtime_persistence.py::test_position_manager_persist_uses_unique_tmp_and_retries_replace tests\core\test_runtime_persistence.py::test_position_manager_load_retries_transient_permission_error tests\test_web_main_runtime_tasks.py tests\test_market_data_hub.py -q`，`51 passed in 21.44s`。
+  - `python -m py_compile core\trading\position_manager.py web\main.py core\marketdata\hub.py` 通过。
+- 第十一轮服务与 selfcheck 仍在运行：服务 PID `76424`，selfcheck PID `163652`。
+- `/api/status`：`status=running`、`trading_mode=paper`、`paper_trading=true`。
+- `/api/market-data/status`：
+  - `market_ws.mode=shadow`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.ws_tick_count=8894`
+  - `market_ws.rest_snapshot_count=418`
+  - `market_ws.shadow_compare_count=152`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.feed_watch_timeout_count=0`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.stale_symbol_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.shadow_max_abs_diff_bps=12.844398929016815`
+- 第十一轮 selfcheck JSON/stderr 仍为 0 字节，符合长跑结束前预期；不得据此宣称 Level 1 通过。
+- 服务 stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `3`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `0`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `1`
+  - `Failed to persist positions`: `4`
+  - `Live kline fetch timed out`: `4`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `3`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `2`
+- 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
