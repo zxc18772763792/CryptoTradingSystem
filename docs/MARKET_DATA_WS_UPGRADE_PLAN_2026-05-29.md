@@ -3663,6 +3663,12 @@ summary:
   - `python -m py_compile scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_live_shadow_precheck.py` 通过。
   - `git diff --check -- scripts/precheck_market_ws_live_shadow.py tests/test_market_ws_live_shadow_precheck.py` 通过。
   - 当前第十一轮 paper shadow 服务上复跑 Level 2 precheck 仍按预期失败：`runtime is not live`、`market WS status is missing fail_closed_for_live`；新增 summary 确认 `market_ws_feed_watch_symbol_count=2`、`market_ws_feed_watch_symbols=["binance:BTC/USDT","binance:ETH/USDT"]`、`market_ws_feed_watch_symbol_error_count=0`。
+- 2026-05-30 00:58 +08:00 更新：`1fba147 Validate watched WS symbols in shadow reports` 已把 watched-symbol 校验延伸到 `scripts\selfcheck_market_ws_shadow.py` 和 `scripts\evaluate_market_ws_shadow_report.py`。后续 paper/live shadow 长跑会在每个采样点记录 feed watch symbols，并在最终 evaluator 中拒绝 `max_feed_watch_symbol_error_count_observed > 0`。
+- 验证：
+  - `pytest tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py -q`，`22 passed in 3.77s`。
+  - `python -m py_compile scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py` 通过。
+  - `git diff --check -- scripts/selfcheck_market_ws_shadow.py scripts/evaluate_market_ws_shadow_report.py tests/test_market_ws_shadow_selfcheck.py tests/test_market_ws_shadow_report_eval.py` 通过。
+  - 说明：该加固不会改变已经在运行的第十一轮 selfcheck 进程；它适用于后续重新启动并加载当前代码的 paper/live shadow 长跑和最终 evaluator。
 - 当前判断不变：第十一轮最终 JSON 通过、回归测试和静态扫描重跑通过、且 Level 2 precheck 通过前，不进入 live shadow，不开启 `ui_primary`。
 
 2026-05-30 00:21 +08:00 第十一轮继续观察：
