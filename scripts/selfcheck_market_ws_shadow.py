@@ -468,8 +468,11 @@ def _print_human_summary(report: Dict[str, Any]) -> None:
         f"feed_watch_error_delta={summary.get('feed_watch_error_delta')} "
         f"feed_watch_empty_delta={summary.get('feed_watch_empty_delta')} "
         f"feed_watch_timeout_delta={summary.get('feed_watch_timeout_delta')} "
+        f"watch_symbol_errors={summary.get('max_feed_watch_symbol_error_count_observed')} "
         f"p99_abs_diff_bps={summary.get('p99_abs_diff_bps')} "
-        f"p95_ws_age_ms={summary.get('p95_ws_age_ms')}",
+        f"p95_ws_age_ms={summary.get('p95_ws_age_ms')} "
+        f"final_runtime={summary.get('final_trading_mode')} "
+        f"final_fail_closed_for_live={summary.get('final_fail_closed_for_live')}",
         file=sys.stderr,
     )
     for error in report.get("errors") or []:

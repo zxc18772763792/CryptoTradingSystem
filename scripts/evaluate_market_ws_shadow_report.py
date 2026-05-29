@@ -337,8 +337,11 @@ def _print_human_summary(result: Dict[str, Any], report_path: Path, service_err_
         f"violations={summary.get('shadow_compare_violation_delta')} "
         f"feed_timeouts={summary.get('feed_watch_timeout_delta')} "
         f"feed_errors={summary.get('feed_watch_error_delta')} "
+        f"watch_symbol_errors={summary.get('max_feed_watch_symbol_error_count_observed')} "
         f"p99_abs_diff_bps={summary.get('p99_abs_diff_bps')} "
-        f"p95_ws_age_ms={summary.get('p95_ws_age_ms')}",
+        f"p95_ws_age_ms={summary.get('p95_ws_age_ms')} "
+        f"final_runtime={summary.get('final_trading_mode')} "
+        f"final_fail_closed_for_live={summary.get('final_fail_closed_for_live')}",
         file=sys.stderr,
     )
     for error in result.get("errors") or []:
