@@ -67,7 +67,9 @@ def evaluate_precheck(status_payload: Dict[str, Any], market_payload: Dict[str, 
         errors.append("MARKET_WS_ENABLED is not configured true")
     if _as_bool(market_ws.get("force_rest")):
         errors.append("MARKET_WS_FORCE_REST must be false for live shadow")
-    if not _as_bool(market_ws.get("fail_closed_for_live")):
+    if market_ws.get("fail_closed_for_live") is None:
+        errors.append("market WS status is missing fail_closed_for_live")
+    elif not _as_bool(market_ws.get("fail_closed_for_live")):
         errors.append("MARKET_WS_FAIL_CLOSED_FOR_LIVE must be true")
 
     summary = {

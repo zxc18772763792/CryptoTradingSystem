@@ -84,6 +84,20 @@ def test_live_shadow_precheck_rejects_disabled_fail_closed():
     assert "MARKET_WS_FAIL_CLOSED_FOR_LIVE must be true" in errors
 
 
+def test_live_shadow_precheck_rejects_missing_fail_closed_status():
+    payload = _market_ws_payload()
+    payload.pop("fail_closed_for_live")
+
+    ok, errors, summary = precheck.evaluate_precheck(
+        _status_payload(market_ws=payload),
+        payload,
+    )
+
+    assert ok is False
+    assert "market WS status is missing fail_closed_for_live" in errors
+    assert summary["market_ws_fail_closed_for_live"] is None
+
+
 def test_live_shadow_precheck_main_calls_status_endpoints(monkeypatch, capsys):
     seen = []
 
