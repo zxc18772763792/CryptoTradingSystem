@@ -3681,6 +3681,41 @@ python scripts\selfcheck_market_ws_shadow.py --base-url http://127.0.0.1:8012 --
   - 第十三轮已经进入 6 小时 current-code clean paper shadow 长跑。
   - 在 `logs\paper_shadow_6h_selfcheck_20260530_153637.out.json` 生成最终 JSON、evaluator 通过、最终回归/静态扫描通过、Level 2 precheck 通过之前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-05-30 15:54 +08:00 第十三轮中途健康检查：
+
+- 当前时间：`2026-05-30 15:54:24 +08:00`。
+- 运行状态：
+  - `8012` 监听 PID `13116`。
+  - selfcheck PID `170852`。
+  - Task `CryptoMarketWsPaperShadow_service_20260530_153637`: `Running`。
+  - Task `CryptoMarketWsPaperShadow_selfcheck_20260530_153637`: `Running`。
+  - `trading_mode=paper`，`paper_trading=True`。
+  - `market_ws.mode=shadow`，`configured_enabled=True`。
+  - `feed_healthy=True`，`ws_hub_healthy=True`。
+  - `ws_tick_count=1860`，`shadow_compare_count=34`。
+- 长跑输出：
+  - `logs\paper_shadow_6h_selfcheck_20260530_153637.out.json` 仍为 0 字节。
+  - `logs\paper_shadow_6h_selfcheck_20260530_153637.err.log` 仍为 0 字节。
+  - 这是 6 小时 selfcheck 结束前的预期状态，不能据此宣称 Level 1 通过。
+- service stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `0`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `0`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `0`
+  - `Failed to persist positions`: `0`
+  - `Live kline fetch timed out`: `0`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `0`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `0`
+- 当前判断不变：等待第十三轮 6 小时 selfcheck 生成最终 JSON 并通过 evaluator；在最终回归/静态扫描和 Level 2 precheck 通过前，不进入 Level 2 live shadow，不开启 `ui_primary`。
+
 2026-05-29 23:56 +08:00 续作追加检查：
 
 - 已提交最终验收工具加固：`e51a43d Report shadow evaluator diagnostic log counts`。
