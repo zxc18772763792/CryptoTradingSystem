@@ -3443,6 +3443,86 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - `[PAPER] Order created`: `2`
 - 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
+
+- 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
+  - stdout/final JSON: `logs\paper_shadow_6h_selfcheck_20260529_222616.out.json`
+  - stderr/human summary: `logs\paper_shadow_6h_selfcheck_20260529_222616.err.log`
+  - human summary: `market-ws-shadow selfcheck: PASS`
+  - `sample_count=361`
+  - `ws_tick_delta=41290`
+  - `shadow_compare_delta=497`
+  - `shadow_compare_violation_delta=0`
+  - `invalid_payload_delta=0`
+  - `timestamp_regression_delta=0`
+  - `shadow_compare_stale_skip_delta=0`
+  - `feed_watch_timeout_delta=0`
+  - `feed_watch_error_delta=0`
+  - `feed_watch_empty_delta=0`
+  - `p99_abs_diff_bps=10.398513132117408`
+  - `p95_ws_age_ms=928.0`
+  - `max_stale_symbol_count_observed=0`
+  - `final_mode=shadow`
+  - `final_enabled=true`
+  - `final_feed_healthy=true`
+  - `final_ws_hub_healthy=true`
+  - `final_feed_last_error=null`
+- 已运行最终 evaluator：
+
+```powershell
+python scripts\evaluate_market_ws_shadow_report.py --report logs\paper_shadow_6h_selfcheck_20260529_222616.out.json --service-err-log logs\paper_shadow_6h_service_20260529_222616.err.log --expect-mode shadow --expect-runtime paper --min-samples 361 --min-ws-tick-delta 1 --min-shadow-compare-delta 1 --max-shadow-violation-delta 0 --max-invalid-payload-delta 0 --max-timestamp-regression-delta 0 --max-shadow-stale-skip-delta 0 --max-feed-watch-timeout-delta -1 --max-feed-watch-error-delta -1 --max-feed-watch-empty-delta 0 --max-stale-symbol-count 0 --max-price-diff-bps 20 --max-ws-age-p95-ms 10000 --max-log-count 0
+```
+
+结果：`market-ws-shadow-report evaluation: PASS`。
+
+- evaluator 硬污染计数均为 0：
+  - `paper_false=0`
+  - `paper_to_live=0`
+  - `exchange_watchdog=0`
+  - `gate_health=0`
+- evaluator 诊断计数已归档：
+  - `connector_binance_connect_timeout=2`
+  - `exchange_manager_binance_reconnected=11`
+  - `watch_tickers_timeout=0`
+  - `ccxt_pro_feed_binance_watch_error=513`
+  - `coinglass_rate_limit_backoff=0`
+  - `positions_live_json=15`
+  - `failed_to_persist_positions=4`
+  - `live_kline_fetch_timed_out=478`
+  - `get_klines_btc_15m_failed=22`
+  - `get_ticker_call=10`
+  - `unclosed_client_session=56`
+  - `paper_order_created=2`
+- 关键解释：
+  - 第十一轮 selfcheck 采样窗口本身通过，且 `feed_watch_error_delta=0`、`feed_watch_empty_delta=0`、`p95_ws_age_ms=928.0`、`p99_abs_diff_bps=10.3985` 均满足 Level 1 门禁。
+  - 但 selfcheck 在 2026-05-30 04:29 +08:00 左右结束后，服务继续运行；05:07 以后服务 stderr 出现大量 `ccxt_pro_feed[binance]: watch error` 与 `Unclosed client session`。这些不属于已通过 selfcheck 窗口的硬失败，但它们暴露了 WS feed 重连时 ccxt.pro client 资源释放不够稳的问题。
+  - 已修复 `core\marketdata\ccxt_pro_feed.py`：新增 `_close_client_safely()`，在 `client.close()` 抛错或未完整释放时兜底关闭 `session` / `aiohttp_session` / `client_session`，并让 `_reset_client()` 统一使用该 helper。
+  - 已补充 `tests\test_ccxt_pro_feed.py`：覆盖 watch error 后旧 client 在重连前关闭，以及 `client.close()` 失败时仍关闭底层 session。
+- 当前代码验证：
+
+```powershell
+python -m py_compile web\main.py core\marketdata\hub.py core\marketdata\runtime_price_provider.py core\marketdata\ccxt_pro_feed.py core\trading\position_manager.py scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py scripts\precheck_market_ws_live_shadow.py tests\test_ccxt_pro_feed.py
+rg -n "\.get_ticker\(" strategies core\trading core\utils -g "*.py"
+pytest tests\test_ccxt_pro_feed.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py -q
+pytest tests\test_runtime_price_provider.py tests\test_market_data_ws_ui_assets.py tests\test_market_data_hub.py tests\test_web_main_runtime_tasks.py tests\test_ccxt_pro_feed.py tests\test_ws_client_hardening.py tests\test_sensitive_api_auth.py tests\test_infra_fixes.py tests\test_startup_mode.py tests\test_order_manager_safety.py tests\test_strategy_order_routing.py tests\test_execution_engine_live_trade_review.py tests\test_account_scoped_live_paths.py tests\test_trading_balances_stale_prev_equity.py tests\test_strategy_runtime_policy.py tests\test_strategy_manager_runtime_data.py tests\test_content_quality_static.py tests\test_market_ws_shadow_selfcheck.py tests\test_execution_engine_protective_levels.py tests\test_market_ws_authority_static.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py tests\core\test_runtime_persistence.py::test_position_manager_persist_uses_unique_tmp_and_retries_replace -q
+pytest tests\test_execution_engine_protective_levels.py tests\test_exchanges.py -q
+git diff --check -- core\marketdata\ccxt_pro_feed.py tests\test_ccxt_pro_feed.py
+```
+
+结果：
+
+- `py_compile` 通过。
+- `.get_ticker(` 精确静态扫描无命中，`rg` exit code 为 `1`，符合预期。
+- WS 定向集合：`48 passed in 5.37s`。
+- 目标回归集合：`229 passed, 1 warning in 29.83s`。warning 仍为既有 `aiosqlite` 背景线程在 event loop close 后报告 `PytestUnhandledThreadExceptionWarning`。
+- 执行/交易所补充集合：`39 passed in 3.67s`。
+- `git diff --check` 通过。
+- 当前结论：
+  - 第十一轮报告证明修复前代码在 6 小时 selfcheck 窗口内满足 Level 1 paper shadow 门禁。
+  - 本次 WS feed client 关闭补强是进入更长 Level 2 live shadow 前必须保存的风险修复。
+  - 因该修复未被第十一轮 6 小时长跑覆盖，不能直接进入 Level 2 live shadow，也不能开启 `ui_primary`。
+  - 下一步应提交当前修复后，重新启动一轮 clean paper shadow，至少覆盖一次 WS feed watch error/reconnect 或完整 6 小时 selfcheck；通过后再运行 Level 2 precheck。
+
 2026-05-29 23:56 +08:00 续作追加检查：
 
 - 已提交最终验收工具加固：`e51a43d Report shadow evaluator diagnostic log counts`。
