@@ -3441,6 +3441,7 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - `get_ticker(`: `3`
   - `Unclosed client session`: `0`
   - `[PAPER] Order created`: `2`
+
 - 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
@@ -3599,6 +3600,86 @@ python scripts\selfcheck_market_ws_shadow.py --base-url http://127.0.0.1:8012 --
   - 由于 6 小时 selfcheck 尚未以可交接后台方式稳定启动并完成，不能把第十二轮视为 Level 1 最终验收。
   - 仍不得进入 Level 2 live shadow，不得开启 `ui_primary`。
   - 下一步优先修正受控长跑启动器；启动器稳定后，重新启动第十二轮 clean paper shadow 6 小时 selfcheck。
+
+2026-05-30 15:43 +08:00 第十三轮 current-code clean paper shadow 启动：
+
+- 背景：
+  - `197da22 Harden market WS feed client cleanup` 之后仍需要一轮覆盖当前代码的 clean paper shadow 6 小时长跑。
+  - 之前的第十二轮 60 秒 smoke 不能替代 6 小时验收；也不能进入 Level 2 live shadow 或开启 `ui_primary`。
+- 新增受控启动器：
+  - `scripts\market_ws_paper_shadow.ps1`
+  - 用 Windows Task Scheduler 启动 service/selfcheck，并在 `logs\paper_shadow_6h_*_<stamp>.cmd` 写出实际执行命令，避免长跑依赖当前 Codex 工具会话。
+  - 非提权环境注册 Task Scheduler 会返回 `New-ScheduledTaskAction : 拒绝访问`；已用提权 PowerShell 启动本轮计划任务。
+- 启动配置：
+  - `TRADING_MODE=paper`
+  - `ALLOW_PERSISTED_LIVE_MODE_START=false`
+  - `OPS_TOKEN=codex-paper-shadow-longrun-token-14`
+  - `MARKET_WS_ENABLED=true`
+  - `MARKET_WS_MODE=shadow`
+  - `MARKET_WS_FORCE_REST=false`
+  - `MARKET_WS_EXCHANGES=binance`
+  - `MARKET_WS_REST_RECONCILE_SEC=30`
+  - `MARKET_WS_WATCH_TIMEOUT_SEC=25`
+  - `MARKET_WS_MAX_PRICE_DIFF_BPS=20`
+  - `MARKET_WS_SYMBOL_MAX_AGE_SEC=10`
+  - `EXCHANGE_WATCHDOG_ENABLED=false`
+  - `COINGLASS_WORKER_ENABLED=false`
+  - `NEWS_BACKGROUND_ENABLED=false`
+  - `NEWS_LLM_BACKGROUND_ENABLED=false`
+  - `DATA_MAINTENANCE_ENABLED=false`
+  - `PUBLIC_MACRO_WORKERS_ENABLED=false`
+  - `PREMIUM_EXTERNAL_WORKERS_ENABLED=false`
+  - `ANALYTICS_HISTORY_ENABLED=false`
+- Service：
+  - Task: `CryptoMarketWsPaperShadow_service_20260530_153637`
+  - PID: `13116`
+  - URL: `http://127.0.0.1:8012`
+  - launch cmd: `logs\paper_shadow_6h_service_20260530_153637.cmd`
+  - stdout: `logs\paper_shadow_6h_service_20260530_153637.out.log`
+  - stderr: `logs\paper_shadow_6h_service_20260530_153637.err.log`
+  - metadata: `logs\paper_shadow_6h_service_20260530_153637.launch.json`
+- 启动后 ready 探测：
+  - `/health`、`/api/status`、`/api/market-data/status` 均返回 `200 OK`。
+  - `status=running`
+  - `trading_mode=paper`
+  - `market_ws_mode=shadow`
+  - `configured_enabled=True`
+- 启动期 stderr 诊断：
+  - 15:37 左右 Binance REST connector 首次 `exchangeInfo` transient 失败；随后 15:37:33 `Connector binance connected in 15.59s`，exchange manager 重新进入 `1/1 exchanges connected`。
+  - 该事件发生在 6 小时 selfcheck 启动前；不作为 Level 1 通过证据，最终 evaluator 仍需扫描 selfcheck 对应 service stderr。
+- 60 秒 smoke：
+  - 第一次 smoke 在启动 warm-up 早期失败：`sample_count=7`、`ws_tick_delta=113`、`shadow_compare_delta=0`、feed/watch/payload/timestamp/stale 均健康。结论：WS feed 已产 tick，但 shadow compare 未在该 60 秒窗口内递增，不能作为通过证据。
+  - warm-up 后状态：`ws_tick_count=229`、`shadow_compare_count=6`、`feed_healthy=True`、`ws_hub_healthy=True`。
+  - 第二次 60 秒 smoke 通过：
+    - `overall_ok=true`
+    - `sample_count=7`
+    - `ws_tick_delta=110`
+    - `shadow_compare_delta=2`
+    - `shadow_compare_violation_delta=0`
+    - `invalid_payload_delta=0`
+    - `timestamp_regression_delta=0`
+    - `shadow_compare_stale_skip_delta=0`
+    - `feed_watch_error_delta=0`
+    - `feed_watch_empty_delta=0`
+    - `feed_watch_timeout_delta=0`
+    - `watch_symbol_errors=0`
+    - `p99_abs_diff_bps=4.868065490383177`
+    - `p95_ws_age_ms=844.0`
+    - `final_runtime=paper`
+    - `final_configured_enabled=true`
+    - `final_fail_closed_for_live=true`
+- 6 小时 selfcheck：
+  - Task: `CryptoMarketWsPaperShadow_selfcheck_20260530_153637`
+  - selfcheck PID: `170852`
+  - launch cmd: `logs\paper_shadow_6h_selfcheck_20260530_153637.cmd`
+  - stdout/final JSON: `logs\paper_shadow_6h_selfcheck_20260530_153637.out.json`
+  - stderr/human summary: `logs\paper_shadow_6h_selfcheck_20260530_153637.err.log`
+  - metadata: `logs\paper_shadow_6h_selfcheck_20260530_153637.launch.json`
+  - 启动后状态：service task 和 selfcheck task 均为 `Running`；`8012` 监听 PID `13116`；selfcheck JSON/stderr 当前为 0 字节，符合 6 小时 selfcheck 结束前预期。
+  - 启动后 market WS 状态：`trading_mode=paper`、`market_ws.mode=shadow`、`configured_enabled=True`、`feed_healthy=True`、`ws_hub_healthy=True`、`ws_tick_count=655`、`shadow_compare_count=12`。
+- 本轮当前判断：
+  - 第十三轮已经进入 6 小时 current-code clean paper shadow 长跑。
+  - 在 `logs\paper_shadow_6h_selfcheck_20260530_153637.out.json` 生成最终 JSON、evaluator 通过、最终回归/静态扫描通过、Level 2 precheck 通过之前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
 2026-05-29 23:56 +08:00 续作追加检查：
 
