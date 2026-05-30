@@ -3523,6 +3523,83 @@ git diff --check -- core\marketdata\ccxt_pro_feed.py tests\test_ccxt_pro_feed.py
   - 因该修复未被第十一轮 6 小时长跑覆盖，不能直接进入 Level 2 live shadow，也不能开启 `ui_primary`。
   - 下一步应提交当前修复后，重新启动一轮 clean paper shadow，至少覆盖一次 WS feed watch error/reconnect 或完整 6 小时 selfcheck；通过后再运行 Level 2 precheck。
 
+2026-05-30 15:18 +08:00 第十二轮启动尝试与当前阻断：
+
+- 已提交当前修复：`197da22 Harden market WS feed client cleanup`。
+- 第十二轮受控服务配置沿用 clean paper shadow 模板：
+  - `TRADING_MODE=paper`
+  - `ALLOW_PERSISTED_LIVE_MODE_START=false`
+  - `OPS_TOKEN=codex-paper-shadow-longrun-token-12`
+  - `MARKET_WS_ENABLED=true`
+  - `MARKET_WS_MODE=shadow`
+  - `MARKET_WS_FORCE_REST=false`
+  - `MARKET_WS_EXCHANGES=binance`
+  - `EXCHANGE_WATCHDOG_ENABLED=false`
+  - `COINGLASS_WORKER_ENABLED=false`
+  - `NEWS_BACKGROUND_ENABLED=false`
+  - `NEWS_LLM_BACKGROUND_ENABLED=false`
+  - `DATA_MAINTENANCE_ENABLED=false`
+  - `PUBLIC_MACRO_WORKERS_ENABLED=false`
+  - `PREMIUM_EXTERNAL_WORKERS_ENABLED=false`
+  - `ANALYTICS_HISTORY_ENABLED=false`
+- 当前代码上第十二轮 60 秒 smoke 已通过：
+
+```powershell
+python scripts\selfcheck_market_ws_shadow.py --base-url http://127.0.0.1:8012 --token codex-paper-shadow-longrun-token-12 --duration-sec 60 --interval-sec 10 --min-samples 3 --min-ws-tick-delta 1 --min-shadow-compare-delta 1 --max-shadow-violation-delta 0 --max-invalid-payload-delta 0 --max-timestamp-regression-delta 0 --max-shadow-stale-skip-delta 0 --max-feed-watch-empty-delta 0 --max-stale-symbol-count 0 --max-price-diff-bps 20 --max-ws-age-p95-ms 10000
+```
+
+结果：
+
+- `overall_ok=true`
+- `sample_count=7`
+- `ws_tick_delta=98`
+- `shadow_compare_delta=2`
+- `shadow_compare_violation_delta=0`
+- `invalid_payload_delta=0`
+- `timestamp_regression_delta=0`
+- `shadow_compare_stale_skip_delta=0`
+- `rest_fallback_delta=0`
+- `feed_watch_attempt_delta=98`
+- `feed_watch_timeout_delta=0`
+- `feed_watch_error_delta=0`
+- `feed_watch_empty_delta=0`
+- `max_feed_watch_symbol_error_count_observed=0`
+- `p99_abs_diff_bps=4.954212304728709`
+- `p95_ws_age_ms=730.0`
+- `max_stale_symbol_count_observed=0`
+- `final_mode=shadow`
+- `final_trading_mode=paper`
+- `final_paper_trading=true`
+- `final_enabled=true`
+- `final_configured_enabled=true`
+- `final_fail_closed_for_live=true`
+- `final_feed_healthy=true`
+- `final_ws_hub_healthy=true`
+- `final_feed_watch_symbols=["binance:ETH/USDT","binance:BTC/USDT"]`
+- `final_feed_watch_symbol_errors=[]`
+- `final_feed_last_error=null`
+- 受控启动日志确认 runtime tasks 为 `ai_research_scheduler, circuit_breaker_monitor, cusum_monitor, market_ws_feed, runtime`，不包含 `coinglass`、`exchange_watchdog`、`news` 或 `news_llm`。
+- 启动器问题：
+  - 当前桌面工具会话中同时存在 `PATH` 与 `Path` 环境键，`Start-Process` 默认环境会报 `An item with the same key has already been added`。
+  - 修正进程环境后，`Start-Process` 能创建进程，但用于长跑的 Python 子进程未稳定保活，输出文件保持 0 字节。
+  - `subprocess.Popen` 启动的子进程会随工具命令结束被清理，不能作为 6 小时长跑交接方式。
+  - `schtasks` 在当前上下文返回 `ERROR: The system cannot find the path specified.`，暂未能作为替代启动器。
+  - `cmd /c start` 能运行短命令 probe，但用于 uvicorn 时没有稳定保留服务进程。
+- 当前清理状态：
+  - `127.0.0.1:8012` 已释放。
+  - 没有留下半运行的第十二轮服务或 selfcheck 进程。
+  - 运行工件保留：
+    - `logs\launch_paper_shadow_20260530_151200.cmd`
+    - `logs\paper_shadow_6h_service_20260530_151200.out.log`
+    - `logs\paper_shadow_6h_service_20260530_151200.err.log`
+    - `logs\paper_shadow_6h_selfcheck_20260530_151100.out.json`（0 字节，未作为证据）
+    - `logs\paper_shadow_6h_selfcheck_20260530_151100.err.log`（0 字节，未作为证据）
+- 当前结论：
+  - 当前提交已通过代码回归与 60 秒 paper/shadow smoke。
+  - 由于 6 小时 selfcheck 尚未以可交接后台方式稳定启动并完成，不能把第十二轮视为 Level 1 最终验收。
+  - 仍不得进入 Level 2 live shadow，不得开启 `ui_primary`。
+  - 下一步优先修正受控长跑启动器；启动器稳定后，重新启动第十二轮 clean paper shadow 6 小时 selfcheck。
+
 2026-05-29 23:56 +08:00 续作追加检查：
 
 - 已提交最终验收工具加固：`e51a43d Report shadow evaluator diagnostic log counts`。
