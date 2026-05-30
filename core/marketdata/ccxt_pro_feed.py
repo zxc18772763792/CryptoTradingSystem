@@ -57,6 +57,42 @@ async def _cancel_task(task: "asyncio.Future") -> None:
             await task
 
 
+def _consume_task_result(task: asyncio.Future) -> None:
+    with contextlib.suppress(BaseException):
+        task.result()
+
+
+async def _await_close_result(result: Any) -> None:
+    if result is None:
+        return
+    if asyncio.iscoroutine(result):
+        task = asyncio.create_task(result)
+    elif isinstance(result, asyncio.Future):
+        task = result
+    else:
+        return
+    task.add_done_callback(_consume_task_result)
+    with contextlib.suppress(BaseException):
+        await asyncio.shield(task)
+
+
+async def _close_client_safely(client: Any) -> None:
+    """Close ccxt/ccxt.pro clients and any leaked aiohttp session fallback."""
+    close = getattr(client, "close", None)
+    if callable(close):
+        with contextlib.suppress(BaseException):
+            await _await_close_result(close())
+
+    for attr in ("session", "aiohttp_session", "client_session"):
+        session = getattr(client, attr, None)
+        if session is None or bool(getattr(session, "closed", False)):
+            continue
+        session_close = getattr(session, "close", None)
+        if callable(session_close):
+            with contextlib.suppress(BaseException):
+                await _await_close_result(session_close())
+
+
 def _proxy_url() -> Optional[str]:
     raw = str(
         getattr(settings, "HTTP_PROXY", "")
@@ -382,8 +418,7 @@ class CcxtProMarketFeed:
     async def _reset_client(self, name: str) -> None:
         client = self._clients.pop(name, None)
         if client is not None:
-            with contextlib.suppress(Exception):
-                await client.close()
+            await _close_client_safely(client)
 
     async def _close_all_clients(self) -> None:
         for name in list(self._clients.keys()):

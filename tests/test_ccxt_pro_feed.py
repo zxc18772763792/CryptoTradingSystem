@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from core.marketdata.ccxt_pro_feed import CcxtProMarketFeed
+from core.marketdata.ccxt_pro_feed import CcxtProMarketFeed, _close_client_safely
 
 
 class _FakeProClient:
@@ -33,6 +33,14 @@ class _FakeProClient:
         # Emulate a quiet market: block until the caller's wait_for times out
         # or the task is cancelled.
         await asyncio.sleep(3600)
+
+    async def close(self):
+        self.closed = True
+
+
+class _FakeSession:
+    def __init__(self):
+        self.closed = False
 
     async def close(self):
         self.closed = True
@@ -248,6 +256,58 @@ async def test_watch_error_triggers_reconnect_then_recovers():
 
     assert received, "feed should recover and push after a transient error"
     assert received[0]["binance"]["BTC/USDT"]["last"] == 42.0
+
+
+async def test_watch_error_closes_old_client_before_reconnect():
+    class _BrokenThenHealthyClient(_FakeProClient):
+        def __init__(self, *, broken: bool):
+            super().__init__([{"BTC/USDT": {"last": 42.0, "timestamp": 1_700_000_000_000}}])
+            self._broken = broken
+
+        async def watch_tickers(self, symbols):
+            self.watch_symbols.append(list(symbols))
+            if self._broken:
+                raise RuntimeError("socket dropped")
+            return await super().watch_tickers(symbols)
+
+    broken_client = _BrokenThenHealthyClient(broken=True)
+    healthy_client = _BrokenThenHealthyClient(broken=False)
+    clients = [broken_client, healthy_client]
+    received: list = []
+    feed = _make_feed(clients[0], received)
+    feed._build_client = lambda name: clients.pop(0)  # type: ignore[method-assign]
+    feed._reconnect_min_sec = 0.01
+    feed._reconnect_max_sec = 0.02
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(feed.run(stop))
+    for _ in range(100):
+        if received:
+            break
+        await asyncio.sleep(0.02)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert received
+    assert clients == []
+    assert broken_client.closed is True
+    assert healthy_client.closed is True
+    assert feed.status_snapshot()["watch_error_count"] >= 1
+
+
+async def test_close_client_safely_closes_session_when_client_close_fails():
+    class _LeakyClient:
+        def __init__(self):
+            self.session = _FakeSession()
+
+        async def close(self):
+            raise RuntimeError("close failed before session cleanup")
+
+    client = _LeakyClient()
+
+    await _close_client_safely(client)
+
+    assert client.session.closed is True
 
 
 async def test_run_noops_without_exchanges():
