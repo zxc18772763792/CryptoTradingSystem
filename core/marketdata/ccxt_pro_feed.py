@@ -139,6 +139,10 @@ class CcxtProMarketFeed:
         self._last_payload_symbol_count: Dict[str, int] = {}
         self._client_default_type: Dict[str, str] = {}
         self._client_rest_default_type: Dict[str, str] = {}
+        self._market_cache: Dict[str, Dict[str, Any]] = {}
+        self._currency_cache: Dict[str, Dict[str, Any]] = {}
+        self._market_cache_loaded_at: Dict[str, str] = {}
+        self._market_cache_used_count: Dict[str, int] = {}
 
     # ── public API ────────────────────────────────────────────────────────
     def is_healthy(self, *, max_age_sec: Optional[float] = None) -> bool:
@@ -183,6 +187,9 @@ class CcxtProMarketFeed:
                 "last_payload_symbol_count": int(self._last_payload_symbol_count.get(name, 0)),
                 "default_type": self._client_default_type.get(name),
                 "rest_default_type": self._client_rest_default_type.get(name),
+                "market_cache_symbol_count": len(self._market_cache.get(name, {})),
+                "market_cache_loaded_at": self._market_cache_loaded_at.get(name),
+                "market_cache_used_count": int(self._market_cache_used_count.get(name, 0)),
             }
         errors = [err for err in self._last_error.values() if err]
         return {
@@ -282,8 +289,21 @@ class CcxtProMarketFeed:
                 if client is None:
                     return  # unrecoverable: this exchange has no ws support
                 self._clients[name] = client
-                with contextlib.suppress(Exception):
-                    await client.load_markets()
+                try:
+                    await self._prepare_client_markets(name, client)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._watch_error_count[name] = self._watch_error_count.get(name, 0) + 1
+                    self._last_error[name] = f"{type(exc).__name__}: {exc}"
+                    logger.debug(
+                        f"ccxt_pro_feed[{name}]: load_markets failed: {exc}; "
+                        f"reconnecting in {backoff:.1f}s"
+                    )
+                    await self._reset_client(name)
+                    await self._sleep_or_stop(stop_event, backoff)
+                    backoff = min(self._reconnect_max_sec, backoff * 2.0)
+                    continue
 
             symbols = self._current_symbols()
             if not symbols:
@@ -351,6 +371,41 @@ class CcxtProMarketFeed:
                 await self._on_tick({name: payload})
             except Exception as exc:  # never let a consumer error kill the loop
                 logger.debug(f"ccxt_pro_feed[{name}]: on_tick callback failed: {exc}")
+
+    async def _prepare_client_markets(self, name: str, client: Any) -> None:
+        if self._apply_cached_markets(name, client):
+            return
+
+        await client.load_markets()
+        self._remember_client_markets(name, client)
+
+    def _apply_cached_markets(self, name: str, client: Any) -> bool:
+        markets = self._market_cache.get(name)
+        if not markets:
+            return False
+        set_markets = getattr(client, "set_markets", None)
+        if not callable(set_markets):
+            return False
+
+        currencies = self._currency_cache.get(name)
+        set_markets(markets, currencies)
+        self._market_cache_used_count[name] = self._market_cache_used_count.get(name, 0) + 1
+        logger.debug(
+            "ccxt_pro_feed[{}]: restored {} cached markets for reconnect",
+            name,
+            len(markets),
+        )
+        return True
+
+    def _remember_client_markets(self, name: str, client: Any) -> None:
+        markets = getattr(client, "markets", None)
+        if not isinstance(markets, dict) or not markets:
+            return
+        self._market_cache[name] = markets
+        currencies = getattr(client, "currencies", None)
+        if isinstance(currencies, dict):
+            self._currency_cache[name] = currencies
+        self._market_cache_loaded_at[name] = self._now_iso()
 
     def _current_symbols(self) -> List[str]:
         try:
