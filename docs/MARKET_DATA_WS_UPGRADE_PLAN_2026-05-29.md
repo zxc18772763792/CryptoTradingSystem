@@ -3704,6 +3704,65 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - 不能宣称 Level 1 通过；必须等待最终 selfcheck JSON 生成后运行 evaluator、最终回归/静态扫描和 Level 2 precheck。
   - 不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
 
+2026-05-31 17:49 +08:00 第十四轮继续观察与运行中回归：
+
+- 第十四轮 selfcheck 仍在运行：
+  - `Port 8012 listening PID=158156`
+  - `Selfcheck processes: 187340`
+  - `CryptoMarketWsPaperShadow_service_20260531_170100: Running`
+  - `CryptoMarketWsPaperShadow_selfcheck_20260531_170100: Running`
+  - `Runtime status=running trading_mode=paper paper_trading=True`
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.out.json`：`0` 字节。
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.err.log`：`0` 字节。
+- `/api/status` 与 `/api/market-data/status` 关键指标：
+  - `status=running`
+  - `trading_mode=paper`
+  - `paper_trading=true`
+  - `market_ws.mode=shadow`
+  - `market_ws.configured_enabled=true`
+  - `market_ws.enabled=true`
+  - `market_ws.force_rest=false`
+  - `market_ws.fail_closed_for_live=true`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.ws_tick_count=3962`
+  - `market_ws.rest_snapshot_count=255`
+  - `market_ws.shadow_compare_count=87`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.stale_symbol_count=0`
+  - `market_ws.last_tick_age_ms=316`
+  - `market_ws.shadow_max_abs_diff_bps=8.094408441876226`
+  - `market_ws.feed_watch_attempt_count=3966`
+  - `market_ws.feed_watch_timeout_count=3`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.feed_status.exchanges.binance.market_cache_symbol_count=4377`
+  - `market_ws.feed_status.exchanges.binance.market_cache_used_count=0`
+  - `market_ws.feed_status.exchanges.binance.last_symbols=["ETH/USDT","BTC/USDT"]`
+- service stderr 计数：
+  - `watch_tickers timeout`: `3`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `Live kline fetch timed out`: `1`
+  - `Unclosed client session`: `0`
+  - `exchange_watchdog`: `0`
+  - `ExchangeNotAvailable`: `0`
+- 运行中非变更回归：
+  - `python -m pytest tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_authority_static.py -q`，`11 passed in 4.95s`。
+  - `python -m py_compile scripts\precheck_market_ws_live_shadow.py scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_authority_static.py` 通过。
+  - `rg -n "\.get_ticker\(" strategies core\trading core\utils -g "*.py"` 无命中，`rg` exit code 为 `1`，符合预期。
+  - `python -m pytest tests\test_ccxt_pro_feed.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_shadow_launcher_assets.py -q`，`53 passed in 5.39s`。
+  - `python -m py_compile core\marketdata\ccxt_pro_feed.py scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py scripts\precheck_market_ws_live_shadow.py tests\test_ccxt_pro_feed.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py` 通过。
+  - `git diff --check` 通过。
+- 当前判断：
+  - 运行中回归和静态扫描没有发现 Phase2 WS 门禁退化。
+  - 这些检查仍不能替代最终 6 小时 selfcheck JSON/evaluator。
+  - 第十四轮最终通过、最终回归/静态扫描和 Level 2 precheck 通过前，不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
