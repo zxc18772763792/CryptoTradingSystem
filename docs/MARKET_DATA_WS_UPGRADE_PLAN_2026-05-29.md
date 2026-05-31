@@ -3589,6 +3589,66 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - 不使用 `strategy_primary` 做 live observation。
   - 等待 6 小时 selfcheck 生成最终 JSON 后，必须运行最终 evaluator、最终回归/静态扫描和 Level 2 precheck。
 
+2026-05-31 17:24 +08:00 第十四轮中途健康检查：
+
+- 运行状态：
+  - `Port 8012 listening PID=158156`
+  - `Selfcheck processes: 187340`
+  - `CryptoMarketWsPaperShadow_service_20260531_170100: Running`
+  - `CryptoMarketWsPaperShadow_selfcheck_20260531_170100: Running`
+  - `Runtime status=running trading_mode=paper paper_trading=True`
+- selfcheck 文件：
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.out.json`：`0` 字节。
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.err.log`：`0` 字节。
+  - 0 字节符合 6 小时 selfcheck 结束前预期，不作为通过证据。
+- `/api/market-data/status` 关键指标：
+  - `mode=shadow`
+  - `configured_enabled=true`
+  - `force_rest=false`
+  - `fail_closed_for_live=true`
+  - `feed_healthy=true`
+  - `ws_hub_healthy=true`
+  - `feed_last_error=null`
+  - `ws_tick_count=1700`
+  - `rest_snapshot_count=112`
+  - `shadow_compare_count=38`
+  - `shadow_compare_violation_count=0`
+  - `shadow_compare_stale_skip_count=0`
+  - `invalid_payload_count=0`
+  - `timestamp_regression_count=0`
+  - `ws_stale_symbol_count=0`
+  - `last_tick_age_ms=101`
+  - `shadow_max_abs_diff_bps=5.484189723319664`
+  - `feed_watch_attempt_count=1704`
+  - `feed_watch_timeout_count=3`
+  - `feed_watch_error_count=0`
+  - `feed_watch_empty_count=0`
+  - `feed_status.exchanges.binance.market_cache_symbol_count=4377`
+  - `feed_status.exchanges.binance.market_cache_used_count=0`
+  - `feed_status.exchanges.binance.last_symbols=["ETH/USDT","BTC/USDT"]`
+- service stderr 计数：
+  - `Connector binance connect timed out`: `0`
+  - `exchange_manager: binance reconnected`: `0`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `exchange_watchdog`: `0`
+  - `Health check failed for gate`: `0`
+  - `watch_tickers timeout`: `3`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `coinglass: rate-limit backoff`: `0`
+  - `positions_live.json`: `0`
+  - `Failed to persist positions`: `0`
+  - `Live kline fetch timed out`: `1`
+  - `get_klines(BTC/USDT, 15m) failed`: `0`
+  - `get_ticker(`: `0`
+  - `Unclosed client session`: `0`
+  - `[PAPER] Order created`: `0`
+- 当前判断：
+  - 中途 feed/hub 证据健康，且无 live scope / exchange_watchdog / watch error / unclosed-session 污染。
+  - `watch_tickers timeout` 目前作为诊断项记录，不单独阻断；最终仍以 selfcheck JSON 和 evaluator 门禁为准。
+  - 不能宣称 Level 1 通过。
+  - 不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
