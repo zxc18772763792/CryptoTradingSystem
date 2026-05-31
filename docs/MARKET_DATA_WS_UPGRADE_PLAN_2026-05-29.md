@@ -3649,6 +3649,61 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - 不能宣称 Level 1 通过。
   - 不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
 
+2026-05-31 17:30 +08:00 第十四轮继续观察：
+
+- 运行状态：
+  - `Port 8012 listening PID=158156`
+  - `Selfcheck processes: 187340`
+  - `CryptoMarketWsPaperShadow_service_20260531_170100: Running`
+  - `CryptoMarketWsPaperShadow_selfcheck_20260531_170100: Running`
+  - `Runtime status=running trading_mode=paper paper_trading=True`
+- selfcheck 文件：
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.out.json`：`0` 字节。
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.err.log`：`0` 字节。
+  - 0 字节仍符合 6 小时 selfcheck 结束前预期，不作为通过证据。
+- `/api/status` 与 `/api/market-data/status` 关键指标：
+  - `status=running`
+  - `trading_mode=paper`
+  - `paper_trading=true`
+  - `market_ws.mode=shadow`
+  - `market_ws.configured_enabled=true`
+  - `market_ws.enabled=true`
+  - `market_ws.force_rest=false`
+  - `market_ws.fail_closed_for_live=true`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.ws_tick_count=2284`
+  - `market_ws.rest_snapshot_count=150`
+  - `market_ws.shadow_compare_count=52`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.stale_symbol_count=0`
+  - `market_ws.last_tick_age_ms=142`
+  - `market_ws.shadow_max_abs_diff_bps=8.094408441876226`
+  - `market_ws.feed_watch_attempt_count=2288`
+  - `market_ws.feed_watch_timeout_count=3`
+  - `market_ws.feed_watch_error_count=0`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.feed_status.exchanges.binance.market_cache_symbol_count=4377`
+  - `market_ws.feed_status.exchanges.binance.market_cache_used_count=0`
+  - `market_ws.feed_status.exchanges.binance.last_symbols=["ETH/USDT","BTC/USDT"]`
+- service stderr 计数：
+  - `watch_tickers timeout`: `3`
+  - `ccxt_pro_feed[binance]: watch error`: `0`
+  - `Live kline fetch timed out`: `1`
+  - `Unclosed client session`: `0`
+  - `exchange_watchdog`: `0`
+  - `ExchangeNotAvailable`: `0`
+- 当前判断：
+  - 第十四轮仍在 Level 1 paper shadow 6 小时长跑中，运行中证据继续健康。
+  - 三次 `watch_tickers timeout` 是已恢复诊断项；当前没有 watch error、stale symbol、compare violation、invalid payload、timestamp regression 或 unclosed-session 污染。
+  - 不能宣称 Level 1 通过；必须等待最终 selfcheck JSON 生成后运行 evaluator、最终回归/静态扫描和 Level 2 precheck。
+  - 不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
