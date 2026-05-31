@@ -3512,6 +3512,83 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - 重新启动 current-code clean paper shadow，先做短 smoke，再做 6 小时 selfcheck。
   - 只有新的 Level 1 paper shadow 最终 JSON、evaluator、最终回归/静态扫描全部通过后，才允许运行 Level 2 precheck。
 
+2026-05-31 17:20 +08:00 第十四轮 current-code clean paper shadow 启动：
+
+- 已提交 WS feed 重连修复：`0d4dbb8 Cache WS feed markets across reconnects`。
+- 已提交 selfcheck 采样加固：`4e87550 Keep WS shadow selfcheck sampling after probe errors`。
+- selfcheck 加固原因：
+  - 第十四轮启动后第一次 60 秒 smoke 遇到一次 `/health` read timeout，旧脚本直接中止并产生 `samples=[]`。
+  - 同时服务状态仍显示 `paper` / `MARKET_WS_MODE=shadow` / feed+hub healthy，后续延迟探针显示 `/health`、`/api/status`、`/api/market-data/status` 均恢复为毫秒级响应。
+  - 新脚本会把单次 HTTP probe 异常记录为失败 sample 并继续采样；该异常仍会让本次 selfcheck 失败，但不会丢失后续有效样本和 feed 指标。
+- 加固验证：
+  - `python -m py_compile scripts\selfcheck_market_ws_shadow.py tests\test_market_ws_shadow_selfcheck.py` 通过。
+  - `python -m pytest tests\test_market_ws_shadow_selfcheck.py -q`，`13 passed in 6.35s`。
+  - `python -m pytest tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_shadow_launcher_assets.py -q`，`40 passed in 6.17s`。
+  - `python -m py_compile scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py` 通过。
+  - `git diff --check -- scripts/selfcheck_market_ws_shadow.py tests/test_market_ws_shadow_selfcheck.py` 通过。
+- 新服务：
+  - service task: `CryptoMarketWsPaperShadow_service_20260531_170100`
+  - service PID: `158156`
+  - token: `codex-paper-shadow-longrun-token-15`
+  - service launch cmd: `logs\paper_shadow_6h_service_20260531_170100.cmd`
+  - service stdout: `logs\paper_shadow_6h_service_20260531_170100.out.log`
+  - service stderr: `logs\paper_shadow_6h_service_20260531_170100.err.log`
+  - service metadata: `logs\paper_shadow_6h_service_20260531_170100.launch.json`
+- 启动配置复核：
+  - `TRADING_MODE=paper`
+  - `ALLOW_PERSISTED_LIVE_MODE_START=false`
+  - `MARKET_WS_ENABLED=true`
+  - `MARKET_WS_MODE=shadow`
+  - `MARKET_WS_FORCE_REST=false`
+  - `MARKET_WS_EXCHANGES=binance`
+  - `EXCHANGE_WATCHDOG_ENABLED=false`
+  - `COINGLASS_WORKER_ENABLED=false`
+  - `NEWS_BACKGROUND_ENABLED=false`
+  - `NEWS_LLM_BACKGROUND_ENABLED=false`
+  - `ANALYTICS_HISTORY_ENABLED=false`
+- 通过的 60 秒 smoke：
+  - `overall_ok=true`
+  - `sample_count=7`
+  - `valid_sample_count=7`
+  - `sample_error_count=0`
+  - `ws_tick_delta=100`
+  - `shadow_compare_delta=2`
+  - `shadow_compare_violation_delta=0`
+  - `invalid_payload_delta=0`
+  - `timestamp_regression_delta=0`
+  - `shadow_compare_stale_skip_delta=0`
+  - `feed_watch_error_delta=0`
+  - `feed_watch_empty_delta=0`
+  - `feed_watch_timeout_delta=0`
+  - `max_feed_watch_symbol_error_count_observed=0`
+  - `max_stale_symbol_count_observed=0`
+  - `p99_abs_diff_bps=3.706150206018184`
+  - `p95_ws_age_ms=351.0`
+  - `final_trading_mode=paper`
+  - `final_fail_closed_for_live=true`
+  - `final_feed_healthy=true`
+  - `final_ws_hub_healthy=true`
+  - `final_feed_last_error=null`
+- 6 小时 selfcheck 已启动：
+  - selfcheck task: `CryptoMarketWsPaperShadow_selfcheck_20260531_170100`
+  - selfcheck PID: `187340`
+  - selfcheck launch cmd: `logs\paper_shadow_6h_selfcheck_20260531_170100.cmd`
+  - selfcheck stdout/final JSON: `logs\paper_shadow_6h_selfcheck_20260531_170100.out.json`
+  - selfcheck stderr: `logs\paper_shadow_6h_selfcheck_20260531_170100.err.log`
+  - selfcheck metadata: `logs\paper_shadow_6h_selfcheck_20260531_170100.launch.json`
+  - 当前 `out.json` 与 `err.log` 均为 0 字节，符合长跑结束前预期。
+- 当前状态：
+  - `Port 8012 listening PID=158156`
+  - `Selfcheck processes: 187340`
+  - `Runtime status=running trading_mode=paper paper_trading=True`
+  - `Market WS mode=shadow configured_enabled=True feed_healthy=True ws_hub_healthy=True ws_tick_count=1315 shadow_compare_count=30`
+- 当前判断：
+  - 第十四轮只是在运行中，不能宣称 Level 1 通过。
+  - 不进入 Level 2 live shadow。
+  - 不开启 `ui_primary`。
+  - 不使用 `strategy_primary` 做 live observation。
+  - 等待 6 小时 selfcheck 生成最终 JSON 后，必须运行最终 evaluator、最终回归/静态扫描和 Level 2 precheck。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
