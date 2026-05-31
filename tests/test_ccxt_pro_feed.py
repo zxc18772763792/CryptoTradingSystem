@@ -20,11 +20,21 @@ class _FakeProClient:
         self._batches = list(batches)
         self.closed = False
         self.load_markets_called = False
+        self.markets = {}
+        self.currencies = {}
+        self.set_markets_calls = []
         self.watch_symbols = []
 
     async def load_markets(self):
         self.load_markets_called = True
+        if not self.markets:
+            self.markets = {"BTC/USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT"}}
         return {}
+
+    def set_markets(self, markets, currencies=None):
+        self.set_markets_calls.append((markets, currencies))
+        self.markets = markets
+        self.currencies = currencies or {}
 
     async def watch_tickers(self, symbols):
         self.watch_symbols.append(list(symbols))
@@ -293,6 +303,55 @@ async def test_watch_error_closes_old_client_before_reconnect():
     assert broken_client.closed is True
     assert healthy_client.closed is True
     assert feed.status_snapshot()["watch_error_count"] >= 1
+
+
+async def test_reconnect_reuses_cached_markets_without_rest_reload():
+    class _InitialClient(_FakeProClient):
+        def __init__(self):
+            super().__init__([{"BTC/USDT": {"last": 100.0, "timestamp": 1_700_000_000_000}}])
+            self.markets = {
+                "BTC/USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT"},
+                "ETH/USDT": {"id": "ETHUSDT", "symbol": "ETH/USDT"},
+            }
+            self.currencies = {"USDT": {"code": "USDT"}}
+
+        async def watch_tickers(self, symbols):
+            self.watch_symbols.append(list(symbols))
+            if self._batches:
+                return self._batches.pop(0)
+            raise RuntimeError("remote closed socket")
+
+    class _ReconnectClient(_FakeProClient):
+        async def load_markets(self):
+            self.load_markets_called = True
+            raise RuntimeError("REST exchangeInfo unavailable")
+
+    first_client = _InitialClient()
+    second_client = _ReconnectClient(
+        [{"BTC/USDT": {"last": 101.0, "timestamp": 1_700_000_001_000}}]
+    )
+    clients = [first_client, second_client]
+    received: list = []
+    feed = _make_feed(clients[0], received)
+    feed._build_client = lambda name: clients.pop(0)  # type: ignore[method-assign]
+    feed._reconnect_min_sec = 0.01
+    feed._reconnect_max_sec = 0.02
+    stop = asyncio.Event()
+
+    task = asyncio.create_task(feed.run(stop))
+    for _ in range(100):
+        if len(received) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    stop.set()
+    await asyncio.wait_for(task, timeout=5.0)
+
+    assert [batch["binance"]["BTC/USDT"]["last"] for batch in received[:2]] == [100.0, 101.0]
+    assert first_client.load_markets_called is True
+    assert second_client.load_markets_called is False
+    assert second_client.set_markets_calls == [(first_client.markets, first_client.currencies)]
+    assert feed.status_snapshot()["exchanges"]["binance"]["market_cache_symbol_count"] == 2
+    assert feed.status_snapshot()["exchanges"]["binance"]["market_cache_used_count"] >= 1
 
 
 async def test_close_client_safely_closes_session_when_client_close_fails():

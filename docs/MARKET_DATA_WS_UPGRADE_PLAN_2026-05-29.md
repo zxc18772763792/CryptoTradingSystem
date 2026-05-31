@@ -3444,6 +3444,74 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
 
 - 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-05-31 16:56 +08:00 第十三轮最终评估与重连修复：
+
+- 第十三轮 current-code clean paper shadow 最终没有通过 Level 1。
+- 运行状态复核：
+  - `Port 8012 is not listening.`
+  - `Selfcheck processes: none`
+  - `CryptoMarketWsPaperShadow_service_20260530_153637: Ready`
+  - `CryptoMarketWsPaperShadow_selfcheck_20260530_153637: Ready`
+- 最终报告：
+  - `logs\paper_shadow_6h_selfcheck_20260530_153637.out.json`
+  - `logs\paper_shadow_6h_selfcheck_20260530_153637.err.log`
+  - `logs\paper_shadow_6h_service_20260530_153637.err.log`
+- 最终 evaluator 结果：`market-ws-shadow-report evaluation: FAIL`。
+- 关键 summary：
+  - `overall_ok=false`
+  - `started_at=2026-05-30T07:43:04.810843+00:00`
+  - `finished_at=2026-05-30T13:43:30.357709+00:00`
+  - `sample_count=361`
+  - `ws_tick_delta=2689`
+  - `shadow_compare_delta=50`
+  - `shadow_compare_violation_delta=0`
+  - `invalid_payload_delta=0`
+  - `timestamp_regression_delta=0`
+  - `shadow_compare_stale_skip_delta=0`
+  - `feed_watch_error_delta=581`
+  - `max_feed_watch_symbol_error_count_observed=4`
+  - `max_stale_symbol_count_observed=2`
+  - `p99_abs_diff_bps=5.302094288464259`
+  - `p95_ws_age_ms=1809.0`
+  - `final_trading_mode=paper`
+  - `final_configured_enabled=true`
+  - `final_fail_closed_for_live=true`
+  - `final_feed_healthy=false`
+  - `final_ws_hub_healthy=false`
+  - `final_feed_last_error="ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo"`
+- 硬失败从 `sample[26]` 开始：
+  - `ws_stale_symbol_count>0`
+  - `market WS watched symbol is stale: binance:BTC/USDT`
+  - `market WS watched symbol age 34732.0 ms exceeds 10000.0 ms: binance:BTC/USDT`
+  - `market WS watched symbol is stale: binance:ETH/USDT`
+  - `market WS watched symbol age 34725.0 ms exceeds 10000.0 ms: binance:ETH/USDT`
+- 服务 stderr 时间线显示：
+  - 2026-05-30 16:08 左右先出现 `Connection closed by remote server, closing code 1006`。
+  - 之后 WS feed 重连阶段反复失败在 `binance GET https://api.binance.com/api/v3/exchangeInfo`。
+  - 同期 REST connector/kline 也反复失败在 `fapi.binance.com`、`api.binance.com`、`sapi/v1/capital/config/getall`。
+  - evaluator 诊断计数中 `ccxt_pro_feed_binance_watch_error=1189`、`get_klines_btc_15m_failed=589`、`connector_binance_connect_timeout=2`、`unclosed_client_session=0`。
+- 结论：
+  - Level 1 paper shadow 未通过。
+  - 不进入 Level 2 live shadow。
+  - 不开启 `ui_primary`。
+  - 不使用 `strategy_primary` 做 live observation。
+  - 继续保持 REST fallback/fail-closed 路径作为权威保护。
+- 代码修复：
+  - `CcxtProMarketFeed` 在首次成功 `load_markets()` 后缓存 per-exchange `markets` / `currencies`。
+  - 后续同进程重连时，若缓存存在且新 client 支持 `set_markets()`，优先注入缓存，不再每次重连都强依赖 Binance REST `exchangeInfo`。
+  - 首次启动仍要求真实 `load_markets()` 成功；该修复只覆盖“已成功启动过、运行中远端断开、重连时 REST exchangeInfo 临时不可达”的第十三轮失败形态。
+  - `/api/status` / `/api/market-data/status` 的 feed status 新增 `market_cache_symbol_count`、`market_cache_loaded_at`、`market_cache_used_count` 诊断字段。
+- 本轮验证：
+  - `python -m py_compile core\marketdata\ccxt_pro_feed.py tests\test_ccxt_pro_feed.py` 通过。
+  - `python -m pytest tests\test_ccxt_pro_feed.py -q`，`13 passed in 5.50s`。
+  - `python -m pytest tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_shadow_launcher_assets.py -q`，`38 passed in 4.49s`。
+  - `python -m py_compile core\marketdata\ccxt_pro_feed.py scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py scripts\precheck_market_ws_live_shadow.py tests\test_ccxt_pro_feed.py` 通过。
+  - `git diff --check -- core/marketdata/ccxt_pro_feed.py tests/test_ccxt_pro_feed.py` 通过。
+- 下一步：
+  - 提交该修复。
+  - 重新启动 current-code clean paper shadow，先做短 smoke，再做 6 小时 selfcheck。
+  - 只有新的 Level 1 paper shadow 最终 JSON、evaluator、最终回归/静态扫描全部通过后，才允许运行 Level 2 precheck。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
