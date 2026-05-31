@@ -162,6 +162,7 @@ def _extract_sample(base_url: str, token: str, timeout: float) -> Dict[str, Any]
     watched_symbols, watched_symbol_errors = _watched_symbol_errors(market_ws)
     return {
         "sampled_at": sampled_at,
+        "sample_ok": True,
         "health_status_code": health["status_code"],
         "status_status_code": status["status_code"],
         "market_status_code": market["status_code"],
@@ -219,6 +220,14 @@ def _extract_sample(base_url: str, token: str, timeout: float) -> Dict[str, Any]
     }
 
 
+def _failed_sample(error: Exception) -> Dict[str, Any]:
+    return {
+        "sampled_at": datetime.now(timezone.utc).isoformat(),
+        "sample_ok": False,
+        "sample_error": f"{type(error).__name__}: {error}",
+    }
+
+
 def _delta(samples: List[Dict[str, Any]], key: str) -> int:
     if not samples:
         return 0
@@ -228,6 +237,7 @@ def _delta(samples: List[Dict[str, Any]], key: str) -> int:
 def _evaluate_samples(
     samples: List[Dict[str, Any]],
     *,
+    min_samples: int,
     expect_mode: str,
     expect_runtime: str,
     min_ws_tick_delta: int,
@@ -248,6 +258,9 @@ def _evaluate_samples(
     runtime = str(expect_runtime or "paper").strip().lower()
     for index, sample in enumerate(samples):
         prefix = f"sample[{index}]"
+        if sample.get("sample_error"):
+            errors.append(f"{prefix}: sample request failed: {sample.get('sample_error')}")
+            continue
         if sample.get("health_status_code") != 200 or str(sample.get("health_status")).lower() not in {"healthy", "running"}:
             errors.append(f"{prefix}: /health not healthy")
         if sample.get("status_status_code") != 200 or str(sample.get("app_status")).lower() != "running":
@@ -286,15 +299,19 @@ def _evaluate_samples(
         for watched_symbol_error in sample.get("feed_watch_symbol_errors") or []:
             errors.append(f"{prefix}: {watched_symbol_error}")
 
-    ws_tick_delta = _delta(samples, "ws_tick_count")
-    shadow_compare_delta = _delta(samples, "shadow_compare_count")
-    shadow_violation_delta = _delta(samples, "shadow_compare_violation_count")
-    invalid_delta = _delta(samples, "invalid_payload_count")
-    timestamp_regression_delta = _delta(samples, "timestamp_regression_count")
-    shadow_stale_skip_delta = _delta(samples, "shadow_compare_stale_skip_count")
-    feed_watch_timeout_delta = _delta(samples, "feed_watch_timeout_count")
-    feed_watch_error_delta = _delta(samples, "feed_watch_error_count")
-    feed_watch_empty_delta = _delta(samples, "feed_watch_empty_count")
+    valid_samples = [sample for sample in samples if not sample.get("sample_error")]
+    if len(valid_samples) < int(min_samples):
+        errors.append(f"valid_sample_count {len(valid_samples)} < required {int(min_samples)}")
+
+    ws_tick_delta = _delta(valid_samples, "ws_tick_count")
+    shadow_compare_delta = _delta(valid_samples, "shadow_compare_count")
+    shadow_violation_delta = _delta(valid_samples, "shadow_compare_violation_count")
+    invalid_delta = _delta(valid_samples, "invalid_payload_count")
+    timestamp_regression_delta = _delta(valid_samples, "timestamp_regression_count")
+    shadow_stale_skip_delta = _delta(valid_samples, "shadow_compare_stale_skip_count")
+    feed_watch_timeout_delta = _delta(valid_samples, "feed_watch_timeout_count")
+    feed_watch_error_delta = _delta(valid_samples, "feed_watch_error_count")
+    feed_watch_empty_delta = _delta(valid_samples, "feed_watch_empty_count")
     if ws_tick_delta < int(min_ws_tick_delta):
         errors.append(f"ws_tick_delta {ws_tick_delta} < required {min_ws_tick_delta}")
     if shadow_compare_delta < int(min_shadow_compare_delta):
@@ -326,17 +343,17 @@ def _evaluate_samples(
 
     diff_values = [
         float(value)
-        for value in (_as_float(sample.get("shadow_last_abs_diff_bps")) for sample in samples)
+        for value in (_as_float(sample.get("shadow_last_abs_diff_bps")) for sample in valid_samples)
         if value is not None
     ]
     ws_age_values = [
         float(value)
-        for value in (_as_float(sample.get("shadow_last_ws_age_ms")) for sample in samples)
+        for value in (_as_float(sample.get("shadow_last_ws_age_ms")) for sample in valid_samples)
         if value is not None
     ]
     tick_age_values = [
         float(value)
-        for value in (_as_float(sample.get("last_tick_age_ms")) for sample in samples)
+        for value in (_as_float(sample.get("last_tick_age_ms")) for sample in valid_samples)
         if value is not None
     ]
     diff_p99 = _percentile(diff_values, 99.0)
@@ -347,22 +364,25 @@ def _evaluate_samples(
         errors.append(f"p95_ws_age_ms {ws_age_p95:.1f} > allowed {float(max_ws_age_p95_ms):.1f}")
 
     summary = {
-        "sample_count": len(samples),
+        "sample_count": len(valid_samples),
+        "valid_sample_count": len(valid_samples),
+        "sample_attempt_count": len(samples),
+        "sample_error_count": len(samples) - len(valid_samples),
         "ws_tick_delta": ws_tick_delta,
         "shadow_compare_delta": shadow_compare_delta,
         "shadow_compare_violation_delta": shadow_violation_delta,
         "invalid_payload_delta": invalid_delta,
         "timestamp_regression_delta": timestamp_regression_delta,
         "shadow_compare_stale_skip_delta": shadow_stale_skip_delta,
-        "rest_fallback_delta": _delta(samples, "rest_fallback_count"),
-        "rest_snapshot_delta": _delta(samples, "rest_snapshot_count"),
-        "shadow_missing_ws_delta": _delta(samples, "shadow_missing_ws_count"),
-        "feed_watch_attempt_delta": _delta(samples, "feed_watch_attempt_count"),
+        "rest_fallback_delta": _delta(valid_samples, "rest_fallback_count"),
+        "rest_snapshot_delta": _delta(valid_samples, "rest_snapshot_count"),
+        "shadow_missing_ws_delta": _delta(valid_samples, "shadow_missing_ws_count"),
+        "feed_watch_attempt_delta": _delta(valid_samples, "feed_watch_attempt_count"),
         "feed_watch_timeout_delta": feed_watch_timeout_delta,
         "feed_watch_error_delta": feed_watch_error_delta,
         "feed_watch_empty_delta": feed_watch_empty_delta,
         "max_feed_watch_symbol_error_count_observed": max(
-            (_as_int(sample.get("feed_watch_symbol_error_count")) for sample in samples),
+            (_as_int(sample.get("feed_watch_symbol_error_count")) for sample in valid_samples),
             default=0,
         ),
         "p99_abs_diff_bps": diff_p99,
@@ -372,22 +392,22 @@ def _evaluate_samples(
                 _as_int(sample.get("ws_stale_symbol_count"))
                 if sample.get("ws_stale_symbol_count") is not None
                 else _as_int(sample.get("stale_symbol_count"))
-                for sample in samples
+                for sample in valid_samples
             ),
             default=0,
         ),
-        "final_mode": samples[-1].get("mode") if samples else None,
-        "final_trading_mode": samples[-1].get("trading_mode") if samples else None,
-        "final_paper_trading": samples[-1].get("paper_trading") if samples else None,
-        "final_enabled": samples[-1].get("enabled") if samples else None,
-        "final_configured_enabled": samples[-1].get("configured_enabled") if samples else None,
-        "final_fail_closed_for_live": samples[-1].get("fail_closed_for_live") if samples else None,
-        "final_feed_healthy": samples[-1].get("feed_healthy") if samples else None,
-        "final_ws_hub_healthy": samples[-1].get("ws_hub_healthy") if samples else None,
-        "final_feed_watch_symbols": samples[-1].get("feed_watch_symbols") if samples else [],
-        "final_feed_watch_symbol_errors": samples[-1].get("feed_watch_symbol_errors") if samples else [],
-        "final_fallback_reasons": samples[-1].get("fallback_reasons") if samples else {},
-        "final_feed_last_error": samples[-1].get("feed_last_error") if samples else None,
+        "final_mode": valid_samples[-1].get("mode") if valid_samples else None,
+        "final_trading_mode": valid_samples[-1].get("trading_mode") if valid_samples else None,
+        "final_paper_trading": valid_samples[-1].get("paper_trading") if valid_samples else None,
+        "final_enabled": valid_samples[-1].get("enabled") if valid_samples else None,
+        "final_configured_enabled": valid_samples[-1].get("configured_enabled") if valid_samples else None,
+        "final_fail_closed_for_live": valid_samples[-1].get("fail_closed_for_live") if valid_samples else None,
+        "final_feed_healthy": valid_samples[-1].get("feed_healthy") if valid_samples else None,
+        "final_ws_hub_healthy": valid_samples[-1].get("ws_hub_healthy") if valid_samples else None,
+        "final_feed_watch_symbols": valid_samples[-1].get("feed_watch_symbols") if valid_samples else [],
+        "final_feed_watch_symbol_errors": valid_samples[-1].get("feed_watch_symbol_errors") if valid_samples else [],
+        "final_fallback_reasons": valid_samples[-1].get("fallback_reasons") if valid_samples else {},
+        "final_feed_last_error": valid_samples[-1].get("feed_last_error") if valid_samples else None,
     }
     return not errors, errors, summary
 
@@ -421,12 +441,16 @@ def run_selfcheck(
     started_at = datetime.now(timezone.utc).isoformat()
     samples: List[Dict[str, Any]] = []
     for index in range(sample_count):
-        samples.append(_extract_sample(base_url, token, timeout))
+        try:
+            samples.append(_extract_sample(base_url, token, timeout))
+        except Exception as exc:
+            samples.append(_failed_sample(exc))
         if index < sample_count - 1:
             sleep_fn(interval)
     finished_at = datetime.now(timezone.utc).isoformat()
     ok, errors, summary = _evaluate_samples(
         samples,
+        min_samples=int(min_samples),
         expect_mode=expect_mode,
         expect_runtime=expect_runtime,
         min_ws_tick_delta=min_ws_tick_delta,

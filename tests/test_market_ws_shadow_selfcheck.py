@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import requests
 from urllib.parse import urlparse
 
 import scripts.selfcheck_market_ws_shadow as shadow_check
@@ -35,7 +36,10 @@ def _fake_request_factory(route_sequences, seen):
             raise AssertionError(f"unexpected request: {key}")
         idx = min(counters[key], len(sequence) - 1)
         counters[key] += 1
-        return sequence[idx]
+        item = sequence[idx]
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     return _fake_request
 
@@ -171,6 +175,99 @@ def test_market_ws_shadow_selfcheck_passes_with_ws_and_compare_deltas(monkeypatc
     assert report["summary"]["feed_watch_attempt_delta"] == 3
     assert report["summary"]["p99_abs_diff_bps"] == 1.5
     assert any(call["headers"].get("X-OPS-TOKEN") == "test-token" for call in seen)
+
+
+def test_market_ws_shadow_selfcheck_keeps_valid_samples_after_probe_timeout(monkeypatch):
+    routes = {
+        ("GET", "/health"): [
+            requests.exceptions.ReadTimeout("health timed out"),
+            FakeResponse(200, {"status": "healthy"}),
+            FakeResponse(200, {"status": "healthy"}),
+        ],
+        ("GET", "/api/status"): [
+            FakeResponse(200, _api_status_payload()),
+            FakeResponse(200, _api_status_payload()),
+        ],
+        ("GET", "/api/market-data/status"): [
+            FakeResponse(200, _status_payload(ws_tick_count=10, compare_count=3)),
+            FakeResponse(200, _status_payload(ws_tick_count=14, compare_count=5)),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, []))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=2,
+        interval_sec=1,
+        min_samples=2,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=1,
+        min_shadow_compare_delta=1,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is False
+    assert report["summary"]["sample_attempt_count"] == 3
+    assert report["summary"]["valid_sample_count"] == 2
+    assert report["summary"]["sample_error_count"] == 1
+    assert report["summary"]["ws_tick_delta"] == 4
+    assert report["summary"]["shadow_compare_delta"] == 2
+    assert "sample[0]: sample request failed: ReadTimeout: health timed out" in report["errors"]
+
+
+def test_market_ws_shadow_selfcheck_reports_all_probe_failures(monkeypatch):
+    routes = {
+        ("GET", "/health"): [
+            requests.exceptions.ReadTimeout("first timeout"),
+            requests.exceptions.ConnectionError("second failed"),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, []))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=1,
+        interval_sec=1,
+        min_samples=2,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=1,
+        min_shadow_compare_delta=1,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is False
+    assert report["summary"]["sample_attempt_count"] == 2
+    assert report["summary"]["valid_sample_count"] == 0
+    assert report["summary"]["sample_error_count"] == 2
+    assert "valid_sample_count 0 < required 2" in report["errors"]
+    assert "sample[0]: sample request failed: ReadTimeout: first timeout" in report["errors"]
+    assert "sample[1]: sample request failed: ConnectionError: second failed" in report["errors"]
 
 
 def test_market_ws_shadow_selfcheck_rejects_paper_runtime_when_live_expected(monkeypatch):
