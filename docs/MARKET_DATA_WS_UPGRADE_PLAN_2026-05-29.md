@@ -3444,6 +3444,16 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
 
 - 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
 
+2026-06-01 21:38 +08:00 第十五轮等待期间代码级门禁预跑：
+
+- 第十五轮 6 小时 selfcheck 尚未完成，`logs\paper_shadow_6h_selfcheck_20260601_203445.out.json` 仍为 0 字节；本次检查不能替代最终 JSON/evaluator。
+- 运行不依赖最终 JSON 的回归和静态门禁：
+  - `rg -n "\.get_ticker\(" strategies core\trading core\utils -g "*.py"` 无命中，`rg` exit code 为 `1`，符合预期。
+  - `python -m py_compile core\marketdata\hub.py core\marketdata\runtime_price_provider.py core\marketdata\ccxt_pro_feed.py web\main.py scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py scripts\precheck_market_ws_live_shadow.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_authority_static.py tests\test_market_ws_shadow_launcher_assets.py` 通过。
+  - `python -m pytest tests\test_runtime_price_provider.py tests\test_market_data_ws_ui_assets.py tests\test_market_data_hub.py tests\test_web_main_runtime_tasks.py tests\test_ccxt_pro_feed.py tests\test_ws_client_hardening.py tests\test_sensitive_api_auth.py tests\test_infra_fixes.py tests\test_startup_mode.py tests\test_order_manager_safety.py tests\test_strategy_order_routing.py tests\test_execution_engine_live_trade_review.py tests\test_account_scoped_live_paths.py tests\test_trading_balances_stale_prev_equity.py tests\test_strategy_runtime_policy.py tests\test_strategy_manager_runtime_data.py tests\test_content_quality_static.py tests\test_market_ws_shadow_selfcheck.py tests\test_execution_engine_protective_levels.py tests\test_market_ws_authority_static.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_shadow_launcher_assets.py -q`，结果 `235 passed, 1 warning in 36.60s`。
+- warning 为既有 aiosqlite 线程在事件循环关闭后的 `PytestUnhandledThreadExceptionWarning`，不属于 market WS 门禁失败。
+- 当前判断不变：第十五轮最终 JSON/evaluator、最终回归/静态扫描和 Level 2 precheck 通过前，不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
+
 2026-05-31 16:56 +08:00 第十三轮最终评估与重连修复：
 
 - 第十三轮 current-code clean paper shadow 最终没有通过 Level 1。
