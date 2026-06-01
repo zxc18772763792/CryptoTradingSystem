@@ -20,6 +20,11 @@ def test_paper_shadow_launcher_detaches_with_controlled_env_and_logs():
     assert "paper_shadow_6h_service_{0}.err.log" in script
     assert "paper_shadow_6h_selfcheck_{0}.out.json" in script
     assert "paper_shadow_6h_selfcheck_{0}.err.log" in script
+    assert "MARKET_WS_SHADOW_${Kind}_START" in script
+    assert "MARKET_WS_SHADOW_${Kind}_EXIT" in script
+    assert "MARKET_WS_SHADOW_EXIT_CODE=%ERRORLEVEL%" in script
+    assert '-Kind "SERVICE"' in script
+    assert '-Kind "SELFCHECK"' in script
 
     for expected in (
         'set "TRADING_MODE=paper"',

@@ -384,3 +384,98 @@ async def test_run_noops_without_exchanges():
     # Should return promptly without raising.
     await asyncio.wait_for(feed.run(stop), timeout=5.0)
     assert received == []
+
+
+async def test_disk_snapshot_bootstraps_when_load_markets_fails(tmp_path):
+    """A persisted markets snapshot lets a fresh feed bootstrap when the first
+    REST ``load_markets()`` fails (e.g. exchangeInfo unreachable at startup)."""
+
+    # 1) Healthy client loads markets; the feed persists them to disk.
+    class _GoodClient(_FakeProClient):
+        def __init__(self):
+            super().__init__([{"BTC/USDT": {"last": 100.0, "timestamp": 1_700_000_000_000}}])
+            self.markets = {
+                "BTC/USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT"},
+                "ETH/USDT": {"id": "ETHUSDT", "symbol": "ETH/USDT"},
+            }
+            self.currencies = {"USDT": {"code": "USDT"}}
+
+        async def watch_tickers(self, symbols):
+            self.watch_symbols.append(list(symbols))
+            if self._batches:
+                return self._batches.pop(0)
+            await asyncio.sleep(3600)
+
+    good = _GoodClient()
+    received1: list = []
+    feed1 = _make_feed(good, received1)
+    feed1._client_default_type["binance"] = "swap"
+    feed1._market_cache_dir = lambda: tmp_path  # type: ignore[method-assign]
+    stop1 = asyncio.Event()
+    task1 = asyncio.create_task(feed1.run(stop1))
+    for _ in range(100):
+        if received1:
+            break
+        await asyncio.sleep(0.02)
+    stop1.set()
+    await asyncio.wait_for(task1, timeout=5.0)
+
+    assert (tmp_path / "binance_swap.json").exists(), "feed should persist a markets snapshot"
+
+    # 2) Fresh feed whose client's load_markets() fails -> on-disk fallback.
+    class _NoNetClient(_FakeProClient):
+        async def load_markets(self):
+            self.load_markets_called = True
+            raise RuntimeError("REST exchangeInfo unreachable")
+
+    bad = _NoNetClient([{"BTC/USDT": {"last": 200.0, "timestamp": 1_700_000_002_000}}])
+    received2: list = []
+    feed2 = _make_feed(bad, received2)
+    feed2._client_default_type["binance"] = "swap"
+    feed2._market_cache_dir = lambda: tmp_path  # type: ignore[method-assign]
+    stop2 = asyncio.Event()
+    task2 = asyncio.create_task(feed2.run(stop2))
+    for _ in range(100):
+        if received2:
+            break
+        await asyncio.sleep(0.02)
+    stop2.set()
+    await asyncio.wait_for(task2, timeout=5.0)
+
+    assert received2, "feed should bootstrap from the on-disk snapshot and push a tick"
+    assert received2[0]["binance"]["BTC/USDT"]["last"] == 200.0
+    assert bad.load_markets_called is True
+    assert bad.set_markets_calls, "disk markets should have been applied via set_markets"
+    assert set(bad.set_markets_calls[0][0].keys()) == {"BTC/USDT", "ETH/USDT"}
+    assert feed2.status_snapshot()["exchanges"]["binance"]["market_disk_cache_used_count"] >= 1
+
+
+async def test_disk_snapshot_rejected_when_stale_or_wrong_type(tmp_path):
+    """Stale or market-type-mismatched snapshots are ignored (load error stands)."""
+    import json as _json
+    import time as _time
+
+    client = _FakeProClient([])
+    feed = _make_feed(client, [])
+    feed._client_default_type["binance"] = "swap"
+    feed._market_cache_dir = lambda: tmp_path  # type: ignore[method-assign]
+    path = tmp_path / "binance_swap.json"
+
+    # Older than the TTL -> rejected.
+    path.write_text(_json.dumps({
+        "default_type": "swap",
+        "saved_epoch": _time.time() - (8 * 24 * 3600),
+        "markets": {"BTC/USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT"}},
+        "currencies": {},
+    }))
+    assert feed._apply_disk_markets("binance", client) is False
+
+    # Fresh but captured under a different market type -> rejected.
+    path.write_text(_json.dumps({
+        "default_type": "spot",
+        "saved_epoch": _time.time(),
+        "markets": {"BTC/USDT": {"id": "BTCUSDT", "symbol": "BTC/USDT"}},
+        "currencies": {},
+    }))
+    assert feed._apply_disk_markets("binance", client) is False
+    assert client.set_markets_calls == []

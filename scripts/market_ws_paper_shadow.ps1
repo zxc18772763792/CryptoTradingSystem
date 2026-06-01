@@ -108,6 +108,23 @@ function New-LaunchCmdFile {
     return $cmdPath
 }
 
+function New-InstrumentedCmdCommand {
+    param(
+        [string]$Kind,
+        [string]$Command,
+        [string]$MarkerLog
+    )
+
+    $quotedMarkerLog = ConvertTo-CmdLiteral $MarkerLog
+    return @(
+        "echo MARKET_WS_SHADOW_${Kind}_START %DATE% %TIME% >> $quotedMarkerLog",
+        $Command,
+        "set `"MARKET_WS_SHADOW_EXIT_CODE=%ERRORLEVEL%`"",
+        "echo MARKET_WS_SHADOW_${Kind}_EXIT %MARKET_WS_SHADOW_EXIT_CODE% %DATE% %TIME% >> $quotedMarkerLog",
+        "exit /b %MARKET_WS_SHADOW_EXIT_CODE%"
+    )
+}
+
 function Get-TaskName {
     param([string]$Kind)
     return "CryptoMarketWsPaperShadow_{0}_{1}" -f $Kind, $Stamp
@@ -223,7 +240,10 @@ function Start-MarketWsService {
     $serviceErr = Join-Path $logRoot ("paper_shadow_6h_service_{0}.err.log" -f $Stamp)
     $commands = @("cd /d $(ConvertTo-CmdLiteral $projectRoot)")
     $commands += Get-CommonEnvCommands
-    $commands += "$(ConvertTo-CmdLiteral $PythonExe) -m uvicorn web.main:app --host $BindHost --port $Port >> $(ConvertTo-CmdLiteral $serviceOut) 2>> $(ConvertTo-CmdLiteral $serviceErr)"
+    $commands += New-InstrumentedCmdCommand `
+        -Kind "SERVICE" `
+        -Command "$(ConvertTo-CmdLiteral $PythonExe) -m uvicorn web.main:app --host $BindHost --port $Port >> $(ConvertTo-CmdLiteral $serviceOut) 2>> $(ConvertTo-CmdLiteral $serviceErr)" `
+        -MarkerLog $serviceErr
     $cmdPath = New-LaunchCmdFile -Kind "service" -Lines $commands
     $taskName = Start-LaunchTask -Kind "service" -CmdPath $cmdPath
 
@@ -281,7 +301,7 @@ function Start-MarketWsSelfcheck {
     $selfcheckErr = Join-Path $logRoot ("paper_shadow_6h_selfcheck_{0}.err.log" -f $Stamp)
     $commands = @("cd /d $(ConvertTo-CmdLiteral $projectRoot)")
     $commands += Get-CommonEnvCommands
-    $commands += @(
+    $selfcheckCommand = @(
         "$(ConvertTo-CmdLiteral $PythonExe) scripts\selfcheck_market_ws_shadow.py",
         "--base-url http://127.0.0.1:$Port",
         "--token $Token",
@@ -300,6 +320,10 @@ function Start-MarketWsSelfcheck {
         "--max-ws-age-p95-ms 10000",
         ">> $(ConvertTo-CmdLiteral $selfcheckOut) 2>> $(ConvertTo-CmdLiteral $selfcheckErr)"
     ) -join " "
+    $commands += New-InstrumentedCmdCommand `
+        -Kind "SELFCHECK" `
+        -Command $selfcheckCommand `
+        -MarkerLog $selfcheckErr
 
     $cmdPath = New-LaunchCmdFile -Kind "selfcheck" -Lines $commands
     $taskName = Start-LaunchTask -Kind "selfcheck" -CmdPath $cmdPath
