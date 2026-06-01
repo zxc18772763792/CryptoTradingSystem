@@ -3824,6 +3824,38 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - 第十四轮最终 JSON/evaluator 未完成前，不能宣称 Level 1 通过。
   - 不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
 
+2026-06-01 20:34 +08:00 第十四轮自检报告缺失与启动器补强：
+
+- 第十四轮 service/selfcheck 均已退出，端口不再监听：
+  - `Port 8012 is not listening.`
+  - `Selfcheck processes: none`
+  - `CryptoMarketWsPaperShadow_service_20260531_170100: Ready`
+  - `CryptoMarketWsPaperShadow_selfcheck_20260531_170100: Ready`
+- 自检输出仍为空：
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.out.json`：`0` 字节，`LastWriteTime=2026-05-31 17:19:58`。
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.err.log`：`0` 字节，`LastWriteTime=2026-05-31 17:19:58`。
+- 服务日志：
+  - `logs\paper_shadow_6h_service_20260531_170100.err.log`：`66655` 字节，最后更新 `2026-05-31 18:31:59`。
+  - `logs\paper_shadow_6h_service_20260531_170100.out.log`：`20986` 字节，最后更新 `2026-05-31 18:31:11`。
+  - 服务尾部仍是 18:31 左右的 `watch_tickers timeout`、Binance kline REST 失败与一次 time sync；没有 selfcheck 最终 JSON 或 human summary。
+- 判定：
+  - 第十四轮不是有效 Level 1 证据；既不能通过 evaluator，也不能作为失败报告精确归因，因为 scheduled selfcheck 没有留下退出码、stderr 或 JSON。
+  - 第十四轮只保留为 reconnect-cache 运行中诊断证据。
+- 启动器补强：
+  - `scripts\market_ws_paper_shadow.ps1` 新增 `New-InstrumentedCmdCommand`。
+  - service/selfcheck `.cmd` 会在对应 stderr/marker log 写入 `MARKET_WS_SHADOW_<KIND>_START`、`MARKET_WS_SHADOW_<KIND>_EXIT <exit_code>`，并用 `exit /b <exit_code>` 传播子进程退出码。
+  - 目标是后续若 scheduled task 再次无 JSON 退出，至少能从 stderr marker 判断命令是否启动、何时退出、退出码是什么。
+- 验证：
+  - `python -m pytest tests\test_market_ws_shadow_launcher_assets.py -q`，`2 passed in 2.84s`。
+  - `python -m pytest tests\test_ccxt_pro_feed.py tests\test_market_ws_shadow_selfcheck.py tests\test_market_ws_shadow_report_eval.py tests\test_market_ws_live_shadow_precheck.py tests\test_market_ws_shadow_launcher_assets.py -q`，`55 passed in 5.39s`。
+  - PowerShell parser check for `scripts\market_ws_paper_shadow.ps1` 通过。
+  - `python -m py_compile tests\test_market_ws_shadow_launcher_assets.py scripts\selfcheck_market_ws_shadow.py scripts\evaluate_market_ws_shadow_report.py scripts\precheck_market_ws_live_shadow.py core\marketdata\ccxt_pro_feed.py` 通过。
+  - `git diff --check -- scripts\market_ws_paper_shadow.ps1 tests\test_market_ws_shadow_launcher_assets.py` 通过。
+- 当前判断：
+  - 需要重新启动一轮 current-code clean paper shadow。先做 60 秒 smoke，再做 6 小时 selfcheck。
+  - 新一轮必须使用启动器补强后的 `.cmd`，并确认 selfcheck stderr 中有 `MARKET_WS_SHADOW_SELFCHECK_START` marker。
+  - Level 1 最终 JSON/evaluator、最终回归/静态扫描和 Level 2 precheck 通过前，仍不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：

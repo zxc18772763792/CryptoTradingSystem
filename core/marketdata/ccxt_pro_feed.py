@@ -25,8 +25,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import os
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from loguru import logger
@@ -47,6 +50,11 @@ from config.settings import settings
 TickCallback = Callable[[Dict[str, Dict[str, Any]]], Awaitable[None]]
 # Sync callable returning the current list of symbols to watch.
 SymbolsProvider = Callable[[], List[str]]
+
+# Markets metadata changes rarely, so a recent on-disk snapshot is a safe
+# bootstrap fallback when the network is too unstable to fetch exchangeInfo at
+# startup. Snapshots older than this are ignored to avoid running on stale data.
+_MARKET_DISK_CACHE_TTL_SEC = 7 * 24 * 3600
 
 
 async def _cancel_task(task: "asyncio.Future") -> None:
@@ -143,6 +151,8 @@ class CcxtProMarketFeed:
         self._currency_cache: Dict[str, Dict[str, Any]] = {}
         self._market_cache_loaded_at: Dict[str, str] = {}
         self._market_cache_used_count: Dict[str, int] = {}
+        self._market_disk_cache_used_count: Dict[str, int] = {}
+        self._market_disk_cache_saved_at: Dict[str, str] = {}
 
     # ── public API ────────────────────────────────────────────────────────
     def is_healthy(self, *, max_age_sec: Optional[float] = None) -> bool:
@@ -190,6 +200,8 @@ class CcxtProMarketFeed:
                 "market_cache_symbol_count": len(self._market_cache.get(name, {})),
                 "market_cache_loaded_at": self._market_cache_loaded_at.get(name),
                 "market_cache_used_count": int(self._market_cache_used_count.get(name, 0)),
+                "market_disk_cache_used_count": int(self._market_disk_cache_used_count.get(name, 0)),
+                "market_disk_cache_saved_at": self._market_disk_cache_saved_at.get(name),
             }
         errors = [err for err in self._last_error.values() if err]
         return {
@@ -376,7 +388,16 @@ class CcxtProMarketFeed:
         if self._apply_cached_markets(name, client):
             return
 
-        await client.load_markets()
+        try:
+            await client.load_markets()
+        except Exception:
+            # Network market load failed (e.g. exchangeInfo unreachable during a
+            # connectivity blip). Fall back to a previously persisted on-disk
+            # snapshot so the feed can still bootstrap instead of looping on
+            # reconnect. Re-raise only when there is no usable snapshot.
+            if self._apply_disk_markets(name, client):
+                return
+            raise
         self._remember_client_markets(name, client)
 
     def _apply_cached_markets(self, name: str, client: Any) -> bool:
@@ -406,6 +427,92 @@ class CcxtProMarketFeed:
         if isinstance(currencies, dict):
             self._currency_cache[name] = currencies
         self._market_cache_loaded_at[name] = self._now_iso()
+        self._persist_markets_to_disk(
+            name, markets, currencies if isinstance(currencies, dict) else None
+        )
+
+    # ── on-disk markets snapshot (cross-restart bootstrap fallback) ─────────
+    def _market_cache_dir(self) -> Path:
+        base = getattr(settings, "BASE_DIR", None)
+        root = Path(base) if base else Path(__file__).resolve().parents[2]
+        return root / "data" / "marketdata_ws_cache"
+
+    def _market_cache_path(self, name: str) -> Path:
+        kind = str(self._client_default_type.get(name) or "spot").strip().lower() or "spot"
+        stem = "".join(ch if ch.isalnum() else "_" for ch in f"{name}_{kind}")
+        return self._market_cache_dir() / f"{stem}.json"
+
+    def _persist_markets_to_disk(
+        self, name: str, markets: Dict[str, Any], currencies: Optional[Dict[str, Any]]
+    ) -> None:
+        """Best-effort persist of freshly loaded markets for a future cold start."""
+        try:
+            path = self._market_cache_path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "exchange": name,
+                "default_type": self._client_default_type.get(name),
+                "saved_at": self._now_iso(),
+                "saved_epoch": time.time(),
+                "markets": markets,
+                "currencies": currencies or {},
+            }
+            tmp = path.with_name(path.name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, default=str)
+            os.replace(tmp, path)
+            self._market_disk_cache_saved_at[name] = payload["saved_at"]
+        except Exception as exc:  # disk issues must never affect the live feed
+            logger.debug("ccxt_pro_feed[{}]: market disk-cache persist failed: {}", name, exc)
+
+    def _apply_disk_markets(self, name: str, client: Any) -> bool:
+        """Restore markets from a recent on-disk snapshot after a failed load.
+
+        Returns True only when a fresh-enough, market-type-matching snapshot was
+        applied, so the feed can keep going without a network ``load_markets``.
+        """
+        set_markets = getattr(client, "set_markets", None)
+        if not callable(set_markets):
+            return False
+        try:
+            path = self._market_cache_path(name)
+            if not path.exists():
+                return False
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            markets = payload.get("markets")
+            if not isinstance(markets, dict) or not markets:
+                return False
+            # Never apply a snapshot captured under a different market type
+            # (e.g. spot markets on a swap client).
+            saved_type = str(payload.get("default_type") or "").strip().lower()
+            want_type = str(self._client_default_type.get(name) or "").strip().lower()
+            if saved_type and want_type and saved_type != want_type:
+                return False
+            age = time.time() - float(payload.get("saved_epoch") or 0.0)
+            if age > _MARKET_DISK_CACHE_TTL_SEC:
+                return False
+            currencies = payload.get("currencies") or None
+            set_markets(markets, currencies if isinstance(currencies, dict) else None)
+        except Exception as exc:
+            logger.debug("ccxt_pro_feed[{}]: market disk-cache apply failed: {}", name, exc)
+            return False
+
+        self._market_cache[name] = markets
+        if isinstance(currencies, dict):
+            self._currency_cache[name] = currencies
+        self._market_cache_loaded_at[name] = self._now_iso()
+        self._market_disk_cache_used_count[name] = (
+            self._market_disk_cache_used_count.get(name, 0) + 1
+        )
+        logger.warning(
+            "ccxt_pro_feed[{}]: REST load_markets failed; bootstrapped from on-disk "
+            "snapshot ({} markets, {:.0f}s old)",
+            name,
+            len(markets),
+            age,
+        )
+        return True
 
     def _current_symbols(self) -> List[str]:
         try:
