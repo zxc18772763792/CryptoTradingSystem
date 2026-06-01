@@ -50,6 +50,9 @@ from config.settings import settings
 TickCallback = Callable[[Dict[str, Dict[str, Any]]], Awaitable[None]]
 # Sync callable returning the current list of symbols to watch.
 SymbolsProvider = Callable[[], List[str]]
+# Async callback for mark-price/funding updates:
+# {exchange: {symbol: {mark, index, funding_rate, next_funding_time, timestamp}}}.
+MarkCallback = Callable[[Dict[str, Dict[str, Any]]], Awaitable[None]]
 
 # Markets metadata changes rarely, so a recent on-disk snapshot is a safe
 # bootstrap fallback when the network is too unstable to fetch exchangeInfo at
@@ -123,8 +126,13 @@ class CcxtProMarketFeed:
         reconnect_min_sec: float = 1.0,
         reconnect_max_sec: float = 30.0,
         health_max_age_sec: float = 15.0,
+        watch_mark_prices: bool = False,
+        on_mark: Optional["MarkCallback"] = None,
     ) -> None:
         self._on_tick = on_tick
+        self._on_mark = on_mark
+        # Mark stream only runs when explicitly enabled AND a consumer is wired.
+        self._watch_mark_prices = bool(watch_mark_prices) and on_mark is not None
         self._symbols_provider = symbols_provider
         self._exchanges = [str(e).strip().lower() for e in (exchanges or []) if str(e).strip()]
         self._watch_timeout_sec = max(5.0, float(watch_timeout_sec))
@@ -153,6 +161,13 @@ class CcxtProMarketFeed:
         self._market_cache_used_count: Dict[str, int] = {}
         self._market_disk_cache_used_count: Dict[str, int] = {}
         self._market_disk_cache_saved_at: Dict[str, str] = {}
+        # Optional mark-price / funding stream state (off by default).
+        self._mark_clients: Dict[str, Any] = {}
+        self._mark_last_push_monotonic: Dict[str, float] = {}
+        self._mark_watch_attempt_count: Dict[str, int] = {}
+        self._mark_watch_error_count: Dict[str, int] = {}
+        self._mark_last_error: Dict[str, str] = {}
+        self._mark_last_payload_symbol_count: Dict[str, int] = {}
 
     # ── public API ────────────────────────────────────────────────────────
     def is_healthy(self, *, max_age_sec: Optional[float] = None) -> bool:
@@ -202,6 +217,15 @@ class CcxtProMarketFeed:
                 "market_cache_used_count": int(self._market_cache_used_count.get(name, 0)),
                 "market_disk_cache_used_count": int(self._market_disk_cache_used_count.get(name, 0)),
                 "market_disk_cache_saved_at": self._market_disk_cache_saved_at.get(name),
+                "mark_enabled": bool(self._watch_mark_prices),
+                "mark_last_push_age_ms": (
+                    round((now - self._mark_last_push_monotonic[name]) * 1000.0, 3)
+                    if name in self._mark_last_push_monotonic else None
+                ),
+                "mark_watch_attempt_count": int(self._mark_watch_attempt_count.get(name, 0)),
+                "mark_watch_error_count": int(self._mark_watch_error_count.get(name, 0)),
+                "mark_last_error": self._mark_last_error.get(name),
+                "mark_last_payload_symbol_count": int(self._mark_last_payload_symbol_count.get(name, 0)),
             }
         errors = [err for err in self._last_error.values() if err]
         return {
@@ -237,6 +261,18 @@ class CcxtProMarketFeed:
             )
             for name in self._exchanges
         ]
+        if self._watch_mark_prices and self._on_mark is not None:
+            logger.info(
+                "ccxt_pro_feed: mark-price/funding stream enabled for {}",
+                ", ".join(self._exchanges),
+            )
+            tasks += [
+                asyncio.create_task(
+                    self._run_one_exchange_mark(name, stop_event),
+                    name=f"ws_mark_{name}",
+                )
+                for name in self._exchanges
+            ]
         try:
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
@@ -582,9 +618,152 @@ class CcxtProMarketFeed:
         if client is not None:
             await _close_client_safely(client)
 
+    # ── optional mark-price / funding stream ────────────────────────────────
+    async def _reset_mark_client(self, name: str) -> None:
+        client = self._mark_clients.pop(name, None)
+        if client is not None:
+            await _close_client_safely(client)
+
+    @staticmethod
+    def _to_perp_symbol(symbol: str) -> str:
+        """Map a UI symbol to its linear-perp form (mark price is derivatives-only).
+
+        ``BTC/USDT`` -> ``BTC/USDT:USDT``; already-suffixed symbols pass through.
+        """
+        s = str(symbol or "").strip()
+        if not s or ":" in s:
+            return s
+        if "/" in s:
+            quote = s.split("/", 1)[1]
+            if quote:
+                return f"{s}:{quote}"
+        return s
+
+    def _mark_symbols(self) -> List[str]:
+        seen: Dict[str, None] = {}
+        out: List[str] = []
+        for sym in self._current_symbols():
+            perp = self._to_perp_symbol(sym)
+            if perp and perp not in seen:
+                seen[perp] = None
+                out.append(perp)
+        return out
+
+    @classmethod
+    def _normalize_mark_prices(cls, name: str, payload: Any) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        if not isinstance(payload, dict):
+            return out
+
+        def _num(*vals: Any) -> Optional[float]:
+            for v in vals:
+                try:
+                    f = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if f == f:  # reject NaN
+                    return f
+            return None
+
+        for symbol, entry in payload.items():
+            if not isinstance(entry, dict):
+                continue
+            info = entry.get("info") if isinstance(entry.get("info"), dict) else {}
+            # Prefer ccxt unified fields, fall back to raw binance markPrice fields
+            # (s/p/i/r/T) which are stable and documented.
+            mark = _num(entry.get("markPrice"), info.get("p"), entry.get("last"), entry.get("close"))
+            if mark is None or mark <= 0:
+                continue
+            index = _num(entry.get("indexPrice"), info.get("i"))
+            funding = _num(entry.get("fundingRate"), info.get("r"))
+            next_funding = _num(entry.get("fundingTimestamp"), info.get("T"))
+            ts_ms = _num(entry.get("timestamp"), info.get("E"))
+            if ts_ms and ts_ms > 0:
+                ts_iso = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+            else:
+                ts_iso = datetime.now(timezone.utc).isoformat()
+            out[cls._spot_style_symbol(symbol)] = {
+                "mark": mark,
+                "index": index,
+                "funding_rate": funding,
+                "next_funding_time": int(next_funding) if next_funding else None,
+                "timestamp": ts_iso,
+            }
+        return out
+
+    async def _run_one_exchange_mark(self, name: str, stop_event: asyncio.Event) -> None:
+        backoff = self._reconnect_min_sec
+        while not stop_event.is_set():
+            client = self._mark_clients.get(name)
+            if client is None:
+                client = self._build_client(name)
+                if client is None:
+                    return
+                self._mark_clients[name] = client
+                try:
+                    await self._prepare_client_markets(name, client)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._mark_watch_error_count[name] = self._mark_watch_error_count.get(name, 0) + 1
+                    self._mark_last_error[name] = f"{type(exc).__name__}: {exc}"
+                    await self._reset_mark_client(name)
+                    await self._sleep_or_stop(stop_event, backoff)
+                    backoff = min(self._reconnect_max_sec, backoff * 2.0)
+                    continue
+
+            symbols = self._mark_symbols()
+            if not symbols:
+                await self._sleep_or_stop(stop_event, 2.0)
+                continue
+
+            self._mark_watch_attempt_count[name] = self._mark_watch_attempt_count.get(name, 0) + 1
+            watch_task = asyncio.ensure_future(client.watch_mark_prices(symbols))
+            stop_task = asyncio.ensure_future(stop_event.wait())
+            done, _pending = await asyncio.wait(
+                {watch_task, stop_task},
+                timeout=self._watch_timeout_sec,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_event.is_set():
+                await _cancel_task(watch_task)
+                await _cancel_task(stop_task)
+                break
+            if watch_task not in done:
+                await _cancel_task(watch_task)
+                await _cancel_task(stop_task)
+                continue
+            await _cancel_task(stop_task)
+            try:
+                payload_raw = watch_task.result()
+                backoff = self._reconnect_min_sec
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._mark_watch_error_count[name] = self._mark_watch_error_count.get(name, 0) + 1
+                self._mark_last_error[name] = f"{type(exc).__name__}: {exc}"
+                await self._reset_mark_client(name)
+                await self._sleep_or_stop(stop_event, backoff)
+                backoff = min(self._reconnect_max_sec, backoff * 2.0)
+                continue
+
+            payload = self._normalize_mark_prices(name, payload_raw)
+            self._mark_last_payload_symbol_count[name] = len(payload)
+            if not payload:
+                continue
+            self._mark_last_push_monotonic[name] = time.monotonic()
+            self._mark_last_error.pop(name, None)
+            if self._on_mark is not None:
+                try:
+                    await self._on_mark({name: payload})
+                except Exception as exc:
+                    logger.debug(f"ccxt_pro_feed[{name}]: on_mark callback failed: {exc}")
+
     async def _close_all_clients(self) -> None:
         for name in list(self._clients.keys()):
             await self._reset_client(name)
+        for name in list(self._mark_clients.keys()):
+            await self._reset_mark_client(name)
 
     @staticmethod
     async def _sleep_or_stop(stop_event: asyncio.Event, seconds: float) -> None:
