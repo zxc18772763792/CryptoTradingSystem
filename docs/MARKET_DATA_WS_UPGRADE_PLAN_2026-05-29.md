@@ -3856,6 +3856,60 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - 新一轮必须使用启动器补强后的 `.cmd`，并确认 selfcheck stderr 中有 `MARKET_WS_SHADOW_SELFCHECK_START` marker。
   - Level 1 最终 JSON/evaluator、最终回归/静态扫描和 Level 2 precheck 通过前，仍不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
 
+2026-06-01 20:47 +08:00 第十五轮 hardened current-code paper shadow 启动：
+
+- 已提交启动器与 feed 补强：`d3b131a Harden WS shadow longrun diagnostics`。
+- 新服务：
+  - service task: `CryptoMarketWsPaperShadow_service_20260601_203445`
+  - service PID: `31224`
+  - token: `codex-paper-shadow-longrun-token-16`
+  - service launch cmd: `logs\paper_shadow_6h_service_20260601_203445.cmd`
+  - service stdout: `logs\paper_shadow_6h_service_20260601_203445.out.log`
+  - service stderr: `logs\paper_shadow_6h_service_20260601_203445.err.log`
+  - service metadata: `logs\paper_shadow_6h_service_20260601_203445.launch.json`
+- service stderr marker 已出现：
+  - `MARKET_WS_SHADOW_SERVICE_START 2026/06/01 周一 20:44:27.44`
+- 启动后状态复核：
+  - `status=running`
+  - `trading_mode=paper`
+  - `paper_trading=true`
+  - `market_ws.mode=shadow`
+  - `market_ws.configured_enabled=true`
+  - `market_ws.force_rest=false`
+  - `market_ws.fail_closed_for_live=true`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.feed_status.exchanges.binance.market_cache_symbol_count=4384`
+  - `market_ws.feed_status.exchanges.binance.market_disk_cache_saved_at=2026-06-01T12:45:10.945149+00:00`
+- 60 秒 smoke 通过：
+  - `overall_ok=true`
+  - `sample_count=7`
+  - `valid_sample_count=7`
+  - `sample_error_count=0`
+  - `ws_tick_delta=112`
+  - `shadow_compare_delta=2`
+  - `shadow_compare_violation_delta=0`
+  - `invalid_payload_delta=0`
+  - `timestamp_regression_delta=0`
+  - `shadow_compare_stale_skip_delta=0`
+  - `feed_watch_error_delta=0`
+  - `feed_watch_empty_delta=0`
+  - `feed_watch_timeout_delta=0`
+  - `max_feed_watch_symbol_error_count_observed=0`
+  - `p99_abs_diff_bps=2.9091261544418883`
+  - `p95_ws_age_ms=611.0`
+  - `final_trading_mode=paper`
+  - `final_configured_enabled=true`
+  - `final_fail_closed_for_live=true`
+  - `final_feed_healthy=true`
+  - `final_ws_hub_healthy=true`
+  - `final_feed_last_error=null`
+  - `final_feed_watch_symbols=["binance:ETH/USDT","binance:BTC/USDT"]`
+- 当前判断：
+  - 短 smoke 已满足启动第十五轮 6 小时 selfcheck 的前置条件。
+  - 第十五轮最终 JSON/evaluator、最终回归/静态扫描和 Level 2 precheck 通过前，仍不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
