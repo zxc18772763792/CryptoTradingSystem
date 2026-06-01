@@ -3763,6 +3763,67 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - 这些检查仍不能替代最终 6 小时 selfcheck JSON/evaluator。
   - 第十四轮最终通过、最终回归/静态扫描和 Level 2 precheck 通过前，不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
 
+2026-05-31 18:30 +08:00 第十四轮 reconnect-cache 路径观察：
+
+- 第十四轮 selfcheck 仍在运行，最终文件仍未生成：
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.out.json`：`0` 字节。
+  - `logs\paper_shadow_6h_selfcheck_20260531_170100.err.log`：`0` 字节。
+  - service stderr 已增长到 `65866` 字节，主要来自 18:02-18:09 的 Binance REST/proxy 失败和 WS reconnect 诊断。
+- 直接 API 探针结果：
+  - `/health`：`ok=true`，`ms=1739`，`status=healthy`。
+  - `/api/status`：`ok=true`，`ms=1479`，`status=running`，`trading_mode=paper`，`paper_trading=true`，`market_ws_mode=shadow`。
+  - `/api/market-data/status`：`ok=true`，`ms=1661`。
+- `/api/market-data/status` 关键指标：
+  - `market_ws.mode=shadow`
+  - `market_ws.configured_enabled=true`
+  - `market_ws.enabled=true`
+  - `market_ws.force_rest=false`
+  - `market_ws.fail_closed_for_live=true`
+  - `market_ws.feed_healthy=true`
+  - `market_ws.ws_hub_healthy=true`
+  - `market_ws.feed_last_error=null`
+  - `market_ws.ws_tick_count=6276`
+  - `market_ws.rest_snapshot_count=457`
+  - `market_ws.shadow_compare_count=135`
+  - `market_ws.shadow_compare_violation_count=0`
+  - `market_ws.shadow_compare_stale_skip_count=0`
+  - `market_ws.invalid_payload_count=0`
+  - `market_ws.timestamp_regression_count=0`
+  - `market_ws.ws_stale_symbol_count=0`
+  - `market_ws.stale_symbol_count=0`
+  - `market_ws.last_tick_age_ms=2572`
+  - `market_ws.shadow_max_abs_diff_bps=8.094408441876226`
+  - `market_ws.feed_watch_attempt_count=6313`
+  - `market_ws.feed_watch_timeout_count=3`
+  - `market_ws.feed_watch_error_count=33`
+  - `market_ws.feed_watch_empty_count=0`
+  - `market_ws.feed_status.exchanges.binance.market_cache_symbol_count=4377`
+  - `market_ws.feed_status.exchanges.binance.market_cache_used_count=33`
+  - `market_ws.feed_status.exchanges.binance.last_symbols=["ETH/USDT","BTC/USDT"]`
+- service stderr 计数：
+  - `watch_tickers timeout`: `3`
+  - `ccxt_pro_feed[binance]: watch error`: `33`
+  - `Live kline fetch timed out`: `1`
+  - `get_klines(BTC/USDT, 15m) failed`: `17`
+  - `exchange_manager: binance reconnected`: `3`
+  - `Connector binance connect timed out`: `0`
+  - `Health check failed for gate`: `0`
+  - `Paper trading mode: False`: `0`
+  - `scope switched: paper -> live`: `0`
+  - `Unclosed client session`: `0`
+  - `exchange_watchdog`: `0`
+  - `ExchangeNotAvailable`: `0`
+- stderr 时间线：
+  - 18:02-18:09 多次出现 `Cannot connect to host 127.0.0.1:7890 ... 远程计算机拒绝网络连接`，WS feed 进入 reconnect。
+  - 同期 Binance REST connector 多次失败在 `fapi/v1/time`、`sapi/v1/capital/config/getall`、`fapi/v1/klines`。
+  - 每次 WS reconnect 前均看到 `restored 4377 cached markets for reconnect`，说明 `0d4dbb8` 的 market-cache 路径已被真实运行覆盖。
+  - 18:09:54 Binance connector `reconnected (fast path)`；18:30 API 状态显示 feed/hub healthy、`feed_last_error=null`、WS tick 和 shadow compare 继续推进。
+- 当前判断：
+  - 这是第十四轮中真实覆盖 reconnect-cache 的关键诊断窗口；当前代码避免了第十三轮那种重连后卡死在 `exchangeInfo` 的失败形态。
+  - `feed_watch_error_delta` 默认仍作为诊断项，最终 evaluator 会归档频率；硬门禁仍看最终健康、watched symbol 新鲜度、stale/violation/invalid/regression/empty payload、p95 age 和价差。
+  - 第十四轮最终 JSON/evaluator 未完成前，不能宣称 Level 1 通过。
+  - 不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
