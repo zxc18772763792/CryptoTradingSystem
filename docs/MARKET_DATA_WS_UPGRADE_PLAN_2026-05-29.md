@@ -3910,6 +3910,30 @@ rg -n "\.get_ticker\(" strategies core\trading core\utils -S
   - 短 smoke 已满足启动第十五轮 6 小时 selfcheck 的前置条件。
   - 第十五轮最终 JSON/evaluator、最终回归/静态扫描和 Level 2 precheck 通过前，仍不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
 
+2026-06-01 20:49 +08:00 第十五轮 6 小时 selfcheck 已启动：
+
+- 6 小时 selfcheck：
+  - selfcheck task: `CryptoMarketWsPaperShadow_selfcheck_20260601_203445`
+  - selfcheck PID: `45112`
+  - selfcheck launch cmd: `logs\paper_shadow_6h_selfcheck_20260601_203445.cmd`
+  - selfcheck stdout/final JSON: `logs\paper_shadow_6h_selfcheck_20260601_203445.out.json`
+  - selfcheck stderr: `logs\paper_shadow_6h_selfcheck_20260601_203445.err.log`
+  - selfcheck metadata: `logs\paper_shadow_6h_selfcheck_20260601_203445.launch.json`
+- hardened marker 已确认：
+  - `MARKET_WS_SHADOW_SELFCHECK_START 2026/06/01 周一 20:48:53.25`
+  - `logs\paper_shadow_6h_selfcheck_20260601_203445.err.log` 当前 `63` 字节。
+  - `logs\paper_shadow_6h_selfcheck_20260601_203445.out.json` 当前 `0` 字节，符合长跑结束前预期。
+- 当前运行状态：
+  - `Port 8012 listening PID=31224`
+  - `Selfcheck processes: 45112`
+  - `CryptoMarketWsPaperShadow_service_20260601_203445: Running`
+  - `CryptoMarketWsPaperShadow_selfcheck_20260601_203445: Running`
+  - `Runtime status=running trading_mode=paper paper_trading=True`
+  - `Market WS mode=shadow configured_enabled=True feed_healthy=True ws_hub_healthy=True ws_tick_count=444 shadow_compare_count=10`
+- 当前判断：
+  - 第十五轮已经进入 current-code clean paper shadow 6 小时长跑。
+  - 最终 JSON/evaluator、最终回归/静态扫描和 Level 2 precheck 通过前，不进入 Level 2 live shadow，不开启 `ui_primary`，不使用 `strategy_primary`。
+
 2026-05-30 12:24 +08:00 第十一轮最终评估与当前代码补强：
 
 - 第十一轮 6 小时 selfcheck 已完成并产出最终报告：
