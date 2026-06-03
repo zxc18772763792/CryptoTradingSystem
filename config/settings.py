@@ -209,6 +209,8 @@ class Settings(BaseSettings):
     MARKET_WS_REST_RECONCILE_SEC: float = 30.0
     MARKET_WS_MAX_PRICE_DIFF_BPS: float = 20.0
     MARKET_WS_FAIL_CLOSED_FOR_LIVE: bool = True
+    # Auto-degrade WS->REST on sustained quality loss in ui_primary/strategy_primary.
+    MARKET_WS_QUALITY_GUARD_ENABLED: bool = False
     # When True, a parquet index that looks local-stamped (runs ahead of real
     # UTC) raises instead of being silently shifted — use to flush out any
     # remaining non-UTC kline writer in CI / debugging.
