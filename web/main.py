@@ -709,6 +709,53 @@ _MARKET_WS_EXCHANGE_DISCOVERY_INTERVAL_SEC = 5.0
 # socket goes quiet). None when the feed is disabled or not yet started.
 _market_ws_feed: Optional[Any] = None
 
+# ── optional WS quality auto-degrade guard (off by default) ─────────────────
+_MARKET_WS_QUALITY_GUARD_ENABLED = _env_bool(
+    "MARKET_WS_QUALITY_GUARD_ENABLED",
+    bool(getattr(settings, "MARKET_WS_QUALITY_GUARD_ENABLED", False)),
+)
+try:
+    from core.marketdata.ws_quality_guard import WsQualityGuard, sample_from_market_ws_status
+
+    _market_ws_quality_guard = (
+        WsQualityGuard(enabled=True, max_tick_age_ms=float(_MARKET_WS_SYMBOL_MAX_AGE_SEC) * 1000.0)
+        if _MARKET_WS_QUALITY_GUARD_ENABLED
+        else None
+    )
+except Exception as exc:  # pragma: no cover - guard module is optional
+    WsQualityGuard = None  # type: ignore
+    sample_from_market_ws_status = None  # type: ignore
+    _market_ws_quality_guard = None
+    logger.debug(f"ws quality guard unavailable: {exc}")
+
+
+def _observe_ws_quality_guard() -> bool:
+    """Feed the WS quality guard one sample; return True if it says force REST.
+
+    No-op (False) unless the guard is enabled and we're in a primary mode — in
+    shadow/off, REST is already authoritative so the guard is irrelevant.
+    """
+    guard = _market_ws_quality_guard
+    if guard is None or not getattr(guard, "enabled", False):
+        return False
+    if _MARKET_WS_MODE not in {"ui_primary", "strategy_primary"}:
+        return False
+    if sample_from_market_ws_status is None:
+        return False
+    try:
+        decision = guard.observe(sample_from_market_ws_status(_market_ws_status_snapshot()))
+        if decision.action == "degrade":
+            logger.warning(
+                "market_ws quality guard DEGRADE -> forcing REST: %s",
+                "; ".join(decision.reasons),
+            )
+        elif decision.action == "recover":
+            logger.info("market_ws quality guard RECOVER -> WS primary restored")
+        return bool(decision.force_rest)
+    except Exception as exc:
+        logger.debug(f"ws quality guard observe failed: {exc}")
+        return False
+
 
 async def _runtime_pusher(stop_event: asyncio.Event) -> None:
     last_market_tick_at = 0.0
@@ -733,11 +780,13 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
                     else list(watch_symbols)
                 )
                 hub_healthy = not fallback_symbols
+                guard_force_rest = _observe_ws_quality_guard()
                 ws_can_suppress_rest = bool(
                     _is_market_ws_stream_enabled()
                     and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
                     and feed_healthy
                     and hub_healthy
+                    and not guard_force_rest
                 )
                 if not ws_can_suppress_rest:
                     fallback_active = bool(
@@ -840,6 +889,11 @@ def _market_ws_status_snapshot(*, include_symbols: bool = False) -> Dict[str, An
         "symbol_max_age_sec": _MARKET_WS_SYMBOL_MAX_AGE_SEC,
         "health_max_age_sec": _MARKET_WS_HEALTH_MAX_AGE_SEC,
         "max_price_diff_bps": _MARKET_WS_MAX_PRICE_DIFF_BPS,
+        "quality_guard": (
+            _market_ws_quality_guard.status()
+            if _market_ws_quality_guard is not None
+            else {"enabled": False}
+        ),
         **hub_snapshot,
     }
 

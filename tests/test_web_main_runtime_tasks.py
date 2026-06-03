@@ -288,6 +288,38 @@ def test_runtime_pusher_uses_rest_when_ws_unhealthy(monkeypatch):
     assert emit_calls[-1]["fallback_reason"] == "ws_unhealthy"
 
 
+def test_observe_ws_quality_guard_forces_rest_when_degraded(monkeypatch):
+    """When enabled + in a primary mode, a degraded guard returns force-REST=True."""
+    from core.marketdata.ws_quality_guard import WsQualityGuard
+
+    g = WsQualityGuard(enabled=True, window_sec=60, min_samples=1, degrade_unhealthy_fraction=0.5)
+    monkeypatch.setattr(web_main, "_market_ws_quality_guard", g)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    bad = {"feed_healthy": False, "ws_hub_healthy": False, "ws_stale_symbol_count": 2, "last_tick_age_ms": 99999.0}
+    monkeypatch.setattr(web_main, "_market_ws_status_snapshot", lambda **k: bad)
+    assert web_main._observe_ws_quality_guard() is True
+    assert g.state == "degraded"
+
+
+def test_observe_ws_quality_guard_noop_when_disabled_or_shadow(monkeypatch):
+    """Guard is a no-op when disabled, or when not in ui_primary/strategy_primary."""
+    from core.marketdata.ws_quality_guard import WsQualityGuard
+
+    # disabled (None) -> False
+    monkeypatch.setattr(web_main, "_market_ws_quality_guard", None)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    assert web_main._observe_ws_quality_guard() is False
+
+    # enabled but shadow mode -> never observed, returns False
+    g = WsQualityGuard(enabled=True, window_sec=60, min_samples=1, degrade_unhealthy_fraction=0.5)
+    monkeypatch.setattr(web_main, "_market_ws_quality_guard", g)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "shadow")
+    bad = {"feed_healthy": False, "ws_hub_healthy": False, "ws_stale_symbol_count": 2, "last_tick_age_ms": 99999.0}
+    monkeypatch.setattr(web_main, "_market_ws_status_snapshot", lambda **k: bad)
+    assert web_main._observe_ws_quality_guard() is False
+    assert g.state == "ws"
+
+
 def test_runtime_pusher_uses_rest_fallback_when_ui_primary_hub_is_stale(monkeypatch):
     """A healthy feed alone is not enough; stale hub data must trigger REST fallback."""
 
