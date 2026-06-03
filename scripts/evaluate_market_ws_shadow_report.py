@@ -90,6 +90,10 @@ def evaluate_report(
     diagnostic_log_counts: Optional[Dict[str, int]] = None,
     max_log_count: int = 0,
     require_final_runtime_fields: bool = False,
+    tolerate_transient: bool = False,
+    max_degraded_samples: int = 0,
+    max_consecutive_degraded: int = 1,
+    max_degraded_oldest_age_ms: float = 60000.0,
 ) -> Dict[str, Any]:
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     errors: list[str] = []
@@ -166,16 +170,40 @@ def evaluate_report(
         feed_watch_empty_delta <= int(max_feed_watch_empty_delta),
         f"feed_watch_empty_delta {feed_watch_empty_delta} > allowed {max_feed_watch_empty_delta}",
     )
-    _add_error(
-        errors,
-        max_feed_watch_symbol_errors == 0,
-        f"max_feed_watch_symbol_error_count_observed {max_feed_watch_symbol_errors} > allowed 0",
-    )
-    _add_error(
-        errors,
-        max_stale_observed <= int(max_stale_symbol_count),
-        f"max_stale_symbol_count_observed {max_stale_observed} > allowed {max_stale_symbol_count}",
-    )
+    if tolerate_transient:
+        # Bounded-tolerance gate: allow a small number of *isolated* transient
+        # degradations (momentary REST fallback / brief stale, recovered next sample)
+        # using the summary stats the selfcheck records, but still hard-fail on
+        # sustained degradation.
+        degraded_sample_count = _safe_int(summary.get("degraded_sample_count"))
+        max_consecutive_degraded_observed = _safe_int(summary.get("max_consecutive_degraded_observed"))
+        worst_degraded_oldest = _safe_float(summary.get("worst_degraded_oldest_age_ms")) or 0.0
+        _add_error(
+            errors,
+            degraded_sample_count <= int(max_degraded_samples),
+            f"degraded_sample_count {degraded_sample_count} > allowed {max_degraded_samples}",
+        )
+        _add_error(
+            errors,
+            max_consecutive_degraded_observed <= int(max_consecutive_degraded),
+            f"max_consecutive_degraded {max_consecutive_degraded_observed} > allowed {max_consecutive_degraded} (sustained degradation)",
+        )
+        _add_error(
+            errors,
+            worst_degraded_oldest <= float(max_degraded_oldest_age_ms),
+            f"worst_degraded_oldest_age_ms {worst_degraded_oldest:.0f} > allowed {max_degraded_oldest_age_ms:.0f}",
+        )
+    else:
+        _add_error(
+            errors,
+            max_feed_watch_symbol_errors == 0,
+            f"max_feed_watch_symbol_error_count_observed {max_feed_watch_symbol_errors} > allowed 0",
+        )
+        _add_error(
+            errors,
+            max_stale_observed <= int(max_stale_symbol_count),
+            f"max_stale_symbol_count_observed {max_stale_observed} > allowed {max_stale_symbol_count}",
+        )
     _add_error(errors, p99_abs_diff_bps is not None, "p99_abs_diff_bps is missing")
     if p99_abs_diff_bps is not None:
         _add_error(
@@ -323,6 +351,11 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Require final_trading_mode and final_paper_trading to be present and exact.",
     )
+    parser.add_argument("--tolerate-transient", action="store_true",
+                        help="Allow a small bounded number of isolated transient degradations (REST fallback / brief stale).")
+    parser.add_argument("--max-degraded-samples", type=int, default=0)
+    parser.add_argument("--max-consecutive-degraded", type=int, default=1)
+    parser.add_argument("--max-degraded-oldest-age-ms", type=float, default=60000.0)
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -380,6 +413,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             diagnostic_log_counts=diagnostic_log_counts,
             max_log_count=int(args.max_log_count),
             require_final_runtime_fields=bool(args.require_final_runtime_fields),
+            tolerate_transient=bool(args.tolerate_transient),
+            max_degraded_samples=int(args.max_degraded_samples),
+            max_consecutive_degraded=int(args.max_consecutive_degraded),
+            max_degraded_oldest_age_ms=float(args.max_degraded_oldest_age_ms),
         )
     except Exception as exc:
         result = {

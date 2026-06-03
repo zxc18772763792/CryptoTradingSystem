@@ -252,10 +252,15 @@ def _evaluate_samples(
     max_stale_symbol_count: int,
     max_price_diff_bps: float,
     max_ws_age_p95_ms: Optional[float],
+    tolerate_transient: bool = False,
+    max_degraded_samples: int = 0,
+    max_consecutive_degraded: int = 1,
+    max_degraded_oldest_age_ms: float = 60000.0,
 ) -> Tuple[bool, List[str], Dict[str, Any]]:
     errors: List[str] = []
     mode = str(expect_mode or "shadow").strip().lower()
     runtime = str(expect_runtime or "paper").strip().lower()
+    degraded_indices: List[int] = []
     for index, sample in enumerate(samples):
         prefix = f"sample[{index}]"
         if sample.get("sample_error"):
@@ -294,10 +299,42 @@ def _evaluate_samples(
             if sample.get("ws_stale_symbol_count") is not None
             else _as_int(sample.get("stale_symbol_count"))
         )
-        if stale_for_check > max_stale_symbol_count:
-            errors.append(f"{prefix}: ws_stale_symbol_count>{max_stale_symbol_count}")
-        for watched_symbol_error in sample.get("feed_watch_symbol_errors") or []:
-            errors.append(f"{prefix}: {watched_symbol_error}")
+        sample_watch_errors = sample.get("feed_watch_symbol_errors") or []
+        sample_stale = stale_for_check > max_stale_symbol_count
+        if sample_stale or sample_watch_errors:
+            degraded_indices.append(index)
+        if not tolerate_transient:
+            if sample_stale:
+                errors.append(f"{prefix}: ws_stale_symbol_count>{max_stale_symbol_count}")
+            for watched_symbol_error in sample_watch_errors:
+                errors.append(f"{prefix}: {watched_symbol_error}")
+
+    # Transient-degradation tolerance (only enforced when --tolerate-transient is set).
+    # A "degraded" sample is one where a watched symbol was momentarily not WS-sourced
+    # or stale; we allow a small bounded number of *isolated* such samples (which REST
+    # fallback covers) but still hard-fail on sustained degradation.
+    total_degraded = len(degraded_indices)
+    longest_degraded = 0
+    if degraded_indices:
+        longest_degraded = _run = 1
+        for _a, _b in zip(degraded_indices, degraded_indices[1:]):
+            _run = _run + 1 if _b == _a + 1 else 1
+            longest_degraded = max(longest_degraded, _run)
+    worst_degraded_oldest = max(
+        (_as_float(samples[i].get("oldest_tick_age_ms")) or 0.0 for i in degraded_indices),
+        default=0.0,
+    )
+    if tolerate_transient:
+        if total_degraded > int(max_degraded_samples):
+            errors.append(f"degraded_sample_count {total_degraded} > allowed {max_degraded_samples}")
+        if longest_degraded > int(max_consecutive_degraded):
+            errors.append(
+                f"max_consecutive_degraded {longest_degraded} > allowed {max_consecutive_degraded} (sustained degradation)"
+            )
+        if worst_degraded_oldest > float(max_degraded_oldest_age_ms):
+            errors.append(
+                f"degraded_sample oldest_tick_age_ms {worst_degraded_oldest:.0f} > allowed {max_degraded_oldest_age_ms:.0f}"
+            )
 
     valid_samples = [sample for sample in samples if not sample.get("sample_error")]
     if len(valid_samples) < int(min_samples):
@@ -387,6 +424,10 @@ def _evaluate_samples(
         ),
         "p99_abs_diff_bps": diff_p99,
         "p95_ws_age_ms": ws_age_p95,
+        "tolerate_transient": bool(tolerate_transient),
+        "degraded_sample_count": total_degraded,
+        "max_consecutive_degraded_observed": longest_degraded,
+        "worst_degraded_oldest_age_ms": worst_degraded_oldest,
         "max_stale_symbol_count_observed": max(
             (
                 _as_int(sample.get("ws_stale_symbol_count"))
@@ -434,6 +475,10 @@ def run_selfcheck(
     max_stale_symbol_count: int,
     max_price_diff_bps: float,
     max_ws_age_p95_ms: Optional[float],
+    tolerate_transient: bool = False,
+    max_degraded_samples: int = 0,
+    max_consecutive_degraded: int = 1,
+    max_degraded_oldest_age_ms: float = 60000.0,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> Dict[str, Any]:
     interval = max(0.1, float(interval_sec or 1.0))
@@ -465,6 +510,10 @@ def run_selfcheck(
         max_stale_symbol_count=max_stale_symbol_count,
         max_price_diff_bps=max_price_diff_bps,
         max_ws_age_p95_ms=max_ws_age_p95_ms,
+        tolerate_transient=tolerate_transient,
+        max_degraded_samples=max_degraded_samples,
+        max_consecutive_degraded=max_consecutive_degraded,
+        max_degraded_oldest_age_ms=max_degraded_oldest_age_ms,
     )
     return {
         "overall_ok": ok,
@@ -528,6 +577,10 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-stale-symbol-count", type=int, default=int(os.getenv("MARKET_WS_SHADOW_MAX_STALE_SYMBOL_COUNT", "0")))
     parser.add_argument("--max-price-diff-bps", type=float, default=float(os.getenv("MARKET_WS_MAX_PRICE_DIFF_BPS", "20")))
     parser.add_argument("--max-ws-age-p95-ms", type=float, default=None)
+    parser.add_argument("--tolerate-transient", action="store_true", default=_as_bool(os.getenv("MARKET_WS_SHADOW_TOLERATE_TRANSIENT", "")))
+    parser.add_argument("--max-degraded-samples", type=int, default=int(os.getenv("MARKET_WS_SHADOW_MAX_DEGRADED_SAMPLES", "0")))
+    parser.add_argument("--max-consecutive-degraded", type=int, default=int(os.getenv("MARKET_WS_SHADOW_MAX_CONSECUTIVE_DEGRADED", "1")))
+    parser.add_argument("--max-degraded-oldest-age-ms", type=float, default=float(os.getenv("MARKET_WS_SHADOW_MAX_DEGRADED_OLDEST_AGE_MS", "60000")))
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -555,6 +608,10 @@ def main(argv: Iterable[str] | None = None) -> int:
             max_stale_symbol_count=int(args.max_stale_symbol_count),
             max_price_diff_bps=float(args.max_price_diff_bps),
             max_ws_age_p95_ms=args.max_ws_age_p95_ms,
+            tolerate_transient=bool(args.tolerate_transient),
+            max_degraded_samples=int(args.max_degraded_samples),
+            max_consecutive_degraded=int(args.max_consecutive_degraded),
+            max_degraded_oldest_age_ms=float(args.max_degraded_oldest_age_ms),
         )
     except Exception as exc:
         report = {
