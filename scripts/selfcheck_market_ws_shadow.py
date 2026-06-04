@@ -323,8 +323,11 @@ def _evaluate_samples(
         for _a, _b in zip(degraded_indices, degraded_indices[1:]):
             _run = _run + 1 if _b == _a + 1 else 1
             longest_degraded = max(longest_degraded, _run)
+    # Use the active/watched feed freshness (last_tick_age_ms), NOT the hub's
+    # global oldest_tick_age_ms — the latter false-fires on a stale *non-watched*
+    # symbol that got one tick early and never updated again (can read ~hours).
     worst_degraded_oldest = max(
-        (_as_float(samples[i].get("oldest_tick_age_ms")) or 0.0 for i in degraded_indices),
+        (_as_float(samples[i].get("last_tick_age_ms")) or 0.0 for i in degraded_indices),
         default=0.0,
     )
     if tolerate_transient:
@@ -336,7 +339,7 @@ def _evaluate_samples(
             )
         if worst_degraded_oldest > float(max_degraded_oldest_age_ms):
             errors.append(
-                f"degraded_sample oldest_tick_age_ms {worst_degraded_oldest:.0f} > allowed {max_degraded_oldest_age_ms:.0f}"
+                f"degraded_sample watched_tick_age_ms {worst_degraded_oldest:.0f} > allowed {max_degraded_oldest_age_ms:.0f}"
             )
 
     valid_samples = [sample for sample in samples if not sample.get("sample_error")]
