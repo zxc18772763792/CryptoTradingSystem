@@ -62,6 +62,7 @@ from core.data.factor_library import FACTOR_CATALOG, build_factor_library
 from core.data.coinglass_feature_builder import build_coinglass_overview_payload
 from core.data.coinglass_registry import get_coinglass_manifest
 from core.exchanges.exchange_manager import exchange_manager
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.runtime import runtime_state
 from web.api.backtest import (
     _build_fama_backtest_components,
@@ -1363,6 +1364,50 @@ async def _safe_exchange_call(
             await asyncio.sleep(0.4 * (attempt + 1))
 
     raise last_error or RuntimeError(f"{exchange}.{method_name} failed")
+
+
+async def _load_ticker_payload(exchange: str, symbol: str) -> Dict[str, Any]:
+    connector = exchange_manager.get_exchange(exchange)
+    try:
+        price_read = await get_realtime_price(
+            exchange,
+            symbol,
+            connector=connector,
+            allow_rest_fallback=False,
+            max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+            rest_timeout_sec=1.5,
+        )
+    except Exception:
+        price_read = None
+
+    if price_read is not None and price_read.ok and price_read.price is not None:
+        return {
+            "exchange": exchange,
+            "symbol": symbol,
+            "last": float(price_read.price),
+            "bid": float(price_read.bid or 0.0),
+            "ask": float(price_read.ask or 0.0),
+            "high_24h": 0.0,
+            "low_24h": 0.0,
+            "volume_24h": 0.0,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": price_read.source,
+            "price_meta": price_read.to_metadata(),
+        }
+
+    ticker = await _safe_exchange_call(exchange, "get_ticker", symbol)
+    return {
+        "exchange": exchange,
+        "symbol": symbol,
+        "last": ticker.last,
+        "bid": ticker.bid,
+        "ask": ticker.ask,
+        "high_24h": ticker.high_24h,
+        "low_24h": ticker.low_24h,
+        "volume_24h": ticker.volume_24h,
+        "timestamp": ticker.timestamp.isoformat(),
+        "source": "rest",
+    }
 
 
 async def _fetch_public_trades(
@@ -3882,22 +3927,9 @@ async def get_klines(
 @router.get("/ticker")
 async def get_ticker(exchange: str, symbol: str):
     try:
-        ticker = await _safe_exchange_call(exchange, "get_ticker", symbol)
+        return await _load_ticker_payload(exchange, symbol)
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"交易所未连接或行情拉取失败: {e}")
-
-    return {
-        "exchange": exchange,
-        "symbol": symbol,
-        "last": ticker.last,
-        "bid": ticker.bid,
-        "ask": ticker.ask,
-        "high_24h": ticker.high_24h,
-        "low_24h": ticker.low_24h,
-        "volume_24h": ticker.volume_24h,
-        "timestamp": ticker.timestamp.isoformat(),
-    }
-
 
 @router.get("/tickers")
 async def get_tickers(exchange: str):
@@ -3906,13 +3938,16 @@ async def get_tickers(exchange: str):
 
     for symbol in symbols[:20]:
         try:
-            ticker = await _safe_exchange_call(exchange, "get_ticker", symbol)
+            ticker = await _load_ticker_payload(exchange, symbol)
+            last = float(ticker.get("last") or 0.0)
+            low_24h = float(ticker.get("low_24h") or 0.0)
             tickers.append(
                 {
                     "symbol": symbol,
-                    "last": ticker.last,
-                    "change_24h": (ticker.last - ticker.low_24h) / ticker.low_24h if ticker.low_24h > 0 else 0,
-                    "volume_24h": ticker.volume_24h,
+                    "last": last,
+                    "change_24h": (last - low_24h) / low_24h if low_24h > 0 else 0,
+                    "volume_24h": float(ticker.get("volume_24h") or 0.0),
+                    "source": ticker.get("source"),
                 }
             )
         except Exception:

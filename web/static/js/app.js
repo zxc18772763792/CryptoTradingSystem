@@ -2353,6 +2353,10 @@ const wsStaleCount=Number(wsStaleRaw==null?allStaleCount:wsStaleRaw);
 const staleCount=(enabled&&mode!=='off')?wsStaleCount:allStaleCount;
 const fallbackCount=Number(mw.rest_fallback_count||0);
 const violationCount=Number(mw.shadow_compare_violation_count||0);
+const markPriceEnabled=!!mw.mark_price_enabled;
+const auxiliarySymbolCount=Number(mw.auxiliary_symbol_count||0);
+const channelCounts=(mw.channel_counts&&typeof mw.channel_counts==='object')?mw.channel_counts:{};
+const channelSummary=Object.entries(channelCounts).map(([k,v])=>`${k}:${v}`).join(',');
 let text='行情: REST';
 let tone='';
 if(statusStale){
@@ -2392,6 +2396,9 @@ el.title=[
   `ws_hub_healthy=${wsHubHealthy}`,
   `ws_stale_symbols=${Number.isFinite(wsStaleCount)?wsStaleCount:0}`,
   `stale_symbols_total=${Number.isFinite(allStaleCount)?allStaleCount:0}`,
+  `mark_price_enabled=${markPriceEnabled}`,
+  `auxiliary_symbols=${Number.isFinite(auxiliarySymbolCount)?auxiliarySymbolCount:0}`,
+  `channels=${channelSummary||'none'}`,
   `rest_fallback_count=${Number.isFinite(fallbackCount)?fallbackCount:0}`,
   `shadow_violations=${Number.isFinite(violationCount)?violationCount:0}`
 ].join(' | ');

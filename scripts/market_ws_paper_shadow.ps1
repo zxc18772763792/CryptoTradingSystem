@@ -209,6 +209,7 @@ function Get-CommonEnvCommands {
         'set "MARKET_WS_WATCH_TIMEOUT_SEC=25"',
         'set "MARKET_WS_MAX_PRICE_DIFF_BPS=20"',
         'set "MARKET_WS_SYMBOL_MAX_AGE_SEC=10"',
+        'set "MARKET_WS_MARK_PRICE_ENABLED=false"',
         'set "EXCHANGE_WATCHDOG_ENABLED=false"',
         'set "COINGLASS_WORKER_ENABLED=false"',
         'set "NEWS_BACKGROUND_ENABLED=false"',

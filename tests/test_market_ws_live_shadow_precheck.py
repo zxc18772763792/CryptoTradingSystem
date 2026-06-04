@@ -32,6 +32,9 @@ def _market_ws_payload(**overrides):
         "mode": "shadow",
         "force_rest": False,
         "fail_closed_for_live": True,
+        "mark_price_enabled": False,
+        "auxiliary_symbol_count": 0,
+        "channel_counts": {"ticker": 2},
         "feed_healthy": True,
         "feed_status": {
             "exchanges": {
@@ -79,6 +82,26 @@ def test_live_shadow_precheck_passes_expected_configuration():
     assert summary["trading_mode"] == "live"
     assert summary["market_ws_mode"] == "shadow"
     assert summary["market_ws_fail_closed_for_live"] is True
+    assert summary["market_ws_mark_price_enabled"] is False
+    assert summary["market_ws_auxiliary_symbol_count"] == 0
+    assert summary["market_ws_channel_counts"] == {"ticker": 2}
+
+
+def test_live_shadow_precheck_preserves_mark_price_observability():
+    ok, errors, summary = precheck.evaluate_precheck(
+        _status_payload(),
+        _market_ws_payload(
+            mark_price_enabled=True,
+            auxiliary_symbol_count=2,
+            channel_counts={"mark_price": 2, "ticker": 2},
+        ),
+    )
+
+    assert ok is True
+    assert errors == []
+    assert summary["market_ws_mark_price_enabled"] is True
+    assert summary["market_ws_auxiliary_symbol_count"] == 2
+    assert summary["market_ws_channel_counts"] == {"mark_price": 2, "ticker": 2}
 
 
 def test_live_shadow_precheck_rejects_paper_runtime():

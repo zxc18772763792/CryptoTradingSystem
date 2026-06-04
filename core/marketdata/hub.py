@@ -50,6 +50,15 @@ def _coerce_float(value: Any) -> Optional[float]:
     return out
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _coerce_datetime(value: Any) -> Optional[datetime]:
     if value is None:
         return None
@@ -86,6 +95,9 @@ class MarketTick:
     bid: Optional[float] = None
     ask: Optional[float] = None
     mark: Optional[float] = None
+    index_price: Optional[float] = None
+    funding_rate: Optional[float] = None
+    next_funding_time: Optional[int] = None
     volume: Optional[float] = None
     timestamp_exchange: Optional[datetime] = None
     timestamp_received: datetime = field(default_factory=_utc_now)
@@ -122,6 +134,12 @@ class MarketTick:
         }
         if self.mark is not None:
             payload["mark"] = self.mark
+        if self.index_price is not None:
+            payload["index"] = self.index_price
+        if self.funding_rate is not None:
+            payload["funding_rate"] = self.funding_rate
+        if self.next_funding_time is not None:
+            payload["next_funding_time"] = self.next_funding_time
         if self.volume is not None:
             payload["volume"] = self.volume
         if self.raw_symbol:
@@ -140,6 +158,9 @@ class MarketTick:
             "bid": self.bid,
             "ask": self.ask,
             "mark": self.mark,
+            "index": self.index_price,
+            "funding_rate": self.funding_rate,
+            "next_funding_time": self.next_funding_time,
             "volume": self.volume,
             "source": self.source,
             "age_ms": age_ms,
@@ -252,6 +273,23 @@ class MarketDataHub:
         bid = _coerce_float(payload.get("bid"))
         ask = _coerce_float(payload.get("ask"))
         mark = _coerce_float(payload.get("mark") if payload.get("mark") is not None else payload.get("mark_price"))
+        index_price = _coerce_float(
+            payload.get("index")
+            if payload.get("index") is not None
+            else payload.get("index_price")
+            if payload.get("index_price") is not None
+            else payload.get("indexPrice")
+        )
+        funding_rate = _coerce_float(
+            payload.get("funding_rate")
+            if payload.get("funding_rate") is not None
+            else payload.get("fundingRate")
+        )
+        next_funding_time = _coerce_int(
+            payload.get("next_funding_time")
+            if payload.get("next_funding_time") is not None
+            else payload.get("fundingTimestamp")
+        )
         volume = _coerce_float(
             payload.get("volume")
             if payload.get("volume") is not None
@@ -308,6 +346,9 @@ class MarketDataHub:
             bid=bid,
             ask=ask,
             mark=mark,
+            index_price=index_price,
+            funding_rate=funding_rate,
+            next_funding_time=next_funding_time,
             volume=volume,
             timestamp_exchange=timestamp_exchange,
             timestamp_received=now,
@@ -439,19 +480,58 @@ class MarketDataHub:
             },
         }
 
-    def has_fresh_tick(self, *, max_age_sec: Optional[float] = None, source: Optional[MarketTickSource] = None) -> bool:
+    def has_fresh_tick(
+        self,
+        *,
+        max_age_sec: Optional[float] = None,
+        source: Optional[MarketTickSource] = None,
+        channel: Optional[str] = None,
+    ) -> bool:
         horizon = self.symbol_max_age_sec if max_age_sec is None else float(max_age_sec)
         now = _utc_now()
+        channel_key = str(channel or "").strip() if channel else None
         ticks = (
-            [tick for (src, _exchange, _symbol, _channel), tick in self._source_ticks.items() if src == source]
+            [
+                tick
+                for (src, _exchange, _symbol, tick_channel), tick in self._source_ticks.items()
+                if src == source and (channel_key is None or tick_channel == channel_key)
+            ]
             if source
-            else list(self._ticks.values())
+            else [
+                tick
+                for (_exchange, _symbol, tick_channel), tick in self._ticks.items()
+                if channel_key is None or tick_channel == channel_key
+            ]
         )
         return any(not tick.to_status(max_age_sec=horizon, now=now)["is_stale"] for tick in ticks)
 
-    def healthy_exchanges(self, *, max_age_sec: Optional[float] = None, source: Optional[MarketTickSource] = None) -> list[str]:
+    def healthy_exchanges(
+        self,
+        *,
+        max_age_sec: Optional[float] = None,
+        source: Optional[MarketTickSource] = None,
+        channel: Optional[str] = None,
+    ) -> list[str]:
         horizon = self.exchange_max_age_sec if max_age_sec is None else float(max_age_sec)
         now = _utc_now()
+        channel_key = str(channel or "").strip() if channel else None
+        if channel_key is not None:
+            exchanges: set[str] = set()
+            iterable = self._source_ticks.items() if source else (
+                ((("",) + key), tick) for key, tick in self._ticks.items()
+            )
+            for key, tick in iterable:
+                if source:
+                    src, exchange, _symbol, tick_channel = key
+                    if src != source:
+                        continue
+                else:
+                    _src, exchange, _symbol, tick_channel = key
+                if tick_channel != channel_key:
+                    continue
+                if (now - tick.timestamp_received).total_seconds() <= horizon:
+                    exchanges.add(exchange)
+            return sorted(exchanges)
         if source:
             return sorted(
                 exchange
@@ -466,25 +546,43 @@ class MarketDataHub:
 
     def snapshot(self, *, include_symbols: bool = False) -> Dict[str, Any]:
         now = _utc_now()
-        statuses = [
+        all_statuses = [
             tick.to_status(max_age_sec=self.symbol_max_age_sec, now=now)
             for tick in self._ticks.values()
         ]
+        statuses = [row for row in all_statuses if row.get("channel") == "ticker"]
+        auxiliary_statuses = [row for row in all_statuses if row.get("channel") != "ticker"]
         ages = [int(row["age_ms"]) for row in statuses]
         stale = [row for row in statuses if row["is_stale"]]
         ws_statuses = [row for row in statuses if row["source"] == "ws"]
         ws_stale = [row for row in ws_statuses if row["is_stale"]]
-        healthy_exchanges = self.healthy_exchanges(max_age_sec=self.exchange_max_age_sec)
-        ws_healthy_exchanges = self.healthy_exchanges(max_age_sec=self.exchange_max_age_sec, source="ws")
+        channel_counts: Dict[str, int] = {}
+        for row in all_statuses:
+            channel = str(row.get("channel") or "ticker")
+            channel_counts[channel] = channel_counts.get(channel, 0) + 1
+        healthy_exchanges = self.healthy_exchanges(max_age_sec=self.exchange_max_age_sec, channel="ticker")
+        ws_healthy_exchanges = self.healthy_exchanges(
+            max_age_sec=self.exchange_max_age_sec,
+            source="ws",
+            channel="ticker",
+        )
         latest_age = min(ages) if ages else None
         oldest_age = max(ages) if ages else None
         out: Dict[str, Any] = {
             "hub_healthy": bool(healthy_exchanges and statuses and len(stale) < len(statuses)),
-            "ws_hub_healthy": self.has_fresh_tick(max_age_sec=self.symbol_max_age_sec, source="ws"),
+            "ws_hub_healthy": self.has_fresh_tick(
+                max_age_sec=self.symbol_max_age_sec,
+                source="ws",
+                channel="ticker",
+            ),
             "healthy_exchanges": healthy_exchanges,
             "ws_healthy_exchanges": ws_healthy_exchanges,
             "symbol_count": len(statuses),
-            "ws_symbol_count": sum(1 for key in self._source_ticks if key[0] == "ws"),
+            "ws_symbol_count": sum(
+                1 for key in self._source_ticks if key[0] == "ws" and key[3] == "ticker"
+            ),
+            "auxiliary_symbol_count": len(auxiliary_statuses),
+            "channel_counts": dict(sorted(channel_counts.items())),
             "last_tick_age_ms": latest_age,
             "oldest_tick_age_ms": oldest_age,
             "stale_symbol_count": len(stale),
@@ -505,10 +603,15 @@ class MarketDataHub:
         }
         if include_symbols:
             per_exchange: Dict[str, Dict[str, Any]] = {}
-            for row in statuses:
+            for row in all_statuses:
                 exchange = str(row["exchange"])
                 symbol = str(row["symbol"])
-                per_exchange.setdefault(exchange, {})[symbol] = row
+                channel = str(row.get("channel") or "ticker")
+                symbol_rows = per_exchange.setdefault(exchange, {})
+                if channel == "ticker":
+                    symbol_rows[symbol] = row
+                else:
+                    symbol_rows[f"{symbol}#{channel}"] = row
             out["symbols"] = per_exchange
         return out
 

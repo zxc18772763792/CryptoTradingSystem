@@ -31,6 +31,9 @@ def test_market_data_ws_status_uses_exchange_ws_metrics_not_browser_ws_badge():
         "rest_fallback_count",
         "ws_stale_symbol_count",
         "stale_symbol_count",
+        "mark_price_enabled",
+        "auxiliary_symbol_count",
+        "channel_counts",
         "shadow_compare_violation_count",
     ]
     for field in required_fields:
@@ -42,3 +45,6 @@ def test_market_data_ws_status_uses_exchange_ws_metrics_not_browser_ws_badge():
     assert "行情: stale" in app_js
     assert "ws_stale_symbols" in app_js
     assert "stale_symbols_total" in app_js
+    assert "mark_price_enabled" in app_js
+    assert "auxiliary_symbols" in app_js
+    assert "channels=" in app_js

@@ -95,8 +95,10 @@ def test_xgb_booster_cache_concurrent_miss_returns_one_cached_instance(tmp_path,
 
 def test_cex_arbitrage_update_prices_runs_concurrent():
     """update_prices should issue get_ticker calls concurrently via asyncio.gather."""
+    from core.marketdata.hub import market_data_hub
     from strategies.arbitrage.cex_arbitrage import CEXArbitrageStrategy
 
+    market_data_hub.clear()
     call_order: list[str] = []
 
     async def slow_ticker(symbol: str):
@@ -115,16 +117,19 @@ def test_cex_arbitrage_update_prices_runs_concurrent():
     strategy = CEXArbitrageStrategy()
     strategy.params = {"exchanges": list(connectors.keys())}
 
-    import core.exchanges
-    with patch.object(
-        core.exchanges.exchange_manager,
-        "get_exchange",
-        side_effect=lambda name: connectors.get(name),
-    ):
-        import time
-        t0 = time.monotonic()
-        prices = asyncio.run(strategy.update_prices("BTC/USDT"))
-        elapsed = time.monotonic() - t0
+    try:
+        import core.exchanges
+        with patch.object(
+            core.exchanges.exchange_manager,
+            "get_exchange",
+            side_effect=lambda name: connectors.get(name),
+        ):
+            import time
+            t0 = time.monotonic()
+            prices = asyncio.run(strategy.update_prices("BTC/USDT"))
+            elapsed = time.monotonic() - t0
+    finally:
+        market_data_hub.clear()
 
     assert set(prices.keys()) == {"binance", "okx", "bybit"}
     # 3 sequential calls at 0.05s each = 0.15s. Parallel should be ~0.05s.
@@ -137,8 +142,10 @@ def test_cex_arbitrage_update_prices_runs_concurrent():
 
 def test_cex_arbitrage_isolates_single_exchange_failure():
     """One exchange raising should not poison the other results."""
+    from core.marketdata.hub import market_data_hub
     from strategies.arbitrage.cex_arbitrage import CEXArbitrageStrategy
 
+    market_data_hub.clear()
     async def ok_ticker(symbol: str):
         return SimpleNamespace(bid=100.0, ask=101.0, last=100.5)
 
@@ -153,13 +160,16 @@ def test_cex_arbitrage_isolates_single_exchange_failure():
     strategy = CEXArbitrageStrategy()
     strategy.params = {"exchanges": ["binance", "okx"]}
 
-    import core.exchanges
-    with patch.object(
-        core.exchanges.exchange_manager,
-        "get_exchange",
-        side_effect=lambda name: {"binance": good, "okx": bad}[name],
-    ):
-        prices = asyncio.run(strategy.update_prices("BTC/USDT"))
+    try:
+        import core.exchanges
+        with patch.object(
+            core.exchanges.exchange_manager,
+            "get_exchange",
+            side_effect=lambda name: {"binance": good, "okx": bad}[name],
+        ):
+            prices = asyncio.run(strategy.update_prices("BTC/USDT"))
+    finally:
+        market_data_hub.clear()
 
     assert "binance" in prices
     assert "okx" not in prices  # failure isolated

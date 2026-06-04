@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -10,6 +11,12 @@ from starlette.middleware.cors import CORSMiddleware
 from core.ops.service import auth as ops_auth_module
 from web import main as web_main
 from web.startup_mode import StartupModeDecision
+
+
+def test_model_env_fields_include_news_llm_backup_chain():
+    assert "NEWS_LLM_BACKUP_API_KEY" in web_main._MODEL_ENV_FIELDS
+    assert "NEWS_LLM_BACKUP_BASE_URL" in web_main._MODEL_ENV_FIELDS
+    assert "NEWS_LLM_BACKUP_MODEL" in web_main._MODEL_ENV_FIELDS
 
 
 def test_news_llm_task_runs_as_internal_fallback(monkeypatch):
@@ -320,6 +327,53 @@ def test_observe_ws_quality_guard_noop_when_disabled_or_shadow(monkeypatch):
     assert g.state == "ws"
 
 
+def test_runtime_pusher_quality_guard_forces_full_rest_fallback(monkeypatch):
+    """A degraded guard must fetch the full watch list even when current WS ticks are fresh."""
+
+    class _HealthyFeed:
+        def is_healthy(self):
+            return True
+
+    emit_calls = []
+
+    async def _fake_emit_market_ticks(**kwargs):
+        emit_calls.append(kwargs)
+
+    async def _fake_emit_runtime_snapshot():
+        return None
+
+    watch_symbols = ["BTC/USDT", "ETH/USDT"]
+    web_main.market_data_hub.clear()
+    for symbol in watch_symbols:
+        web_main.market_data_hub.upsert_ws_tick("binance", symbol, {"last": 50000.0})
+
+    monkeypatch.setattr(web_main.settings, "MARKET_WS_EXCHANGES", "binance")
+    monkeypatch.setattr(web_main, "_MARKET_WS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "ui_primary")
+    monkeypatch.setattr(web_main, "_MARKET_WS_FORCE_REST", False)
+    monkeypatch.setattr(web_main, "_MARKET_TICK_INTERVAL_SEC", 0.0)
+    monkeypatch.setattr(web_main, "_market_ws_feed", _HealthyFeed())
+    monkeypatch.setattr(web_main, "_collect_watch_symbols", lambda: list(watch_symbols))
+    monkeypatch.setattr(web_main, "_observe_ws_quality_guard", lambda: True)
+    monkeypatch.setattr(web_main, "_emit_market_ticks", _fake_emit_market_ticks)
+    monkeypatch.setattr(web_main, "_emit_runtime_snapshot", _fake_emit_runtime_snapshot)
+    monkeypatch.setattr(web_main.event_bus, "has_subscribers", lambda: True)
+
+    async def _run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(web_main._runtime_pusher(stop))
+        await asyncio.sleep(0.05)
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+    asyncio.run(_run())
+    assert emit_calls, "quality guard force-REST should not be a no-op"
+    assert emit_calls[-1]["hub_source"] == "rest_fallback"
+    assert emit_calls[-1]["fallback_reason"] == "ws_quality_guard"
+    assert emit_calls[-1]["symbols"] == watch_symbols
+    web_main.market_data_hub.clear()
+
+
 def test_runtime_pusher_uses_rest_fallback_when_ui_primary_hub_is_stale(monkeypatch):
     """A healthy feed alone is not enough; stale hub data must trigger REST fallback."""
 
@@ -607,6 +661,64 @@ def test_market_data_status_route_includes_symbol_details(monkeypatch):
     assert payload["mode"] == "shadow"
     assert payload["symbols"]["binance"]["BTC/USDT"]["source"] == "ws"
     web_main.market_data_hub.clear()
+
+
+def test_publish_market_mark_prices_writes_auxiliary_hub_channel():
+    web_main.market_data_hub.clear()
+
+    asyncio.run(
+        web_main._publish_market_mark_prices(
+            {
+                "binance": {
+                    "BTC/USDT:USDT": {
+                        "mark": 50010.0,
+                        "index": 50000.0,
+                        "funding_rate": 0.0001,
+                        "next_funding_time": 1_700_000_000_000,
+                    }
+                }
+            }
+        )
+    )
+
+    payload = web_main._market_ws_status_snapshot(include_symbols=True)
+    assert payload["symbol_count"] == 0
+    assert payload["auxiliary_symbol_count"] == 1
+    assert payload["channel_counts"] == {"mark_price": 1}
+    mark_status = payload["symbols"]["binance"]["BTC/USDT#mark_price"]
+    assert mark_status["channel"] == "mark_price"
+    assert mark_status["mark"] == 50010.0
+    assert mark_status["index"] == 50000.0
+    assert mark_status["funding_rate"] == 0.0001
+    assert mark_status["next_funding_time"] == 1_700_000_000_000
+    assert mark_status["source"] == "ws"
+    web_main.market_data_hub.clear()
+
+
+def test_market_ws_feed_worker_passes_mark_price_callback_when_enabled(monkeypatch):
+    captured = {}
+
+    class _FakeFeed:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def run(self, stop_event):
+            stop_event.set()
+
+    fake_module = SimpleNamespace(CcxtProMarketFeed=_FakeFeed, CCXT_PRO_AVAILABLE=True)
+    monkeypatch.setitem(sys.modules, "core.marketdata.ccxt_pro_feed", fake_module)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MARK_PRICE_ENABLED", True)
+    monkeypatch.setattr(web_main, "_configured_market_ws_exchange_names", lambda: ["binance"])
+    monkeypatch.setattr(web_main, "_MARKET_WS_EXCHANGE_DISCOVERY_INTERVAL_SEC", 0.01)
+
+    stop = asyncio.Event()
+    asyncio.run(web_main._market_ws_feed_worker(stop))
+
+    assert captured["watch_mark_prices"] is True
+    assert captured["on_mark"] is web_main._publish_market_mark_prices
+    assert captured["on_tick"] is web_main._publish_market_ticks
+    assert captured["exchanges"] == ["binance"]
+    assert web_main._market_ws_feed is None
 
 
 def test_emit_market_ticks_records_rest_snapshot_without_fallback_count(monkeypatch):
