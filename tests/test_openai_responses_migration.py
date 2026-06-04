@@ -2445,6 +2445,37 @@ def test_news_feed_summarize_cfg_caps_batch_and_extends_timeout_for_local_gemma(
     assert effective["llm"]["summarize_timeout_sec"] == 120
 
 
+def test_news_llm_runtime_snapshot_reports_nim_translation_chain(monkeypatch):
+    import web.api.news as module
+
+    monkeypatch.setattr(settings, "NEWS_LLM_PROVIDER", "openai", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "nvidia-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "google/gemma-4-31b-it", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "local-key,ds-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "http://192.168.1.24:8010/v1,https://kuaipao.ai", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "gemma4-local,deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "", raising=False)
+
+    payload = module._news_llm_runtime_snapshot({"llm": {"provider": "openai", "force_chat_completions": True}})
+
+    assert payload["enabled"] is True
+    assert [target["role"] for target in payload["targets"]] == ["primary", "backup", "backup"]
+    assert [target["summary_label"] for target in payload["targets"]] == [
+        "nim_summary",
+        "gm_summary",
+        "ds_summary",
+    ]
+    assert [target["model"] for target in payload["targets"]] == [
+        "google/gemma-4-31b-it",
+        "gemma4-local",
+        "deepseek-v4-flash",
+    ]
+    assert all(target["api_key_configured"] for target in payload["targets"])
+    assert all("api_key" not in target for target in payload["targets"])
+
+
 def test_failed_unstructured_with_llm_summary_is_treated_as_repaired():
     import web.api.news as module
 

@@ -26,6 +26,7 @@ from core.ai.research_runtime_context import resolve_runtime_research_context
 from core.audit import audit_logger
 from core.data import data_storage
 from core.exchanges.exchange_manager import exchange_manager
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.risk.risk_manager import risk_manager
 from core.strategies import Signal, SignalType, strategy_manager
 from core.strategies.persistence import (
@@ -1537,17 +1538,32 @@ async def _build_strategy_sizing_preview(name: str) -> Dict[str, Any]:
         except Exception:
             continue
 
-    # Only use live ticker if already connected (no new connection attempts)
+    price_meta: Dict[str, Any] = {
+        "source": price_source,
+        "exchange": exchange,
+        "symbol": symbol,
+    }
+
+    # Prefer the market-data hub (WS/rest_snapshot) before hitting REST.
+    # If the hub is missing or stale, use the already-connected exchange object
+    # as a bounded REST fallback; this preview must not create new connections.
     if last_price <= 0:
         connector = exchange_manager.get_exchange(exchange)
-        if connector:
-            try:
-                ticker = await asyncio.wait_for(connector.get_ticker(symbol), timeout=3.0)
-                last_price = float(getattr(ticker, "last", 0.0) or 0.0)
-                if last_price > 0:
-                    price_source = "live"
-            except Exception:
-                last_price = 0.0
+        try:
+            result = await get_realtime_price(
+                exchange,
+                symbol,
+                connector=connector,
+                allow_rest_fallback=connector is not None,
+                max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                rest_timeout_sec=3.0,
+            )
+            if result.ok and result.price is not None:
+                last_price = float(result.price)
+                price_source = f"hub:{result.source}" if result.reason == "hub_fresh" else result.source
+                price_meta = result.to_metadata()
+        except Exception:
+            last_price = 0.0
 
     min_amount, amount_decimals = await execution_engine._get_exchange_amount_rules(exchange, symbol)
     configured_min_notional = max(1.0, float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0))
@@ -1599,6 +1615,7 @@ async def _build_strategy_sizing_preview(name: str) -> Dict[str, Any]:
         "available_notional": round(available_notional, 6),
         "price": round(last_price, 8) if last_price > 0 else 0.0,
         "price_source": price_source,
+        "price_meta": price_meta,
         "exchange_min_notional": round(exchange_min_notional, 6),
         "configured_min_notional": round(configured_min_notional, 6),
         "effective_min_notional": round(effective_min_notional, 6),

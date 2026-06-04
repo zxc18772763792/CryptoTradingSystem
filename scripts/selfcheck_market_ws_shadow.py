@@ -176,6 +176,7 @@ def _extract_sample(base_url: str, token: str, timeout: float) -> Dict[str, Any]
         "configured_enabled": market_ws.get("configured_enabled"),
         "force_rest": market_ws.get("force_rest"),
         "fail_closed_for_live": market_ws.get("fail_closed_for_live"),
+        "mark_price_enabled": market_ws.get("mark_price_enabled"),
         "feed_present": market_ws.get("feed_present"),
         "feed_healthy": market_ws.get("feed_healthy"),
         "hub_healthy": market_ws.get("hub_healthy"),
@@ -184,6 +185,8 @@ def _extract_sample(base_url: str, token: str, timeout: float) -> Dict[str, Any]
         "ws_healthy_exchanges": market_ws.get("ws_healthy_exchanges") or [],
         "symbol_count": _as_int(market_ws.get("symbol_count")),
         "ws_symbol_count": _as_int(market_ws.get("ws_symbol_count")),
+        "auxiliary_symbol_count": _as_int(market_ws.get("auxiliary_symbol_count")),
+        "channel_counts": market_ws.get("channel_counts") or {},
         "stale_symbol_count": _as_int(market_ws.get("stale_symbol_count")),
         "ws_stale_symbol_count": (
             _as_int(market_ws.get("ws_stale_symbol_count"))
@@ -443,6 +446,9 @@ def _evaluate_samples(
         "final_enabled": valid_samples[-1].get("enabled") if valid_samples else None,
         "final_configured_enabled": valid_samples[-1].get("configured_enabled") if valid_samples else None,
         "final_fail_closed_for_live": valid_samples[-1].get("fail_closed_for_live") if valid_samples else None,
+        "final_mark_price_enabled": valid_samples[-1].get("mark_price_enabled") if valid_samples else None,
+        "final_auxiliary_symbol_count": valid_samples[-1].get("auxiliary_symbol_count") if valid_samples else None,
+        "final_channel_counts": valid_samples[-1].get("channel_counts") if valid_samples else {},
         "final_feed_healthy": valid_samples[-1].get("feed_healthy") if valid_samples else None,
         "final_ws_hub_healthy": valid_samples[-1].get("ws_hub_healthy") if valid_samples else None,
         "final_feed_watch_symbols": valid_samples[-1].get("feed_watch_symbols") if valid_samples else [],

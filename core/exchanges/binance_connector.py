@@ -23,10 +23,10 @@ from core.exchanges.base_exchange import (
     OrderStatus,
 )
 
-_BALANCE_SPOT_TIMEOUT_SEC = 4.0
-_FUNDING_FETCH_TIMEOUT_SEC = 2.8
+_BALANCE_SPOT_TIMEOUT_SEC = 6.0  # was 4.0 — give each wallet fetch room for proxy latency (~1.3-2s/call) before it fails-fast and gets skipped
+_FUNDING_FETCH_TIMEOUT_SEC = 4.0  # was 2.8 — the sapi funding-asset endpoint is the slow one
 _FUNDING_CACHE_TTL_SEC = 300.0
-_BALANCE_CACHE_TTL_SEC = 90.0
+_BALANCE_CACHE_TTL_SEC = 180.0  # was 90.0 — a 3-min-old valuation is still usable; flagging stale at 90s was too aggressive given fetch latency
 
 
 def _consume_close_result(task: asyncio.Task) -> None:

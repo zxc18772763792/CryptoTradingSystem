@@ -33,6 +33,7 @@ def test_paper_shadow_launcher_detaches_with_controlled_env_and_logs():
         'set "MARKET_WS_MODE=shadow"',
         'set "MARKET_WS_FORCE_REST=false"',
         'set "MARKET_WS_EXCHANGES=binance"',
+        'set "MARKET_WS_MARK_PRICE_ENABLED=false"',
         'set "EXCHANGE_WATCHDOG_ENABLED=false"',
         'set "COINGLASS_WORKER_ENABLED=false"',
         'set "NEWS_BACKGROUND_ENABLED=false"',
@@ -62,3 +63,18 @@ def test_paper_shadow_launcher_uses_ops_token_header_and_level1_gates():
     assert "--max-stale-symbol-count 0" in script
     assert "--max-price-diff-bps 20" in script
     assert "--max-ws-age-p95-ms 10000" in script
+
+
+def test_live_shadow_launcher_pins_mark_price_stream_off_for_level2_shadow():
+    script = _read("scripts/market_ws_live_shadow.ps1")
+
+    for expected in (
+        'set "TRADING_MODE=live"',
+        'set "MARKET_WS_ENABLED=true"',
+        'set "MARKET_WS_MODE=shadow"',
+        'set "MARKET_WS_FORCE_REST=false"',
+        'set "MARKET_WS_FAIL_CLOSED_FOR_LIVE=true"',
+        'set "MARKET_WS_MARK_PRICE_ENABLED=false"',
+    ):
+        assert expected in script
+    assert "precheck_market_ws_live_shadow.py" in script

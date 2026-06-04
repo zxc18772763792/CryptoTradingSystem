@@ -258,3 +258,35 @@ def test_shadow_compare_counts_missing_ws_only_when_enabled():
     assert snapshot["shadow_missing_ws_count"] == 1
     assert snapshot["shadow_compare_count"] == 0
     assert snapshot["shadow_last_compare"] is None
+
+
+def test_auxiliary_mark_price_channel_does_not_pollute_ticker_health():
+    hub = MarketDataHub(symbol_max_age_sec=10)
+
+    hub.upsert_ws_tick(
+        "binance",
+        "BTC/USDT:USDT",
+        {
+            "mark": 50001.0,
+            "index": 49995.0,
+            "funding_rate": 0.0001,
+            "next_funding_time": 1_700_000_000_000,
+        },
+        channel="mark_price",
+    )
+
+    snapshot = hub.snapshot(include_symbols=True)
+    assert snapshot["hub_healthy"] is False
+    assert snapshot["ws_hub_healthy"] is False
+    assert snapshot["symbol_count"] == 0
+    assert snapshot["ws_symbol_count"] == 0
+    assert snapshot["auxiliary_symbol_count"] == 1
+    assert snapshot["channel_counts"] == {"mark_price": 1}
+    assert "BTC/USDT" not in snapshot["symbols"]["binance"]
+    mark_status = snapshot["symbols"]["binance"]["BTC/USDT#mark_price"]
+    assert mark_status["channel"] == "mark_price"
+    assert mark_status["mark"] == 50001.0
+    assert mark_status["index"] == 49995.0
+    assert mark_status["funding_rate"] == 0.0001
+    assert mark_status["next_funding_time"] == 1_700_000_000_000
+    assert mark_status["source"] == "ws"

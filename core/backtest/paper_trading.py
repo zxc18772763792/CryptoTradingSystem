@@ -9,7 +9,9 @@ from typing import Any, Callable, Dict, List
 
 from loguru import logger
 
+from config.settings import settings
 from core.exchanges.exchange_manager import exchange_manager
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.strategies import Signal, StrategyBase
 from core.trading.execution_engine import execution_engine
 from core.trading.position_manager import position_manager
@@ -125,8 +127,16 @@ class PaperTradingEngine:
             symbols = exchange_manager.get_supported_symbols(exchange_name)
             for symbol in symbols[:5]:
                 try:
-                    ticker = await exchange.get_ticker(symbol)
-                    prices.setdefault(exchange_name, {})[symbol] = ticker.last
+                    result = await get_realtime_price(
+                        exchange_name,
+                        symbol,
+                        connector=exchange,
+                        allow_rest_fallback=True,
+                        max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                        rest_timeout_sec=3.0,
+                    )
+                    if result.ok and result.price is not None:
+                        prices.setdefault(exchange_name, {})[symbol] = float(result.price)
                 except Exception as e:
                     logger.warning(f"Failed to get ticker for {symbol}: {e}")
 

@@ -62,6 +62,7 @@ def _status_payload(
         "mode": "shadow",
         "force_rest": False,
         "fail_closed_for_live": True,
+        "mark_price_enabled": False,
         "feed_present": True,
         "feed_healthy": True,
         "hub_healthy": True,
@@ -71,6 +72,8 @@ def _status_payload(
         "symbol_max_age_sec": 10.0,
         "symbol_count": 1,
         "ws_symbol_count": 1,
+        "auxiliary_symbol_count": 0,
+        "channel_counts": {"ticker": 1},
         "stale_symbol_count": stale,
         "last_tick_age_ms": 250,
         "oldest_tick_age_ms": 250,
@@ -534,6 +537,9 @@ def test_market_ws_shadow_selfcheck_treats_recovered_timeouts_as_diagnostic(monk
     assert report["overall_ok"] is True
     assert report["summary"]["feed_watch_timeout_delta"] == 2
     assert report["summary"]["feed_watch_error_delta"] == 1
+    assert report["summary"]["final_mark_price_enabled"] is False
+    assert report["summary"]["final_auxiliary_symbol_count"] == 0
+    assert report["summary"]["final_channel_counts"] == {"ticker": 1}
 
 
 def test_market_ws_shadow_selfcheck_uses_ws_stale_count_when_available(monkeypatch):
@@ -576,6 +582,58 @@ def test_market_ws_shadow_selfcheck_uses_ws_stale_count_when_available(monkeypat
 
     assert report["overall_ok"] is True
     assert report["summary"]["max_stale_symbol_count_observed"] == 0
+
+
+def test_market_ws_shadow_selfcheck_preserves_mark_price_observability(monkeypatch):
+    routes = {
+        ("GET", "/health"): [FakeResponse(200, {"status": "healthy"}), FakeResponse(200, {"status": "healthy"})],
+        ("GET", "/api/status"): [
+            FakeResponse(200, _api_status_payload()),
+            FakeResponse(200, _api_status_payload()),
+        ],
+        ("GET", "/api/market-data/status"): [
+            FakeResponse(200, _status_payload(ws_tick_count=10, compare_count=3)),
+            FakeResponse(
+                200,
+                _status_payload(ws_tick_count=14, compare_count=5)
+                | {
+                    "mark_price_enabled": True,
+                    "auxiliary_symbol_count": 1,
+                    "channel_counts": {"mark_price": 1, "ticker": 1},
+                },
+            ),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, []))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=1,
+        interval_sec=1,
+        min_samples=2,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=1,
+        min_shadow_compare_delta=1,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is True
+    assert report["summary"]["final_mark_price_enabled"] is True
+    assert report["summary"]["final_auxiliary_symbol_count"] == 1
+    assert report["summary"]["final_channel_counts"] == {"mark_price": 1, "ticker": 1}
 
 
 def test_market_ws_shadow_selfcheck_still_fails_empty_feed_batches(monkeypatch):

@@ -27,6 +27,9 @@ def _report(*, expect_mode="shadow", expect_runtime="paper", **summary_overrides
         "final_enabled": True,
         "final_configured_enabled": True,
         "final_fail_closed_for_live": True,
+        "final_mark_price_enabled": False,
+        "final_auxiliary_symbol_count": 0,
+        "final_channel_counts": {"ticker": 1},
         "final_feed_healthy": True,
         "final_ws_hub_healthy": True,
         "final_feed_watch_symbols": ["binance:BTC/USDT"],
@@ -73,6 +76,9 @@ def test_market_ws_shadow_report_eval_passes_clean_report():
     assert result["errors"] == []
     assert result["summary"]["sample_count"] == 361
     assert result["summary"]["p99_abs_diff_bps"] == 4.2
+    assert result["summary"]["final_mark_price_enabled"] is False
+    assert result["summary"]["final_auxiliary_symbol_count"] == 0
+    assert result["summary"]["final_channel_counts"] == {"ticker": 1}
 
 
 def test_market_ws_shadow_report_eval_fails_threshold_violations():
@@ -94,6 +100,21 @@ def test_market_ws_shadow_report_eval_fails_threshold_violations():
     assert "shadow_compare_stale_skip_delta 2 > allowed 0" in result["errors"]
     assert any(error.startswith("p99_abs_diff_bps") for error in result["errors"])
     assert "final_feed_healthy is not true" in result["errors"]
+
+
+def test_market_ws_shadow_report_eval_preserves_mark_price_observability():
+    result = _evaluate(
+        report=_report(
+            final_mark_price_enabled=True,
+            final_auxiliary_symbol_count=2,
+            final_channel_counts={"mark_price": 2, "ticker": 2},
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["summary"]["final_mark_price_enabled"] is True
+    assert result["summary"]["final_auxiliary_symbol_count"] == 2
+    assert result["summary"]["final_channel_counts"] == {"mark_price": 2, "ticker": 2}
 
 
 def test_market_ws_shadow_report_eval_fails_log_pollution():

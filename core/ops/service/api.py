@@ -37,6 +37,7 @@ from core.governance.service import (
     transition_strategy as governance_transition_strategy,
     upsert_api_user as governance_upsert_api_user,
 )
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.ops.service.auth import get_ops_token, get_request_auth, ops_token_configured, require_ops_auth
 from core.runtime.bootstrap import runtime_bootstrap
 from core.research.orchestrator import (
@@ -553,6 +554,16 @@ async def _ensure_paper_mode_started() -> None:
 
 async def _get_ticker_price(symbol: str, exchange_name: str = "binance") -> float:
     connector = exchange_manager.get_exchange(exchange_name)
+    price_read = await get_realtime_price(
+        exchange_name,
+        symbol,
+        connector=connector,
+        allow_rest_fallback=connector is not None,
+        max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+        rest_timeout_sec=1.5,
+    )
+    if price_read.ok and price_read.price is not None:
+        return float(price_read.price)
     if not connector:
         raise RuntimeError(f"exchange not connected: {exchange_name}")
     ticker = await connector.get_ticker(symbol)

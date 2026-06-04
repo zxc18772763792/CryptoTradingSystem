@@ -39,6 +39,9 @@ _MODEL_ENV_FIELDS = (
     "NEWS_LLM_API_KEY",
     "NEWS_LLM_BASE_URL",
     "NEWS_LLM_MODEL",
+    "NEWS_LLM_BACKUP_API_KEY",
+    "NEWS_LLM_BACKUP_BASE_URL",
+    "NEWS_LLM_BACKUP_MODEL",
     "NEWS_LLM_FORCE_CHAT_COMPLETIONS",
 )
 
@@ -176,6 +179,10 @@ _MARKET_WS_REST_RECONCILE_SEC = max(
         "MARKET_WS_REST_RECONCILE_SEC",
         float(getattr(settings, "MARKET_WS_REST_RECONCILE_SEC", 30.0) or 30.0),
     ),
+)
+_MARKET_WS_MARK_PRICE_ENABLED = _env_bool(
+    "MARKET_WS_MARK_PRICE_ENABLED",
+    bool(getattr(settings, "MARKET_WS_MARK_PRICE_ENABLED", False)),
 )
 market_data_hub.symbol_max_age_sec = _MARKET_WS_SYMBOL_MAX_AGE_SEC
 market_data_hub.exchange_max_age_sec = _MARKET_WS_HEALTH_MAX_AGE_SEC
@@ -568,6 +575,7 @@ def _symbols_requiring_ws_fallback(symbols: Iterable[str]) -> List[str]:
         exchanges = market_data_hub.healthy_exchanges(
             max_age_sec=_MARKET_WS_HEALTH_MAX_AGE_SEC,
             source="ws",
+            channel="ticker",
         )
     for symbol in symbols:
         normalized = str(symbol or "").strip()
@@ -781,6 +789,8 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
                 )
                 hub_healthy = not fallback_symbols
                 guard_force_rest = _observe_ws_quality_guard()
+                if guard_force_rest:
+                    fallback_symbols = list(watch_symbols)
                 ws_can_suppress_rest = bool(
                     _is_market_ws_stream_enabled()
                     and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
@@ -793,7 +803,12 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
                         _is_market_ws_stream_enabled()
                         and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
                     )
-                    reason = "ws_unhealthy" if not feed_healthy else "ws_stale"
+                    if guard_force_rest:
+                        reason = "ws_quality_guard"
+                    elif not feed_healthy:
+                        reason = "ws_unhealthy"
+                    else:
+                        reason = "ws_stale"
                     await _emit_market_ticks(
                         hub_source="rest_fallback" if fallback_active else "rest_snapshot",
                         fallback_reason=reason if fallback_active else "periodic_rest_snapshot",
@@ -849,6 +864,26 @@ async def _publish_market_ticks(payload: Dict[str, Dict[str, Any]]) -> None:
             logger.warning(f"market_tick WS publish failed after hub write: {exc}")
 
 
+async def _publish_market_mark_prices(payload: Dict[str, Dict[str, Any]]) -> None:
+    """Cache optional WS mark-price/funding updates in the market-data hub."""
+    if not payload:
+        return
+    _sync_market_data_hub_runtime_config()
+    for exchange_name, symbols in payload.items():
+        if not isinstance(symbols, dict):
+            continue
+        for symbol, mark_payload in symbols.items():
+            if not isinstance(mark_payload, dict):
+                market_data_hub.upsert_ws_tick(exchange_name, symbol, {}, channel="mark_price")
+                continue
+            market_data_hub.upsert_ws_tick(
+                exchange_name,
+                symbol,
+                mark_payload,
+                channel="mark_price",
+            )
+
+
 def _market_ws_status_snapshot(*, include_symbols: bool = False) -> Dict[str, Any]:
     _sync_market_data_hub_runtime_config()
     feed = _market_ws_feed
@@ -889,6 +924,7 @@ def _market_ws_status_snapshot(*, include_symbols: bool = False) -> Dict[str, An
         "symbol_max_age_sec": _MARKET_WS_SYMBOL_MAX_AGE_SEC,
         "health_max_age_sec": _MARKET_WS_HEALTH_MAX_AGE_SEC,
         "max_price_diff_bps": _MARKET_WS_MAX_PRICE_DIFF_BPS,
+        "mark_price_enabled": bool(_MARKET_WS_MARK_PRICE_ENABLED),
         "quality_guard": (
             _market_ws_quality_guard.status()
             if _market_ws_quality_guard is not None
@@ -944,6 +980,8 @@ async def _market_ws_feed_worker(stop_event: asyncio.Event) -> None:
         reconnect_min_sec=_MARKET_WS_RECONNECT_MIN_SEC,
         reconnect_max_sec=_MARKET_WS_RECONNECT_MAX_SEC,
         health_max_age_sec=_MARKET_WS_HEALTH_MAX_AGE_SEC,
+        watch_mark_prices=_MARKET_WS_MARK_PRICE_ENABLED,
+        on_mark=_publish_market_mark_prices,
     )
     _market_ws_feed = feed
     try:

@@ -38,6 +38,7 @@ from core.data.coinglass_client import CoinglassClient, coinglass_enabled
 from core.exchanges.exchange_manager import exchange_manager
 from core.exchanges.base_exchange import OrderSide, OrderType
 from core.exchanges.binance_connector import BinanceConnector
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.notifications import notification_manager
 from core.risk.risk_manager import risk_manager
 from core.runtime import runtime_state
@@ -59,7 +60,7 @@ from core.trading.order_manager import OrderRequest as CoreOrderRequest
 from core.utils.asyncio_compat import LoopBoundAsyncLock
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
 
-_BALANCE_FETCH_TIMEOUT_SEC = 5.5
+_BALANCE_FETCH_TIMEOUT_SEC = 18.0  # was 5.5 — too tight for the 3-4 sequential wallet fetches (funding+spot+futures) through a proxy (~1.3s/call); the cache fast-path still serves the UI within seconds, so a longer background-refresh budget just keeps the cache fresh instead of timing out
 _TICKER_FETCH_TIMEOUT_SEC = 1.6
 _BALANCE_SNAPSHOT_CACHE_TTL_SEC = 300.0
 _BALANCE_SNAPSHOT_FAST_AGE_SEC = 12.0
@@ -5048,8 +5049,6 @@ async def _load_rule_prices() -> Dict[str, float]:
         tasks: List[asyncio.Task] = []
         for exchange_name in ["gate", "binance", "okx"]:
             connector = exchange_manager.get_exchange(exchange_name)
-            if not connector:
-                continue
             for symbol in symbols:
 
                 async def _fetch_one(
@@ -5059,11 +5058,18 @@ async def _load_rule_prices() -> Dict[str, float]:
                     _symbol: str = symbol,
                 ) -> tuple[str, str, float]:
                     try:
-                        ticker = await asyncio.wait_for(
-                            _connector.get_ticker(_symbol),
-                            timeout=_RULE_PRICE_FETCH_TIMEOUT_SEC,
+                        result = await get_realtime_price(
+                            _exchange_name,
+                            _symbol,
+                            connector=_connector,
+                            allow_rest_fallback=_connector is not None,
+                            max_age_sec=float(
+                                getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0)
+                                or 10.0
+                            ),
+                            rest_timeout_sec=_RULE_PRICE_FETCH_TIMEOUT_SEC,
                         )
-                        return _exchange_name, _symbol, float(ticker.last or 0.0)
+                        return _exchange_name, _symbol, float(result.price or 0.0) if result.ok else 0.0
                     except Exception as exc:
                         logger.debug(
                             f"rule price fetch failed: exchange={_exchange_name} symbol={_symbol} error={exc}"
@@ -5125,10 +5131,15 @@ async def _precheck_binance_futures_order(request: OrderRequest) -> None:
     px = float(request.price or 0.0)
     if px <= 0:
         try:
-            ticker = await asyncio.wait_for(
-                connector.get_ticker(request.symbol), timeout=2.5
+            result = await get_realtime_price(
+                "binance",
+                request.symbol,
+                connector=connector,
+                allow_rest_fallback=True,
+                max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                rest_timeout_sec=2.5,
             )
-            px = float(getattr(ticker, "last", 0.0) or 0.0)
+            px = float(result.price or 0.0) if result.ok else 0.0
         except Exception:
             px = 0.0
     notional = float(request.amount or 0.0) * max(px, 0.0)

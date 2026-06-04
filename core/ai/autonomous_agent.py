@@ -39,6 +39,7 @@ from core.observability.decision_trace import DecisionTrace, append_gate
 from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
 from core.data import data_storage
 from core.exchanges.exchange_manager import exchange_manager
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.news.storage import db as news_db
 from core.risk.risk_manager import risk_manager
 from core.runtime import runtime_state
@@ -2484,11 +2485,16 @@ class AutonomousTradingAgent:
         exchange = str(cfg.get("exchange") or "binance")
         symbol = str(cfg.get("symbol") or "BTC/USDT")
         connector = exchange_manager.get_exchange(exchange)
-        if connector is None:
-            return 0.0
         try:
-            ticker = await connector.get_ticker(symbol)
-            return float(getattr(ticker, "last", 0.0) or 0.0)
+            result = await get_realtime_price(
+                exchange,
+                symbol,
+                connector=connector,
+                allow_rest_fallback=connector is not None,
+                max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                rest_timeout_sec=2.5,
+            )
+            return float(result.price or 0.0) if result.ok else 0.0
         except Exception:
             return 0.0
 

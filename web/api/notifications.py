@@ -1,11 +1,12 @@
 """Notification API endpoints."""
-import asyncio
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from config.settings import settings
 from core.exchanges.exchange_manager import exchange_manager
+from core.marketdata.runtime_price_provider import get_realtime_price
 from core.notifications import notification_manager
 from core.risk.risk_manager import risk_manager
 from core.strategies import strategy_manager
@@ -47,13 +48,19 @@ class EvaluateRequest(BaseModel):
 async def _load_prices(exchange: str, symbols: List[str]) -> Dict[str, float]:
     prices: Dict[str, float] = {}
     connector = exchange_manager.get_exchange(exchange)
-    if not connector:
-        return prices
 
     for symbol in symbols:
         try:
-            ticker = await asyncio.wait_for(connector.get_ticker(symbol), timeout=1.5)
-            prices[symbol] = float(ticker.last or 0.0)
+            result = await get_realtime_price(
+                exchange,
+                symbol,
+                connector=connector,
+                allow_rest_fallback=connector is not None,
+                max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                rest_timeout_sec=1.5,
+            )
+            if result.ok and result.price is not None:
+                prices[symbol] = float(result.price)
         except Exception:
             continue
     return prices

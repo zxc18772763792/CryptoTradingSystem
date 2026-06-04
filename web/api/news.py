@@ -27,6 +27,8 @@ from config.settings import settings
 from core.data.coinglass_client import coinglass_enabled
 from core.news.collectors.manager import MultiSourceNewsCollector
 from core.news.eventizer.llm_glm5 import (
+    _openai_endpoint_targets as _news_llm_endpoint_targets,
+    _summary_source_label as _news_llm_summary_source_label,
     _summarize_fallback,
     batch_summarize_titles_llm as batch_summarize_titles,
     extract_events_llm_with_meta,
@@ -221,6 +223,67 @@ def _news_source_flags() -> Dict[str, bool]:
         "coinglass_economic_data": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ECONOMIC_DATA", True),
         "coinglass_financial_events": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_FINANCIAL_EVENTS", True),
         "coinglass_central_bank": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_CENTRAL_BANK", True),
+    }
+
+
+def _public_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parts = urlsplit(text)
+    except Exception:
+        return text[:160]
+    if not parts.scheme or not parts.netloc:
+        return text[:160]
+    hostname = parts.hostname or parts.netloc
+    netloc = hostname
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit((parts.scheme, netloc, parts.path.rstrip("/"), "", ""))[:160]
+
+
+def _news_llm_runtime_snapshot(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    llm_cfg = (cfg or {}).get("llm") if isinstance(cfg, dict) else {}
+    if not isinstance(llm_cfg, dict):
+        llm_cfg = {}
+
+    try:
+        raw_targets = _news_llm_endpoint_targets(cfg or {})
+    except Exception as exc:
+        return {
+            "enabled": _news_llm_enabled(),
+            "provider": str(os.environ.get("NEWS_LLM_PROVIDER") or getattr(settings, "NEWS_LLM_PROVIDER", "") or "").strip(),
+            "targets": [],
+            "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+        }
+
+    targets: List[Dict[str, Any]] = []
+    for idx, target in enumerate(raw_targets):
+        base_url = _public_url(target.get("base_url"))
+        model = str(target.get("model") or "").strip()
+        label = _news_llm_summary_source_label(base_url, model) or "openai_summary"
+        targets.append(
+            {
+                "index": int(target.get("index") if target.get("index") is not None else idx),
+                "role": "backup" if bool(target.get("is_backup")) else "primary",
+                "base_url": base_url,
+                "model": model,
+                "summary_label": label,
+                "api_key_configured": bool(str(target.get("api_key") or "").strip()),
+            }
+        )
+
+    return {
+        "enabled": _news_llm_enabled(),
+        "provider": str(os.environ.get("NEWS_LLM_PROVIDER") or getattr(settings, "NEWS_LLM_PROVIDER", "") or llm_cfg.get("provider") or "").strip(),
+        "force_chat_completions": str(
+            os.environ.get("NEWS_LLM_FORCE_CHAT_COMPLETIONS")
+            or getattr(settings, "NEWS_LLM_FORCE_CHAT_COMPLETIONS", "")
+            or llm_cfg.get("force_chat_completions")
+            or ""
+        ).strip(),
+        "targets": targets,
     }
 
 
@@ -566,10 +629,12 @@ def _news_background_state(
 
 
 def _news_runtime_snapshot(request: Request) -> Dict[str, Any]:
+    cfg = _get_cfg(request)
     return {
         "service": "web_news",
         "timestamp": _now_utc().isoformat(),
         "llm_enabled": _news_llm_enabled(),
+        "llm_runtime": _news_llm_runtime_snapshot(cfg),
         "sync_pull_llm": _env_bool("NEWS_PULL_SYNC_LLM", False),
         **_news_background_state(request),
         "last_pull": getattr(request.app.state, "news_last_pull", None),
