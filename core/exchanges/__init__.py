@@ -3,6 +3,7 @@
 """
 from core.exchanges.base_exchange import (
     BaseExchange,
+    ExchangeThrottled,
     Ticker,
     Kline,
     Order,
@@ -32,6 +33,7 @@ from core.exchanges.exchange_manager import ExchangeManager, exchange_manager
 
 __all__ = [
     "BaseExchange",
+    "ExchangeThrottled",
     "Ticker",
     "Kline",
     "Order",

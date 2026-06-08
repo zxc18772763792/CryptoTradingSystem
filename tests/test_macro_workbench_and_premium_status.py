@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pandas as pd
+import pytest
 
 
 def _recent_snapshot_ts() -> str:
@@ -408,7 +409,8 @@ def test_onchain_module_exposes_derivatives_shadow_summary(monkeypatch):
     ]
 
 
-def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
     from web.api import ai_research as ai_module
 
     monkeypatch.chdir(tmp_path)
@@ -478,8 +480,13 @@ def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
             }
         ),
     )
+    # Patch news_db async calls to prevent aiosqlite deadlock in full-suite runs
+    from core.news.storage import db as _news_db
+    monkeypatch.setattr(_news_db, "summarize_news_raw_coverage", AsyncMock(return_value={}))
+    monkeypatch.setattr(_news_db, "list_source_states", AsyncMock(return_value=[]))
+    monkeypatch.setattr(_news_db, "get_llm_queue_stats", AsyncMock(return_value={}))
 
-    result = asyncio.run(ai_module.get_premium_data_status())
+    result = await ai_module.get_premium_data_status()
     source = result["sources"]["fred_macro"]
     coinglass = result["sources"]["coinglass"]
 

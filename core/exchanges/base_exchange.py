@@ -8,9 +8,17 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional, Any, AsyncGenerator, List
 import asyncio
+import time
 from loguru import logger
 
 from config.exchanges import ExchangeConfig, ExchangeType
+
+
+class ExchangeThrottled(Exception):
+    """Raised to fast-fail a market-data read while the connector is in a
+    throttle cooldown (exchange returned 429/418/DDoSProtection). Lets callers
+    skip the request instead of piling more weight onto a rate-limited account.
+    """
 
 
 class OrderSide(Enum):
@@ -118,6 +126,8 @@ class BaseExchange(ABC):
         self.name = config.name
         self._connected = False
         self._client: Any = None
+        self._throttle_until = 0.0
+        self._throttle_failures = 0
 
     @abstractmethod
     async def connect(self) -> bool:
@@ -294,8 +304,67 @@ class BaseExchange(ABC):
             )
         )
 
+    @staticmethod
+    def _is_throttle_error(error: Exception) -> bool:
+        """True for exchange rate-limit / ban errors (429 / 418 / -1003)."""
+        if isinstance(error, ExchangeThrottled):
+            return False
+        for cls in type(error).mro():
+            if cls.__name__ in ("DDoSProtection", "RateLimitExceeded"):
+                return True
+        message = str(error or "").lower()
+        return any(
+            token in message
+            for token in (
+                "too many requests",
+                "-1003",
+                "request weight",
+                "way too much",
+                "banned until",
+                "ip banned",
+                "ratelimit",
+            )
+        )
+
+    def _throttle_remaining(self) -> float:
+        """Seconds left in the current throttle cooldown (0.0 if clear)."""
+        return max(0.0, float(getattr(self, "_throttle_until", 0.0)) - time.monotonic())
+
+    def _note_throttle(self) -> None:
+        """Enter / extend an exponential throttle cooldown (5s..120s)."""
+        failures = int(getattr(self, "_throttle_failures", 0)) + 1
+        self._throttle_failures = failures
+        backoff = min(120.0, 5.0 * (2 ** min(failures - 1, 5)))
+        self._throttle_until = time.monotonic() + backoff
+
+    def _clear_throttle(self) -> None:
+        """Reset the cooldown after a successful request."""
+        if getattr(self, "_throttle_failures", 0) or getattr(self, "_throttle_until", 0.0):
+            self._throttle_failures = 0
+            self._throttle_until = 0.0
+
+    def _raise_if_throttled(self, operation: str) -> None:
+        """Fast-fail a read while cooling down, so we add no weight to the ban."""
+        remaining = self._throttle_remaining()
+        if remaining > 0:
+            raise ExchangeThrottled(
+                f"[{self.name}] {operation} skipped: throttle cooldown ~{remaining:.0f}s remaining"
+            )
+
     def _handle_error(self, error: Exception, operation: str) -> None:
         """统一错误处理"""
+        if isinstance(error, ExchangeThrottled):
+            # Already a cooldown fast-fail; propagate quietly, don't re-note.
+            raise error
+        if self._is_throttle_error(error):
+            # Throttle/ban: back off instead of reconnecting (reconnect reloads
+            # markets = more weight = worse). Do NOT flip _connected here.
+            self._note_throttle()
+            logger.warning(
+                f"[{self.name}] {operation} throttled by exchange; "
+                f"backing off ~{self._throttle_remaining():.0f}s"
+            )
+            raise error
         if self._is_transient_connection_error(error):
             self._connected = False
         logger.error(f"[{self.name}] {operation} failed: {error}")

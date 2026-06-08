@@ -78,3 +78,5 @@ def test_live_shadow_launcher_pins_mark_price_stream_off_for_level2_shadow():
     ):
         assert expected in script
     assert "precheck_market_ws_live_shadow.py" in script
+    assert "--expect-runtime live" in script
+    assert "--timeout 20" in script

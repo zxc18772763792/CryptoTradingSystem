@@ -41,6 +41,7 @@ class LiquidationOICrowdingStrategy(StrategyBase):
             "max_trades_per_symbol_per_day": 2,
             "lookback_bars": 120,
             "emit_gate_hold_signal": True,
+            "emit_crowding_close_signal": True,
         }
         if params:
             default_params.update(params)
@@ -105,6 +106,40 @@ class LiquidationOICrowdingStrategy(StrategyBase):
 
         if not bool(self.params.get("trade_mode", True)):
             return signals
+
+        if bool(self.params.get("emit_crowding_close_signal", True)):
+            if gate.block_new_longs:
+                signals.append(
+                    Signal(
+                        symbol=ctx.symbol,
+                        signal_type=SignalType.CLOSE_LONG,
+                        price=price,
+                        timestamp=ctx.timestamp,
+                        strategy_name=self.name,
+                        strength=max(float(self.params.get("min_signal_strength", 0.55)), clamp(gate.severity)),
+                        metadata={
+                            "structural_role": "crowding_risk_exit",
+                            "risk_gate": gate.to_dict(),
+                            "reason_codes": ["derivatives_crowded_long_close_long"],
+                        },
+                    )
+                )
+            if gate.block_new_shorts:
+                signals.append(
+                    Signal(
+                        symbol=ctx.symbol,
+                        signal_type=SignalType.CLOSE_SHORT,
+                        price=price,
+                        timestamp=ctx.timestamp,
+                        strategy_name=self.name,
+                        strength=max(float(self.params.get("min_signal_strength", 0.55)), clamp(gate.severity)),
+                        metadata={
+                            "structural_role": "crowding_risk_exit",
+                            "risk_gate": gate.to_dict(),
+                            "reason_codes": ["derivatives_crowded_short_close_short"],
+                        },
+                    )
+                )
 
         long_reversal = detect_flush_reversal(prepared, side="long_flush", config=self._config)
         short_reversal = detect_flush_reversal(prepared, side="short_squeeze", config=self._config)

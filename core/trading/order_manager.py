@@ -351,10 +351,49 @@ class OrderManager:
         return str(client_order_id) in self._client_order_ids
 
     def _release_client_order_id(self, client_order_id: Optional[str]) -> None:
-        """Drop a reservation immediately (used when submit raises before fill)."""
+        """Drop a reservation immediately (only safe when the order was rejected
+        before execution — see _is_ambiguous_submit_error)."""
         if not client_order_id:
             return
         self._client_order_ids.pop(str(client_order_id), None)
+
+    @staticmethod
+    def _is_ambiguous_submit_error(error: Exception) -> bool:
+        """True when a submit failure leaves the order's exchange state UNKNOWN.
+
+        Network/timeout failures may mean the request reached the exchange and
+        filled even though we never saw the response. In that case the
+        clientOrderId MUST stay reserved so a blind retry cannot create a second
+        fill (the exchange also rejects a duplicate id). Definitive
+        pre-execution rejections (bad params, insufficient funds, throttle,
+        auth) return False — those never executed, so the id is safe to release.
+        """
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+            return True
+        ambiguous_names = {
+            "RequestTimeout",
+            "NetworkError",
+            "ExchangeNotAvailable",
+            "ReadTimeout",
+            "ReadTimeoutError",
+            "ConnectTimeout",
+            "ConnectionError",
+        }
+        for cls in type(error).mro():
+            if cls.__name__ in ambiguous_names:
+                return True
+        message = str(error or "").lower()
+        return any(
+            token in message
+            for token in (
+                "timeout",
+                "timed out",
+                "temporarily unavailable",
+                "server disconnected",
+                "connection reset",
+                "connection aborted",
+            )
+        )
 
     async def _create_paper_order(self, request: OrderRequest) -> Order:
         order_id = self._next_paper_order_id()
@@ -727,10 +766,24 @@ class OrderManager:
             return order
         except Exception as e:
             self._last_error = str(e)
-            # Release the clientOrderId reservation when the submit failed
-            # before reaching the exchange — otherwise honest retries would
-            # be wrongly rejected as duplicates.
-            self._release_client_order_id(client_order_id)
+            # Idempotency on failure:
+            #  • Ambiguous network/timeout → the order MAY have reached the
+            #    exchange and filled. KEEP the clientOrderId reserved so a blind
+            #    retry is blocked (the exchange also rejects a duplicate id).
+            #    This prevents double-fills; the reservation auto-expires after
+            #    the TTL, by which point the order should be reconciled.
+            #  • Definitive pre-execution rejection → the order never executed,
+            #    so release the id for honest retries.
+            if self._is_ambiguous_submit_error(e):
+                logger.critical(
+                    f"order submit AMBIGUOUS — exchange state UNKNOWN; holding "
+                    f"client_order_id={client_order_id} reserved for "
+                    f"{self._CLIENT_ORDER_ID_TTL_SEC:.0f}s, reconcile before retry. "
+                    f"exchange={request.exchange} symbol={request.symbol} "
+                    f"side={request.side.value} amount={request.amount} error={e}"
+                )
+            else:
+                self._release_client_order_id(client_order_id)
             logger.error(
                 f"Failed to create order: exchange={request.exchange} symbol={request.symbol} "
                 f"type={request.order_type.value} side={request.side.value} amount={request.amount} "

@@ -96,6 +96,110 @@ def test_real_order_reuses_generated_client_order_id_for_request_retry(monkeypat
     assert manager.get_last_error().startswith("duplicate client_order_id detected")
 
 
+class _RaisingExchange:
+    """Exchange stub whose create_order always raises a configured error."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.calls = 0
+
+    async def create_order(self, symbol, side, order_type, amount, price=None, params=None):
+        self.calls += 1
+        raise self.error
+
+
+def _make_real_manager(monkeypatch, exchange):
+    manager = OrderManager()
+    manager.set_paper_trading(False)
+    monkeypatch.setattr(manager, "_ensure_exchange_connector", AsyncMock(return_value=exchange))
+    monkeypatch.setattr(
+        order_manager_module.risk_manager,
+        "get_risk_report",
+        lambda: {"equity": {"current": 10_000.0}},
+    )
+    monkeypatch.setattr(
+        order_manager_module.decision_engine,
+        "evaluate_order_intent",
+        AsyncMock(return_value=SimpleNamespace(allowed=True, reason="", reduce_only=False, trace_id="t")),
+    )
+    return manager
+
+
+def _limit_request():
+    # exchange="okx" keeps us off the binance-futures fast path → goes straight
+    # to exchange.create_order, which the raising stub intercepts.
+    return OrderRequest(
+        symbol="BTC/USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        amount=0.01,
+        price=50_000.0,
+        exchange="okx",
+        strategy="strat",
+    )
+
+
+def test_ambiguous_timeout_holds_client_order_id_and_blocks_blind_retry(monkeypatch):
+    """A submit timeout leaves fill-state unknown → the clientOrderId must stay
+    reserved so an upstream retry of the same request cannot double-fill."""
+    ex = _RaisingExchange(asyncio.TimeoutError("read timed out"))
+    manager = _make_real_manager(monkeypatch, ex)
+    request = _limit_request()
+
+    first = asyncio.run(manager._create_real_order(request))
+    assert first is None
+    coid = request.params["newClientOrderId"]
+    # Held, NOT released — the order may have reached the exchange.
+    assert manager._is_client_order_id_active(coid) is True
+
+    # Retrying the same request is rejected as a duplicate → no second submit.
+    second = asyncio.run(manager._create_real_order(request))
+    assert second is None
+    assert ex.calls == 1
+    assert manager.get_last_error().startswith("duplicate client_order_id")
+
+
+def test_definitive_rejection_releases_client_order_id_and_allows_retry(monkeypatch):
+    """A definitive pre-execution rejection (order never executed) releases the
+    clientOrderId so an honest retry is allowed."""
+    ex = _RaisingExchange(ValueError("invalid order: -1111 precision over maximum"))
+    manager = _make_real_manager(monkeypatch, ex)
+    request = _limit_request()
+
+    first = asyncio.run(manager._create_real_order(request))
+    assert first is None
+    coid = request.params["newClientOrderId"]
+    # Released — safe to retry.
+    assert manager._is_client_order_id_active(coid) is False
+
+    second = asyncio.run(manager._create_real_order(request))
+    assert second is None
+    assert ex.calls == 2  # both honest attempts reached the exchange
+
+
+class _RequestTimeout(Exception):
+    """Stands in for ccxt.RequestTimeout (matched by class name)."""
+
+
+@pytest.mark.parametrize(
+    "error,expected",
+    [
+        (asyncio.TimeoutError(), True),
+        (TimeoutError("x"), True),
+        (ConnectionError("connection reset by peer"), True),
+        (_RequestTimeout("binance POST timed out"), True),
+        (RuntimeError("Request timeout after 8s"), True),
+        (RuntimeError("server disconnected without response"), True),
+        (ValueError("insufficient funds"), False),
+        (ValueError("-1111 precision over maximum"), False),
+        (RuntimeError("invalid order: reduceOnly rejected"), False),
+        (RuntimeError("-2010 NEW_ORDER_REJECTED"), False),
+    ],
+)
+def test_is_ambiguous_submit_error_classifier(error, expected):
+    assert OrderManager._is_ambiguous_submit_error(error) is expected
+
+
 def test_ws_client_skeleton_methods_raise_not_implemented():
     client = WSClient(WSClientConfig(url="wss://example.invalid", name="test_ws"))
 

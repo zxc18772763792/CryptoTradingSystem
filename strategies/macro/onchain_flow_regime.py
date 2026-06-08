@@ -27,6 +27,7 @@ class OnChainFlowRegimeStrategy(StrategyBase):
             "max_scalar_up": 1.20,
             "max_scalar_down": 0.40,
             "emit_regime_hold_signal": True,
+            "emit_regime_close_signal": True,
         }
         if params:
             default_params.update(params)
@@ -76,6 +77,42 @@ class OnChainFlowRegimeStrategy(StrategyBase):
 
         if not bool(self.params.get("trade_mode", False)):
             return signals
+
+        if bool(self.params.get("emit_regime_close_signal", True)):
+            if regime == "accumulation":
+                strength = clamp(ctx.onchain.accumulation_score)
+                signals.append(
+                    Signal(
+                        symbol=ctx.symbol,
+                        signal_type=SignalType.CLOSE_SHORT,
+                        price=price,
+                        timestamp=ctx.timestamp,
+                        strategy_name=self.name,
+                        strength=strength,
+                        metadata={
+                            "structural_role": "slow_regime_exit",
+                            "position_scalar": scalar.to_dict(),
+                            "reason_codes": ["onchain_accumulation_close_short"],
+                        },
+                    )
+                )
+            elif regime == "distribution":
+                strength = clamp(ctx.onchain.distribution_score)
+                signals.append(
+                    Signal(
+                        symbol=ctx.symbol,
+                        signal_type=SignalType.CLOSE_LONG,
+                        price=price,
+                        timestamp=ctx.timestamp,
+                        strategy_name=self.name,
+                        strength=strength,
+                        metadata={
+                            "structural_role": "slow_regime_exit",
+                            "position_scalar": scalar.to_dict(),
+                            "reason_codes": ["onchain_distribution_close_long"],
+                        },
+                    )
+                )
 
         if regime == "accumulation":
             strength = clamp(ctx.onchain.accumulation_score)

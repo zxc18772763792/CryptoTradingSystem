@@ -14,6 +14,7 @@ from config.exchanges import ExchangeConfig, ExchangeType
 from core.exchanges.base_exchange import (
     BaseExchange,
     Balance,
+    ExchangeThrottled,
     Kline,
     Order,
     OrderSide,
@@ -24,6 +25,44 @@ from core.exchanges.base_exchange import (
 from core.exchanges.binance_connector import BinanceConnector
 
 exchange_manager_module = importlib.import_module("core.exchanges.exchange_manager")
+
+
+class DummyExchange(BaseExchange):
+    async def connect(self):
+        return True
+
+    async def disconnect(self):
+        return None
+
+    async def get_ticker(self, symbol):
+        raise NotImplementedError
+
+    async def get_klines(self, symbol, timeframe, since=None, limit=None):
+        raise NotImplementedError
+
+    async def get_order_book(self, symbol, limit=20):
+        raise NotImplementedError
+
+    async def get_balance(self):
+        raise NotImplementedError
+
+    async def create_order(self, symbol, side, order_type, amount, price=None, params=None):
+        raise NotImplementedError
+
+    async def cancel_order(self, order_id, symbol):
+        raise NotImplementedError
+
+    async def get_order(self, order_id, symbol):
+        raise NotImplementedError
+
+    async def get_open_orders(self, symbol=None):
+        raise NotImplementedError
+
+    async def get_positions(self):
+        raise NotImplementedError
+
+    async def get_trades(self, symbol, since=None, limit=None):
+        raise NotImplementedError
 
 
 class TestBaseExchange:
@@ -167,44 +206,53 @@ class TestBinanceConnector:
         assert ticker.last == 50000.0
         assert ticker.exchange == "binance"
 
+    def test_get_ticker_fast_fails_during_throttle_cooldown(self, connector):
+        class FakeClient:
+            def __init__(self):
+                self.fetch_calls = 0
+
+            async def fetch_ticker(self, symbol):
+                self.fetch_calls += 1
+                return {}
+
+        fake_client = FakeClient()
+        connector._client = fake_client
+        connector._connected = True
+        connector._note_throttle()
+
+        with pytest.raises(ExchangeThrottled, match="get_ticker skipped"):
+            asyncio.run(connector.get_ticker("BTC/USDT"))
+
+        assert fake_client.fetch_calls == 0
+
+    def test_get_ticker_success_clears_throttle_cooldown(self, connector):
+        class FakeClient:
+            markets = {}
+
+            async def fetch_ticker(self, symbol):
+                assert symbol == "BTC/USDT"
+                return {
+                    "last": 50000.0,
+                    "bid": 49990.0,
+                    "ask": 50010.0,
+                    "high": 51000.0,
+                    "low": 49000.0,
+                    "baseVolume": 1234.5,
+                    "timestamp": 1609459200000,
+                }
+
+        connector._client = FakeClient()
+        connector._connected = True
+        connector._note_throttle()
+        connector._throttle_until = 0.0
+
+        ticker = asyncio.run(connector.get_ticker("BTC/USDT"))
+
+        assert ticker.last == 50000.0
+        assert connector._throttle_failures == 0
+        assert connector._throttle_remaining() == 0.0
+
     def test_transient_error_marks_exchange_disconnected(self):
-        class DummyExchange(BaseExchange):
-            async def connect(self):
-                return True
-
-            async def disconnect(self):
-                return None
-
-            async def get_ticker(self, symbol):
-                raise NotImplementedError
-
-            async def get_klines(self, symbol, timeframe, since=None, limit=None):
-                raise NotImplementedError
-
-            async def get_order_book(self, symbol, limit=20):
-                raise NotImplementedError
-
-            async def get_balance(self):
-                raise NotImplementedError
-
-            async def create_order(self, symbol, side, order_type, amount, price=None, params=None):
-                raise NotImplementedError
-
-            async def cancel_order(self, order_id, symbol):
-                raise NotImplementedError
-
-            async def get_order(self, order_id, symbol):
-                raise NotImplementedError
-
-            async def get_open_orders(self, symbol=None):
-                raise NotImplementedError
-
-            async def get_positions(self):
-                raise NotImplementedError
-
-            async def get_trades(self, symbol, since=None, limit=None):
-                raise NotImplementedError
-
         exchange = DummyExchange(ExchangeConfig(name="dummy", exchange_type=ExchangeType.CEX))
         exchange._connected = True
 
@@ -212,6 +260,38 @@ class TestBinanceConnector:
             exchange._handle_error(TimeoutError("request timed out"), "fetch_ticker")
 
         assert exchange.is_connected is False
+
+    def test_throttle_error_keeps_exchange_connected_and_starts_cooldown(self):
+        class RateLimitExceeded(Exception):
+            pass
+
+        exchange = DummyExchange(ExchangeConfig(name="dummy", exchange_type=ExchangeType.CEX))
+        exchange._connected = True
+
+        with pytest.raises(RateLimitExceeded):
+            exchange._handle_error(
+                RateLimitExceeded("Too many requests; request weight limit -1003"),
+                "fetch_ticker",
+            )
+
+        assert exchange.is_connected is True
+        assert exchange._throttle_failures == 1
+        assert exchange._throttle_remaining() > 0
+
+        with pytest.raises(ExchangeThrottled, match="throttle cooldown"):
+            exchange._raise_if_throttled("get_ticker")
+
+    def test_throttle_fast_fail_does_not_extend_cooldown(self):
+        exchange = DummyExchange(ExchangeConfig(name="dummy", exchange_type=ExchangeType.CEX))
+        exchange._note_throttle()
+        until = exchange._throttle_until
+        failures = exchange._throttle_failures
+
+        with pytest.raises(ExchangeThrottled):
+            exchange._handle_error(ExchangeThrottled("cooling down"), "get_ticker")
+
+        assert exchange._throttle_until == until
+        assert exchange._throttle_failures == failures
 
     def test_get_klines_uses_existing_futures_market_before_1000_alias(self):
         config = ExchangeConfig(

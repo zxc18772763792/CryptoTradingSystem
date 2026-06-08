@@ -1,9 +1,9 @@
 {
   "schema_version": "family_regime_priors.v1",
-  "updated_at": "2026-05-29T06:56:12.623029+00:00",
+  "updated_at": "2026-06-07T20:19:59.226794+00:00",
   "priors": {
     "MAStrategy|mixed|benchmark": {
-      "sample_size": 78,
+      "sample_size": 96,
       "counterfactual_outcome_sample_size": 0,
       "sharpe_gap_ewma": 0.0,
       "edge_delta_ewma": 0.0,
@@ -13,17 +13,17 @@
       "confirmation_rate": 0.0,
       "negative_evidence_rate": 1.0,
       "status_counts": {
-        "decayed": 78
+        "decayed": 96
       },
       "last_status": "decayed",
-      "updated_at": "2026-05-29T06:56:12.623029+00:00",
+      "updated_at": "2026-06-07T20:19:59.226780+00:00",
       "graduation": {
         "status": "needs_counterfactual_outcomes",
         "binding_eligible": false,
         "min_sample_size": 30,
         "min_counterfactual_outcome_sample_size": 20,
         "max_binding_adjustment": 0.1,
-        "sample_size": 78,
+        "sample_size": 96,
         "counterfactual_outcome_sample_size": 0,
         "confirmation_rate": 0.0,
         "negative_evidence_rate": 1.0
