@@ -337,6 +337,7 @@ function Start-MarketWsSelfcheck {
         "--base-url http://127.0.0.1:$Port",
         "--token $Token",
         "--expect-runtime live",
+        "--timeout 20",
         "--duration-sec $DurationSec",
         "--interval-sec $IntervalSec",
         "--min-samples $MinSamples",

@@ -282,9 +282,11 @@ class BinanceConnector(BaseExchange):
 
     async def get_ticker(self, symbol: str) -> Ticker:
         try:
+            self._raise_if_throttled("get_ticker")
             client = await self._ensure_client()
             mapped_symbol = _resolve_futures_symbol(symbol, self.config.default_type, getattr(client, "markets", None))
             ticker = await client.fetch_ticker(mapped_symbol)
+            self._clear_throttle()
             divisor = _futures_price_divisor(symbol, mapped_symbol, self.config.default_type)
             def _norm_price(v: Any) -> float:
                 px = float(v or 0)
@@ -317,6 +319,7 @@ class BinanceConnector(BaseExchange):
         limit: Optional[int] = None,
     ) -> List[Kline]:
         try:
+            self._raise_if_throttled("get_klines")
             client = await self._ensure_client()
             mapped_symbol = _resolve_futures_symbol(symbol, self.config.default_type, getattr(client, "markets", None))
             divisor = _futures_price_divisor(symbol, mapped_symbol, self.config.default_type)
@@ -327,6 +330,7 @@ class BinanceConnector(BaseExchange):
                 since=since_ms,
                 limit=limit or 1000,
             )
+            self._clear_throttle()
             return [
                 Kline(
                     symbol=symbol,
@@ -346,8 +350,10 @@ class BinanceConnector(BaseExchange):
 
     async def get_order_book(self, symbol: str, limit: int = 20) -> dict:
         try:
+            self._raise_if_throttled("get_order_book")
             client = await self._ensure_client()
             orderbook = await client.fetch_order_book(symbol, limit)
+            self._clear_throttle()
             return {
                 "bids": orderbook.get("bids", []),
                 "asks": orderbook.get("asks", []),

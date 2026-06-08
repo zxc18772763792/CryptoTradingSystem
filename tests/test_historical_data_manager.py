@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -40,7 +39,7 @@ class _AwareKlineConnector:
         ]
 
 
-def test_download_historical_klines_accepts_utc_aware_exchange_timestamps(monkeypatch):
+async def test_download_historical_klines_accepts_utc_aware_exchange_timestamps(monkeypatch):
     manager = HistoricalDataManager()
     connector = _AwareKlineConnector()
     saved = {}
@@ -56,14 +55,12 @@ def test_download_historical_klines_accepts_utc_aware_exchange_timestamps(monkey
 
     monkeypatch.setattr(historical_data_module.data_storage, "save_klines_to_parquet", _save_stub)
 
-    klines = asyncio.run(
-        manager.download_historical_klines(
-            exchange="binance",
-            symbol="FET/USDT",
-            timeframe="1h",
-            start_time=datetime(2026, 5, 17, 0, 0, 0, tzinfo=timezone.utc),
-            end_time=datetime(2026, 5, 17, 1, 0, 0, tzinfo=timezone.utc),
-        )
+    klines = await manager.download_historical_klines(
+        exchange="binance",
+        symbol="FET/USDT",
+        timeframe="1h",
+        start_time=datetime(2026, 5, 17, 0, 0, 0, tzinfo=timezone.utc),
+        end_time=datetime(2026, 5, 17, 1, 0, 0, tzinfo=timezone.utc),
     )
 
     progress = manager.get_download_progress("binance_FET/USDT_1h")
@@ -76,7 +73,7 @@ def test_download_historical_klines_accepts_utc_aware_exchange_timestamps(monkey
     assert progress.current_time.tzinfo is None
 
 
-def test_download_historical_klines_fails_after_bounded_retries(monkeypatch):
+async def test_download_historical_klines_fails_after_bounded_retries(monkeypatch):
     manager = HistoricalDataManager()
     connector = _AlwaysFailConnector()
 
@@ -88,14 +85,12 @@ def test_download_historical_klines_fails_after_bounded_retries(monkeypatch):
     monkeypatch.setattr(historical_data_module.data_storage, "save_klines_to_parquet", _save_stub)
 
     with pytest.raises(RuntimeError, match="连续重试 6 次"):
-        asyncio.run(
-            manager.download_historical_klines(
-                exchange="binance",
-                symbol="RENDER/USDT",
-                timeframe="1h",
-                start_time=datetime(2026, 3, 1, 0, 0, 0),
-                end_time=datetime(2026, 3, 2, 0, 0, 0),
-            )
+        await manager.download_historical_klines(
+            exchange="binance",
+            symbol="RENDER/USDT",
+            timeframe="1h",
+            start_time=datetime(2026, 3, 1, 0, 0, 0),
+            end_time=datetime(2026, 3, 2, 0, 0, 0),
         )
 
     progress = manager.get_download_progress("binance_RENDER/USDT_1h")
@@ -106,7 +101,7 @@ def test_download_historical_klines_fails_after_bounded_retries(monkeypatch):
     assert "upstream timeout" in progress.last_error
 
 
-def test_download_historical_klines_does_not_retry_bad_symbol(monkeypatch):
+async def test_download_historical_klines_does_not_retry_bad_symbol(monkeypatch):
     manager = HistoricalDataManager()
     connector = _BadSymbolConnector()
 
@@ -118,14 +113,12 @@ def test_download_historical_klines_does_not_retry_bad_symbol(monkeypatch):
     monkeypatch.setattr(historical_data_module.data_storage, "save_klines_to_parquet", _save_stub)
 
     with pytest.raises(RuntimeError, match="download failed without retry"):
-        asyncio.run(
-            manager.download_historical_klines(
-                exchange="binance",
-                symbol="RENDER/USDT",
-                timeframe="1h",
-                start_time=datetime(2026, 3, 1, 0, 0, 0),
-                end_time=datetime(2026, 3, 2, 0, 0, 0),
-            )
+        await manager.download_historical_klines(
+            exchange="binance",
+            symbol="RENDER/USDT",
+            timeframe="1h",
+            start_time=datetime(2026, 3, 1, 0, 0, 0),
+            end_time=datetime(2026, 3, 2, 0, 0, 0),
         )
 
     progress = manager.get_download_progress("binance_RENDER/USDT_1h")

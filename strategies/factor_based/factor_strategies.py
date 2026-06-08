@@ -1320,38 +1320,60 @@ class HurstExponentStrategy(FactorStrategyBase):
         current_z = zscore.iloc[-1]
         prev_z = zscore.iloc[-2]
 
-        # Trending market (VR > 1): momentum strategy
+        mean_value = float(mean.iloc[-1]) if pd.notna(mean.iloc[-1]) else None
+        tp_pct = float(self.params["take_profit_pct"])
+
+        # Trending market (VR > 1): momentum strategy — symmetric BUY and SELL.
         if current_vr > self.params["trending_threshold"]:
-            if prev_z < self.params["zscore_threshold"] and current_z >= self.params["zscore_threshold"]:
+            zt = self.params["zscore_threshold"]
+            if prev_z < zt and current_z >= zt:
                 signal = self._create_signal(
                     symbol, SignalType.BUY, current_price,
                     strength=0.7,
                     metadata={"variance_ratio": current_vr, "regime": "trending"}
                 )
                 signal.stop_loss = current_price * (1 - self.params["stop_loss_pct"])
-                signal.take_profit = current_price * (1 + self.params["take_profit_pct"])
+                signal.take_profit = current_price * (1 + tp_pct)
+                signals.append(signal)
+            elif prev_z > -zt and current_z <= -zt:
+                signal = self._create_signal(
+                    symbol, SignalType.SELL, current_price,
+                    strength=0.7,
+                    metadata={"variance_ratio": current_vr, "regime": "trending"}
+                )
+                signal.stop_loss = current_price * (1 + self.params["stop_loss_pct"])
+                signal.take_profit = current_price * (1 - tp_pct)
                 signals.append(signal)
 
-        # Mean-reverting market (VR < 1): contrarian strategy
+        # Mean-reverting market (VR < 1): contrarian strategy — TP targets the mean.
         elif current_vr < self.params["mean_revert_threshold"]:
-            if prev_z > self.params["zscore_threshold"] and current_z <= self.params["zscore_threshold"]:
+            zt = self.params["zscore_threshold"]
+            if prev_z > zt and current_z <= zt:
                 signal = self._create_signal(
                     symbol, SignalType.SELL, current_price,
                     strength=0.7,
                     metadata={"variance_ratio": current_vr, "regime": "mean_reverting"}
                 )
                 signal.stop_loss = current_price * (1 + self.params["stop_loss_pct"])
-                signal.take_profit = mean.iloc[-1]
+                # Mean should be below current_price for a SELL. Fall back to pct if NaN/wrong dir.
+                if mean_value is not None and mean_value < current_price:
+                    signal.take_profit = mean_value
+                else:
+                    signal.take_profit = current_price * (1 - tp_pct)
                 signals.append(signal)
 
-            elif prev_z < -self.params["zscore_threshold"] and current_z >= -self.params["zscore_threshold"]:
+            elif prev_z < -zt and current_z >= -zt:
                 signal = self._create_signal(
                     symbol, SignalType.BUY, current_price,
                     strength=0.7,
                     metadata={"variance_ratio": current_vr, "regime": "mean_reverting"}
                 )
                 signal.stop_loss = current_price * (1 - self.params["stop_loss_pct"])
-                signal.take_profit = mean.iloc[-1]
+                # Mean should be above current_price for a BUY. Fall back to pct if NaN/wrong dir.
+                if mean_value is not None and mean_value > current_price:
+                    signal.take_profit = mean_value
+                else:
+                    signal.take_profit = current_price * (1 + tp_pct)
                 signals.append(signal)
 
         return signals
@@ -1497,7 +1519,7 @@ class MaxDrawdownStrategy(FactorStrategyBase):
         # Recovery percentage from bottom
         recovery = (current_price - bottom_price) / (top_price - bottom_price) if top_price != bottom_price else 0
 
-        # Signal: recovering from significant drawdown
+        # Signal: recovering from significant drawdown → BUY the recovery.
         if (prev_dd <= self.params["dd_threshold"] and
             recovery > self.params["recovery_threshold"] and
             current_price > close.iloc[-2]):  # Uptrend
@@ -1509,6 +1531,28 @@ class MaxDrawdownStrategy(FactorStrategyBase):
             signal.stop_loss = bottom_price * 0.98  # Just below recent low
             signal.take_profit = current_price * (1 + self.params["take_profit_pct"])
             signals.append(signal)
+
+        # Symmetric SELL: a strong run-up off the rolling low that is now
+        # reversing down (mirror of the drawdown-recovery BUY). Without this the
+        # strategy was silent in every downturn and captured only ~half its edge.
+        else:
+            runup = (close - rolling_min) / rolling_min.replace(0, np.nan)
+            prev_ru = runup.iloc[-2]
+            retracement = (
+                (top_price - current_price) / (top_price - bottom_price)
+                if top_price != bottom_price else 0.0
+            )
+            if (pd.notna(prev_ru) and prev_ru >= abs(self.params["dd_threshold"]) and
+                    retracement > self.params["recovery_threshold"] and
+                    current_price < close.iloc[-2]):  # Downtrend
+                signal = self._create_signal(
+                    symbol, SignalType.SELL, current_price,
+                    strength=min(retracement, 1.0),
+                    metadata={"runup": float(prev_ru), "retracement": float(retracement)}
+                )
+                signal.stop_loss = top_price * 1.02  # Just above recent high
+                signal.take_profit = current_price * (1 - self.params["take_profit_pct"])
+                signals.append(signal)
 
         return signals
 

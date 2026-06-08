@@ -410,6 +410,52 @@ class TestMomentumStrategy:
         momentum = strategy._calculate_momentum(trending_data)
         assert isinstance(momentum, pd.Series)
 
+    def test_positive_momentum_fade_closes_long(self):
+        dates = pd.date_range(start="2024-01-01", periods=8, freq="h")
+        df = pd.DataFrame(
+            {
+                "close": [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 103.0, 101.0],
+                "symbol": ["BTC/USDT"] * 8,
+            },
+            index=dates,
+        )
+        strategy = MomentumStrategy(
+            "Mom_Test",
+            params={"lookback_period": 3, "momentum_threshold": 0.02},
+        )
+
+        signals = strategy.generate_signals(df)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == SignalType.CLOSE_LONG
+        assert signals[0].symbol == "BTC/USDT"
+        assert signals[0].metadata["exit_reason"] == "positive_momentum_faded"
+        assert signals[0].metadata["previous_momentum"] == pytest.approx(0.03)
+        assert signals[0].metadata["momentum"] == pytest.approx(0.01)
+
+    def test_negative_momentum_fade_closes_short(self):
+        dates = pd.date_range(start="2024-01-01", periods=8, freq="h")
+        df = pd.DataFrame(
+            {
+                "close": [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 97.0, 99.0],
+                "symbol": ["BTC/USDT"] * 8,
+            },
+            index=dates,
+        )
+        strategy = MomentumStrategy(
+            "Mom_Test",
+            params={"lookback_period": 3, "momentum_threshold": 0.02},
+        )
+
+        signals = strategy.generate_signals(df)
+
+        assert len(signals) == 1
+        assert signals[0].signal_type == SignalType.CLOSE_SHORT
+        assert signals[0].symbol == "BTC/USDT"
+        assert signals[0].metadata["exit_reason"] == "negative_momentum_faded"
+        assert signals[0].metadata["previous_momentum"] == pytest.approx(-0.03)
+        assert signals[0].metadata["momentum"] == pytest.approx(-0.01)
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

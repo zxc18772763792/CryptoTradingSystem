@@ -175,6 +175,31 @@ class SupplyEventStrategy(StrategyBase):
         logger.info(f"{self.name} {signal_type.value.upper()} {ctx.symbol}: {decision.reason_codes}")
         return signals
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Close position when no active supply events remain for the symbol."""
+        if data is None or data.empty or "close" not in data:
+            return None
+        ctx, _ = self._context(data)
+        if ctx.events.active_events:
+            return None
+        # Event window has expired — emit CLOSE signal to exit the position.
+        side = getattr(position, "side", None) or getattr(position, "direction", None)
+        price = float(data["close"].iloc[-1])
+        timestamp = self._bar_time(data)
+        if str(side).lower() in ("long", "buy"):
+            sig_type = SignalType.CLOSE_LONG
+        else:
+            sig_type = SignalType.CLOSE_SHORT
+        return Signal(
+            symbol=ctx.symbol,
+            signal_type=sig_type,
+            price=price,
+            timestamp=timestamp,
+            strategy_name=self.name,
+            strength=1.0,
+            metadata={"exit_reason": "event_window_expired"},
+        )
+
     def get_required_data(self) -> Dict[str, Any]:
         return {
             "type": "event_context",

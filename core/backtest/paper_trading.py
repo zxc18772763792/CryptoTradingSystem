@@ -145,14 +145,17 @@ class PaperTradingEngine:
         return prices
 
     async def _run_strategies(self) -> None:
-        """Run strategy hooks for the current tick."""
+        """No-op: signal generation is handled by strategy_manager, not this engine.
+
+        PaperTradingEngine receives pre-generated signals via process_signal().
+        This loop exists so the tick scheduler has a hook to call, but live signal
+        dispatch does NOT flow through here — do not add strategy.generate_signals()
+        calls here without also wiring up market data routing.
+        """
         for strategy in self._strategies:
             if not strategy.is_running:
                 continue
-
             try:
-                # Strategy-specific data gathering is intentionally left to the
-                # strategy implementation and surrounding orchestration.
                 pass
             except Exception as e:
                 logger.error(f"Strategy {strategy.name} error: {e}")

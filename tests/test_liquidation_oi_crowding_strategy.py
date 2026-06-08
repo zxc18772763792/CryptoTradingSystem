@@ -76,6 +76,32 @@ def test_liquidation_strategy_emits_long_flush_reversal_trade():
     assert signals[0].metadata["reason_codes"] == ["liquidation_long_flush_reversal"]
 
 
+def test_liquidation_strategy_closes_long_when_crowded_long_gate_blocks():
+    df = _base_frame()
+    df.iloc[-1, df.columns.get_loc("crowded_long_score")] = 0.84
+    df.iloc[-1, df.columns.get_loc("funding_z")] = 2.0
+
+    strategy = LiquidationOICrowdingStrategy(params={"emit_gate_hold_signal": False})
+    signals = strategy.generate_signals(df)
+
+    assert [s.signal_type for s in signals] == [SignalType.CLOSE_LONG]
+    assert signals[0].metadata["structural_role"] == "crowding_risk_exit"
+    assert signals[0].metadata["reason_codes"] == ["derivatives_crowded_long_close_long"]
+
+
+def test_liquidation_strategy_closes_short_when_crowded_short_gate_blocks():
+    df = _base_frame()
+    df.iloc[-1, df.columns.get_loc("crowded_short_score")] = 0.84
+    df.iloc[-1, df.columns.get_loc("funding_z")] = -2.0
+
+    strategy = LiquidationOICrowdingStrategy(params={"emit_gate_hold_signal": False})
+    signals = strategy.generate_signals(df)
+
+    assert [s.signal_type for s in signals] == [SignalType.CLOSE_SHORT]
+    assert signals[0].metadata["structural_role"] == "crowding_risk_exit"
+    assert signals[0].metadata["reason_codes"] == ["derivatives_crowded_short_close_short"]
+
+
 def test_liquidation_strategy_gate_mode_emits_explainable_hold():
     df = _base_frame()
     df.iloc[-1, df.columns.get_loc("crowded_short_score")] = 0.84

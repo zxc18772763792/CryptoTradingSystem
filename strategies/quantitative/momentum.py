@@ -55,8 +55,46 @@ class MomentumStrategy(StrategyBase):
 
         threshold = self.params["momentum_threshold"]
 
+        # 正动量回落到阈值内 - 平多
+        if prev_momentum >= threshold and current_momentum < threshold:
+            strength = max(0.2, min((threshold - current_momentum) / threshold, 1.0))
+            signal = Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_LONG,
+                price=current_price,
+                timestamp=timestamp,
+                strategy_name=self.name,
+                strength=strength,
+                metadata={
+                    "momentum": current_momentum,
+                    "previous_momentum": prev_momentum,
+                    "exit_reason": "positive_momentum_faded",
+                },
+            )
+            signals.append(signal)
+            logger.info(f"Momentum CLOSE_LONG for {symbol}: momentum={current_momentum:.4f}")
+
+        # 负动量回归到阈值内 - 平空
+        elif prev_momentum <= -threshold and current_momentum > -threshold:
+            strength = max(0.2, min((current_momentum + threshold) / threshold, 1.0))
+            signal = Signal(
+                symbol=symbol,
+                signal_type=SignalType.CLOSE_SHORT,
+                price=current_price,
+                timestamp=timestamp,
+                strategy_name=self.name,
+                strength=strength,
+                metadata={
+                    "momentum": current_momentum,
+                    "previous_momentum": prev_momentum,
+                    "exit_reason": "negative_momentum_faded",
+                },
+            )
+            signals.append(signal)
+            logger.info(f"Momentum CLOSE_SHORT for {symbol}: momentum={current_momentum:.4f}")
+
         # 正动量突破阈值 - 买入
-        if prev_momentum < threshold and current_momentum >= threshold:
+        elif prev_momentum < threshold and current_momentum >= threshold:
             signal = Signal(
                 symbol=symbol,
                 signal_type=SignalType.BUY,
