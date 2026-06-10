@@ -67,6 +67,9 @@ _BALANCE_SNAPSHOT_FAST_AGE_SEC = 12.0
 _LIVE_ORDER_DETAILS_CACHE_TTL_SEC = 60.0
 _BALANCE_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
 _LIVE_POSITION_SNAPSHOT_CACHE: Dict[str, Any] = {"ts": 0.0, "data": {}}
+# Single-flight guard so concurrent TTL misses don't all launch their own
+# full cross-exchange position scans; waiters reuse the refresher's result.
+_LIVE_POSITION_SNAPSHOT_LOCK = LoopBoundAsyncLock()
 _LIVE_POSITION_SNAPSHOT_TTL_SEC = 6.0
 _LIVE_POSITION_FETCH_TIMEOUT_SEC = 8.5
 _LIVE_DAILY_REALIZED_PNL_CACHE: Dict[str, Any] = {
@@ -3503,6 +3506,16 @@ async def _build_analytics_history_health(
     }
 
 
+def _fresh_live_position_snapshot(force_refresh: bool) -> Optional[Dict[str, Any]]:
+    if force_refresh:
+        return None
+    cached = _LIVE_POSITION_SNAPSHOT_CACHE.get("data") or {}
+    cached_ts = float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)
+    if cached and (time.time() - cached_ts) <= _LIVE_POSITION_SNAPSHOT_TTL_SEC:
+        return dict(cached)
+    return None
+
+
 async def _collect_live_position_snapshot(
     force_refresh: bool = False,
 ) -> Dict[str, Any]:
@@ -3514,16 +3527,21 @@ async def _collect_live_position_snapshot(
             "distribution": {},
         }
 
-    now_ts = time.time()
-    cached = _LIVE_POSITION_SNAPSHOT_CACHE.get("data") or {}
-    cached_ts = float(_LIVE_POSITION_SNAPSHOT_CACHE.get("ts") or 0.0)
-    if (
-        not force_refresh
-        and cached
-        and (now_ts - cached_ts) <= _LIVE_POSITION_SNAPSHOT_TTL_SEC
-    ):
-        return dict(cached)
+    fresh = _fresh_live_position_snapshot(force_refresh)
+    if fresh is not None:
+        return fresh
 
+    async with _LIVE_POSITION_SNAPSHOT_LOCK:
+        # Re-check after acquiring: another caller may have refreshed while
+        # we waited on the lock.
+        fresh = _fresh_live_position_snapshot(force_refresh)
+        if fresh is not None:
+            return fresh
+        return await _collect_live_position_snapshot_refresh()
+
+
+async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
+    now_ts = time.time()
     rows: List[tuple[str, Any]] = []
     for exchange_name in exchange_manager.get_connected_exchanges():
         connector = exchange_manager.get_exchange(exchange_name)

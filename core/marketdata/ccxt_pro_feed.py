@@ -706,7 +706,12 @@ class CcxtProMarketFeed:
                     raise
                 except Exception as exc:
                     self._mark_watch_error_count[name] = self._mark_watch_error_count.get(name, 0) + 1
-                    self._mark_last_error[name] = f"{type(exc).__name__}: {exc}"
+                    err_msg = f"{type(exc).__name__}: {exc}"
+                    if name not in self._mark_last_error:
+                        logger.warning(f"ccxt_pro_feed[{name}]: mark-price client prepare error: {err_msg}; reconnecting in {backoff:.1f}s")
+                    else:
+                        logger.debug(f"ccxt_pro_feed[{name}]: mark-price client prepare error: {err_msg}; reconnecting in {backoff:.1f}s")
+                    self._mark_last_error[name] = err_msg
                     await self._reset_mark_client(name)
                     await self._sleep_or_stop(stop_event, backoff)
                     backoff = min(self._reconnect_max_sec, backoff * 2.0)
@@ -741,7 +746,12 @@ class CcxtProMarketFeed:
                 raise
             except Exception as exc:
                 self._mark_watch_error_count[name] = self._mark_watch_error_count.get(name, 0) + 1
-                self._mark_last_error[name] = f"{type(exc).__name__}: {exc}"
+                err_msg = f"{type(exc).__name__}: {exc}"
+                if name not in self._mark_last_error:
+                    logger.warning(f"ccxt_pro_feed[{name}]: mark-price watch error: {err_msg}; reconnecting in {backoff:.1f}s")
+                else:
+                    logger.debug(f"ccxt_pro_feed[{name}]: mark-price watch error: {err_msg}; reconnecting in {backoff:.1f}s")
+                self._mark_last_error[name] = err_msg
                 await self._reset_mark_client(name)
                 await self._sleep_or_stop(stop_event, backoff)
                 backoff = min(self._reconnect_max_sec, backoff * 2.0)

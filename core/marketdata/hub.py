@@ -211,6 +211,9 @@ class MarketDataHub:
         self._shadow_compare_stale_skip_count = 0
         self._shadow_last_compare: Optional[Dict[str, Any]] = None
         self._shadow_max_abs_diff_bps = 0.0
+        self._ws_trusted = True
+        self._ws_distrust_reason: Optional[str] = None
+        self._ws_distrust_read_count = 0
 
     def clear(self) -> None:
         self._ticks.clear()
@@ -230,6 +233,24 @@ class MarketDataHub:
         self._shadow_compare_stale_skip_count = 0
         self._shadow_last_compare = None
         self._shadow_max_abs_diff_bps = 0.0
+        self._ws_trusted = True
+        self._ws_distrust_reason = None
+        self._ws_distrust_read_count = 0
+
+    @property
+    def ws_trusted(self) -> bool:
+        return self._ws_trusted
+
+    def set_ws_trust(self, trusted: bool, *, reason: Optional[str] = None) -> None:
+        """Mark WS-sourced ticks as (un)trusted for reads.
+
+        While distrusted (e.g. the WS quality guard degraded), ``get_tick``
+        reports WS-sourced ticks as stale/fallback-required even when fresh, so
+        metadata-aware readers fall back to REST instead of consuming a feed
+        whose quality breached its gates. REST-sourced ticks are unaffected.
+        """
+        self._ws_trusted = bool(trusted)
+        self._ws_distrust_reason = None if self._ws_trusted else str(reason or "quality_guard")
 
     def upsert_ws_tick(self, exchange: Any, symbol: Any, payload: Dict[str, Any], *, channel: str = "ticker") -> Optional[MarketTick]:
         return self.upsert_tick(exchange, symbol, payload, source="ws", channel=channel)
@@ -467,16 +488,22 @@ class MarketDataHub:
             return None
         horizon = self.symbol_max_age_sec if max_age_sec is None else float(max_age_sec)
         status = tick.to_status(max_age_sec=horizon)
+        is_stale = bool(status["is_stale"])
+        quality = status["quality"]
+        if tick.source == "ws" and not self._ws_trusted:
+            self._ws_distrust_read_count += 1
+            is_stale = True
+            quality = "ws_distrusted"
         return {
             "tick": tick.to_payload(),
             "meta": {
                 "age_ms": status["age_ms"],
-                "is_stale": status["is_stale"],
-                "quality": status["quality"],
+                "is_stale": is_stale,
+                "quality": quality,
                 "source": tick.source,
                 "exchange": tick.exchange,
                 "symbol": tick.symbol,
-                "fallback_required": bool(status["is_stale"]),
+                "fallback_required": is_stale,
             },
         }
 
@@ -599,6 +626,9 @@ class MarketDataHub:
             "shadow_compare_stale_skip_count": self._shadow_compare_stale_skip_count,
             "shadow_max_abs_diff_bps": self._shadow_max_abs_diff_bps,
             "shadow_last_compare": dict(self._shadow_last_compare) if self._shadow_last_compare else None,
+            "ws_trusted": self._ws_trusted,
+            "ws_distrust_reason": self._ws_distrust_reason,
+            "ws_distrust_read_count": self._ws_distrust_read_count,
             "last_error": self._last_error,
         }
         if include_symbols:

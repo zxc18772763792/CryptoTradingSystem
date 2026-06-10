@@ -290,3 +290,43 @@ def test_auxiliary_mark_price_channel_does_not_pollute_ticker_health():
     assert mark_status["funding_rate"] == 0.0001
     assert mark_status["next_funding_time"] == 1_700_000_000_000
     assert mark_status["source"] == "ws"
+
+
+def test_ws_distrust_marks_fresh_ws_ticks_stale_until_trust_restored():
+    hub = MarketDataHub(symbol_max_age_sec=10)
+    hub.upsert_ws_tick("binance", "BTC/USDT", {"last": 68000, "bid": 67999, "ask": 68001})
+    hub.upsert_rest_tick(
+        "binance",
+        "ETH/USDT",
+        {"last": 3800, "bid": 3799, "ask": 3801},
+        source="rest_snapshot",
+    )
+
+    assert hub.ws_trusted is True
+    fresh = hub.get_tick("binance", "BTC/USDT")
+    assert fresh is not None and fresh["meta"]["is_stale"] is False
+
+    hub.set_ws_trust(False, reason="ws_quality_guard")
+    assert hub.ws_trusted is False
+
+    distrusted = hub.get_tick("binance", "BTC/USDT")
+    assert distrusted is not None
+    assert distrusted["meta"]["is_stale"] is True
+    assert distrusted["meta"]["fallback_required"] is True
+    assert distrusted["meta"]["quality"] == "ws_distrusted"
+
+    # REST-sourced ticks are unaffected by WS distrust.
+    rest_read = hub.get_tick("binance", "ETH/USDT")
+    assert rest_read is not None
+    assert rest_read["meta"]["quality"] != "ws_distrusted"
+
+    snapshot = hub.snapshot()
+    assert snapshot["ws_trusted"] is False
+    assert snapshot["ws_distrust_reason"] == "ws_quality_guard"
+    assert snapshot["ws_distrust_read_count"] >= 1
+
+    hub.set_ws_trust(True)
+    restored = hub.get_tick("binance", "BTC/USDT")
+    assert restored is not None and restored["meta"]["is_stale"] is False
+    assert hub.snapshot()["ws_trusted"] is True
+    assert hub.snapshot()["ws_distrust_reason"] is None
