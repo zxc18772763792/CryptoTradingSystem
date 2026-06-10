@@ -5214,9 +5214,15 @@ async def export_backtest_report(
     )
     if df.empty:
         raise HTTPException(status_code=404, detail="缺少历史数据")
-    df = _filter_backtest_frame_by_bounds(df, parsed_start, parsed_end)
+    full_df = _normalize_backtest_frame_index(df)
+    df = _filter_backtest_frame_by_bounds(full_df, parsed_start, parsed_end)
     if df.empty:
         raise HTTPException(status_code=404, detail="该时间范围内无可用数据")
+    # Mirror /run's auto-expand: exporting the same request that auto-expanded
+    # during the run must not 400 on the narrow window.
+    min_bars = _min_required_bars(timeframe)
+    if len(df) < min_bars and len(full_df) >= min_bars:
+        df = full_df
 
     result = await asyncio.to_thread(
         _run_backtest_core,
@@ -5294,23 +5300,23 @@ async def export_backtest_report(
             fig = plt.figure(figsize=(11.69, 8.27))
             fig.patch.set_facecolor("#ffffff")
             txt = (
-                f"Backtest Report\\n\\n"
-                f"Strategy: {strategy}\\n"
-                f"Symbol: {symbol}\\n"
-                f"Timeframe: {timeframe}\\n"
-                f"Initial Capital: {initial_capital:.2f}\\n"
-                f"Final Capital: {float(result.get('final_capital', 0.0)):.2f}\\n"
-                f"Total Return: {float(result.get('total_return', 0.0)):.2f}%\\n"
-                f"Gross Return: {float(result.get('gross_total_return', 0.0)):.2f}%\\n"
-                f"Cost Drag: {float(result.get('cost_drag_return_pct', 0.0)):.2f}%\\n"
-                f"Max Drawdown: {float(result.get('max_drawdown', 0.0)):.2f}%\\n"
-                f"Sharpe: {float(result.get('sharpe_ratio', 0.0)):.2f}\\n"
-                f"Quality: {result.get('quality_flag', 'ok')}\\n"
-                f"Anomaly Ratio: {float(result.get('anomaly_bar_ratio', 0.0)):.4f}\\n"
-                f"Trades: {int(result.get('total_trades', 0) or 0)}\\n"
-                f"Win Rate: {float(result.get('win_rate', 0.0)):.2f}%\\n"
-                f"Commission(one-way): {max(0.0, float(commission_rate or 0.0)) * 100:.4f}%\\n"
-                f"Slippage(one-way): {max(0.0, float(slippage_bps or 0.0)):.2f} bps\\n"
+                f"Backtest Report\n\n"
+                f"Strategy: {strategy}\n"
+                f"Symbol: {symbol}\n"
+                f"Timeframe: {timeframe}\n"
+                f"Initial Capital: {initial_capital:.2f}\n"
+                f"Final Capital: {float(result.get('final_capital', 0.0)):.2f}\n"
+                f"Total Return: {float(result.get('total_return', 0.0)):.2f}%\n"
+                f"Gross Return: {float(result.get('gross_total_return', 0.0)):.2f}%\n"
+                f"Cost Drag: {float(result.get('cost_drag_return_pct', 0.0)):.2f}%\n"
+                f"Max Drawdown: {float(result.get('max_drawdown', 0.0)):.2f}%\n"
+                f"Sharpe: {float(result.get('sharpe_ratio', 0.0)):.2f}\n"
+                f"Quality: {result.get('quality_flag', 'ok')}\n"
+                f"Anomaly Ratio: {float(result.get('anomaly_bar_ratio', 0.0)):.4f}\n"
+                f"Trades: {int(result.get('total_trades', 0) or 0)}\n"
+                f"Win Rate: {float(result.get('win_rate', 0.0)):.2f}%\n"
+                f"Commission(one-way): {max(0.0, float(commission_rate or 0.0)) * 100:.4f}%\n"
+                f"Slippage(one-way): {max(0.0, float(slippage_bps or 0.0)):.2f} bps\n"
             )
             fig.text(0.08, 0.92, txt, va="top", fontsize=12, family="monospace")
             plt.axis("off")

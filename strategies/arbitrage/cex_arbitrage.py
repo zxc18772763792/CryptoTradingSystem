@@ -1,4 +1,5 @@
 import asyncio
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -8,6 +9,58 @@ from loguru import logger
 from core.exchanges import exchange_manager
 from core.marketdata.runtime_price_provider import get_realtime_price
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
+
+
+def _position_side_text(position: Any) -> str:
+    side = getattr(position, "side", None)
+    return str(getattr(side, "value", side) or "").strip().lower()
+
+
+def _normalize_symbol_key(symbol: Any) -> str:
+    raw = str(symbol or "").strip().upper()
+    if not raw:
+        return ""
+    if ":" in raw:
+        raw = raw.split(":", 1)[0]
+    raw = raw.replace("_", "/")
+    if "/" not in raw and raw.endswith("USDT") and len(raw) > 4:
+        raw = f"{raw[:-4]}/USDT"
+    return raw
+
+
+def _resolve_exit_ratio(params: Dict[str, Any], default: float = 0.5) -> float:
+    try:
+        ratio = float(params.get("exit_spread_ratio", default))
+    except (TypeError, ValueError):
+        ratio = default
+    if not math.isfinite(ratio):
+        ratio = default
+    return min(max(ratio, 0.0), 1.0)
+
+
+def _close_signal_price(data: Any, position: Any) -> float:
+    try:
+        if data is not None and "close" in getattr(data, "columns", []) and len(data):
+            px = float(data["close"].iloc[-1])
+            if math.isfinite(px) and px > 0:
+                return px
+    except Exception:
+        pass
+    for attr in ("current_price", "entry_price"):
+        try:
+            px = float(getattr(position, attr, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(px) and px > 0:
+            return px
+    return 0.0
+
+
+def _observation_age_sec(observed_at: Any, now: datetime) -> Optional[float]:
+    try:
+        return max(0.0, (now - observed_at).total_seconds())
+    except (TypeError, AttributeError):
+        return None
 
 
 class CEXArbitrageStrategy(StrategyBase):
@@ -26,11 +79,18 @@ class CEXArbitrageStrategy(StrategyBase):
             "cooldown_min": 1,
             "max_vol": 0.03,
             "max_spread": 0.05,
+            # Close positions once the live spread falls below
+            # exit_spread_ratio * min_spread (capital is otherwise locked
+            # until global SL/TP fires).
+            "exit_spread_ratio": 0.5,
+            # Never act on a price book older than this (<=0 disables guard).
+            "exit_price_max_age_sec": 300.0,
         }
         if params:
             default_params.update(params)
         super().__init__(name, default_params)
         self._price_cache: Dict[str, Dict[str, Dict[str, float]]] = {}
+        self._price_cache_at: Dict[str, datetime] = {}
         self._last_signal_at: Dict[str, datetime] = {}
 
     def _resolve_min_spread(self) -> float:
@@ -77,6 +137,7 @@ class CEXArbitrageStrategy(StrategyBase):
             ready.append((str(exchange_name), connector))
         if not ready:
             self._price_cache[symbol] = prices
+            self._price_cache_at[symbol] = datetime.now(timezone.utc)
             return prices
 
         results = await asyncio.gather(
@@ -108,6 +169,7 @@ class CEXArbitrageStrategy(StrategyBase):
                 prices[exchange_name] = {"bid": bid, "ask": ask, "last": last}
 
         self._price_cache[symbol] = prices
+        self._price_cache_at[symbol] = datetime.now(timezone.utc)
         return prices
 
     def find_arbitrage_opportunities(self, symbol: str, prices: Dict[str, Dict[str, float]]) -> List[Dict[str, Any]]:
@@ -163,6 +225,131 @@ class CEXArbitrageStrategy(StrategyBase):
         max_n = max(1, int(self.params.get("max_opportunities", 2)))
         return opportunities[:max_n]
 
+    def _lookup_price_book(
+        self, symbol: str
+    ) -> Tuple[Optional[Dict[str, Dict[str, float]]], Optional[datetime]]:
+        target = _normalize_symbol_key(symbol)
+        if not target:
+            return None, None
+        for key, book in self._price_cache.items():
+            if _normalize_symbol_key(key) == target:
+                return book, self._price_cache_at.get(key)
+        return None, None
+
+    def _current_effective_spread(
+        self,
+        book: Dict[str, Dict[str, float]],
+        buy_exchange: Any = None,
+        sell_exchange: Any = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Current effective spread from the cached price book.
+
+        Prefers the exact entry pair when both legs are still quoted;
+        otherwise falls back to the best spread across all exchange pairs.
+        Returns None when fewer than two usable quotes exist (never close
+        blind on a one-sided book).
+        """
+        fee_drag = (
+            2 * float(self.params.get("fee_rate", 0.0))
+            if bool(self.params.get("consider_fees", True))
+            else 0.0
+        )
+
+        def _pair_spread(buy_ex: str, sell_ex: str) -> Optional[Dict[str, Any]]:
+            buy_ask = float((book.get(buy_ex) or {}).get("ask") or 0.0)
+            sell_bid = float((book.get(sell_ex) or {}).get("bid") or 0.0)
+            if buy_ask <= 0 or sell_bid <= 0:
+                return None
+            spread = (sell_bid - buy_ask) / buy_ask
+            return {
+                "spread": spread,
+                "effective_spread": spread - fee_drag,
+                "buy_exchange": buy_ex,
+                "sell_exchange": sell_ex,
+            }
+
+        buy_key = str(buy_exchange or "").strip()
+        sell_key = str(sell_exchange or "").strip()
+        if buy_key and sell_key and buy_key != sell_key:
+            pair = _pair_spread(buy_key, sell_key)
+            if pair is not None:
+                pair["spread_scope"] = "entry_pair"
+                return pair
+
+        best: Optional[Dict[str, Any]] = None
+        for buy_ex in book:
+            for sell_ex in book:
+                if buy_ex == sell_ex:
+                    continue
+                row = _pair_spread(buy_ex, sell_ex)
+                if row is None:
+                    continue
+                if best is None or row["effective_spread"] > best["effective_spread"]:
+                    best = row
+        if best is not None:
+            best["spread_scope"] = "best_pair"
+        return best
+
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Close an arbitrage leg once the cross-exchange spread converges.
+
+        check_exit is synchronous, so it reads the price book cached by the
+        latest ``update_prices`` run (runtime price provider) instead of
+        awaiting fresh quotes; a stale book never triggers an exit.
+        """
+        side = _position_side_text(position)
+        if side not in {"long", "short"}:
+            return None
+        symbol = str(getattr(position, "symbol", "") or "").strip()
+        if not symbol:
+            return None
+
+        book, cached_at = self._lookup_price_book(symbol)
+        if not book or cached_at is None:
+            return None
+        now = datetime.now(timezone.utc)
+        age_sec = _observation_age_sec(cached_at, now)
+        max_age = float(self.params.get("exit_price_max_age_sec", 300.0) or 0.0)
+        if age_sec is None or (max_age > 0 and age_sec > max_age):
+            return None
+
+        metadata = dict(getattr(position, "metadata", {}) or {})
+        spread_info = self._current_effective_spread(
+            book,
+            metadata.get("buy_exchange"),
+            metadata.get("sell_exchange"),
+        )
+        if spread_info is None:
+            return None
+
+        min_spread = self._resolve_min_spread()
+        ratio = _resolve_exit_ratio(self.params)
+        threshold = min_spread * ratio
+        if float(spread_info["effective_spread"]) > threshold:
+            return None
+
+        return Signal(
+            symbol=symbol,
+            signal_type=SignalType.CLOSE_LONG if side == "long" else SignalType.CLOSE_SHORT,
+            price=_close_signal_price(data, position),
+            timestamp=self._bar_time(data),
+            strategy_name=self.name,
+            strength=0.7,
+            metadata={
+                "close_reason": "arbitrage_spread_converged",
+                "close_only": True,
+                "current_spread": float(spread_info["spread"]),
+                "current_effective_spread": float(spread_info["effective_spread"]),
+                "exit_threshold": float(threshold),
+                "entry_threshold": float(min_spread),
+                "exit_spread_ratio": float(ratio),
+                "spread_scope": str(spread_info["spread_scope"]),
+                "buy_exchange": str(spread_info["buy_exchange"]),
+                "sell_exchange": str(spread_info["sell_exchange"]),
+                "price_book_age_sec": float(age_sec),
+            },
+        )
+
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         return []
 
@@ -194,6 +381,8 @@ class CEXArbitrageStrategy(StrategyBase):
                     metadata={
                         "exchange": opp["buy_exchange"],
                         "arbitrage_type": "buy_side",
+                        "buy_exchange": opp["buy_exchange"],
+                        "sell_exchange": opp["sell_exchange"],
                         "spread": float(opp["spread"]),
                         "effective_spread": float(opp["effective_spread"]),
                         "cross_exchange_vol": float(opp.get("cross_exchange_vol", 0.0)),
@@ -211,6 +400,8 @@ class CEXArbitrageStrategy(StrategyBase):
                     metadata={
                         "exchange": opp["sell_exchange"],
                         "arbitrage_type": "sell_side",
+                        "buy_exchange": opp["buy_exchange"],
+                        "sell_exchange": opp["sell_exchange"],
                         "spread": float(opp["spread"]),
                         "effective_spread": float(opp["effective_spread"]),
                         "cross_exchange_vol": float(opp.get("cross_exchange_vol", 0.0)),
@@ -248,12 +439,18 @@ class TriangularArbitrageStrategy(StrategyBase):
             "max_opportunities": 2,
             "cooldown_min": 1,
             "max_spread": 0.05,
+            # Close positions once |edge| falls below
+            # exit_spread_ratio * min_profit.
+            "exit_spread_ratio": 0.5,
+            # Never act on an edge observation older than this (<=0 disables).
+            "exit_price_max_age_sec": 300.0,
         }
         if params:
             default_params.update(params)
         super().__init__(name, default_params)
         self._triangles: List[List[str]] = []
         self._last_signal_at: Dict[str, datetime] = {}
+        self._last_edge_obs: Dict[str, Dict[str, Any]] = {}
 
     def _resolve_min_profit(self) -> float:
         raw = self.params.get("min_profit", self.params.get("alpha_threshold", 0.003))
@@ -322,6 +519,60 @@ class TriangularArbitrageStrategy(StrategyBase):
         opportunities.sort(key=lambda x: float(x["profit"]), reverse=True)
         return opportunities
 
+    def check_exit(self, data: pd.DataFrame, position: Any) -> Optional[Signal]:
+        """Close a triangular position once the implied/direct edge fades.
+
+        Reads the per-symbol edge recorded by the latest
+        ``generate_signals_async`` run (check_exit is synchronous and cannot
+        await fresh quotes); a stale observation never triggers an exit.
+        """
+        side = _position_side_text(position)
+        if side not in {"long", "short"}:
+            return None
+        symbol = str(getattr(position, "symbol", "") or "").strip()
+        key = _normalize_symbol_key(symbol)
+        if not key:
+            return None
+
+        obs = self._last_edge_obs.get(key)
+        if not isinstance(obs, dict):
+            return None
+        now = datetime.now(timezone.utc)
+        age_sec = _observation_age_sec(obs.get("at"), now)
+        max_age = float(self.params.get("exit_price_max_age_sec", 300.0) or 0.0)
+        if age_sec is None or (max_age > 0 and age_sec > max_age):
+            return None
+        try:
+            edge_abs = float(obs.get("edge_abs"))
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(edge_abs):
+            return None
+
+        min_profit = self._resolve_min_profit()
+        ratio = _resolve_exit_ratio(self.params)
+        threshold = min_profit * ratio
+        if edge_abs > threshold:
+            return None
+
+        return Signal(
+            symbol=symbol,
+            signal_type=SignalType.CLOSE_LONG if side == "long" else SignalType.CLOSE_SHORT,
+            price=_close_signal_price(data, position),
+            timestamp=self._bar_time(data),
+            strategy_name=self.name,
+            strength=0.7,
+            metadata={
+                "close_reason": "triangular_edge_converged",
+                "close_only": True,
+                "current_edge_abs": float(edge_abs),
+                "exit_threshold": float(threshold),
+                "entry_threshold": float(min_profit),
+                "exit_spread_ratio": float(ratio),
+                "observation_age_sec": float(age_sec),
+            },
+        )
+
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
         return []
 
@@ -344,6 +595,9 @@ class TriangularArbitrageStrategy(StrategyBase):
         max_spread = max(min_profit, float(self.params.get("max_spread", 0.05) or 0.05))
         fee_drag = 3 * float(self.params.get("fee_rate", 0.001)) if bool(self.params.get("consider_fees", True)) else 0.0
         opportunities: List[Dict[str, Any]] = []
+        # Edge observations are recorded for every priced triangle (even below
+        # min_profit) so check_exit can detect convergence later.
+        observed_edges: Dict[str, float] = {}
 
         for tri in triangles:
             if len(tri) != 3:
@@ -376,6 +630,15 @@ class TriangularArbitrageStrategy(StrategyBase):
             mid_quote = float(t_mid_quote.price or 0.0)
             edge, implied = self._edge_from_prices(direct, mid_base, mid_quote)
             edge_after_fee = edge - fee_drag if edge > 0 else edge + fee_drag
+            if direct > 0 and mid_base > 0 and mid_quote > 0:
+                obs_key = _normalize_symbol_key(direct_pair)
+                if obs_key:
+                    # Convergence is measured on the raw edge: the fee-adjusted
+                    # edge saturates at ±fee_drag when the dislocation closes
+                    # and would never fall below the exit threshold.
+                    current_abs = abs(edge)
+                    if current_abs > observed_edges.get(obs_key, -1.0):
+                        observed_edges[obs_key] = current_abs
             if abs(edge_after_fee) < min_profit:
                 continue
             if abs(edge_after_fee) > max_spread:
@@ -390,6 +653,11 @@ class TriangularArbitrageStrategy(StrategyBase):
                     "timestamp": datetime.now(timezone.utc),
                 }
             )
+
+        if observed_edges:
+            obs_at = datetime.now(timezone.utc)
+            for obs_key, edge_abs in observed_edges.items():
+                self._last_edge_obs[obs_key] = {"edge_abs": float(edge_abs), "at": obs_at}
 
         if not opportunities:
             return []

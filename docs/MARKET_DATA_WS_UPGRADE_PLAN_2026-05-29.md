@@ -4757,3 +4757,79 @@ powershell -ExecutionPolicy Bypass -File scripts\market_ws_ui_primary.ps1 -Actio
 
 - FAIL 时：保持 shadow，按第 28.3 节失败处理定位（重点看 degraded sample 分布与服务 stderr 时间线），修复后重启第五轮。
 - Level 4（strategy_primary）仍按 §28.5 前置条件执行；本轮 hub 信任联动已把 guard 保护延伸到策略读价路径，但 Level 3 稳定运行一个完整交易日 + fallback 演练记录仍是硬前置。
+
+### 33.5 第四轮最终评估 + Level-3 切换记录（2026-06-10 16:41 +08:00）
+
+**评估时间**：2026-06-10 16:41（自动执行，scheduled task `ws-live-level2-eval-level3-switch`）
+
+#### Level-2 最终评估结果：PASS
+
+```json
+{
+  "ok": true,
+  "errors": [],
+  "summary": {
+    "sample_count": 1441,
+    "ws_tick_delta": 150693,
+    "shadow_compare_delta": 2745,
+    "shadow_compare_violation_delta": 0,
+    "invalid_payload_delta": 0,
+    "timestamp_regression_delta": 0,
+    "shadow_compare_stale_skip_delta": 0,
+    "feed_watch_timeout_delta": 0,
+    "feed_watch_error_delta": 1,
+    "feed_watch_empty_delta": 0,
+    "max_feed_watch_symbol_error_count_observed": 2,
+    "max_stale_symbol_count_observed": 1,
+    "p99_abs_diff_bps": 14.924,
+    "p95_ws_age_ms": 2330.0,
+    "final_mode": "shadow",
+    "final_trading_mode": "live",
+    "final_paper_trading": false,
+    "final_enabled": true,
+    "final_fail_closed_for_live": true,
+    "final_feed_healthy": true,
+    "final_ws_hub_healthy": true
+  }
+}
+```
+
+关键指标：
+| 指标 | 实测值 | 阈值 | 判定 |
+|---|---|---|---|
+| sample_count | 1441 | ≥1430 | ✓ |
+| ws_tick_delta | 150693 | ≥1 | ✓ |
+| shadow_compare_delta | 2745 | ≥1 | ✓ |
+| violation_delta | 0 | ≤30 | ✓ |
+| p99_abs_diff_bps | 14.92 | ≤20 | ✓ |
+| p95_ws_age_ms | 2330ms | ≤10000ms | ✓ |
+| invalid_payload_delta | 0 | 0 | ✓ |
+| timestamp_regression_delta | 0 | 0 | ✓ |
+| feed_watch_empty_delta | 0 | 0 | ✓ |
+
+#### Level-3 切换过程
+
+1. **停止旧 shadow 服务**（PID 19660）：`market_ws_ui_primary.ps1 -Action stop -Port 8000` → `Stopped service PID=19660`
+2. **启动 ui_primary 服务**：Launcher 内部再次通过 Level-2 评估门禁，READY 确认：
+   - `pid=30196`
+   - `trading_mode=live`
+   - `market_ws_mode=ui_primary`
+   - `quality_guard=True`
+   - 服务 cmd：`logs/ui_primary_service_20260610_164940.cmd`
+   - 服务 stderr：`logs/ui_primary_service_20260610_164940.err.log`
+   - Launch metadata：`logs/ui_primary_service_20260610_164940.launch.json`
+3. **status 验证**（启动约 4 分钟后，quality_guard 恢复后）：
+   - `mode=ui_primary` ✓
+   - `feed_healthy=true` ✓
+   - `ws_hub_healthy=true` ✓
+   - `quality_guard.enabled=true, state=ws`（recover_count=1）✓
+   - `ws_trusted=true` ✓
+   - `fail_closed_for_live=true` ✓
+   - `ws_tick_count=593`（WS 正常出票）
+4. **6 小时 ui_primary 观察 selfcheck 已启动**：
+   - task：`CryptoMarketWsUiPrimary_selfcheck_20260610_165647`
+   - JSON：`logs/ui_primary_selfcheck_20260610_165647.out.json`
+   - stderr：`logs/ui_primary_selfcheck_20260610_165647.err.log`
+   - 预计结束：2026-06-10 22:56 +08:00
+
+**下一步**：等待 6 小时 ui_primary 观察完成后，评估 Level-3 稳定性。Level 4（strategy_primary）按 §28.5 前置条件执行（需完整交易日稳定运行 + fallback 演练记录）。
