@@ -409,8 +409,7 @@ def test_onchain_module_exposes_derivatives_shadow_summary(monkeypatch):
     ]
 
 
-@pytest.mark.asyncio
-async def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
+def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
     from web.api import ai_research as ai_module
 
     monkeypatch.chdir(tmp_path)
@@ -486,7 +485,7 @@ async def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypat
     monkeypatch.setattr(_news_db, "list_source_states", AsyncMock(return_value=[]))
     monkeypatch.setattr(_news_db, "get_llm_queue_stats", AsyncMock(return_value={}))
 
-    result = await ai_module.get_premium_data_status()
+    result = asyncio.run(ai_module.get_premium_data_status())
     source = result["sources"]["fred_macro"]
     coinglass = result["sources"]["coinglass"]
 

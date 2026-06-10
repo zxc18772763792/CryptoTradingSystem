@@ -47,7 +47,7 @@
 | P4-Parquet | `scripts/migrate_parquet_klines_to_utc.py --apply` 未执行 | ⚠️ **持续未执行** | 高 |
 | C3-aiosqlite | 全量测试结束时 `RuntimeError: Event loop is closed` warning | ⚠️ 未处理 | 低 |
 | WS-mark 静默 | mark-price 流异常无日志（`ccxt_pro_feed.py:708,743`） | ⚠️ **未修复** | 中 |
-| P1-退出-arb | `cex_arbitrage`/`dex_arbitrage` 无 CLOSE 信号 | ⚠️ 持续 | 中 |
+| P1-退出-arb | `cex_arbitrage`/`dex_arbitrage` 无 CLOSE 信号 | ✅ **已修复**（见 §8.5） | 中 |
 | governance-None | `_governance_rejection_reason` 无 None 守卫（`order_manager.py:281`） | ⚠️ 未修复 | 低 |
 | cache-lock | `trading.py` `_BALANCE_SNAPSHOT_CACHE` 无 asyncio.Lock | ⚠️ 未修复 | 中 |
 | 熔断器状态 | 2026-05-25 触发熔断器需确认是否已 reset | ⚠️ 需人工确认 | 需确认 |
@@ -101,13 +101,15 @@ except Exception as exc:
 
 ---
 
-### Bug C — CEX/DEX 套利策略缺少主动平仓信号（**持续，影响资金占用**）
+### Bug C — CEX/DEX 套利策略缺少主动平仓信号（✅ **已修复**，见 §8.5）
 **文件：** `strategies/arbitrage/cex_arbitrage.py`、`strategies/arbitrage/dex_arbitrage.py`
 **严重性：** 中
 
 **现象：** 两个套利策略仅产生 BUY/SELL 信号，无 CLOSE_LONG/CLOSE_SHORT 信号，也无 `check_exit()` 实现。当套利价差回归后，持仓依赖全局止盈止损触发，不主动平仓。在价差持续但名义利润已消失时，资金被长期锁定。
 
 **建议：** 在两策略中新增 `check_exit()` 方法，当价差低于入场阈值时发出 CLOSE 信号。
+
+**修复（2026-06-10）：** 已为 `CEXArbitrageStrategy`、`TriangularArbitrageStrategy`、`DEXArbitrageStrategy` 三个类新增 `check_exit()`，价差收敛到 `exit_spread_ratio`（默认 0.5）× 入场阈值以下时发出 CLOSE 信号。详见 §8.5。
 
 ---
 
@@ -205,7 +207,7 @@ def _governance_rejection_reason(self, governance_check, request: OrderRequest) 
 
 ### 中优先级
 4. **修复 WS mark-price 流错误静默**（Bug B）：在 `ccxt_pro_feed.py:707-712, 742-748` 首次异常时添加 `logger.warning`
-5. **为 CEX/DEX 套利策略添加 `check_exit()`**（Bug C）：价差回归时主动平仓
+5. ~~**为 CEX/DEX 套利策略添加 `check_exit()`**（Bug C）：价差回归时主动平仓~~ ✅ 已完成（见 §8.5）
 6. **为 `trading.py` 缓存添加 `asyncio.Lock`**（Bug D）
 7. **添加 `HurstExponentStrategy` 趋势 SELL 单元测试**
 
@@ -250,10 +252,25 @@ def _governance_rejection_reason(self, governance_check, request: OrderRequest) 
 2. **quality guard 双缺口**（中，Level 4 前置）：guard 只在有浏览器订阅者时被喂样本；降级只影响 UI fan-out 不影响策略读价。已修复（headless 采样 + hub `set_ws_trust` 联动 provider）。
 
 ### 8.3 仍未处理（按原优先级保留）
-- Bug C：CEX/DEX 套利策略缺 `check_exit()`（与 WS 升级无关，单独排期）
+- ~~Bug C：CEX/DEX 套利策略缺 `check_exit()`~~ ✅ 已修复（见 §8.5）
 - P4-Parquet UTC 迁移未执行
 - C3-aiosqlite 测试退出 warning
 
 ### 8.4 新增工具
 - `scripts/market_ws_ui_primary.ps1`：Level-3 launcher（evaluator 硬门禁 + quality guard 强制开启 + ui_primary 观察 selfcheck）
 - 测试：launcher 资产测试 + evaluator live 降级测试 + hub 信任 3 项测试（共 +6 测试）
+
+### 8.5 Bug C 修复 — 套利策略主动平仓（2026-06-10）
+**文件：** `strategies/arbitrage/cex_arbitrage.py`、`strategies/arbitrage/dex_arbitrage.py`、`tests/test_arbitrage_check_exit.py`（新增）
+
+为三个套利策略实现 `check_exit()`，价差收敛到 `exit_spread_ratio`（默认 0.5，可配）× 入场阈值以下时发出 `CLOSE_LONG/CLOSE_SHORT`（带 `close_only=True` + `close_reason`），不再依赖全局 SL/TP 占用资金。已自动接入 `strategy_manager._collect_exit_signals`（对带 `generate_signals_async` 的策略每轮调用 `check_exit`）。
+
+- **`CEXArbitrageStrategy`**：`check_exit` 同步，读取 `update_prices` 缓存的价格簿（runtime_price_provider 路径，**未直接调 connector.get_ticker**）；新增 `_price_cache_at` 时间戳，价格簿过期（默认 300s）不平仓。优先用持仓 metadata 的 `buy_exchange`/`sell_exchange` 算入场对的实时价差，否则退回全场最优价差（保守，不盲平）。入场信号 metadata 补 `buy_exchange`/`sell_exchange`。
+- **`TriangularArbitrageStrategy`**：`generate_signals_async` 为每个定价三角记录 `_last_edge_obs[symbol]={edge_abs, at}`（含未达门槛者）。收敛判定用**原始 edge**——fee 调整后的 edge 会饱和在 ±fee_drag，永远跌不到阈值以下。
+- **`DEXArbitrageStrategy`**：`find_arbitrage_opportunities` 记录每对 token 最优 `profit_pct`；`_pair_key` 用排序后的 token，SELL 腿反向符号（`USDC/ETH`）命中同一观察。过期（默认 600s）不平仓。
+
+**关键参数：** `exit_spread_ratio`（默认 0.5）、`exit_price_max_age_sec`（CEX/三角 300s，DEX 600s）。
+
+**测试：** `tests/test_arbitrage_check_exit.py` 24 项，三策略各覆盖「价差收敛→平仓」「价差未回归→不平仓」「观察过期/缺失→不平仓」「long/short 侧映射」「`exit_spread_ratio` 阈值控制」，并通过真实异步定价路径验证缓存刷新。全部通过；回归 `test_perf_fixes_round2`/`test_strategy_signal_regressions`/`test_strategy_check_exit` 共 47 项无回退。
+
+> 时序前提：策略须先跑过一轮 `generate_signals_async` 刷新价格簿/edge 观察，下一轮 `check_exit` 才有新鲜数据。正常调度满足；策略暂停但持仓仍在时观察会过期、退出回落到全局 SL/TP——为有意保守行为（不拿陈旧价平仓）。
