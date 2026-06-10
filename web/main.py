@@ -759,6 +759,13 @@ def _observe_ws_quality_guard() -> bool:
             )
         elif decision.action == "recover":
             logger.info("market_ws quality guard RECOVER -> WS primary restored")
+        # Propagate distrust to the hub so metadata-aware price reads
+        # (runtime_price_provider) also stop trusting fresh WS ticks while
+        # the guard is degraded — not just the UI fan-out path.
+        try:
+            market_data_hub.set_ws_trust(not decision.force_rest, reason="ws_quality_guard")
+        except Exception:
+            pass
         return bool(decision.force_rest)
     except Exception as exc:
         logger.debug(f"ws quality guard observe failed: {exc}")
@@ -774,49 +781,53 @@ async def _runtime_pusher(stop_event: asyncio.Event) -> None:
             has_subscribers = event_bus.has_subscribers()
             if has_subscribers:
                 await _emit_runtime_snapshot()
-            if has_subscribers and now - last_market_tick_at >= _MARKET_TICK_INTERVAL_SEC:
+            if now - last_market_tick_at >= _MARKET_TICK_INTERVAL_SEC:
                 # In shadow mode REST remains the UI/runtime tick source while
                 # WS only feeds the hub. In ui_primary/strategy_primary, a
                 # fresh hub tick is allowed to suppress REST fan-out.
                 _sync_market_data_hub_runtime_config()
-                feed = _market_ws_feed
-                feed_healthy = bool(feed is not None and feed.is_healthy())
-                watch_symbols = _collect_watch_symbols()
-                fallback_symbols = (
-                    _symbols_requiring_ws_fallback(watch_symbols)
-                    if feed_healthy
-                    else list(watch_symbols)
-                )
-                hub_healthy = not fallback_symbols
+                # Observe the quality guard on every tick interval — not only
+                # when a browser is connected — so strategy_primary keeps its
+                # auto-degrade protection in headless operation.
                 guard_force_rest = _observe_ws_quality_guard()
-                if guard_force_rest:
-                    fallback_symbols = list(watch_symbols)
-                ws_can_suppress_rest = bool(
-                    _is_market_ws_stream_enabled()
-                    and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
-                    and feed_healthy
-                    and hub_healthy
-                    and not guard_force_rest
-                )
-                if not ws_can_suppress_rest:
-                    fallback_active = bool(
+                if has_subscribers:
+                    feed = _market_ws_feed
+                    feed_healthy = bool(feed is not None and feed.is_healthy())
+                    watch_symbols = _collect_watch_symbols()
+                    fallback_symbols = (
+                        _symbols_requiring_ws_fallback(watch_symbols)
+                        if feed_healthy
+                        else list(watch_symbols)
+                    )
+                    hub_healthy = not fallback_symbols
+                    if guard_force_rest:
+                        fallback_symbols = list(watch_symbols)
+                    ws_can_suppress_rest = bool(
                         _is_market_ws_stream_enabled()
                         and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
+                        and feed_healthy
+                        and hub_healthy
+                        and not guard_force_rest
                     )
-                    if guard_force_rest:
-                        reason = "ws_quality_guard"
-                    elif not feed_healthy:
-                        reason = "ws_unhealthy"
-                    else:
-                        reason = "ws_stale"
-                    await _emit_market_ticks(
-                        hub_source="rest_fallback" if fallback_active else "rest_snapshot",
-                        fallback_reason=reason if fallback_active else "periodic_rest_snapshot",
-                        symbols=fallback_symbols if fallback_active else None,
-                    )
-                    if _is_market_ws_stream_enabled() and _MARKET_WS_MODE == "shadow":
-                        last_rest_reconcile_at = now
-                last_market_tick_at = now
+                    if not ws_can_suppress_rest:
+                        fallback_active = bool(
+                            _is_market_ws_stream_enabled()
+                            and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}
+                        )
+                        if guard_force_rest:
+                            reason = "ws_quality_guard"
+                        elif not feed_healthy:
+                            reason = "ws_unhealthy"
+                        else:
+                            reason = "ws_stale"
+                        await _emit_market_ticks(
+                            hub_source="rest_fallback" if fallback_active else "rest_snapshot",
+                            fallback_reason=reason if fallback_active else "periodic_rest_snapshot",
+                            symbols=fallback_symbols if fallback_active else None,
+                        )
+                        if _is_market_ws_stream_enabled() and _MARKET_WS_MODE == "shadow":
+                            last_rest_reconcile_at = now
+                    last_market_tick_at = now
             if (
                 _is_market_ws_stream_enabled()
                 and _MARKET_WS_MODE == "shadow"

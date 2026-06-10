@@ -278,6 +278,8 @@ class OrderManager:
         governance_check,
         request: OrderRequest,
     ) -> str:
+        if governance_check is None:
+            return ""
         if not governance_check.allowed:
             return f"governance blocked: {governance_check.reason}"
         if governance_check.reduce_only and not bool(request.reduce_only):
@@ -880,7 +882,8 @@ class OrderManager:
 
         try:
             order = await connector.get_order(order_id, symbol)
-            self._orders[order_id] = order
+            if order is not None:
+                self._orders[order_id] = order
             return order
         except Exception as e:
             logger.error(f"Failed to get order {order_id}: {e}")

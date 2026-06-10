@@ -138,3 +138,35 @@ def test_execution_engine_live_strategy_primary_ignores_unverified_preferred_pri
     with pytest.raises(PriceUnavailableError):
         asyncio.run(engine._resolve_price("binance", "BTC/USDT", preferred_price=50000.0))
     market_data_hub.clear()
+
+
+def test_realtime_price_provider_falls_back_to_rest_when_ws_distrusted():
+    hub = MarketDataHub(symbol_max_age_sec=10)
+    hub.upsert_ws_tick("binance", "BTC/USDT", {"last": 50000.0, "bid": 49999.0, "ask": 50001.0})
+    hub.set_ws_trust(False, reason="ws_quality_guard")
+    connector = _Connector(_Ticker(symbol="BTC/USDT", last=51000.0, bid=50999.0, ask=51001.0))
+
+    result = asyncio.run(
+        get_realtime_price(
+            "binance",
+            "BTC/USDT",
+            hub=hub,
+            connector=connector,
+        )
+    )
+
+    # The fresh-but-distrusted WS tick must not be served; REST wins.
+    assert connector.calls == 1
+    assert result.ok
+    assert result.price == 51000.0
+    assert result.source == "rest_fallback"
+
+    # Once trust is restored the (now newer) hub tick is served again.
+    hub.set_ws_trust(True)
+    hub.upsert_ws_tick("binance", "BTC/USDT", {"last": 50500.0, "bid": 50499.0, "ask": 50501.0})
+    result2 = asyncio.run(
+        get_realtime_price("binance", "BTC/USDT", hub=hub, connector=connector)
+    )
+    assert connector.calls == 1
+    assert result2.ok
+    assert result2.source == "ws"

@@ -1107,3 +1107,29 @@ def test_startup_syncs_auto_strategy_accounts_to_paper(monkeypatch):
     assert result["auto_strategy_accounts_updated"] == 3
     assert mode_calls == [("main", "paper")]
     assert auto_calls == ["paper"]
+
+
+def test_observe_ws_quality_guard_propagates_hub_ws_trust(monkeypatch):
+    """Guard degrade/recover must flip the hub's WS-trust flag so the
+    runtime price provider also stops trusting fresh WS ticks."""
+    from core.marketdata.ws_quality_guard import WsQualityGuard
+    from core.marketdata.hub import market_data_hub
+
+    g = WsQualityGuard(
+        enabled=True, window_sec=60, min_samples=1,
+        degrade_unhealthy_fraction=0.5, recover_healthy_sec=0.0,
+    )
+    monkeypatch.setattr(web_main, "_market_ws_quality_guard", g)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "strategy_primary")
+    try:
+        bad = {"feed_healthy": False, "ws_hub_healthy": False, "ws_stale_symbol_count": 2, "last_tick_age_ms": 99999.0}
+        monkeypatch.setattr(web_main, "_market_ws_status_snapshot", lambda **k: bad)
+        assert web_main._observe_ws_quality_guard() is True
+        assert market_data_hub.ws_trusted is False
+
+        good = {"feed_healthy": True, "ws_hub_healthy": True, "ws_stale_symbol_count": 0, "last_tick_age_ms": 100.0}
+        monkeypatch.setattr(web_main, "_market_ws_status_snapshot", lambda **k: good)
+        assert web_main._observe_ws_quality_guard() is False
+        assert market_data_hub.ws_trusted is True
+    finally:
+        market_data_hub.set_ws_trust(True)
