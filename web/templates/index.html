@@ -3191,8 +3191,8 @@
                                     <input type="number" id="backtest-stop-loss-pct" value="0.05" min="0.01" max="0.5" step="0.01" disabled>
                                 </div>
                                 <div class="form-group">
-                                    <label>固定止盈比例（0.01~1.0，如 0.10 = 10%）</label>
-                                    <input type="number" id="backtest-take-profit-pct" value="0.10" min="0.01" max="1.0" step="0.01" disabled>
+                                    <label>固定止盈比例（0.01~0.99，如 0.10 = 10%）</label>
+                                    <input type="number" id="backtest-take-profit-pct" value="0.10" min="0.01" max="0.99" step="0.01" disabled>
                                 </div>
                             </div>
                             <div class="inline-actions">
@@ -3218,7 +3218,7 @@
                                     <label>用于“运行回测”与“套利页带配置进入回测”的完整参数</label>
                                     <textarea id="backtest-custom-params" rows="8" placeholder='例如 {&quot;pair_symbol&quot;:&quot;ETH/USDT&quot;,&quot;lookback_period&quot;:48}'></textarea>
                                 </div>
-                                <div id="backtest-custom-params-hint" class="form-help">留空时使用策略默认参数。多策略对比 / 参数优化暂不读取这里的 JSON。</div>
+                                <div id="backtest-custom-params-hint" class="form-help">留空时使用策略默认参数。运行回测与参数优化会读取这里的 JSON；多策略对比不会读取这里的自由 JSON，只读取策略集合与专用批量参数。</div>
                             </details>
                             <details class="backtest-compare-picker" id="backtest-compare-picker">
                                 <summary>多策略对比策略集合（可自选）<span id="backtest-compare-picked-count" style="margin-left:8px;color:#9fb1c9;">已选 0</span></summary>

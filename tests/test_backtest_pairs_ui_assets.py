@@ -16,6 +16,10 @@ def _render_template(source: str) -> str:
     return Environment(autoescape=False).from_string(source).render(static_asset_url=static_asset_url)
 
 
+def _section_between(source: str, start: str, end: str) -> str:
+    return source.split(start, 1)[1].split(end, 1)[0]
+
+
 def test_backtest_pairs_dual_leg_ui_hooks_exist():
     template_source = _read("web/templates/index.html")
     template = _render_template(template_source)
@@ -102,6 +106,44 @@ def test_backtest_compare_ui_avoids_single_strategy_hard_dependency():
     assert "await ensureSelectedBacktestStrategy();" not in compare_section
     assert "b1.disabled=true;" in compare_section
     assert "b1.disabled=false;" in compare_section
+
+
+def test_backtest_optimize_uses_dynamic_timeout_and_custom_params():
+    app_js = _read("web/static/js/app.js")
+
+    assert "function estimateBacktestOptimizeTimeoutMs" in app_js
+    optimize_section = _section_between(
+        app_js,
+        "const b2=document.getElementById('btn-backtest-optimize');",
+        "const b3=document.getElementById('btn-backtest-export');",
+    )
+
+    assert "buildBacktestRequestContext(st,{includeCustomParams:false})" not in optimize_section
+    assert "params_json=${encodeURIComponent(JSON.stringify(ctx.params))}" in optimize_section
+    assert "const optimizeTimeoutMs=estimateBacktestOptimizeTimeoutMs(st,maxTrials,tf," in optimize_section
+    assert "timeoutMs:optimizeTimeoutMs" in optimize_section
+    assert "timeoutMs:90000" not in optimize_section
+
+
+def test_backtest_custom_params_hint_matches_optimize_behavior():
+    template_source = _read("web/templates/index.html")
+    app_js = _read("web/static/js/app.js")
+    stale_hint = "多策略对比 / 参数优化暂不读取这里的 JSON"
+
+    assert stale_hint not in template_source
+    assert stale_hint not in app_js
+    assert "运行回测与参数优化会读取这里的 JSON" in template_source
+    assert "运行回测与参数优化会读取这里的 JSON" in app_js
+    assert "多策略对比不会读取这里的自由 JSON" in template_source
+    assert "多策略对比不会读取这里的自由 JSON" in app_js
+
+
+def test_backtest_fixed_take_profit_ui_matches_backend_range():
+    template_source = _read("web/templates/index.html")
+
+    assert "固定止盈比例（0.01~0.99，如 0.10 = 10%）" in template_source
+    assert 'id="backtest-take-profit-pct" value="0.10" min="0.01" max="0.99" step="0.01" disabled' in template_source
+    assert 'id="backtest-take-profit-pct" value="0.10" min="0.01" max="1.0"' not in template_source
 
 
 def test_backtest_registration_preserves_exit_management_hooks():
