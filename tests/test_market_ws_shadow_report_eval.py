@@ -332,3 +332,65 @@ def test_market_ws_shadow_report_eval_main_counts_logs_for_empty_report(tmp_path
     assert payload["log_counts"]["paper_false"] == 1
     assert payload["diagnostic_log_counts"]["unclosed_client_session"] == 1
     assert payload["diagnostic_log_counts"]["positions_live_json"] == 1
+
+
+def test_market_ws_shadow_report_eval_demotes_paper_pollution_keys_for_live_runtime(tmp_path, capsys):
+    """In a LIVE runtime, `Paper trading mode: False`, paper<->live scope flips
+    and the (intentionally enabled) exchange watchdog are normal operation —
+    they must be reported as diagnostics, not hard log-pollution failures."""
+    report_path = tmp_path / "live_shadow.json"
+    log_path = tmp_path / "service.err.log"
+    report = _report(
+        expect_runtime="live",
+        final_trading_mode="live",
+        final_paper_trading=False,
+    )
+    report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+    log_path.write_text(
+        "\n".join(
+            [
+                "Paper trading mode: False",
+                "Risk manager scope switched: paper -> live",
+                "exchange_watchdog: binance unhealthy, attempting reconnect",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    code = evaluator.main([
+        "--report",
+        str(report_path),
+        "--service-err-log",
+        str(log_path),
+        "--expect-runtime",
+        "live",
+    ])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 0, captured.err
+    assert payload["ok"] is True
+    assert "paper_false" not in payload["log_counts"]
+    assert payload["diagnostic_log_counts"]["paper_false"] == 1
+    assert payload["diagnostic_log_counts"]["paper_to_live"] == 1
+    assert payload["diagnostic_log_counts"]["exchange_watchdog"] == 1
+
+
+def test_market_ws_shadow_report_eval_keeps_paper_pollution_hard_for_paper_runtime(tmp_path, capsys):
+    report_path = tmp_path / "paper_shadow.json"
+    log_path = tmp_path / "service.err.log"
+    report_path.write_text(json.dumps(_report(), ensure_ascii=False), encoding="utf-8")
+    log_path.write_text("Paper trading mode: False\n", encoding="utf-8")
+
+    code = evaluator.main([
+        "--report",
+        str(report_path),
+        "--service-err-log",
+        str(log_path),
+    ])
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 1
+    assert payload["ok"] is False
+    assert any("paper_false" in err for err in payload["errors"])

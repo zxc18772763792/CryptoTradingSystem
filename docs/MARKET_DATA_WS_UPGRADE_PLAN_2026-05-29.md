@@ -4699,3 +4699,61 @@ summary:
   - `Unclosed client session`: `0`
   - `[PAPER] Order created`: `2`
 - 当前判断不变：第十一轮仍只能作为运行中证据，必须等待 6 小时 selfcheck 结束并运行最终 evaluator；Level 1 通过和最终回归均完成前，不进入 Level 2 live shadow，不开启 `ui_primary`。
+
+## 33. 续作检查点 - 2026-06-10（Level 2 第四轮运行中 + Level 3 工具链就绪）
+
+### 33.1 Level 2 live shadow 历史复盘
+
+| 轮次 | selfcheck stamp | 结果 | 失败主因 |
+| --- | --- | --- | --- |
+| 第一轮 | `20260603_191305` | FAIL | 运行中服务被重启且新进程未带 WS env（sample[1298] 起 `mode=off`）；`timestamp_regression_delta=9`；计数器重置导致 `ws_tick_delta` 为负 |
+| 第二轮 | `20260604_225903` | FAIL | 164 次采样 `/health` read timeout（服务事件循环阻塞）；`degraded_sample_count=67>24`；`max_consecutive_degraded=3>2`；`valid_sample_count=1277<1430` |
+| 第三轮 | `20260608_185151` | 无效 | selfcheck 无 JSON 退出（0 字节），服务 `live8000_20260608_184954` 于 6/9 14:18 停止；只保留诊断价值 |
+| 第四轮 | `20260609_163924` | 运行中 | 服务 `live8000_20260609_163612`（PID 19660，端口 8000，全 worker），selfcheck PID 18300，预计 2026-06-10 16:39 结束 |
+
+第四轮中途抽样（2026-06-10 08:10 +08:00，运行 ~15.5h）：
+- `trading_mode=live`、`paper_trading=false`、`mode=shadow`、`fail_closed_for_live=true`
+- `feed_healthy=true`、`ws_hub_healthy=true`、`feed_last_error=null`
+- `ws_tick_count=97758`、`shadow_compare_count=1768`
+- `violation=0`、`invalid=0`、`regression=0`、`stale_skip=0`、`ws_stale=0`
+- `feed_watch_error_count=1`（05:06 一次 code 1006 断连，1s 重连恢复）
+- `shadow_max_abs_diff_bps=19.42`（接近 20 上限，未超）
+- 服务 stderr：`Unclosed client session=1`（04:22 REST connector 重连泄漏一次）、`Read timed out=2`、`exchange_watchdog reconnect` 若干（live 下属合法运维日志）
+
+### 33.2 本轮审计修复（commit d95f2c4 + 后续）
+
+1. **evaluator live 日志门禁修复**：`DEFAULT_LOG_PATTERNS` 中 `paper_false`/`paper_to_live`/`exchange_watchdog` 在 `--expect-runtime live` 时自动降级为 diagnostic 计数（live 服务必然打印这些；旧行为会让任何带 `--service-err-log` 的 live 评估必失败）。新增 `LIVE_RUNTIME_OK_LOG_KEYS`。
+2. **mark-price 流静默错误修复**（审计积压 Bug B）：`ccxt_pro_feed._run_one_exchange_mark` 两处 except 现在按 episode 首次 `logger.warning`、重复 `logger.debug`。
+3. **quality guard → hub 信任联动**：`MarketDataHub.set_ws_trust()` 新增；guard 降级时 `get_tick` 把 WS 来源 tick 报告为 `is_stale/fallback_required/quality=ws_distrusted`，使 `runtime_price_provider` 同步回落 REST（覆盖"WS tick 新鲜但价差违规"的 Level-4 缺口）。snapshot 暴露 `ws_trusted`/`ws_distrust_reason`/`ws_distrust_read_count`。
+4. **guard 无订阅者也采样**：`_runtime_pusher` 重构 — guard 观测移出 `has_subscribers` 分支，headless strategy_primary 仍有自动降级保护。
+5. **防御性修复**（审计积压 Bug A/E/D）：`order_manager.get_order()` 不再缓存 None；`_governance_rejection_reason` None 守卫；`trading.py` live 持仓快照改单飞锁（`LoopBoundAsyncLock`），并发 TTL 未命中只发起一次全量扫描——直接降低第二轮失败形态（事件循环阻塞/read timeout）的复发概率。
+
+### 33.3 Level 3 工具链（新增 `scripts/market_ws_ui_primary.ps1`）
+
+- 动作：`gate`（Level-2 evaluator 硬门禁）/ `precheck` / `start-service` / `start-selfcheck`（ui_primary 观察）/ `status` / `stop`。
+- `start-service` 强制顺序：`-ConfirmLive` + `Invoke-Level2Gate`（用 `-EvaluatedReport`/`-ServiceErrLog` 重跑 evaluator，FAIL 即拒绝），端口被占用时拒绝（必须显式停掉 shadow 服务）。
+- Level-3 运行 env 固定：`MARKET_WS_MODE=ui_primary` + `MARKET_WS_QUALITY_GUARD_ENABLED=true` + `MARKET_WS_FAIL_CLOSED_FOR_LIVE=true` + `MARKET_WS_MARK_PRICE_ENABLED=false`；默认保留生产 worker（`-CleanEvidence` 可关）。
+- ui_primary 观察 selfcheck 固定 `--expect-mode ui_primary --expect-runtime live --min-shadow-compare-delta 0`（WS 健康时 REST reconcile 被抑制，不能要求 compare 增长）。
+- 资产测试：`tests/test_market_ws_shadow_launcher_assets.py::test_ui_primary_launcher_pins_level3_env_and_gates`。
+
+### 33.4 第四轮结束后的执行顺序（2026-06-10 16:39 后）
+
+```powershell
+# 1. 确认 selfcheck 已退出并产出最终 JSON（0 字节=未结束，不得评估）
+powershell -ExecutionPolicy Bypass -File scripts\market_ws_live_shadow.ps1 -Action status -Port 8000 -Token <OPS_TOKEN>
+
+# 2. Level-2 最终评估（live 模式日志门禁已修复）
+python scripts\evaluate_market_ws_shadow_report.py --report logs\live_shadow_24h_selfcheck_20260609_163924.out.json --service-err-log logs\live8000_20260609_163612.err.log --expect-mode shadow --expect-runtime live --min-samples 1430 --min-ws-tick-delta 1 --min-shadow-compare-delta 1 --max-shadow-violation-delta 30 --tolerate-transient --max-degraded-samples 24 --max-consecutive-degraded 2 --max-degraded-oldest-age-ms 60000 --max-invalid-payload-delta 0 --max-timestamp-regression-delta 0 --max-shadow-stale-skip-delta 0 --max-feed-watch-empty-delta 0 --max-stale-symbol-count 0 --max-price-diff-bps 20 --max-ws-age-p95-ms 10000 --max-log-count 0 --require-final-runtime-fields
+
+# 3. PASS 后：停旧服务，启动 Level-3 ui_primary（launcher 内部会再次跑 evaluator 门禁）
+powershell -ExecutionPolicy Bypass -File scripts\market_ws_ui_primary.ps1 -Action stop -Port 8000
+powershell -ExecutionPolicy Bypass -File scripts\market_ws_ui_primary.ps1 -Action start-service -ConfirmLive -Port 8000 -Token <OPS_TOKEN> -EvaluatedReport logs\live_shadow_24h_selfcheck_20260609_163924.out.json -ServiceErrLog logs\live8000_20260609_163612.err.log
+
+# 4. ui_primary 观察（6 小时）
+powershell -ExecutionPolicy Bypass -File scripts\market_ws_ui_primary.ps1 -Action start-selfcheck -ConfirmLive -Port 8000 -Token <OPS_TOKEN>
+
+# 5. 回滚（任一异常）：MARKET_WS_FORCE_REST=true 或 stop 后用 Level-2 launcher 回 shadow
+```
+
+- FAIL 时：保持 shadow，按第 28.3 节失败处理定位（重点看 degraded sample 分布与服务 stderr 时间线），修复后重启第五轮。
+- Level 4（strategy_primary）仍按 §28.5 前置条件执行；本轮 hub 信任联动已把 guard 保护延伸到策略读价路径，但 Level 3 稳定运行一个完整交易日 + fallback 演练记录仍是硬前置。

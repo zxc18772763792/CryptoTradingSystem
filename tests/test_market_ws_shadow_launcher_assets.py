@@ -80,3 +80,42 @@ def test_live_shadow_launcher_pins_mark_price_stream_off_for_level2_shadow():
     assert "precheck_market_ws_live_shadow.py" in script
     assert "--expect-runtime live" in script
     assert "--timeout 20" in script
+
+
+def test_ui_primary_launcher_pins_level3_env_and_gates():
+    script = _read("scripts/market_ws_ui_primary.ps1")
+
+    # Level-3 runtime env: live + ui_primary + quality guard forced on.
+    for expected in (
+        'set "TRADING_MODE=live"',
+        'set "MARKET_WS_ENABLED=true"',
+        'set "MARKET_WS_MODE=ui_primary"',
+        'set "MARKET_WS_FORCE_REST=false"',
+        'set "MARKET_WS_FAIL_CLOSED_FOR_LIVE=true"',
+        'set "MARKET_WS_QUALITY_GUARD_ENABLED=true"',
+        'set "MARKET_WS_MARK_PRICE_ENABLED=false"',
+    ):
+        assert expected in script
+
+    # Real-money confirm guard plus the hard Level-2 evaluator gate; the gate
+    # must run inside start-service (not only as a standalone action).
+    assert "Require-LiveConfirm" in script
+    assert "evaluate_market_ws_shadow_report.py" in script
+    assert "Invoke-Level2Gate" in script
+    assert "Level-2 evaluator gate FAILED" in script
+    assert '"--expect-runtime", "live"' in script
+    assert '"--min-samples", "1430"' in script
+    assert '"--require-final-runtime-fields"' in script
+
+    # Observation selfcheck pins ui_primary/live and must NOT require shadow
+    # compare growth (REST reconcile is suppressed while WS is healthy).
+    assert "--expect-mode ui_primary" in script
+    assert "--expect-runtime live" in script
+    assert "--min-shadow-compare-delta 0" in script
+    assert "--tolerate-transient" in script
+
+    # Instrumented detach markers + ops auth header, same as Level 1/2.
+    assert "MARKET_WS_UI_PRIMARY_${Kind}_START" in script
+    assert "MARKET_WS_UI_PRIMARY_${Kind}_EXIT" in script
+    assert '"X-OPS-TOKEN" = $Token' in script
+    assert "Authorization" not in script

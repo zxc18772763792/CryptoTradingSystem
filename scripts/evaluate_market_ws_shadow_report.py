@@ -14,6 +14,13 @@ DEFAULT_LOG_PATTERNS = {
     "gate_health": "Health check failed for gate",
 }
 
+# Patterns that are PAPER-runtime pollution but legitimate in a LIVE runtime:
+# a live service logs `Paper trading mode: False` by definition, the risk
+# manager flips paper<->live scope while serving both books, and the exchange
+# watchdog is deliberately enabled for live. When expect-runtime=live these
+# are demoted from hard gates to diagnostic counts.
+LIVE_RUNTIME_OK_LOG_KEYS = frozenset({"paper_false", "paper_to_live", "exchange_watchdog"})
+
 
 DIAGNOSTIC_LOG_PATTERNS = {
     "connector_binance_connect_timeout": "Connector binance connect timed out",
@@ -393,6 +400,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     service_err_log = Path(args.service_err_log) if str(args.service_err_log or "").strip() else None
     log_counts = _count_log_patterns(service_err_log)
     diagnostic_log_counts = _count_log_patterns(service_err_log, DIAGNOSTIC_LOG_PATTERNS)
+    if str(args.expect_runtime or "").strip().lower() == "live":
+        for key in sorted(LIVE_RUNTIME_OK_LOG_KEYS):
+            if key in log_counts:
+                diagnostic_log_counts[key] = log_counts.pop(key)
     try:
         report = _read_json(report_path)
         result = evaluate_report(
