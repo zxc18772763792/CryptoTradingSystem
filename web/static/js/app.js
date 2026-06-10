@@ -16,6 +16,7 @@ ReversalOnly:'ReversalOnly（仅信号反转）',
 Original:'Original（旧版离场）',
 };
 const DEFAULT_BACKTEST_EXIT_TEMPLATE='SignalPlusTimeStop';
+const BACKTEST_CUSTOM_PARAMS_HINT='留空时使用策略默认参数。运行回测与参数优化会读取这里的 JSON；多策略对比不会读取这里的自由 JSON，只读取策略集合与专用批量参数。';
 const summaryFetchState={statsTask:null,balancesTask:null,statsTaskStartedAt:0,balancesTaskStartedAt:0,statsTaskLastResult:null,balancesTaskLastResult:null,statsTaskLastResultAt:0,balancesTaskLastResultAt:0};
 const RESEARCH_DEFAULT_SYMBOLS=['BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT','ADA/USDT','DOGE/USDT','TRX/USDT','LINK/USDT','AVAX/USDT','DOT/USDT','POL/USDT','LTC/USDT','BCH/USDT','ETC/USDT','ATOM/USDT','NEAR/USDT','APT/USDT','ARB/USDT','OP/USDT','SUI/USDT','INJ/USDT','RUNE/USDT','AAVE/USDT','MKR/USDT','UNI/USDT','FIL/USDT','HBAR/USDT','ICP/USDT','TON/USDT'];
 const DEFAULT_STRATEGY_ALLOCATION=0.15;
@@ -877,6 +878,38 @@ const timeoutMs=
   denseComparePenalty;
 return Math.max(60000,Math.min(20*60*1000,timeoutMs));
 }
+function estimateBacktestOptimizeTimeoutMs(strategyName='',maxTrials=48,timeframe='1h',windowDaysOverride=null,customParams=null){
+const strategy=String(strategyName||'').trim();
+const trials=Math.max(8,Math.min(1024,parseInt(maxTrials,10)||48));
+const tf=String(timeframe||'1h').trim()||'1h';
+const sec=Math.max(1,timeframeSeconds(tf));
+const params=(customParams&&typeof customParams==='object'&&!Array.isArray(customParams))?customParams:{};
+const fallbackWindow=Math.max(30,Math.min(3650,estimateBacktestWindowDays()||recommendDownloadDays(tf)||365));
+const windowDays=Math.max(7,Math.min(3650,Number(windowDaysOverride||0)||fallbackWindow));
+const windowFactor=Math.max(1,Math.ceil(windowDays/(sec<=15*60?45:90)));
+const perTrialCost=sec<=15*60?1500:(sec<=60*60?1250:1000);
+let strategyPenalty=0;
+if(strategy==='FamaFactorArbitrageStrategy'){
+  const universeCount=Math.max(
+    8,
+    Math.min(
+      36,
+      Array.isArray(params.universe_symbols)
+        ? params.universe_symbols.filter(v=>String(v||'').trim()).length
+        : (Number(params.max_symbols||0)>0?Number(params.max_symbols):12)
+    )
+  );
+  strategyPenalty+=universeCount*1400;
+}
+if(isBacktestDualLegStrategy(strategy))strategyPenalty+=12000;
+if(isBacktestMlStrategy(strategy))strategyPenalty+=18000;
+const timeoutMs=
+  45000+
+  trials*perTrialCost+
+  windowFactor*18000+
+  strategyPenalty;
+return Math.max(90000,Math.min(20*60*1000,timeoutMs));
+}
 
 const BACKTEST_MODE_NOTES={
 classic:'自由选择策略、交易对、周期、退出模板和优化参数。',
@@ -1278,7 +1311,7 @@ const hint=document.getElementById('backtest-custom-params-hint');
 const panel=document.getElementById('backtest-custom-params-panel');
 const hasParams=!!(params&&typeof params==='object'&&!Array.isArray(params)&&Object.keys(params).length);
 if(box)box.value=hasParams?JSON.stringify(params,null,2):'';
-if(hint)hint.textContent=note||'留空时使用策略默认参数。多策略对比 / 参数优化暂不读取这里的 JSON。';
+if(hint)hint.textContent=note||BACKTEST_CUSTOM_PARAMS_HINT;
 if(panel&&'open' in panel)panel.open=hasParams;
 }
 
@@ -1365,7 +1398,7 @@ if(spec?.take_profit_pct!=null){
 }
 const customParams=(spec?.params&&typeof spec.params==='object'&&!Array.isArray(spec.params))?spec.params:null;
 setBacktestCustomParams(customParams, customParams&&Object.keys(customParams).length
-  ? `已从套利页回填 ${strategyTypeShortName(strategy)} 的完整参数。点击“运行回测”会走自定义回测。多策略对比 / 参数优化暂不读取这里的 JSON。`
+  ? `已从套利页回填 ${strategyTypeShortName(strategy)} 的完整参数。运行回测与参数优化会读取这里的 JSON；多策略对比不会读取这里的自由 JSON，只读取策略集合与专用批量参数。`
   : '');
 notify(`已切换到回测：${strategyTypeShortName(strategy)}`);
 return true;
@@ -5375,6 +5408,21 @@ const stopLossPct=(Number.isFinite(slRaw)&&slRaw>0&&slRaw<1)?slRaw:null;
 const takeProfitPct=(Number.isFinite(tpRaw)&&tpRaw>0&&tpRaw<1)?tpRaw:null;
 return{enabled,stopLossPct,takeProfitPct};
 }
+function validateBacktestProtectionConfig(){
+const cfg=getBacktestProtectionConfig();
+if(!cfg.enabled)return cfg;
+const slEl=document.getElementById('backtest-stop-loss-pct');
+const tpEl=document.getElementById('backtest-take-profit-pct');
+const slRaw=Number(slEl?.value||0);
+const tpRaw=Number(tpEl?.value||0);
+if(!Number.isFinite(slRaw)||slRaw<=0||slRaw>=1){
+  throw new Error('固定止损比例必须大于 0 且小于 1');
+}
+if(!Number.isFinite(tpRaw)||tpRaw<=0||tpRaw>=1){
+  throw new Error('固定止盈比例必须大于 0 且小于 1');
+}
+return cfg;
+}
 function resolveBacktestRuntimeProtection(source=null){
 const payload=(source&&typeof source==='object'&&!Array.isArray(source))?source:null;
 const params=(payload?.params&&typeof payload.params==='object'&&!Array.isArray(payload.params))?payload.params:{};
@@ -5406,7 +5454,7 @@ if(protection.enabled){
 return params;
 }
 function appendBacktestProtectionParams(url,cfg=null){
-const conf=cfg||getBacktestProtectionConfig();
+const conf=cfg||validateBacktestProtectionConfig();
 let out=String(url||'');
 const rawExitTemplate=String(conf?.exitTemplate||conf?.exit_template||getBacktestExitTemplate()).trim();
 const exitTemplate=BACKTEST_EXIT_TEMPLATE_OPTIONS.includes(rawExitTemplate)?rawExitTemplate:DEFAULT_BACKTEST_EXIT_TEMPLATE;
@@ -6083,8 +6131,9 @@ try{
   if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
   if(Object.keys(params).length)u+=`&params_json=${encodeURIComponent(JSON.stringify(params))}`;
   u=appendBacktestProtectionParams(u);
+  const previewTimeoutMs=estimateBacktestOptimizeTimeoutMs(st,Number(opt.max_trials||opt.trials||48),tf,estimateBacktestWindowDays(),params);
   notify(`正在预览参数组合 #${Number(rankIndex)+1}`);
-  const r=await api(u,{method:'POST',timeoutMs:90000});
+  const r=await api(u,{method:'POST',timeoutMs:previewTimeoutMs});
   r._from_optimize_preview=true;
   r._optimize_rank=Number(rankIndex)+1;
   r._optimize_params=params;
@@ -6146,8 +6195,9 @@ try{
   if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
   if(params)u+=`&params_json=${encodeURIComponent(JSON.stringify(params))}`;
   u=appendBacktestProtectionParams(u,previewProtection);
+  const previewTimeoutMs=estimateBacktestOptimizeTimeoutMs(st,Number(compare.optimize_max_trials||compare?.compare_optimization?.effective_trials||48),tf,Number(compare?._compare_request_meta?.windowDays||0)||estimateBacktestWindowDays(),params||{});
   notify(`正在预览: ${backtestCompareEntryTitle(row)}`);
-  const r=await api(u,{method:'POST',timeoutMs:90000});
+  const r=await api(u,{method:'POST',timeoutMs:previewTimeoutMs});
   r._from_compare_preview=true;
   r._compare_rank=Number(rankIndex)+1;
   r._compare_optimized=!!params;
@@ -8921,18 +8971,23 @@ const selectedSt=await ensureSelectedBacktestStrategy();
 const displayedSt=String(backtestUIState?.lastRenderedBacktest?.strategy||'').trim();
 const st=displayedSt||selectedSt;
 if(isBacktestMlStrategy(st))requireSelectedBacktestMlModel();
-const ctx=buildBacktestRequestContext(st,{includeCustomParams:false});
 const tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date')?.value||'',ed=document.getElementById('backtest-end-date')?.value||'',cr=0.0004,sb=2;
-renderBacktestExtraLoading(`参数优化运行中（${st}${displayedSt&&displayedSt!==selectedSt?'，来自当前展示':'，来自下拉选择'}）`);
 const objective=String(document.getElementById('backtest-opt-objective')?.value||'total_return');
 const maxTrials=Math.max(8,Math.min(1024,parseInt(document.getElementById('backtest-opt-trials')?.value||'96',10)||96));
+const ctx=buildBacktestRequestContext(st,{includeCustomParams:true});
+const optimizeWindowDays=estimateBacktestWindowDays()||recommendDownloadDays(tf)||365;
+const optimizeTimeoutMs=estimateBacktestOptimizeTimeoutMs(st,maxTrials,tf,optimizeWindowDays,ctx.params);
+renderBacktestExtraLoading(
+  `参数优化运行中（${st}${displayedSt&&displayedSt!==selectedSt?'，来自当前展示':'，来自下拉选择'}）`,
+  `试验 ${maxTrials} 次，预计超时保护 ${Math.round(optimizeTimeoutMs/1000)} 秒。${ctx.useCustomRun?'已带入自定义参数 JSON。':''}`
+);
 let ou=`/backtest/optimize?strategy=${st}&symbol=${encodeURIComponent(ctx.symbol)}&timeframe=${tf}&initial_capital=${c}&commission_rate=${cr}&slippage_bps=${sb}&objective=${encodeURIComponent(objective)}&max_trials=${maxTrials}&include_all_trials=true`;
 if(ctx.pairSymbol)ou+=`&pair_symbol=${encodeURIComponent(ctx.pairSymbol)}`;
 if(sd)ou+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)ou+=`&end_date=${encodeURIComponent(ed)}`;
 if(ctx.useCustomRun&&ctx.params&&Object.keys(ctx.params).length)ou+=`&params_json=${encodeURIComponent(JSON.stringify(ctx.params))}`;
 ou=appendBacktestProtectionParams(ou);
-const d=await api(ou,{method:'POST',timeoutMs:90000});
+const d=await api(ou,{method:'POST',timeoutMs:optimizeTimeoutMs});
 renderBacktestOptimizeOutput(d);
 notify('参数优化完成');
 }catch(err){renderBacktestExtraError(err);notify(`参数优化失败: ${err.message}`,true);}
