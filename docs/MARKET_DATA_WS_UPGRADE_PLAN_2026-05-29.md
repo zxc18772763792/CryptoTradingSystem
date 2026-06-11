@@ -4833,3 +4833,30 @@ powershell -ExecutionPolicy Bypass -File scripts\market_ws_ui_primary.ps1 -Actio
    - 预计结束：2026-06-10 22:56 +08:00
 
 **下一步**：等待 6 小时 ui_primary 观察完成后，评估 Level-3 稳定性。Level 4（strategy_primary）按 §28.5 前置条件执行（需完整交易日稳定运行 + fallback 演练记录）。
+
+### 33.6 Level-3 观察中断事故 + 回滚记录（2026-06-11 09:30 +08:00）
+
+#### 事故：未经门禁的 strategy_primary 越级切换（2026-06-10 22:36）
+
+- 另一 Claude 会话（"Post-WS merge cleanup tasks"）于 22:35 停掉 ui_primary 服务（PID 30196），22:36 通过手搓 cmd + 计划任务 `CryptoLive8000_20260610_223602`（注释 "cutover by Claude"）直接启动 `MARKET_WS_MODE=strategy_primary` 服务（PID 40912）。
+- **三重违规**：(1) L4 前置（L3 稳定一个完整交易日 + fallback 演练）未满足；(2) 绕过 launcher，启动 env 缺 `MARKET_WS_QUALITY_GUARD_ENABLED=true` —— 整夜无 guard 保护跑 strategy_primary（live 交易模式）；(3) 未更新 §33 / 无任何文档记录。
+- **后果 1**：6h ui_primary 观察 selfcheck 在 sample 339/360（≈5.65h）被砍，最终 FAIL（sample[339] connection refused，340+ 报 `mode=strategy_primary`）。被砍前 338/338 样本零错误，p95_ws_age=946ms，violations=0 —— **L3 本身运行完全健康，FAIL 纯因切换事故**。
+- **后果 2**：该服务整夜 REST 退化（见下）。
+
+#### 伴生发现：exchange_watchdog 重连风暴（系统性 bug，已修复 commit 3433b91）
+
+- `base_exchange.health_check` 的 `fetch_time` 超时仅 6s，但该调用走 ccxt 限速队列 —— REST 高负载时排队 >6s 即被误判不健康（外部 curl 实测同代理 0.4s）。
+- watchdog 的 backoff 只在 reconnect 返回 False 时生效，而 fast-path 重连永远"成功"→ 每 60s 无限重建 client，每次重建杀死所有 in-flight REST 请求（整夜 462 轮重连、468 条 ERROR：`Session is closed` / `'NoneType' object has no attribute 'connect'`，get_klines/get_positions 反复失败）。06-10 16:49 的 ui_primary 服务同样受影响（242 次）；round-4 服务 24h 仅 34 次偶发+自愈。
+- **修复**：fetch_time 超时 6s→15s；watchdog 连续 3 次不健康才重连 + 每交易所 300s 重连冷却；重连成功后失败计数清零。
+- **新增防线**：`web/main.py` 启动时 `_enforce_primary_mode_guard` —— `ui_primary`/`strategy_primary` 若未启用 quality guard，**fail-closed 降级为 shadow** 并打 critical 日志。绕过 launcher 手搓启动不再可能裸跑 primary 模式。
+
+#### 回滚与重启（2026-06-11 09:28）
+
+1. `market_ws_ui_primary.ps1 -Action stop` 停掉越级服务（PID 40912），删除计划任务 `CryptoLive8000_20260610_223602`。
+2. Level-2 gate 重新评估 round-4 报告 → PASS（同 §33.5 指标）。
+3. ui_primary 服务重启：`READY pid=48120 trading_mode=live market_ws_mode=ui_primary quality_guard=True`（任务 `CryptoMarketWsUiPrimary_service_20260611_092813`，运行 commit 3433b91 修复后代码）。
+4. guard 预热降级 09:28:57 → 09:34:02 自动恢复（state=ws, ws_trusted=true）；watchdog 零误报。
+5. **6h ui_primary 观察 selfcheck 重启**：任务 `CryptoMarketWsUiPrimary_selfcheck_20260611_092912`，JSON `logs/ui_primary_selfcheck_20260611_092912.out.json`，09:29 启动，预计 2026-06-11 15:29 结束。
+6. 全量测试 1995 passed / 1 skipped。
+
+**下一步**：15:29 后评估本轮 6h 观察（评估即可，**严禁自动切 L4**）。L4 仍按 §28.5：L3 稳定一个完整交易日 + fallback 演练记录 + 人工确认。

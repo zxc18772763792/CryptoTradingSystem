@@ -777,9 +777,11 @@ def _observe_ws_quality_guard() -> bool:
     try:
         decision = guard.observe(sample_from_market_ws_status(_market_ws_status_snapshot()))
         if decision.action == "degrade":
+            # loguru ignores printf-style args; interpolate explicitly or
+            # the degrade reasons are lost (logged as a literal "%s").
             logger.warning(
-                "market_ws quality guard DEGRADE -> forcing REST: %s",
-                "; ".join(decision.reasons),
+                f"market_ws quality guard DEGRADE -> forcing REST: "
+                f"{'; '.join(decision.reasons)}"
             )
         elif decision.action == "recover":
             logger.info("market_ws quality guard RECOVER -> WS primary restored")
