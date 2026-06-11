@@ -356,6 +356,16 @@ def _normalize_query_datetime(dt: Optional[datetime]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
 
+def _utc_naive_now() -> datetime:
+    """Current time on the data clock: tz-naive UTC.
+
+    Query bounds default to this, never datetime.now() — parquet indexes are
+    tz-naive UTC and _datetime_to_epoch_ms treats naive values as UTC, so a
+    local-naive "now" would shift windows by the host's UTC offset.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def _normalize_kline_frame_for_compare(df: pd.DataFrame) -> pd.DataFrame:
     """Normalize API-loaded kline indexes to UTC-naive before time filters."""
     return _normalize_parquet_frame_index(df)
@@ -1059,7 +1069,9 @@ async def _emit_download_progress_message(
 ) -> None:
     if not progress_callback:
         return
-    now = datetime.now()
+    # Progress timestamps are UTC like the rest of the task dicts (see
+    # _mark_download_task_failed); _safe_iso_timestamp strips the tz on render.
+    now = datetime.now(timezone.utc)
     payload = SimpleNamespace(
         exchange=exchange,
         symbol=symbol,
@@ -3689,7 +3701,7 @@ async def get_klines(
     load_start = start_time
     load_end = end_time
     if load_start is None and align_mode != "head":
-        effective_end = load_end or datetime.now()
+        effective_end = load_end or _utc_naive_now()
         seconds = _timeframe_seconds(timeframe)
         # UI tail reads only need a bounded recent window; otherwise partitioned
         # parquet loads may scan the entire history before trimming to `limit`.
@@ -3702,7 +3714,7 @@ async def get_klines(
         if timeframe in _SUB_MINUTE_TIMEFRAMES:
             effective_limit = max(120, min(int(live_limit or 0), 480))
             seconds = _timeframe_seconds(timeframe)
-            q_end_time = end_time or datetime.now()
+            q_end_time = end_time or _utc_naive_now()
             q_start_time = start_time
             if q_start_time is None:
                 window_seconds = max(effective_limit * seconds, 300)
@@ -3969,7 +3981,7 @@ async def run_download_historical_data(
     start_time = _normalize_query_datetime(start_time)
     end_time = _normalize_query_datetime(end_time)
     if end_time is None:
-        end_time = datetime.now()
+        end_time = _utc_naive_now()
     if start_time is None:
         start_time = end_time - timedelta(days=days)
     if start_time > end_time:
@@ -4134,7 +4146,7 @@ async def run_download_historical_data(
                     raise RuntimeError(f"Coinglass {source_exchange} 返回重复时间戳，下载无法推进")
 
                 cursor_ms = next_cursor_ms
-                last_success_at = datetime.now()
+                last_success_at = datetime.now(timezone.utc)
                 progress_pct = 0.0
                 if estimated_total > 0:
                     progress_pct = min(99.5 if cursor_ms <= end_ms else 100.0, (len(all_rows) / estimated_total) * 100.0)
@@ -4487,7 +4499,7 @@ async def download_historical_data(
         "start_time": start_time,
         "end_time": end_time,
     }
-    span_ref_end = _normalize_query_datetime(end_time) or datetime.now()
+    span_ref_end = _normalize_query_datetime(end_time) or _utc_naive_now()
     span_ref_start = _normalize_query_datetime(start_time) or (span_ref_end - timedelta(days=max(1, int(days or 1))))
     span_days = max(0.0, (span_ref_end - span_ref_start).total_seconds() / 86400.0)
     should_background = _should_queue_single_download(
@@ -4975,7 +4987,7 @@ async def get_storage_health(exact: bool = False):
     )
 
     return {
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
             "exchange_count": len(exchange_rows),
             "dataset_count": len(datasets),
@@ -6482,7 +6494,9 @@ async def start_second_level_backfill(
     window_days: int = 1,
 ):
     days = max(1, min(days, 1200))
-    end_time = datetime.now()
+    # tz-aware UTC: second_level_backfill converts bounds via .timestamp(),
+    # which would re-interpret a naive datetime in the host's local zone.
+    end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=days)
     task = second_level_backfill_manager.start_task(
         exchange=exchange,

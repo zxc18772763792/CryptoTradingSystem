@@ -1814,7 +1814,8 @@ async def _auto_register_defaults_for_start_all() -> List[str]:
 
     created: List[str] = []
     allocation = round(1.0 / max(1, len(selected)), 4)
-    suffix = datetime.now().strftime("%m%d%H%M")
+    # UTC so auto-registered names sort consistently with log/DB timestamps.
+    suffix = datetime.now(timezone.utc).strftime("%m%d%H%M")
 
     for strategy_type in selected:
         if strategy_type in existing_types:
