@@ -119,3 +119,10 @@ def test_ui_primary_launcher_pins_level3_env_and_gates():
     assert "MARKET_WS_UI_PRIMARY_${Kind}_EXIT" in script
     assert '"X-OPS-TOKEN" = $Token' in script
     assert "Authorization" not in script
+
+    # Fallback drill (s28.5): -DrillForceRest flips ONLY the kill switch while
+    # every other pinned env line and gate stays identical, and the READY
+    # probe verifies the service actually came up with the requested value.
+    assert "[switch]$DrillForceRest" in script
+    assert 'set "MARKET_WS_FORCE_REST=true"' in script
+    assert "force_rest=$($market.force_rest)" in script

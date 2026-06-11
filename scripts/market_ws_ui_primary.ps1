@@ -11,6 +11,11 @@ param(
     # Disable noisy background workers for a controlled observation run.
     # Default OFF = production-like service (all configured workers enabled).
     [switch]$CleanEvidence,
+    # Fallback drill (s28.5 Level-4 prerequisite): start the IDENTICAL Level-3
+    # service but with MARKET_WS_FORCE_REST=true, proving the first rollback
+    # switch restores REST authority. All gates (-ConfirmLive + Level-2
+    # evaluator) still apply. Restore by re-running start-service without it.
+    [switch]$DrillForceRest,
     [string]$BindHost = "127.0.0.1",
     [int]$Port = 8000,
     [string]$Token = "",
@@ -241,6 +246,11 @@ function Get-CommonEnvCommands {
         'set "MARKET_WS_SYMBOL_MAX_AGE_SEC=10"',
         'set "MARKET_WS_MARK_PRICE_ENABLED=false"'
     )
+    if ($DrillForceRest) {
+        # Same pinned env, kill switch ON: REST becomes authoritative and the
+        # WS stream stays down for the duration of the drill.
+        $commands = $commands -replace '^set "MARKET_WS_FORCE_REST=false"$', 'set "MARKET_WS_FORCE_REST=true"'
+    }
     if ($CleanEvidence) {
         $commands += @(
             'set "COINGLASS_WORKER_ENABLED=false"',
@@ -332,6 +342,10 @@ function Invoke-UiPrimaryPrecheck {
 function Start-MarketWsService {
     Require-Token
     Require-LiveConfirm
+    if ($DrillForceRest) {
+        Write-Host ("!!! FALLBACK DRILL: starting with MARKET_WS_FORCE_REST=true " +
+            "(REST authority, WS stream disabled). Restore with a normal start-service. !!!") -ForegroundColor Yellow
+    }
     if (-not (Invoke-Level2Gate)) {
         throw "Refusing to start UI-primary service: Level-2 evaluator gate FAILED."
     }
@@ -379,8 +393,11 @@ function Start-MarketWsService {
                 if ([string]$market.mode -ne "ui_primary") {
                     throw "Service came up with market_ws mode '$($market.mode)', expected 'ui_primary'."
                 }
-                Write-Host ("READY pid={0} status={1} trading_mode={2} market_ws_mode={3} quality_guard={4}" -f `
-                    $pidOnPort, $status.status, $status.trading_mode, $market.mode, $market.quality_guard.enabled)
+                if ([bool]$market.force_rest -ne [bool]$DrillForceRest) {
+                    throw "Service came up with force_rest=$($market.force_rest), expected $([bool]$DrillForceRest)."
+                }
+                Write-Host ("READY pid={0} status={1} trading_mode={2} market_ws_mode={3} quality_guard={4} force_rest={5}" -f `
+                    $pidOnPort, $status.status, $status.trading_mode, $market.mode, $market.quality_guard.enabled, $market.force_rest)
                 return
             }
         } catch {

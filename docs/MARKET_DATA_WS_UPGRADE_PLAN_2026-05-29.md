@@ -4860,3 +4860,50 @@ powershell -ExecutionPolicy Bypass -File scripts\market_ws_ui_primary.ps1 -Actio
 6. 全量测试 1995 passed / 1 skipped。
 
 **下一步**：15:29 后评估本轮 6h 观察（评估即可，**严禁自动切 L4**）。L4 仍按 §28.5：L3 稳定一个完整交易日 + fallback 演练记录 + 人工确认。
+
+### 33.7 Level-4 前置推进：§28.5 验证 + fallback 演练 runbook（2026-06-11 11:40 +08:00）
+
+#### 已完成的 §28.5 前置验证（2026-06-11）
+
+1. **相关测试全过**：`test_runtime_price_provider.py` + order/execution/strategy runtime 选集（`-k "execution or order_manager or strategy_mode or runtime_price or trading"`）= **236 passed, 0 failed**。
+2. **静态扫描通过**：`.get_ticker(` 在 `strategies/`、`core/strategies/`、`core/trading/`、`core/risk/`、`core/accounting/` 下**零命中**；现存调用点均为合法位置（runtime_price_provider 内部 REST fallback、base_exchange health check、ops 诊断、data_collector 采集层、web/main REST pusher）。
+3. **范围确认**：mark-price 流 pinned off（L3 env），无 order book diff / user data WS 混入。
+4. **launcher 新增 `-DrillForceRest`**（资产测试已覆盖）：与正常 start-service 完全相同的门禁（-ConfirmLive + Level-2 evaluator gate）与 pinned env，仅 `MARKET_WS_FORCE_REST=false→true`；READY 探测新增 force_rest 实际值校验。
+
+#### 剩余前置
+- **L3 稳定一个完整交易日**：本轮 ui_primary 自 2026-06-11 09:28 起算 → **2026-06-12 09:28 满足**（前提：期间无降级/重启；6h 观察 15:40 评估 PASS）。
+- **fallback 演练记录**：按下方 runbook 执行。
+- **人工确认**：L4 切换必须由用户明确批准（§33.6 事故教训，无例外）。
+
+#### Fallback 演练 runbook（计划 2026-06-12 09:45 执行）
+
+前置门禁（任一不满足即中止演练并报告）：
+1. 06-11 15:40 的 6h 观察评估为 PASS（见 §33.6 末尾追加记录）。
+2. 演练时服务仍为 ui_primary 且健康（guard state=ws、ws_trusted=true、无 watchdog 风暴）。
+3. 自 09:28 起连续运行无非预期重启（launch.json 时间戳核对）。
+
+步骤（全部经 launcher，禁止手搓 cmd）：
+```powershell
+# 0. 基线快照：status 输出 + /api/market-data/status 存档
+# 1. 停止 ui_primary 服务
+scripts\market_ws_ui_primary.ps1 -Action stop -Port 8000
+# 2. 演练启动（kill switch ON；Level-2 gate 照常重跑）
+scripts\market_ws_ui_primary.ps1 -Action start-service -ConfirmLive -DrillForceRest -Port 8000 -Token <OPS_TOKEN> -EvaluatedReport logs\live_shadow_24h_selfcheck_20260609_163924.out.json -ServiceErrLog logs\live8000_20260609_163612.err.log
+# 3. 观察 ≥15 分钟，验收（见下）
+# 4. 恢复正常 ui_primary（同命令去掉 -DrillForceRest），READY + guard 恢复确认
+```
+
+验收标准（步骤 3）：
+- `force_rest=true`、`mode=ui_primary`、WS stream 未启动（ws_tick_count 不增长）。
+- UI 价格仍持续更新（REST 权威路径），`/api/market-data/status` 无 error。
+- 策略读价路径正常（runtime_price_provider 走 REST，无 PriceUnavailableError 风暴）。
+- 服务日志无 ERROR 新增（watchdog 不误报——REST 是唯一来源时 health check 必须稳定）。
+
+记录模板（执行后填写并追加到本节）：
+```text
+演练时间: ____  恢复时间: ____
+force_rest 生效确认: ____  UI 价格连续性: ____
+策略读价: ____  日志异常: ____
+恢复后 guard recover 时间: ____  ws_trusted: ____
+结论: PASS / FAIL（FAIL → L4 推迟，按 §28.3 定位）
+```
