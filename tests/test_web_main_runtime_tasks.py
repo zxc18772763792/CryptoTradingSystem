@@ -1133,3 +1133,72 @@ def test_observe_ws_quality_guard_propagates_hub_ws_trust(monkeypatch):
         assert market_data_hub.ws_trusted is True
     finally:
         market_data_hub.set_ws_trust(True)
+
+
+def test_enforce_primary_mode_guard_downgrades_unguarded_primary():
+    """ui_primary / strategy_primary without the quality guard must fail
+    closed to shadow (the guard is the only auto-degrade protection)."""
+    for mode in ("ui_primary", "strategy_primary"):
+        effective, reason = web_main._enforce_primary_mode_guard(mode, guard_active=False)
+        assert effective == "shadow"
+        assert reason and mode in reason
+
+
+def test_enforce_primary_mode_guard_keeps_guarded_or_non_primary_modes():
+    for mode in ("ui_primary", "strategy_primary"):
+        effective, reason = web_main._enforce_primary_mode_guard(mode, guard_active=True)
+        assert effective == mode
+        assert reason is None
+    for mode in ("off", "shadow"):
+        for guard_active in (False, True):
+            effective, reason = web_main._enforce_primary_mode_guard(mode, guard_active)
+            assert effective == mode
+            assert reason is None
+
+
+def test_exchange_watchdog_requires_consecutive_failures_and_cooldown(monkeypatch):
+    """A persistently-unhealthy exchange must not be reconnect-churned every
+    cycle: 3 consecutive failures arm the first reconnect, then the per-
+    exchange cooldown blocks further attempts (old behaviour: one per cycle,
+    killing in-flight REST requests each time)."""
+    calls = {"health": 0, "reconnect": 0}
+    stop_event = asyncio.Event()
+
+    async def fake_health_check():
+        calls["health"] += 1
+        if calls["health"] >= 10:
+            stop_event.set()
+        return {"binance": False}
+
+    async def fake_reconnect(name, **kwargs):
+        calls["reconnect"] += 1
+        return True
+
+    monkeypatch.setattr(web_main.exchange_manager, "health_check", fake_health_check)
+    monkeypatch.setattr(web_main.exchange_manager, "reconnect_exchange", fake_reconnect)
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(_seconds):
+        await real_sleep(0)
+
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    async def run():
+        task = asyncio.create_task(web_main._exchange_watchdog_worker(stop_event))
+        await asyncio.wait_for(stop_event.wait(), timeout=5)
+        try:
+            await asyncio.wait_for(task, timeout=1)
+        except (asyncio.TimeoutError, TimeoutError):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(run())
+    assert calls["health"] >= 10
+    # Cycle 3 fires the one allowed reconnect; the success resets the failure
+    # count and the 300s cooldown (loop time barely advances under the fake
+    # sleep) blocks every later attempt.
+    assert calls["reconnect"] == 1
