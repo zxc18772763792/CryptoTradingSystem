@@ -737,6 +737,30 @@ except Exception as exc:  # pragma: no cover - guard module is optional
     logger.debug(f"ws quality guard unavailable: {exc}")
 
 
+def _enforce_primary_mode_guard(mode: str, guard_active: bool) -> Tuple[str, Optional[str]]:
+    """Fail closed: a WS-primary mode without the quality guard loses its
+    only auto-degrade protection, so downgrade it to shadow.
+
+    The launchers pin MARKET_WS_QUALITY_GUARD_ENABLED=true for Level 3+;
+    this catches services started outside the launchers (Level-4 gate).
+    Returns (effective_mode, downgrade_reason | None).
+    """
+    if mode in {"ui_primary", "strategy_primary"} and not guard_active:
+        return "shadow", (
+            f"MARKET_WS_MODE={mode} requires the WS quality guard "
+            "(MARKET_WS_QUALITY_GUARD_ENABLED=true); downgrading to shadow"
+        )
+    return mode, None
+
+
+_mode_downgrade_reason: Optional[str] = None
+_MARKET_WS_MODE, _mode_downgrade_reason = _enforce_primary_mode_guard(
+    _MARKET_WS_MODE, _market_ws_quality_guard is not None
+)
+if _mode_downgrade_reason:
+    logger.critical(f"market_ws fail-closed: {_mode_downgrade_reason}")
+
+
 def _observe_ws_quality_guard() -> bool:
     """Feed the WS quality guard one sample; return True if it says force REST.
 
@@ -1593,8 +1617,16 @@ async def _exchange_watchdog_worker(stop_event: asyncio.Event) -> None:
     """
     _INTERVAL = 60
     _MAX_BACKOFF = 300  # 5 min
+    # Reconnecting tears down the old client, killing every in-flight REST
+    # request on it. One failed health check is often just rate-limit-queue
+    # congestion, so require several consecutive failures and never churn
+    # the same exchange more often than the cooldown.
+    _FAILURE_THRESHOLD = 3
+    _RECONNECT_COOLDOWN = 300.0  # min seconds between reconnects per exchange
     # {exchange_name: next_attempt_monotonic_time}
     _backoff_until: Dict[str, float] = {}
+    _consecutive_failures: Dict[str, int] = {}
+    _last_reconnect_at: Dict[str, float] = {}
 
     await asyncio.sleep(30)  # let exchange_manager.initialize() finish first
 
@@ -1606,6 +1638,15 @@ async def _exchange_watchdog_worker(stop_event: asyncio.Event) -> None:
             for name, healthy in health.items():
                 if healthy:
                     _backoff_until.pop(name, None)  # reset backoff on recovery
+                    _consecutive_failures.pop(name, None)
+                    continue
+                failures = _consecutive_failures.get(name, 0) + 1
+                _consecutive_failures[name] = failures
+                if failures < _FAILURE_THRESHOLD:
+                    logger.warning(
+                        f"exchange_watchdog: {name} unhealthy "
+                        f"({failures}/{_FAILURE_THRESHOLD}, no reconnect yet)"
+                    )
                     continue
                 # Check backoff
                 retry_at = _backoff_until.get(name, 0.0)
@@ -1615,9 +1656,22 @@ async def _exchange_watchdog_worker(stop_event: asyncio.Event) -> None:
                         f"{retry_at - now:.0f}s"
                     )
                     continue
+                since_last = now - _last_reconnect_at.get(name, float("-inf"))
+                if since_last < _RECONNECT_COOLDOWN:
+                    logger.debug(
+                        f"exchange_watchdog: {name} unhealthy, reconnect cooldown "
+                        f"{_RECONNECT_COOLDOWN - since_last:.0f}s remaining"
+                    )
+                    continue
                 logger.warning(f"exchange_watchdog: {name} unhealthy, attempting reconnect")
+                _last_reconnect_at[name] = now
                 ok = await exchange_manager.reconnect_exchange(name)
-                if not ok:
+                if ok:
+                    # Fresh client gets a clean slate; if it is still
+                    # unhealthy the failure count must rebuild to the
+                    # threshold before the next (cooldown-gated) attempt.
+                    _consecutive_failures.pop(name, None)
+                else:
                     # Exponential backoff: 60 → 120 → 240 → 300 → 300...
                     prior = _backoff_until.get(name, now)
                     gap = max(_INTERVAL, min(prior - now + _INTERVAL * 2, _MAX_BACKOFF))

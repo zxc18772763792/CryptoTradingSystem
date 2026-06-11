@@ -267,7 +267,11 @@ class BaseExchange(ABC):
         try:
             fetch_time = getattr(client, "fetch_time", None)
             if callable(fetch_time):
-                await asyncio.wait_for(fetch_time(), timeout=6.0)
+                # 15s, not 6s: fetch_time goes through the ccxt rate-limit
+                # queue, so under REST load the wait reflects queue depth,
+                # not connectivity. A tight timeout here made the watchdog
+                # declare a busy-but-healthy client dead.
+                await asyncio.wait_for(fetch_time(), timeout=15.0)
                 return True
             # No fetch_time on this client: legacy ticker path.
             await self.get_ticker("BTC/USDT")
