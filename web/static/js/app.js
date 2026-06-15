@@ -8828,7 +8828,12 @@ if(b9)b9.onclick=()=>loadAnalyticsPanel('/trading/analytics/stoploss/policy');
 if(fxj)fxj.onclick=()=>exportFactorLibrary('json');
 if(fxc)fxc.onclick=()=>exportFactorLibrary('csv');
 if(fxr)fxr.onclick=()=>exportFactorLibrary('report');
-[fs,fo,fn].forEach(el=>{if(!el)return;el.addEventListener(el.tagName==='INPUT'?'input':'change',()=>rerenderFactorLibraryFromCache());});
+// Debounce the free-text/number filters so typing a symbol or top-N value
+// does not re-render the whole factor table + Plotly correlation heatmap on
+// every keystroke; the sort <select> stays instant via its 'change' event.
+let _factorFilterDebounce=null;
+const _factorFilterRerenderDebounced=()=>{if(_factorFilterDebounce)clearTimeout(_factorFilterDebounce);_factorFilterDebounce=setTimeout(rerenderFactorLibraryFromCache,180);};
+[fs,fo,fn].forEach(el=>{if(!el)return;const isInput=el.tagName==='INPUT';el.addEventListener(isInput?'input':'change',isInput?_factorFilterRerenderDebounced:rerenderFactorLibraryFromCache);});
 
 if(m1)m1.onclick=async()=>{
 const out=getResearchOutputEl();
