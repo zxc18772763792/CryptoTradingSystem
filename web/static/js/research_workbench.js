@@ -914,7 +914,7 @@
     if (!summaryEl || !bulletEl) return;
 
     if (!state.recommendations) {
-      summaryEl.innerHTML = '<div class=”research-conclusion-empty”>先运行「研究总览」，30秒内生成结论</div>';
+      summaryEl.innerHTML = '<div class="research-conclusion-empty">先运行「研究总览」，30秒内生成结论</div>';
       bulletEl.innerHTML = '';
       return;
     }
@@ -933,30 +933,30 @@
 
     // ── Verdict hero block (goes into #research-conclusion-summary) ──
     const symbolTags = focusSymbols.length
-      ? `<div class=”rec-symbols”>${focusSymbols.map((s) => `<span class=”rec-symbol-tag”>${escSafe(s)}</span>`).join('')}</div>`
+      ? `<div class="rec-symbols">${focusSymbols.map((s) => `<span class="rec-symbol-tag">${escSafe(s)}</span>`).join('')}</div>`
       : '';
     const confBadge = confLabel
-      ? `<span class=”rec-conf-badge”>置信 ${escSafe(confLabel)}</span>`
+      ? `<span class="rec-conf-badge">置信 ${escSafe(confLabel)}</span>`
       : '';
     const strategies = (rec.preferred_strategy_families || brief.preferred_strategy_families || []);
     const strategyLine = strategies.length
-      ? `<div class=”rec-strategy-line”>优先策略：${escSafe(strategies.slice(0, 3).join(' / '))}</div>`
+      ? `<div class="rec-strategy-line">优先策略：${escSafe(strategies.slice(0, 3).join(' / '))}</div>`
       : '';
 
     const sourceDesc = describeRecommendationSource(sourceMeta);
     const sourceBadge = sourceDesc && sourceDesc !== '未知来源'
-      ? `<span class=”rec-source-badge” title=”数据来源”>${escSafe(sourceDesc)}</span>`
+      ? `<span class="rec-source-badge" title="数据来源">${escSafe(sourceDesc)}</span>`
       : '';
 
     summaryEl.className = 'rec-verdict';
     summaryEl.innerHTML = `
-      <div class=”rec-verdict-top”>
-        <span class=”rec-bias-badge ${bc.cls}”>${bc.icon} ${bc.label}</span>
+      <div class="rec-verdict-top">
+        <span class="rec-bias-badge ${bc.cls}">${bc.icon} ${bc.label}</span>
         ${confBadge}
         ${sourceBadge}
-        ${timeLabel ? `<span class=”rec-time-label”>${escSafe(timeLabel)}</span>` : ''}
+        ${timeLabel ? `<span class="rec-time-label">${escSafe(timeLabel)}</span>` : ''}
       </div>
-      <div class=”rec-headline”>${escSafe(headline)}</div>
+      <div class="rec-headline">${escSafe(headline)}</div>
       ${symbolTags}
       ${strategyLine}
     `;

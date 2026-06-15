@@ -57,6 +57,21 @@ def test_research_workbench_recommendations_render_structured_actions():
     assert ".research-brief-grid" in style_css
     assert ".research-conclusion-tag" in style_css
 
+    # Regression guard: the verdict hero block must use ASCII-quoted class
+    # attributes. A prior commit corrupted these with smart/curly quotes
+    # (U+201C/U+201D), which silently broke ALL verdict-card styling because
+    # the rendered class names no longer matched the stylesheet. The earlier
+    # assertions above only covered rec-action-btn (which stayed ASCII), so
+    # the bug went undetected. Pin the verdict classes explicitly and forbid
+    # smart double-quotes anywhere in the workbench script.
+    assert 'class="rec-verdict-top"' in workbench_js
+    assert 'class="rec-bias-badge ${bc.cls}"' in workbench_js
+    assert 'class="rec-headline"' in workbench_js
+    assert 'class="rec-symbol-tag"' in workbench_js
+    assert 'class="research-conclusion-empty"' in workbench_js
+    assert "“" not in workbench_js
+    assert "”" not in workbench_js
+
 
 def test_research_workbench_overview_button_uses_parallel_overview_endpoint():
     workbench_js = _read("web/static/js/research_workbench.js")
