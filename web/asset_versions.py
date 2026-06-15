@@ -6,12 +6,12 @@ from typing import Final
 
 ASSET_VERSIONS: Final[dict[str, int]] = {
     "css/style.css": 114,
-    "js/app.js": 140,
-    "js/altcoin_radar.js": 21,
+    "js/app.js": 142,
+    "js/altcoin_radar.js": 23,
     "js/research_workbench.js": 10,
     "js/ai_research.js": 50,
     "js/ai_research_diagnostics.js": 5,
-    "js/ai_research_runtime.js": 7,
+    "js/ai_research_runtime.js": 8,
     "js/ai_research_agent.js": 14,
     "js/news_tab_runtime.js": 20,
     "js/dashboard_unstructured_news.js": 17,

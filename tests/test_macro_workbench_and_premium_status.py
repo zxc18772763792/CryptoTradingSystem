@@ -412,6 +412,7 @@ def test_onchain_module_exposes_derivatives_shadow_summary(monkeypatch):
 def test_premium_data_status_reports_cached_fred_macro(tmp_path, monkeypatch):
     from web.api import ai_research as ai_module
 
+    ai_module._reset_sources_health_cache_for_tests()
     monkeypatch.chdir(tmp_path)
     macro_dir = tmp_path / "data" / "macro"
     macro_dir.mkdir(parents=True, exist_ok=True)
@@ -543,6 +544,7 @@ def test_sources_health_includes_ai_news_and_ml_inventory(tmp_path, monkeypatch)
     from core.data.options_collector import options_collector
     from web.api import ai_research as ai_module
 
+    ai_module._reset_sources_health_cache_for_tests()
     monkeypatch.chdir(tmp_path)
 
     class FakeNewsManager:

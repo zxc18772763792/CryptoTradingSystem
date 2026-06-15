@@ -4384,3 +4384,55 @@ def test_build_prompt_compacts_runtime_context(tmp_path: Path):
     assert "references" not in compact_input["research_context"]
     assert "notes" not in compact_input["execution_cost"]
     assert len(json.dumps(compact_input, ensure_ascii=False)) < len(json.dumps(context_payload, ensure_ascii=False))
+
+
+def test_compact_prompt_context_emits_structured_blocked_symbol_sides(tmp_path: Path):
+    # `blocked_symbol_sides` is produced by autonomous_learning as a list of dicts.
+    # The compact prompt builder must emit clean structured entries (not a truncated
+    # Python repr of the dict) so the model can honor the blocked-symbol-side rule.
+    from core.ai.autonomous_agent import AutonomousTradingAgent
+
+    agent = AutonomousTradingAgent(cache_root=tmp_path)
+    long_reason = (
+        "net_pnl=-12.3456, losses=3, open_unrealized=-4.5678 with a very long trailing "
+        "explanation that would previously have been truncated mid-dict by _slice_text_list"
+    )
+    context_payload = {
+        "exchange": "binance",
+        "symbol": "BTC/USDT",
+        "timeframe": "15m",
+        "trading_mode": "paper",
+        "price": 100.0,
+        "bars": 240,
+        "learning_memory": {
+            "blocked_symbol_sides": [
+                {
+                    "symbol": "BTC/USDT",
+                    "side": "long",
+                    "cooldown_minutes": 360,
+                    "cooldown_until": "2026-06-15T12:00:00+00:00",
+                    "cooldown_active": True,
+                    "reason": long_reason,
+                },
+                "ETH/USDT:short",  # legacy/compact string form is still tolerated
+            ],
+        },
+    }
+
+    compact = agent._compact_prompt_context(context_payload)
+    blocked = compact["learning_memory"]["blocked_symbol_sides"]
+
+    # Every entry must be a clean dict, not a stringified Python repr.
+    assert all(isinstance(entry, dict) for entry in blocked)
+    assert blocked[0]["symbol"] == "BTC/USDT"
+    assert blocked[0]["side"] == "long"
+    assert blocked[0]["cooldown_active"] is True
+    assert blocked[0]["cooldown_minutes"] == 360
+    # Reason is trimmed cleanly (<=120 chars), never a half-serialized dict.
+    assert blocked[0]["reason"] == long_reason[:120]
+    assert "{'symbol'" not in json.dumps(blocked, ensure_ascii=False)
+    # The legacy "SYMBOL:side" string is normalized into the same structured shape.
+    assert blocked[1] == {"symbol": "ETH/USDT", "side": "short"}
+
+    # The whole compact context stays JSON-serializable (it is sent via json.dumps).
+    json.dumps(compact, ensure_ascii=False)

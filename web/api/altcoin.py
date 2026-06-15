@@ -31,6 +31,7 @@ from core.data.coinglass_altcoin import (
 )
 from core.data.coinglass_registry import normalize_coinglass_symbol
 from core.research.altcoin_radar import (
+    TIMEFRAME_SECONDS,
     VALID_TIMEFRAMES,
     build_altcoin_rows,
     build_detail_payload,
@@ -360,6 +361,21 @@ def _finalize_scan_payload(
     return final_payload
 
 
+def _should_cache_scan_payload(payload: Mapping[str, Any]) -> bool:
+    rows = list(payload.get("rows") or [])
+    if not rows:
+        return False
+    for row in rows:
+        freshness = dict((row or {}).get("freshness") or {})
+        data_quality = dict((row or {}).get("data_quality") or {})
+        if bool(freshness.get("using_market_snapshot") or data_quality.get("using_market_snapshot")):
+            return True
+        market_freshness = _safe_float(data_quality.get("market_data_freshness"), 0.0)
+        if market_freshness >= 0.45:
+            return True
+    return False
+
+
 async def _refresh_altcoin_scan_cache(
     *,
     cache_key: str,
@@ -404,7 +420,16 @@ async def _refresh_altcoin_scan_cache(
         stored_at = time.time()
         payload_to_store = _clone_payload(stored_payload)
         payload_to_store.pop("cache", None)
-        _ALTCOIN_SCAN_CACHE[cache_key] = {"stored_at": stored_at, "payload": payload_to_store}
+        if _should_cache_scan_payload(stored_payload):
+            _ALTCOIN_SCAN_CACHE[cache_key] = {"stored_at": stored_at, "payload": payload_to_store}
+        else:
+            _ALTCOIN_SCAN_CACHE.pop(cache_key, None)
+            stored_payload["warnings"] = list(
+                dict.fromkeys(
+                    list(stored_payload.get("warnings") or [])
+                    + ["Altcoin radar result was not cached because market data is stale or unavailable."]
+                )
+            )
         return stored_payload
 
 
@@ -675,17 +700,23 @@ async def _load_snapshot_maps(
 
 
 def _snapshot_age_seconds(value: Any) -> Optional[float]:
+    return _age_seconds_at(value, now=_utcnow())
+
+
+def _age_seconds_at(value: Any, *, now: datetime) -> Optional[float]:
     if not value:
         return None
     try:
-        ts = pd.Timestamp(value).to_pydatetime()
+        ts = pd.Timestamp(value)
     except Exception:
         return None
+    if pd.isna(ts):
+        return None
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
+        ts = ts.tz_localize(timezone.utc)
     else:
-        ts = ts.astimezone(timezone.utc)
-    return max(0.0, (_utcnow() - ts).total_seconds())
+        ts = ts.tz_convert(timezone.utc)
+    return max(0.0, (now - ts.to_pydatetime()).total_seconds())
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -696,6 +727,71 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     if pd.isna(parsed):
         return float(default)
     return float(parsed)
+
+
+def _market_data_stale_cutoff_seconds(timeframe: str) -> float:
+    normalized = _normalize_timeframe(timeframe)
+    return float(TIMEFRAME_SECONDS.get(normalized, TIMEFRAME_SECONDS[DEFAULT_TIMEFRAME]) * 4.0)
+
+
+def _market_frame_age_seconds(frame: Any, *, now: datetime) -> Optional[float]:
+    if not isinstance(frame, pd.DataFrame) or frame.empty:
+        return None
+    try:
+        index = frame.sort_index().index
+        if len(index) == 0:
+            return None
+        return _age_seconds_at(index[-1], now=now)
+    except Exception:
+        return None
+
+
+def _is_fresh_market_snapshot(snapshot: Optional[Mapping[str, Any]], *, timeframe: str, now: datetime) -> bool:
+    if not snapshot:
+        return False
+    status = str(snapshot.get("capture_status") or "ok").strip().lower()
+    if status in {"failed", "error", "unavailable"}:
+        return False
+    if _safe_float(snapshot.get("current_price") or snapshot.get("last_price"), 0.0) <= 0:
+        return False
+    age_sec = _age_seconds_at(snapshot.get("timestamp"), now=now)
+    if age_sec is None:
+        return False
+    return age_sec <= _market_data_stale_cutoff_seconds(timeframe)
+
+
+def _filter_fresh_market_frames(
+    *,
+    frames: Mapping[str, Any],
+    market_snapshots: Mapping[str, Mapping[str, Any]],
+    timeframe: str,
+) -> Tuple[Dict[str, Any], List[str], List[str]]:
+    if not frames:
+        return {}, [], []
+
+    now = _utcnow()
+    stale_cutoff_sec = _market_data_stale_cutoff_seconds(timeframe)
+    snapshots_by_symbol = {
+        str(symbol or "").strip().upper(): snapshot
+        for symbol, snapshot in dict(market_snapshots or {}).items()
+        if str(symbol or "").strip()
+    }
+    kept: Dict[str, Any] = {}
+    dropped_with_snapshot: List[str] = []
+    dropped_without_snapshot: List[str] = []
+    for symbol, frame in dict(frames or {}).items():
+        normalized_symbol = str(symbol or "").strip().upper()
+        if not normalized_symbol:
+            continue
+        frame_age_sec = _market_frame_age_seconds(frame, now=now)
+        if frame_age_sec is not None and frame_age_sec > stale_cutoff_sec:
+            if _is_fresh_market_snapshot(snapshots_by_symbol.get(normalized_symbol), timeframe=timeframe, now=now):
+                dropped_with_snapshot.append(normalized_symbol)
+            else:
+                dropped_without_snapshot.append(normalized_symbol)
+            continue
+        kept[normalized_symbol] = frame
+    return kept, _normalize_symbols(dropped_with_snapshot), _normalize_symbols(dropped_without_snapshot)
 
 
 def _pair_symbol_from_base(base: str) -> str:
@@ -1232,6 +1328,10 @@ async def _compute_scan_payload(
             warnings.append(
                 f"CoinGlass market snapshot fallback: using exchange public ticker for {len(public_snapshots)} symbols."
             )
+        elif _normalize_exchange(exchange) == "binance":
+            warnings.append(
+                f"Exchange public ticker fallback returned no data for {len(fallback_targets)} symbols."
+            )
 
     recovered_symbols = {str(symbol or "").strip().upper() for symbol in (market_snapshots or {}).keys()}
     if recovered_symbols:
@@ -1256,6 +1356,22 @@ async def _compute_scan_payload(
                 f"Local K-line missing for {len(recovered_kline_warnings)} symbols; using live market snapshots instead."
             )
 
+    frames, stale_frame_symbols, stale_without_snapshot_symbols = _filter_fresh_market_frames(
+        frames=frames,
+        market_snapshots=market_snapshots,
+        timeframe=timeframe,
+    )
+    if stale_frame_symbols:
+        warnings.append(
+            "Ignored stale local K-line frames for "
+            f"{len(stale_frame_symbols)} symbols because fresher live market snapshots are available."
+        )
+    if stale_without_snapshot_symbols:
+        warnings.append(
+            "Ignored stale local K-line frames for "
+            f"{len(stale_without_snapshot_symbols)} symbols because no fresh market snapshot was available."
+        )
+
     symbols_used = _normalize_symbols(list(frames.keys()) + list(market_snapshots.keys()))
     if not symbols_used:
         return {
@@ -1271,23 +1387,34 @@ async def _compute_scan_payload(
             "universe_meta": universe_meta([], universe_scope),
         }
 
-    symbol_csv = ",".join(symbols_used)
-    factor_task = get_factor_library(
-        exchange=exchange,
-        symbols=symbol_csv,
-        timeframe=timeframe,
-        lookback=600 if timeframe == "1h" else 900 if timeframe == "4h" else 1200,
-        quantile=0.3,
-        series_limit=500,
-        exclude_retired=exclude_retired,
-    )
-    multi_task = get_multi_assets_overview(
-        exchange=exchange,
-        symbols=symbol_csv,
-        timeframe=timeframe,
-        lookback=400 if timeframe == "1h" else 300 if timeframe == "4h" else 240,
-        exclude_retired=exclude_retired,
-    )
+    factor_symbols = _normalize_symbols(frames.keys())
+    if factor_symbols:
+        symbol_csv = ",".join(factor_symbols)
+        factor_task = get_factor_library(
+            exchange=exchange,
+            symbols=symbol_csv,
+            timeframe=timeframe,
+            lookback=600 if timeframe == "1h" else 900 if timeframe == "4h" else 1200,
+            quantile=0.3,
+            series_limit=500,
+            exclude_retired=exclude_retired,
+        )
+        multi_task = get_multi_assets_overview(
+            exchange=exchange,
+            symbols=symbol_csv,
+            timeframe=timeframe,
+            lookback=400 if timeframe == "1h" else 300 if timeframe == "4h" else 240,
+            exclude_retired=exclude_retired,
+        )
+    else:
+        warnings.append(
+            "Factor and correlation inputs skipped because no fresh local K-line frames were available."
+        )
+        factor_task = asyncio.sleep(0, result={"warnings": [], "asset_scores": []})
+        multi_task = asyncio.sleep(
+            0,
+            result={"retired_filter": {"excluded_symbols": []}, "assets": [], "correlation": {}},
+        )
     snapshots_task = _load_snapshot_maps(exchange=exchange, symbols=symbols_used)
     rules_task = _load_active_altcoin_rules()
     factor_payload, multi_payload, snapshots, rules = await asyncio.gather(
@@ -1430,6 +1557,8 @@ async def get_altcoin_scan_snapshot(
             pre_warnings=pre_warnings,
             ttl=ttl,
         )
+        if refresh:
+            return await asyncio.shield(refresh_task)
         background_warning = (
             "Altcoin radar refresh started in background; serving previous snapshot."
             if refresh

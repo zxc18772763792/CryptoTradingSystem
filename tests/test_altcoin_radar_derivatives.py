@@ -268,8 +268,12 @@ def test_build_altcoin_rows_prefers_coinglass_market_snapshot_when_local_frame_i
     row = rows[0]
 
     assert row["freshness"]["market_label"] == "fresh"
+    assert row["freshness"]["market_source"] == "coinglass_coins_markets"
+    assert row["freshness"]["market_source_type"] == "live_snapshot"
+    assert row["freshness"]["using_market_snapshot"] is True
     assert row["freshness"]["derivatives_label"] == "fresh"
     assert row["derivatives_context"]["source_name"] == "coinglass_coins_markets"
+    assert row["data_quality"]["market_source"] == "coinglass_coins_markets"
     assert row["data_quality"]["market_data_freshness"] >= 0.9
     assert "market_data_stale" not in row["data_quality"]["degraded_reason"]
     assert row["metrics"]["market_cap_usd"] == 2500000000.0
@@ -301,7 +305,11 @@ def test_build_altcoin_rows_does_not_hard_degrade_fresh_public_market_snapshot_w
     row = rows[0]
 
     assert row["freshness"]["market_label"] == "fresh"
+    assert row["freshness"]["market_source"] == "binance_futures_ticker_24h"
+    assert row["freshness"]["market_source_type"] == "live_snapshot"
+    assert row["freshness"]["using_market_snapshot"] is True
     assert row["freshness"]["derivatives_label"] == "missing"
+    assert row["data_quality"]["market_source"] == "binance_futures_ticker_24h"
     assert "market_data_stale" not in row["data_quality"]["degraded_reason"]
     assert "snapshot_missing" not in row["data_quality"]["degraded_reason"]
     assert "derivatives_missing" not in row["data_quality"]["degraded_reason"]

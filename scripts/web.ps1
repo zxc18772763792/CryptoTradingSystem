@@ -1,12 +1,16 @@
 param(
-    [ValidateSet("help", "start", "status", "stop")]
+    [ValidateSet("help", "start", "status", "stop", "live-shadow-news")]
     [string]$Action = "help",
     [string]$EnvName = "crypto_trading",
     [string]$BindHost = "127.0.0.1",
     [int]$Port = 8000,
     [int]$HealthWaitSec = 150,
+    [double]$MaxWsAgeMs = 10000,
     [switch]$OpenBrowser,
     [switch]$AllowPersistedLiveMode,
+    [switch]$ConfirmLive,
+    [switch]$ResetNewsLlmFailover,
+    [switch]$SkipPrecheck,
     [switch]$StartAutonomousAgent,
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
@@ -309,6 +313,7 @@ function Show-Help {
     Write-Host "  .\web.bat"
     Write-Host "  .\web.bat help"
     Write-Host "  .\web.bat start"
+    Write-Host "  .\web.bat live-shadow-news -ConfirmLive -ResetNewsLlmFailover"
     Write-Host "  .\web.bat status"
     Write-Host "  .\web.bat stop -IncludeWorkers"
     Write-Host ""
@@ -332,6 +337,13 @@ function Show-Help {
     Write-Host "  - PM worker remains opt-in via -StartPmWorker."
     Write-Host "  - AI autonomous agent stays separate unless env auto-start is true or you pass -StartAutonomousAgent."
     Write-Host "  - Research universe incremental refresh task is auto-ensured on start."
+    Write-Host "  - Use 'live-shadow-news' for the explicit LIVE + market WS shadow + news engine profile."
+    Write-Host ""
+    Write-Host "Live shadow with news:"
+    Write-Host "  .\web.bat live-shadow-news -ConfirmLive -ResetNewsLlmFailover"
+    Write-Host "    restarts web + news worker + news LLM worker in live mode"
+    Write-Host "    forces MARKET_WS_MODE=shadow and MARKET_WS_FAIL_CLOSED_FOR_LIVE=true"
+    Write-Host "    clears sticky news LLM failover when -ResetNewsLlmFailover is present"
     Write-Host ""
     Write-Host "Troubleshooting:"
     Write-Host "  - Use '.\web.bat status' after every startup."
@@ -501,6 +513,7 @@ function Show-Status {
     Write-Host "  .\web.bat"
     Write-Host "  .\web.bat help"
     Write-Host "  .\web.bat start"
+    Write-Host "  .\web.bat live-shadow-news -ConfirmLive -ResetNewsLlmFailover"
     Write-Host "  .\web.bat start -StartAutonomousAgent"
     Write-Host "  .\web.bat start -NoNewsWorkers"
     Write-Host "  .\web.bat start -EnableAnalyticsHistory"
@@ -620,6 +633,24 @@ switch ($Action) {
             -StartPmWorker:$StartPmWorker.IsPresent `
             -EnableAnalyticsHistory:$EnableAnalyticsHistory.IsPresent `
             -TestDataSources:$TestDataSources.IsPresent
+    }
+    "live-shadow-news" {
+        $liveShadowNewsScript = Join-Path $PSScriptRoot "start_live_shadow_news.ps1"
+        if (-not (Test-Path $liveShadowNewsScript)) {
+            throw "Live shadow news startup script not found: $liveShadowNewsScript"
+        }
+
+        & $liveShadowNewsScript `
+            -Action restart `
+            -EnvName $EnvName `
+            -BindHost $BindHost `
+            -Port $Port `
+            -HealthWaitSec $HealthWaitSec `
+            -MaxWsAgeMs $MaxWsAgeMs `
+            -ConfirmLive:$ConfirmLive.IsPresent `
+            -ResetNewsLlmFailover:$ResetNewsLlmFailover.IsPresent `
+            -SkipPrecheck:$SkipPrecheck.IsPresent `
+            -OpenBrowser:$OpenBrowser.IsPresent
     }
     "stop" {
         Stop-ManagedProcesses -PortNumber $Port -StopWorkers:$IncludeWorkers.IsPresent
