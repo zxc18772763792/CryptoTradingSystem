@@ -1339,6 +1339,14 @@ def _call_llm_batch_summarize(
         parsed = _extract_json_block(content)
         if isinstance(parsed, dict) and isinstance(parsed.get("items"), list):
             parsed_items = parsed.get("items")
+        elif isinstance(parsed, dict) and isinstance(parsed.get("result"), list):
+            parsed_items = parsed.get("result")
+        elif isinstance(parsed, dict) and isinstance(parsed.get("results"), list):
+            parsed_items = parsed.get("results")
+        elif isinstance(parsed, dict) and isinstance(parsed.get("summaries"), list):
+            parsed_items = parsed.get("summaries")
+        elif isinstance(parsed, dict) and isinstance(parsed.get("output"), list):
+            parsed_items = parsed.get("output")
         elif isinstance(parsed, list):
             parsed_items = parsed
         else:

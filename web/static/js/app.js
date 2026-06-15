@@ -3629,10 +3629,10 @@ function renderKlineChart(preserveRange=true){
 const c=document.getElementById('candlestick-chart');
 if(!c)return;
 const bars=marketDataState.bars||[];
-if(!bars.length){c.innerHTML='<p style="color:#8b949e;text-align:center;padding:50px;">暂无数据，系统会自动后台补数后重试。</p>';return;}
-if(typeof Plotly==='undefined'){c.innerHTML='<p style="color:#8b949e;text-align:center;padding:50px;">图表库未加载，K线图暂不可用。</p>';return;}
+if(!bars.length){c.innerHTML='<p class="kline-chart-placeholder" style="color:#8b949e;text-align:center;padding:50px;">暂无数据，系统会自动后台补数后重试。</p>';return;}
+if(typeof Plotly==='undefined'){c.innerHTML='<p class="kline-chart-placeholder" style="color:#8b949e;text-align:center;padding:50px;">图表库未加载，K线图暂不可用。</p>';return;}
 const rows=bars.map(d=>({timestamp:klineToMs(d.timestamp),open:+d.open,high:+d.high,low:+d.low,close:+d.close,volume:+d.volume||0})).filter(d=>Number.isFinite(d.timestamp)&&Number.isFinite(d.open)&&Number.isFinite(d.high)&&Number.isFinite(d.low)&&Number.isFinite(d.close));
-if(!rows.length){c.innerHTML='<p style="color:#8b949e;text-align:center;padding:50px;">时间数据异常，无法渲染K线。</p>';return;}
+if(!rows.length){c.innerHTML='<p class="kline-chart-placeholder" style="color:#8b949e;text-align:center;padding:50px;">时间数据异常，无法渲染K线。</p>';return;}
 const chartKey=`${marketDataState.exchange}|${marketDataState.symbol}|${marketDataState.timeframe}`;
 const chartChanged=marketDataState.lastChartKey!==chartKey;
 if(chartChanged){
@@ -3649,6 +3649,7 @@ const pricePad=priceSpan*0.08;
 const resetView=!preserveRange||chartChanged||!marketDataState.lastRange;
 const layout={paper_bgcolor:'#111723',plot_bgcolor:'#111723',font:{color:'#d7dde8'},margin:{l:50,r:62,t:10,b:28},showlegend:false,dragmode:'pan',uirevision:chartKey,xaxis:plotlyTimeAxis({domain:[0,1],anchor:'y',rangeslider:{visible:false}}),yaxis:{domain:[.28,1],side:'right',showgrid:true,gridcolor:'#283242',automargin:true,autorange:resetView,range:resetView?[minLow-pricePad,maxHigh+pricePad]:undefined},xaxis2:plotlyTimeAxis({domain:[0,1],anchor:'y2',matches:'x'}),yaxis2:{domain:[0,.22],side:'right',showgrid:true,gridcolor:'#283242',automargin:true,autorange:true},hovermode:'x unified'};
 if(!resetView&&marketDataState.lastRange?.start&&marketDataState.lastRange?.end){layout.xaxis.range=[marketDataState.lastRange.start,marketDataState.lastRange.end];}
+Array.from(c.querySelectorAll(':scope > .kline-chart-placeholder')).forEach(el=>el.remove());
 Plotly.react(c,[{type:'candlestick',x,open:o,high:h,low:l,close:cl,increasing:{line:{color:'#1f9d63'}},decreasing:{line:{color:'#d9534f'}},xaxis:'x',yaxis:'y'},{type:'bar',x,y:v,marker:{color:vc,opacity:.7},xaxis:'x2',yaxis:'y2'}],layout,{responsive:true,scrollZoom:true,displaylogo:false,modeBarButtonsToAdd:['drawline','drawopenpath','drawrect','eraseshape'],modeBarButtonsToRemove:['lasso2d','select2d']});
 schedulePlotlyResize(document.getElementById('data')||document);
 }
@@ -3659,7 +3660,7 @@ marketDataState.chartBound=false;
 marketDataState.lastRange=null;
 if(!c)return;
 try{if(typeof Plotly!=='undefined')Plotly.purge(c);}catch{}
-c.innerHTML=`<p style="color:#8b949e;text-align:center;padding:50px;">${esc(message)}</p>`;
+c.innerHTML=`<p class="kline-chart-placeholder" style="color:#8b949e;text-align:center;padding:50px;">${esc(message)}</p>`;
 }
 async function loadMoreLeftByViewport(){
 if(marketDataState.isLoadingLeft||marketDataState.isLoading)return;
@@ -4176,10 +4177,35 @@ try{
 function getDownloadDateRange(){
 const startRaw=String(document.getElementById('download-start-date')?.value||'').trim();
 const endRaw=String(document.getElementById('download-end-date')?.value||'').trim();
+if((startRaw&&!endRaw)||(!startRaw&&endRaw)){
+  throw new Error('开始日期和结束日期需要同时填写；如果想按回溯天数下载，请清空两个日期。');
+}
+if(startRaw&&endRaw&&startRaw>endRaw){
+  throw new Error('开始日期不能晚于结束日期。');
+}
 return{
   start_time:startRaw?`${startRaw}T00:00:00`:null,
   end_time:endRaw?`${endRaw}T23:59:59`:null,
 };
+}
+function updateDownloadTimeMode(){
+const startRaw=String(document.getElementById('download-start-date')?.value||'').trim();
+const endRaw=String(document.getElementById('download-end-date')?.value||'').trim();
+const daysEl=document.getElementById('download-days');
+const helpEl=document.getElementById('download-days-help');
+const hasBoth=Boolean(startRaw&&endRaw);
+const hasPartial=Boolean((startRaw&&!endRaw)||(!startRaw&&endRaw));
+if(daysEl){
+  daysEl.disabled=hasBoth;
+  daysEl.title=hasBoth?'已选择起止日期，回溯天数不参与本次下载。':'';
+}
+if(helpEl){
+  helpEl.textContent=hasBoth
+    ?'已选择起止日期，下载将按精确区间执行，回溯天数不参与本次下载。'
+    :hasPartial
+      ?'开始日期和结束日期需要同时填写；或清空两个日期后按回溯天数下载。'
+      :'未填写开始/结束日期时，按回溯天数下载；填写起止日期后将按精确区间下载。';
+}
 }
 function getDownloadRequestedDays(tf,range={}){
 const inputEl=document.getElementById('download-days');
@@ -5023,6 +5049,11 @@ const dataSymbol=document.getElementById('data-symbol');
 if(dataSymbol)dataSymbol.onchange=()=>{resetKlineChartForSwitch('正在切换币种并加载新行情...');scheduleDataChartReload(120);};
 const dataTimeframe=document.getElementById('data-timeframe');
 if(dataTimeframe)dataTimeframe.onchange=()=>{resetKlineChartForSwitch('正在切换周期并加载新行情...');scheduleDataChartReload(120);};
+['download-start-date','download-end-date'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el)el.addEventListener('change',updateDownloadTimeMode);
+});
+updateDownloadTimeMode();
 loadResearchUniverseRefreshStatus({silent:true}).catch(()=>{});
 setInterval(()=>{if(isDataTabActive()&&!marketDataState.isLoading&&!(marketDataState.bars||[]).length){loadKlinesByForm().catch(()=>{});}},7000);
 }

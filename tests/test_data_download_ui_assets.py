@@ -14,6 +14,7 @@ def test_data_download_batch_controls_and_hooks_exist():
 
     assert 'id="download-start-date"' in template
     assert 'id="download-end-date"' in template
+    assert 'id="download-days-help"' in template
     assert 'id="download-symbols-batch"' in template
     assert 'id="btn-download-fill-research"' in template
     assert 'id="btn-download-fill-altcoin-research"' in template
@@ -32,6 +33,7 @@ def test_data_download_batch_controls_and_hooks_exist():
     assert "async function triggerResearchUniverseRefresh" in app_js
     assert "async function refreshDownloadTasks" in app_js
     assert "function getDownloadDateRange()" in app_js
+    assert "function updateDownloadTimeMode()" in app_js
     assert "function getDownloadRequestedDays(" in app_js
     assert "function setDownloadBatchSymbols(" in app_js
     assert "function fillDownloadBatchFromResearchSymbols(" in app_js
@@ -51,6 +53,10 @@ def test_data_download_batch_controls_and_hooks_exist():
     assert "/data/research/refresh/status" in app_js
     assert "/data/download/tasks?task_ids=" in app_js
     assert "DATA_DOWNLOAD_MAX_BATCH_SYMBOLS=100" in app_js
+    assert "开始日期和结束日期需要同时填写" in app_js
+    assert "开始日期不能晚于结束日期" in app_js
+    assert "daysEl.disabled=hasBoth" in app_js
+    assert "addEventListener('change',updateDownloadTimeMode)" in app_js
     assert "isDownloadPollTimeout" in app_js
     assert "后台任务没有被取消" in app_js
     assert "前台等待已结束" in app_js

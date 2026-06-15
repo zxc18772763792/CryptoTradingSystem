@@ -73,6 +73,9 @@
   const SCAN_DEBOUNCE_MS = 250;
   const BACKGROUND_REFRESH_POLL_MS = 4500;
   const BACKGROUND_REFRESH_MAX_POLLS = 6;
+  const ALTCOIN_RADAR_PREFS_KEY = 'altcoinRadar.controls.v1';
+  const RADAR_MODES = new Set(['combined', 'perp', 'narrative']);
+  const UNIVERSE_SCOPES = new Set(['research', 'expanded', 'watchlist']);
 
   const state = {
     bound: false,
@@ -97,6 +100,9 @@
     operatingModeInFlight: null,
     operatingModeLoadedAt: 0,
     researchProposalInFlight: new Set(),
+    preferencesLoaded: false,
+    savedControls: {},
+    savedUniverseSymbols: [],
   };
 
   function q(id) {
@@ -113,6 +119,102 @@
       const button = q(id);
       if (button) callback(button, kind);
     });
+  }
+
+  function safeLocalStorage() {
+    try {
+      if (typeof window === 'undefined' || !window.localStorage) return null;
+      return window.localStorage;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function normalizeRadarMode(value) {
+    const text = String(value || 'combined').trim().toLowerCase();
+    return RADAR_MODES.has(text) ? text : 'combined';
+  }
+
+  function normalizeUniverseScope(value) {
+    const text = String(value || 'research').trim().toLowerCase();
+    return UNIVERSE_SCOPES.has(text) ? text : 'research';
+  }
+
+  function loadSavedControls() {
+    if (state.preferencesLoaded) return state.savedControls || {};
+    state.preferencesLoaded = true;
+    const storage = safeLocalStorage();
+    if (!storage) return {};
+    try {
+      const raw = storage.getItem(ALTCOIN_RADAR_PREFS_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      state.savedControls = parsed && typeof parsed === 'object' ? parsed : {};
+      state.savedUniverseSymbols = normalizeSymbols(state.savedControls.universeSymbols || []);
+      return state.savedControls;
+    } catch (error) {
+      state.savedControls = {};
+      state.savedUniverseSymbols = [];
+      try { console.warn('[altcoin-radar] failed to load saved controls:', error); } catch (_) {}
+      return {};
+    }
+  }
+
+  function syncRadarModeButtons() {
+    const mode = normalizeRadarMode(state.radarMode);
+    document.querySelectorAll('#altcoin-radar-mode-btns .altcoin-mode-btn').forEach((button) => {
+      button.classList.toggle('active', String(button.dataset.mode || '') === mode);
+    });
+  }
+
+  function applySavedControls() {
+    const saved = loadSavedControls();
+    const setSelectValue = (id, value) => {
+      const el = q(id);
+      if (!(el instanceof HTMLSelectElement)) return;
+      const text = String(value || '').trim();
+      if (!text) return;
+      const hasOption = Array.from(el.options || []).some((opt) => String(opt.value || '') === text);
+      if (hasOption) el.value = text;
+    };
+    setSelectValue('altcoin-radar-exchange', saved.exchange);
+    setSelectValue('altcoin-radar-timeframe', saved.timeframe);
+    setSelectValue('altcoin-radar-sort', saved.sortBy);
+    setSelectValue('altcoin-radar-filter', saved.filter);
+    setSelectValue('altcoin-radar-universe-scope', normalizeUniverseScope(saved.universeScope));
+    const alertedEl = q('altcoin-radar-only-alerted');
+    if (alertedEl && typeof saved.onlyAlerted === 'boolean') alertedEl.checked = saved.onlyAlerted;
+    const retiredEl = q('altcoin-radar-exclude-retired');
+    if (retiredEl && typeof saved.excludeRetired === 'boolean') retiredEl.checked = saved.excludeRetired;
+    state.radarMode = normalizeRadarMode(saved.radarMode || state.radarMode);
+    state.selectedSymbol = String(saved.selectedSymbol || state.selectedSymbol || '').trim().toUpperCase();
+    syncRadarModeButtons();
+  }
+
+  function saveControls(extra = {}) {
+    const storage = safeLocalStorage();
+    if (!storage) return;
+    const controls = readControls();
+    const payload = {
+      exchange: controls.exchange,
+      timeframe: controls.timeframe,
+      sortBy: controls.sortBy,
+      filter: controls.filter,
+      onlyAlerted: controls.onlyAlerted,
+      excludeRetired: controls.excludeRetired,
+      universeSymbols: controls.universeSymbols,
+      radarMode: normalizeRadarMode(controls.radarMode),
+      universeScope: normalizeUniverseScope(controls.universeScope),
+      savedAt: new Date().toISOString(),
+      ...extra,
+      selectedSymbol: String(extra.selectedSymbol || state.selectedSymbol || '').trim().toUpperCase(),
+    };
+    try {
+      storage.setItem(ALTCOIN_RADAR_PREFS_KEY, JSON.stringify(payload));
+      state.savedControls = payload;
+      state.savedUniverseSymbols = normalizeSymbols(payload.universeSymbols || []);
+    } catch (error) {
+      try { console.warn('[altcoin-radar] failed to save controls:', error); } catch (_) {}
+    }
   }
 
   function escapeHtml(value) {
@@ -218,8 +320,8 @@
       excludeRetired: q('altcoin-radar-exclude-retired')?.checked !== false,
       universeSymbols: normalizeSymbols(getSelectedValues('altcoin-radar-universe')).slice(0, 30),
       // Phase 1
-      radarMode: state.radarMode || 'combined',
-      universeScope: String(q('altcoin-radar-universe-scope')?.value || 'research').trim() || 'research',
+      radarMode: normalizeRadarMode(state.radarMode),
+      universeScope: normalizeUniverseScope(q('altcoin-radar-universe-scope')?.value || 'research'),
     };
   }
 
@@ -537,6 +639,19 @@
     return 'watch';
   }
 
+  function marketSourceLabel(row) {
+    const freshness = row?.freshness || {};
+    const dataQuality = row?.data_quality || {};
+    const source = String(freshness.market_source || dataQuality.market_source || '').trim();
+    const sourceType = String(freshness.market_source_type || dataQuality.market_source_type || '').trim();
+    if (source.includes('binance_futures')) return 'futures ticker';
+    if (source.includes('binance_spot')) return 'spot ticker';
+    if (source.includes('coinglass')) return 'CoinGlass';
+    if (sourceType === 'local_kline' || source === 'local_kline') return 'local K';
+    if (sourceType === 'live_snapshot') return source || 'snapshot';
+    return source || '--';
+  }
+
   function pickDefaultPreset(row) {
     if (String(row?.signal_source || '').trim() === 'perp_ignition') return 'anomaly';
     if (String(row?.signal_source || '').trim().startsWith('narrative_')) return 'narrative';
@@ -711,7 +826,11 @@
       .map((symbol) => `<option value="${escapeHtml(symbol)}">${escapeHtml(symbol)}</option>`)
       .join('');
     const preserveCurrentSelection = state.universeLoadedFor === cacheKey && currentSelected.length;
-    const fallbackSelection = preserveCurrentSelection ? currentSelected : finalSymbols.slice(0, defaultCount);
+    const savedSelection = normalizeSymbols(loadSavedControls().universeSymbols || state.savedUniverseSymbols || [])
+      .filter((symbol) => finalSymbols.includes(symbol));
+    const fallbackSelection = preserveCurrentSelection
+      ? currentSelected
+      : (savedSelection.length ? savedSelection : finalSymbols.slice(0, defaultCount));
     setSelectedValues('altcoin-radar-universe', fallbackSelection, finalSymbols[0] || 'LINK/USDT');
     state.universeLoadedFor = cacheKey;
     renderUniverseManager();
@@ -769,19 +888,26 @@
       throw new Error('请先选择一个候选币种');
     }
     const apiFetch = requireApi();
+    let resp = null;
     if (action === 'add') {
-      await apiFetch('/altcoin/radar/watchlist', {
+      resp = await apiFetch('/altcoin/radar/watchlist', {
         method: 'POST',
         timeoutMs: 15000,
         body: JSON.stringify({ symbol: normalized }),
       });
     } else {
-      await apiFetch(`/altcoin/radar/watchlist?symbol=${encodeURIComponent(normalized)}`, {
+      resp = await apiFetch(`/altcoin/radar/watchlist?symbol=${encodeURIComponent(normalized)}`, {
         method: 'DELETE',
         timeoutMs: 15000,
       });
     }
-    await loadWatchlist();
+    const updated = normalizeSymbols(resp?.symbols || []);
+    if (updated.length) {
+      state.watchlist = updated;
+      renderWatchlist();
+    } else {
+      await loadWatchlist();
+    }
     return normalized;
   }
 
@@ -822,6 +948,32 @@
     if (!hasSymbolInUniverse) params.set('watchlist_focus', 'true');
     if (universe.length) params.set('symbols', universe.join(','));
     return params.toString();
+  }
+
+  function filterLabel(value) {
+    const text = String(value || 'all').trim();
+    const filterEl = q('altcoin-radar-filter');
+    const option = filterEl instanceof HTMLSelectElement
+      ? Array.from(filterEl.options || []).find((item) => String(item.value || '') === text)
+      : null;
+    return String(option?.textContent || text || '全部候选').trim();
+  }
+
+  function activeFilterSummary(controls = readControls()) {
+    const parts = [];
+    if (controls.filter && controls.filter !== 'all') parts.push(filterLabel(controls.filter));
+    if (controls.onlyAlerted) parts.push('仅已建预警');
+    return parts.length ? parts.join(' + ') : '全部候选';
+  }
+
+  function clearClientFilters() {
+    const filterEl = q('altcoin-radar-filter');
+    if (filterEl instanceof HTMLSelectElement) filterEl.value = 'all';
+    const alertedEl = q('altcoin-radar-only-alerted');
+    if (alertedEl) alertedEl.checked = false;
+    saveControls();
+    refreshCurrentScan();
+    if (state.selectedSymbol) renderInspector(state.detail || { selected_row: findRow(state.selectedSymbol) });
   }
 
   function applyClientFilters(rows) {
@@ -908,7 +1060,8 @@
     if (tableNote) {
       const filtered = Array.isArray(state.filteredRows) ? state.filteredRows.length : 0;
       const total = Array.isArray(scanPayload?.rows) ? scanPayload.rows.length : 0;
-      tableNote.textContent = `当前展示 ${filtered} / ${total} 条候选`;
+      const filterText = activeFilterSummary();
+      tableNote.textContent = `当前展示 ${filtered} / ${total} 条候选${filterText !== '全部候选' ? ` · ${filterText}` : ''}`;
     }
   }
 
@@ -926,9 +1079,10 @@
     const label = dataFreshnessLabel(row);
     const marketFresh = toPercent(row?.data_quality?.market_data_freshness, 0);
     const snapFresh = toPercent(row?.data_quality?.snapshot_freshness, 0);
+    const sourceLabel = marketSourceLabel(row);
     return `
       <span class="altcoin-radar-tag" data-tone="${escapeHtml(tagTone(label))}">${escapeHtml(label)}</span>
-      <span class="altcoin-radar-freshness">${escapeHtml(marketFresh)} / ${escapeHtml(snapFresh)}</span>
+      <span class="altcoin-radar-freshness">${escapeHtml(marketFresh)} / ${escapeHtml(snapFresh)} · ${escapeHtml(sourceLabel)}</span>
     `;
   }
 
@@ -947,7 +1101,15 @@
     const filteredRows = applyClientFilters(rows);
     state.filteredRows = filteredRows;
     if (!filteredRows.length) {
-      tbody.innerHTML = '<tr><td colspan="12" class="altcoin-radar-empty">当前过滤条件下没有候选，请切换过滤或刷新币池。</td></tr>';
+      const filterText = activeFilterSummary();
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="12" class="altcoin-radar-empty">
+            当前过滤条件下没有候选：${escapeHtml(filterText)}。
+            <button type="button" class="btn btn-sm" data-row-action="clear-filters">清除筛选</button>
+          </td>
+        </tr>
+      `;
       return;
     }
     tbody.innerHTML = filteredRows
@@ -1229,9 +1391,12 @@
     }
 
     const dataQuality = selected?.data_quality || {};
+    const selectedFreshness = selected?.freshness || {};
     const derivativesContext = detailPayload?.derivatives_context || selected?.derivatives_context || {};
     const derivativesError = String(derivativesContext.source_error || '').trim();
     renderListItems('altcoin-radar-data-quality', [
+      ['Market Source', marketSourceLabel(selected)],
+      ['Market As Of', selectedFreshness.as_of ? fmtDateTime(selectedFreshness.as_of) : '--'],
       ['市场新鲜度', toPercent(dataQuality.market_data_freshness, 0)],
       ['快照新鲜度', toPercent(dataQuality.snapshot_freshness, 0)],
       ['Derivatives', formatDerivativesStatus(detailPayload, selected)],
@@ -1451,6 +1616,7 @@
     const normalized = String(symbol || '').trim().toUpperCase();
     if (!normalized) return;
     state.selectedSymbol = normalized;
+    saveControls({ selectedSymbol: normalized });
     renderWatchlist();
     syncSelectedRankingRow();
     const selectedRow = resolveSelectedRow(normalized);
@@ -1479,6 +1645,7 @@
     const controls = readControls();
     const seq = ++state.scanSeq;
     const previousScan = state.scan;
+    state.detailSeq += 1;
     clearBackgroundRefreshPoll();
     if (!options.preserveStatus) {
       setStatus(refresh ? '正在强制刷新雷达，保留上次榜单...' : '正在加载山寨雷达榜单...', 'warn');
@@ -1709,21 +1876,28 @@
   function bindControls() {
     const refreshBtn = q('btn-altcoin-radar-refresh');
     if (refreshBtn) {
-      refreshBtn.onclick = () => scheduleScan(false, {
-        delayMs: 0,
-        notifyMessage: '山寨雷达刷新失败',
-      });
+      refreshBtn.onclick = () => {
+        saveControls();
+        scheduleScan(false, {
+          delayMs: 0,
+          notifyMessage: '山寨雷达刷新失败',
+        });
+      };
     }
     const forceBtn = q('btn-altcoin-radar-force-refresh');
     if (forceBtn) {
-      forceBtn.onclick = () => scheduleScan(true, {
-        delayMs: 0,
-        notifyMessage: '山寨雷达强制刷新失败',
-      });
+      forceBtn.onclick = () => {
+        saveControls();
+        scheduleScan(true, {
+          delayMs: 0,
+          notifyMessage: '山寨雷达强制刷新失败',
+        });
+      };
     }
     const exchangeEl = q('altcoin-radar-exchange');
     if (exchangeEl) {
       exchangeEl.addEventListener('change', async () => {
+        saveControls();
         state.universeLoadedFor = '';
         try {
           await loadUniverseOptions(true);
@@ -1736,18 +1910,21 @@
     const timeframeEl = q('altcoin-radar-timeframe');
     if (timeframeEl) {
       timeframeEl.addEventListener('change', () => {
+        saveControls();
         scheduleScan(false, { notifyMessage: '山寨雷达切周期失败' });
       });
     }
     const sortEl = q('altcoin-radar-sort');
     if (sortEl) {
       sortEl.addEventListener('change', () => {
+        saveControls();
         scheduleScan(false, { notifyMessage: '山寨雷达排序刷新失败' });
       });
     }
     const universeEl = q('altcoin-radar-universe');
     if (universeEl) {
       universeEl.addEventListener('change', () => {
+        saveControls();
         renderUniverseManager();
         scheduleScan(false, { notifyMessage: '山寨雷达币池更新失败' });
       });
@@ -1756,6 +1933,7 @@
       const el = q(id);
       if (el) {
         el.addEventListener('change', () => {
+          saveControls();
           refreshCurrentScan();
           if (state.selectedSymbol) renderInspector(state.detail || { selected_row: findRow(state.selectedSymbol) });
         });
@@ -1764,6 +1942,7 @@
     const excludeEl = q('altcoin-radar-exclude-retired');
     if (excludeEl) {
       excludeEl.addEventListener('change', () => {
+        saveControls();
         scheduleScan(false, { notifyMessage: '山寨雷达退市过滤刷新失败' });
       });
     }
@@ -1905,7 +2084,9 @@
         if (btn) {
           const action = String(btn.dataset.rowAction || '').trim();
           const symbol = String(btn.dataset.symbol || '').trim();
-          if (action === 'inspect') {
+          if (action === 'clear-filters') {
+            clearClientFilters();
+          } else if (action === 'inspect') {
             selectSymbol(symbol).catch((error) => {
               if (typeof notify === 'function') notify(`查看详情失败: ${error.message}`, true);
             });
@@ -2022,9 +2203,9 @@
     const modeBtns = document.querySelectorAll('#altcoin-radar-mode-btns .altcoin-mode-btn');
     modeBtns.forEach((btn) => {
       btn.addEventListener('click', () => {
-        modeBtns.forEach((b) => b.classList.remove('active'));
-        btn.classList.add('active');
-        state.radarMode = String(btn.dataset.mode || 'combined');
+        state.radarMode = normalizeRadarMode(btn.dataset.mode || 'combined');
+        syncRadarModeButtons();
+        saveControls();
         scanRadar(false).catch((error) => {
           if (typeof notify === 'function') notify(`切换雷达模式失败: ${error.message}`, true);
         });
@@ -2035,6 +2216,7 @@
     const scopeEl = q('altcoin-radar-universe-scope');
     if (scopeEl) {
       scopeEl.addEventListener('change', () => {
+        saveControls();
         renderUniverseManager();
         scanRadar(false).catch((error) => {
           if (typeof notify === 'function') notify(`Universe范围切换失败: ${error.message}`, true);
@@ -2046,7 +2228,9 @@
   function bindAltcoinRadarPage() {
     if (state.bound) return;
     state.bound = true;
+    applySavedControls();
     bindControls();
+    syncRadarModeButtons();
     renderUniverseManager();
     updateInspectorButtonState(null);
     refreshOperatingModeBanner({ force: true }).catch(() => {});

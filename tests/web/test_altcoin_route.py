@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pandas as pd
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -818,6 +819,147 @@ def test_compute_scan_payload_uses_public_ticker_fallback_when_coinglass_unavail
     assert any("using live market snapshots instead" in warning for warning in payload["warnings"])
 
 
+def test_compute_scan_payload_excludes_stale_frames_from_factor_inputs(monkeypatch):
+    symbols = ["AAA/USDT", "BBB/USDT"]
+    now = datetime.now(timezone.utc)
+    captured = {}
+
+    stale_frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [10_000.0]},
+        index=[datetime(2026, 1, 1, tzinfo=timezone.utc)],
+    )
+    fresh_frame = pd.DataFrame(
+        {"open": [9.5], "high": [10.5], "low": [9.0], "close": [10.0], "volume": [5_000.0]},
+        index=[now - timedelta(hours=1)],
+    )
+
+    async def fake_resolve_universe(**kwargs):
+        return symbols, symbols, [], []
+
+    async def fake_load_market_frames(**kwargs):
+        return ({"AAA/USDT": stale_frame, "BBB/USDT": fresh_frame}, [])
+
+    async def fake_market_snapshots(**kwargs):
+        return {
+            "AAA/USDT": {
+                "symbol": "AAA/USDT",
+                "timestamp": now.isoformat(),
+                "source_name": "binance_futures_ticker_24h",
+                "capture_status": "ok",
+                "current_price": 12.5,
+                "quote_volume_24h": 9_000_000.0,
+                "price_change_percent_24h": 5.5,
+            }
+        }
+
+    async def fake_public_snapshots(**kwargs):
+        return {}
+
+    async def fake_factor_library(**kwargs):
+        captured["factor_symbols"] = kwargs["symbols"]
+        return {"warnings": [], "asset_scores": [{"symbol": "BBB/USDT", "liquidity": 0.4}]}
+
+    async def fake_multi_assets_overview(**kwargs):
+        captured["multi_symbols"] = kwargs["symbols"]
+        return {"retired_filter": {"excluded_symbols": []}, "assets": [{"symbol": "BBB/USDT"}], "correlation": {}}
+
+    async def fake_snapshot_maps(**kwargs):
+        captured["snapshot_symbols"] = list(kwargs["symbols"])
+        return ({}, {}, {}, {})
+
+    async def fake_load_active_altcoin_rules():
+        return []
+
+    def fake_build_altcoin_rows(**kwargs):
+        captured["market_frames"] = dict(kwargs["market_frames"])
+        captured["market_snapshots"] = dict(kwargs["market_snapshots"])
+        return [
+            {"symbol": "AAA/USDT", "tags": [], "data_quality": {"degraded_reason": []}},
+            {"symbol": "BBB/USDT", "tags": [], "data_quality": {"degraded_reason": []}},
+        ]
+
+    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_public_snapshots)
+    monkeypatch.setattr(altcoin_api, "get_factor_library", fake_factor_library)
+    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fake_multi_assets_overview)
+    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
+    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_altcoin_rows)
+
+    payload = asyncio.run(
+        altcoin_api._compute_scan_payload(
+            exchange="binance",
+            timeframe="4h",
+            symbols=symbols,
+            exclude_retired=True,
+            refresh=True,
+            universe_scope="research",
+            mode="combined",
+            view="4h",
+        )
+    )
+
+    assert set(payload["symbols_used"]) == {"AAA/USDT", "BBB/USDT"}
+    assert captured["factor_symbols"] == "BBB/USDT"
+    assert captured["multi_symbols"] == "BBB/USDT"
+    assert set(captured["snapshot_symbols"]) == {"AAA/USDT", "BBB/USDT"}
+    assert set(captured["market_frames"]) == {"BBB/USDT"}
+    assert captured["market_snapshots"]["AAA/USDT"]["current_price"] == 12.5
+    assert any("Ignored stale local K-line frames for 1 symbols" in warning for warning in payload["warnings"])
+
+
+def test_compute_scan_payload_drops_stale_frames_without_market_snapshot(monkeypatch):
+    symbols = ["AAA/USDT"]
+    stale_frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.0], "volume": [10_000.0]},
+        index=[datetime(2026, 1, 1, tzinfo=timezone.utc)],
+    )
+
+    async def fake_resolve_universe(**kwargs):
+        return symbols, symbols, [], []
+
+    async def fake_load_market_frames(**kwargs):
+        return ({"AAA/USDT": stale_frame}, [])
+
+    async def fake_market_snapshots(**kwargs):
+        raise RuntimeError("coinglass_down")
+
+    async def fake_public_snapshots(**kwargs):
+        return {}
+
+    async def fail_if_called(**kwargs):
+        raise AssertionError("stale-only scan should not compute dependent payloads")
+
+    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_public_snapshots)
+    monkeypatch.setattr(altcoin_api, "get_factor_library", fail_if_called)
+    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fail_if_called)
+    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fail_if_called)
+
+    payload = asyncio.run(
+        altcoin_api._compute_scan_payload(
+            exchange="binance",
+            timeframe="4h",
+            symbols=symbols,
+            exclude_retired=True,
+            refresh=True,
+            universe_scope="research",
+            mode="combined",
+            view="4h",
+        )
+    )
+
+    assert payload["rows"] == []
+    assert payload["symbols_used"] == []
+    assert any("coinglass_down" in warning for warning in payload["warnings"])
+    assert any("Exchange public ticker fallback returned no data for 1 symbols" in warning for warning in payload["warnings"])
+    assert any("no fresh market snapshot" in warning for warning in payload["warnings"])
+
+
 def test_get_altcoin_scan_snapshot_resolves_universe_only_once(monkeypatch):
     altcoin_api._clear_altcoin_scan_cache()
     resolve_calls = 0
@@ -972,6 +1114,147 @@ def test_get_altcoin_scan_snapshot_serves_stale_cache_while_refreshing(monkeypat
     assert refreshed["rows"][0]["tags"] == ["fresh"]
     assert any("fresh warning" in warning for warning in refreshed["warnings"])
     assert cache_key not in altcoin_api._ALTCOIN_SCAN_REFRESH_TASKS
+    altcoin_api._clear_altcoin_scan_cache()
+
+
+def test_get_altcoin_scan_snapshot_force_refresh_awaits_new_payload(monkeypatch):
+    altcoin_api._clear_altcoin_scan_cache()
+    state = {"compute_calls": 0}
+
+    async def fake_resolve_universe(**kwargs):
+        return ["AAA/USDT"], ["AAA/USDT"], [], []
+
+    async def fake_compute_scan_payload(**kwargs):
+        state["compute_calls"] += 1
+        return {
+            "exchange": "binance",
+            "timeframe": "4h",
+            "rows": [
+                {
+                    "symbol": "AAA/USDT",
+                    "tags": ["fresh"],
+                    "freshness": {"using_market_snapshot": True, "market_source_type": "live_snapshot"},
+                    "data_quality": {"market_data_freshness": 0.95, "using_market_snapshot": True},
+                }
+            ],
+            "symbols_requested": ["AAA/USDT"],
+            "symbols_used": ["AAA/USDT"],
+            "excluded_retired": [],
+            "warnings": ["fresh warning"],
+            "generated_at": "2026-04-21T12:00:00+00:00",
+            "universe_meta": {},
+        }
+
+    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api, "_compute_scan_payload", fake_compute_scan_payload)
+
+    cache_key = altcoin_api._cache_key(
+        exchange="binance",
+        timeframe="4h",
+        symbols=["AAA/USDT"],
+        exclude_retired=True,
+        mode="combined",
+        view="4h",
+        universe_scope="research",
+    )
+    altcoin_api._ALTCOIN_SCAN_CACHE[cache_key] = {
+        "stored_at": time.time(),
+        "payload": {
+            "exchange": "binance",
+            "timeframe": "4h",
+            "rows": [{"symbol": "AAA/USDT", "tags": ["cached"], "data_quality": {}}],
+            "symbols_requested": ["AAA/USDT"],
+            "symbols_used": ["AAA/USDT"],
+            "excluded_retired": [],
+            "warnings": ["cached warning"],
+            "generated_at": "2026-04-21T11:55:00+00:00",
+            "universe_meta": {},
+        },
+    }
+
+    payload = asyncio.run(
+        altcoin_api.get_altcoin_scan_snapshot(
+            exchange="binance",
+            timeframe="4h",
+            symbols=["AAA/USDT"],
+            exclude_retired=True,
+            refresh=True,
+            mode="combined",
+            view="4h",
+            universe_scope="research",
+        )
+    )
+
+    assert state["compute_calls"] == 1
+    assert payload["rows"][0]["tags"] == ["fresh"]
+    assert payload["cache"]["hit"] is False
+    assert payload["cache"]["served_mode"] == "live_compute"
+    assert any("fresh warning" in warning for warning in payload["warnings"])
+    assert not any("cached warning" in warning for warning in payload["warnings"])
+    altcoin_api._clear_altcoin_scan_cache()
+
+
+def test_get_altcoin_scan_snapshot_does_not_cache_all_stale_market_data(monkeypatch):
+    altcoin_api._clear_altcoin_scan_cache()
+    state = {"compute_calls": 0}
+
+    async def fake_resolve_universe(**kwargs):
+        return ["AAA/USDT"], ["AAA/USDT"], [], []
+
+    async def fake_compute_scan_payload(**kwargs):
+        state["compute_calls"] += 1
+        return {
+            "exchange": "binance",
+            "timeframe": "4h",
+            "rows": [
+                {
+                    "symbol": "AAA/USDT",
+                    "tags": ["stale"],
+                    "freshness": {"using_market_snapshot": False, "market_source_type": "local_kline"},
+                    "data_quality": {"market_data_freshness": 0.0, "using_market_snapshot": False},
+                }
+            ],
+            "symbols_requested": ["AAA/USDT"],
+            "symbols_used": ["AAA/USDT"],
+            "excluded_retired": [],
+            "warnings": ["stale warning"],
+            "generated_at": "2026-04-21T12:00:00+00:00",
+            "universe_meta": {},
+        }
+
+    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api, "_compute_scan_payload", fake_compute_scan_payload)
+
+    async def runner():
+        first = await altcoin_api.get_altcoin_scan_snapshot(
+            exchange="binance",
+            timeframe="4h",
+            symbols=["AAA/USDT"],
+            exclude_retired=True,
+            refresh=False,
+            mode="combined",
+            view="4h",
+            universe_scope="research",
+        )
+        second = await altcoin_api.get_altcoin_scan_snapshot(
+            exchange="binance",
+            timeframe="4h",
+            symbols=["AAA/USDT"],
+            exclude_retired=True,
+            refresh=False,
+            mode="combined",
+            view="4h",
+            universe_scope="research",
+        )
+        return first, second
+
+    first, second = asyncio.run(runner())
+
+    assert state["compute_calls"] == 2
+    assert first["cache"]["hit"] is False
+    assert second["cache"]["hit"] is False
+    assert any("not cached" in warning for warning in first["warnings"])
+    assert any("not cached" in warning for warning in second["warnings"])
     altcoin_api._clear_altcoin_scan_cache()
 
 

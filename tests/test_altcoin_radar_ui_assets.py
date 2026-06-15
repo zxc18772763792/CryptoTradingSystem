@@ -77,6 +77,7 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "if (!state.watchlist.length) state.watchlist = DEFAULT_WATCHLIST.slice();" in radar_js
     assert "return 'RENDER/USDT';" in radar_js
     assert "async function mutateWatchlist(action, symbol)" in radar_js
+    assert "const updated = normalizeSymbols(resp?.symbols || []);" in radar_js
     assert "const activeKinds = alertKindsForRow(row);" in radar_js
     assert "button.textContent = activeKinds.has(kind) ? `回收${label}` : `建${label}`;" in radar_js
     assert "btn-altcoin-radar-alert-anomaly" in radar_js
@@ -103,6 +104,13 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "function focusWatchlistSymbol(symbol)" in radar_js
     assert "function syncSelectedRankingRow()" in radar_js
     assert "function refreshCurrentScan()" in radar_js
+    assert "const ALTCOIN_RADAR_PREFS_KEY" in radar_js
+    assert "function applySavedControls()" in radar_js
+    assert "function saveControls(extra = {})" in radar_js
+    assert "state.detailSeq += 1;" in radar_js
+    assert 'data-row-action="clear-filters"' in radar_js
+    assert "function clearClientFilters()" in radar_js
+    assert "function marketSourceLabel(row)" in radar_js
     assert "function cacheTimelineEvents(symbol, events)" in radar_js
     assert "function getCachedTimelineEvents(symbol)" in radar_js
     assert "renderUniverseManagerLegacy" not in radar_js
@@ -114,6 +122,8 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "const actionPlan = detailPayload?.action_plan || {}" in radar_js
     assert "'altcoin-radar-action-list'" in radar_js
     assert "['Derivatives 来源', String(derivativesContext.source_name || '--')]" in radar_js
+    assert "['Market Source', marketSourceLabel(selected)]" in radar_js
+    assert "['Market As Of', selectedFreshness.as_of ? fmtDateTime(selectedFreshness.as_of) : '--']" in radar_js
     assert "['Long/Short', shortNumber(metrics.long_short_ratio)]" in radar_js
     assert "['Derivatives 错误', derivativesError || '--']" in radar_js
 

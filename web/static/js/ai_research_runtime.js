@@ -88,8 +88,17 @@
   }
 
   function candidateResultTop(candidate) {
-    const topRows = Array.isArray(candidate?.top_results) ? candidate.top_results : [];
-    return topRows.length ? topRows[0] : null;
+    // Backtest rows live under candidate.metadata.top_results (see /candidates
+    // serialization); fall back to top-level / best-metrics summaries for safety.
+    const meta = candidate?.metadata || {};
+    const topRows = Array.isArray(meta.top_results)
+      ? meta.top_results
+      : (Array.isArray(candidate?.top_results) ? candidate.top_results : []);
+    if (topRows.length) return topRows[0];
+    const best = (meta.best && Object.keys(meta.best).length ? meta.best : null)
+      || candidate?.validation_summary?.metrics?.best
+      || null;
+    return best && typeof best === 'object' && Object.keys(best).length ? best : null;
   }
 
   function findSelectedCandidateRecord(snapshot) {

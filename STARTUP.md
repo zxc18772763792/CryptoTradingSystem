@@ -103,6 +103,14 @@ Start intentionally in live mode:
 .\web.bat start -AllowPersistedLiveMode
 ```
 
+Start the explicit live shadow + news engine profile:
+
+```bat
+.\web.bat live-shadow-news -ConfirmLive -ResetNewsLlmFailover
+```
+
+This profile is the unambiguous operations entry for the current live setup. It restarts web plus the news worker and news LLM worker, sets live mode, forces `MARKET_WS_MODE=shadow`, sets `MARKET_WS_FAIL_CLOSED_FOR_LIVE=true`, and runs the live-shadow market WS precheck. `-ResetNewsLlmFailover` clears the sticky news LLM failover state so NIM is tried first again.
+
 Start web only without the news engine:
 
 ```bat
@@ -199,9 +207,11 @@ If the service should be in `live`:
 The startup chain is layered like this:
 
 - `web.bat`: the only user-facing entry; no args mean one-click startup with browser
-- `scripts\web.ps1`: command router for `help`, `start`, `status`, and `stop`
+- `scripts\web.ps1`: command router for `help`, `start`, `status`, `stop`, and `live-shadow-news`
 - `scripts\start_web_ps.ps1`: transcript wrapper that writes `logs\web_ps.log`
 - `_once.ps1`: low-level launcher that boots web and optional workers, waits for readiness, and can optionally start the autonomous agent through the API
+
+Market WS evidence scripts such as `scripts\market_ws_live_shadow.ps1` are not the normal operations startup path. They intentionally disable unrelated background workers, including news, to collect cleaner WS evidence. Use `.\web.bat live-shadow-news -ConfirmLive -ResetNewsLlmFailover` when you want live shadow WS and the news engine running together.
 
 ## URLs And Logs
 

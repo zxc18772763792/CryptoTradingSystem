@@ -933,6 +933,31 @@ def build_altcoin_rows(
         stale_data = (1.0 - market_freshness) + (1.0 - snapshot_freshness)
         liquidity_risk = spread_bps + (1.0 / max(avg_dollar_volume, 1.0)) * 1_000_000.0
         market_snapshot_fresh = bool(market_snapshot and market_freshness >= 0.45)
+        local_market_as_of = (
+            df.index[-1].isoformat()
+            if not df.empty and hasattr(df.index[-1], "isoformat")
+            else str(df.index[-1])
+            if not df.empty
+            else None
+        )
+        if use_market_snapshot:
+            market_source_name = str(
+                coinglass_market_metrics.get("source_name")
+                or market_snapshot.get("source_name")
+                or "market_snapshot"
+            ).strip()
+            market_source_type = "live_snapshot"
+        elif not df.empty:
+            market_source_name = "local_kline"
+            market_source_type = "local_kline"
+        else:
+            market_source_name = str(market_snapshot.get("source_name") or "market_snapshot").strip()
+            market_source_type = "live_snapshot" if market_snapshot else "missing"
+        market_as_of = (
+            coinglass_market_metrics.get("market_as_of")
+            if use_market_snapshot
+            else local_market_as_of or market_snapshot.get("timestamp")
+        )
 
         degraded_reason: List[str] = []
         if market_freshness < 0.45:
@@ -1064,14 +1089,15 @@ def build_altcoin_rows(
                 ),
             },
             "freshness": {
-                "as_of": (
-                    coinglass_market_metrics.get("market_as_of")
-                    if use_market_snapshot
-                    else df.index[-1].isoformat() if not df.empty and hasattr(df.index[-1], "isoformat") else str(df.index[-1]) if not df.empty else market_snapshot.get("timestamp")
-                ),
+                "as_of": market_as_of,
                 "market_data_age_sec": None if market_age_sec is None else round(market_age_sec, 2),
                 "snapshot_age_sec": None if snapshot_age_sec is None else round(snapshot_age_sec, 2),
                 "derivatives_age_sec": None if derivatives_age_sec is None else round(derivatives_age_sec, 2),
+                "market_source": market_source_name,
+                "market_source_type": market_source_type,
+                "using_market_snapshot": bool(use_market_snapshot),
+                "local_market_as_of": local_market_as_of,
+                "market_snapshot_as_of": market_snapshot.get("timestamp"),
                 "market_label": "fresh" if market_freshness >= 0.7 else "watch" if market_freshness >= 0.45 else "stale",
                 "snapshot_label": "fresh"
                 if snapshot_freshness >= 0.7
@@ -1092,6 +1118,9 @@ def build_altcoin_rows(
                 "derivatives_data_freshness": _round4(derivatives_freshness),
                 "chain_quality": _round4(chain_quality),
                 "derivatives_present": bool(derivatives),
+                "market_source": market_source_name,
+                "market_source_type": market_source_type,
+                "using_market_snapshot": bool(use_market_snapshot),
                 "degraded_reason": degraded_reason,
             },
             "derivatives_context": {

@@ -70,7 +70,19 @@ function Get-PmWorkerPid {
 
 function Enable-CondaEnv {
     param([string]$Name)
+    $workspaceRoot = Split-Path -Parent $PSScriptRoot
+    $localCondaRoot = Join-Path $workspaceRoot ".conda\miniforge3"
+    $localCondaHook = Join-Path $localCondaRoot "shell\condabin\conda-hook.ps1"
+    $localCondabin = Join-Path $localCondaRoot "condabin"
+    if (Test-Path $localCondabin) {
+        $pathParts = @($env:Path -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ($pathParts -notcontains $localCondabin) {
+            $env:Path = $localCondabin + ";" + $env:Path
+        }
+    }
+
     $hookCandidates = @(
+        $localCondaHook,
         "C:\ProgramData\anaconda3\shell\condabin\conda-hook.ps1",
         "$env:USERPROFILE\anaconda3\shell\condabin\conda-hook.ps1",
         "$env:USERPROFILE\miniconda3\shell\condabin\conda-hook.ps1"

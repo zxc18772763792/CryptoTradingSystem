@@ -160,6 +160,53 @@ def test_operating_mode_returns_stale_cache_while_refresh_runs(monkeypatch):
     assert refresh_pending is True
 
 
+def test_sources_health_returns_fallback_when_build_times_out(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    ai_module._reset_sources_health_cache_for_tests()
+
+    async def _slow_build():
+        await asyncio.sleep(0.2)
+        return {"categories": {}, "summary": {}}
+
+    monkeypatch.setattr(ai_module, "_SOURCES_HEALTH_BUILD_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(ai_module, "_build_sources_health_payload", _slow_build)
+
+    result = asyncio.run(ai_module._get_sources_health_payload())
+
+    assert result["cache_status"] == "fallback"
+    assert result["degraded_reason"] == "sources_health_build_timeout"
+    assert result["summary"]["core_ready"] is False
+
+    ai_module._reset_sources_health_cache_for_tests()
+
+
+def test_sources_health_returns_stale_cache_while_refresh_runs(monkeypatch):
+    from web.api import ai_research as ai_module
+
+    ai_module._reset_sources_health_cache_for_tests()
+
+    async def _slow_build():
+        await asyncio.sleep(0.2)
+        return {"cache_marker": "fresh", "categories": {}}
+
+    ai_module._SOURCES_HEALTH_CACHE["payload"] = {"cache_marker": "stale", "categories": {}}
+    ai_module._SOURCES_HEALTH_CACHE["expires_at"] = datetime.now(timezone.utc) - timedelta(seconds=1)
+    monkeypatch.setattr(ai_module, "_build_sources_health_payload", _slow_build)
+
+    async def _call():
+        result = await ai_module._get_sources_health_payload()
+        task = ai_module._SOURCES_HEALTH_CACHE_TASK
+        return result, task is not None and not task.done()
+
+    result, refresh_pending = asyncio.run(_call())
+
+    assert result["cache_marker"] == "stale"
+    assert refresh_pending is True
+
+    ai_module._reset_sources_health_cache_for_tests()
+
+
 def test_work_queue_unifies_drafts_reserve_degradations_and_agent_blocker(monkeypatch):
     from core.ai.proposal_schemas import ProposalValidationSummary
     from web.api import ai_research as ai_module
@@ -1785,7 +1832,11 @@ def test_live_signal_snapshot_exposes_aggregated_timestamp(monkeypatch):
     assert payload["market_data_last_bar_at"] == "2026-04-06T00:15:00+00:00"
 
 
-def test_load_signal_market_data_localizes_naive_bar_timestamp_to_shanghai(monkeypatch):
+def test_load_signal_market_data_interprets_naive_bar_timestamp_as_utc(monkeypatch):
+    # Market-data parquet/live indexes are tz-naive UTC (data_storage coerces to
+    # UTC then drops tzinfo). A naive bar timestamp must therefore be read as UTC,
+    # not as an Asia/Shanghai wall clock — otherwise the freshness age is inflated
+    # ~8h and every signal is wrongly flagged "数据旧".
     from web.api import ai_research as ai_module
 
     frame = pd.DataFrame(
@@ -1807,7 +1858,7 @@ def test_load_signal_market_data_localizes_naive_bar_timestamp_to_shanghai(monke
         )
     )
 
-    assert meta["market_data_last_bar_at"] == "2026-04-06T11:15:00+08:00"
+    assert meta["market_data_last_bar_at"] == "2026-04-06T11:15:00+00:00"
     assert meta["market_data_age_sec"] is not None
 
 

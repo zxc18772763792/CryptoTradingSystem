@@ -69,6 +69,10 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "ai-flow-stage-grid" in runtime_js
     assert "renderChainSummary" in runtime_js
     assert "proposalResearchThesis(proposal)" in runtime_js
+    # candidateResultTop must read backtest rows from metadata.top_results (the
+    # canonical /candidates serialization), not a non-existent top-level field —
+    # otherwise the flow-console Step 3 drawdown metric is always "--".
+    assert "Array.isArray(meta.top_results)" in runtime_js
     assert "modules.candidates" in candidates_js
     assert "window.agentStart = agentStart" in agent_js
     assert "renderAgentChainSummary" in agent_js

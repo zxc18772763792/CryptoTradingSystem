@@ -3859,6 +3859,36 @@ class AutonomousTradingAgent:
                     )
             return items
 
+        def _compact_blocked_symbol_sides(value: Any, limit: int) -> List[Dict[str, Any]]:
+            # `blocked_symbol_sides` entries are dicts ({symbol, side, cooldown_*,
+            # reason}) built by autonomous_learning; a legacy/compact "SYMBOL:side"
+            # string form may also appear. Emit clean structured dicts either way so
+            # the model can honor the "default to hold on blocked symbol-side" rule
+            # instead of receiving a truncated Python repr of the dict.
+            items: List[Dict[str, Any]] = []
+            if not isinstance(value, list):
+                return items
+            for entry in value[: max(0, int(limit))]:
+                if isinstance(entry, dict):
+                    symbol = str(entry.get("symbol") or "").strip()
+                    side = str(entry.get("side") or "").strip()
+                else:
+                    symbol, _, side = str(entry or "").strip().partition(":")
+                    symbol, side = symbol.strip(), side.strip()
+                if not symbol:
+                    continue
+                compact_entry: Dict[str, Any] = {"symbol": symbol[:32], "side": side[:8]}
+                if isinstance(entry, dict):
+                    compact_entry["cooldown_active"] = bool(entry.get("cooldown_active"))
+                    with contextlib.suppress(Exception):
+                        if entry.get("cooldown_minutes") is not None:
+                            compact_entry["cooldown_minutes"] = int(entry.get("cooldown_minutes"))
+                    reason = str(entry.get("reason") or "").strip()
+                    if reason:
+                        compact_entry["reason"] = reason[:120]
+                items.append(compact_entry)
+            return items
+
         def _compact_market_structure_payload(payload: Any) -> Dict[str, Any]:
             market_structure = dict(payload or {})
             trend = dict(market_structure.get("trend") or {})
@@ -4126,7 +4156,7 @@ class AutonomousTradingAgent:
                     "recent_close_loss_streak_count": int(summary.get("recent_close_loss_streak_count") or 0),
                     "recent_latency_avg_ms": _float_or_default(summary.get("recent_latency_avg_ms"), 0.0),
                     "current_open_position_count": int(summary.get("current_open_position_count") or 0),
-                    "blocked_symbol_sides": _slice_text_list(learning_memory.get("blocked_symbol_sides"), 6),
+                    "blocked_symbol_sides": _compact_blocked_symbol_sides(learning_memory.get("blocked_symbol_sides"), 6),
                     "guardrails": _slice_text_list(learning_memory.get("guardrails"), 6),
                     "lessons": _slice_text_list(learning_memory.get("lessons"), 4),
                 }

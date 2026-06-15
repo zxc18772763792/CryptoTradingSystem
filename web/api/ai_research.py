@@ -10,7 +10,6 @@ import math
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
@@ -57,11 +56,19 @@ from core.research.orchestrator import (
 
 
 router = APIRouter()
-SIGNAL_MARKET_DATA_TIMEZONE = ZoneInfo("Asia/Shanghai")
+# Market-data parquet/live indexes are tz-naive UTC (data_storage coerces to UTC
+# then drops tzinfo). Naive bar timestamps must therefore be interpreted as UTC —
+# localizing them as an Asia/Shanghai wall clock shifts each bar ~8h earlier and
+# inflates the freshness age by ~8h, marking every fresh signal "数据旧".
+SIGNAL_MARKET_DATA_TIMEZONE = timezone.utc
 _OPERATING_MODE_CACHE_TTL_SEC = 20.0
 _OPERATING_MODE_BUILD_TIMEOUT_SEC = 2.5
 _OPERATING_MODE_CACHE: Dict[str, Any] = {"payload": None, "expires_at": None}
 _OPERATING_MODE_CACHE_TASK: Optional[asyncio.Task] = None
+_SOURCES_HEALTH_CACHE_TTL_SEC = 30.0
+_SOURCES_HEALTH_BUILD_TIMEOUT_SEC = 8.0
+_SOURCES_HEALTH_CACHE: Dict[str, Any] = {"payload": None, "expires_at": None}
+_SOURCES_HEALTH_CACHE_TASK: Optional[asyncio.Task] = None
 
 
 class AIPlannerGenerateRequest(BaseModel):
@@ -6110,10 +6117,77 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
     }
 
 
+def _clear_sources_health_cache_task(task: asyncio.Task) -> None:
+    global _SOURCES_HEALTH_CACHE_TASK
+    if _SOURCES_HEALTH_CACHE_TASK is task:
+        _SOURCES_HEALTH_CACHE_TASK = None
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.debug(f"sources health background refresh failed: {exc}")
+
+
+def _reset_sources_health_cache_for_tests() -> None:
+    global _SOURCES_HEALTH_CACHE_TASK
+    task = _SOURCES_HEALTH_CACHE_TASK
+    if task is not None and not task.done():
+        task.cancel()
+    _SOURCES_HEALTH_CACHE_TASK = None
+    _SOURCES_HEALTH_CACHE["payload"] = None
+    _SOURCES_HEALTH_CACHE["expires_at"] = None
+
+
+def _start_sources_health_cache_task(*, force: bool = False) -> asyncio.Task:
+    global _SOURCES_HEALTH_CACHE_TASK
+    task = _SOURCES_HEALTH_CACHE_TASK
+    if not force and task is not None and not task.done():
+        return task
+
+    async def _runner() -> Dict[str, Any]:
+        result = await _build_sources_health_payload()
+        _SOURCES_HEALTH_CACHE["payload"] = dict(result)
+        _SOURCES_HEALTH_CACHE["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=_SOURCES_HEALTH_CACHE_TTL_SEC)
+        return result
+
+    task = asyncio.create_task(_runner())
+    task.add_done_callback(_clear_sources_health_cache_task)
+    _SOURCES_HEALTH_CACHE_TASK = task
+    return task
+
+
+async def _get_sources_health_payload(*, force: bool = False) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    expires_at = _SOURCES_HEALTH_CACHE.get("expires_at")
+    payload = _SOURCES_HEALTH_CACHE.get("payload")
+    if (
+        not force
+        and isinstance(payload, dict)
+        and isinstance(expires_at, datetime)
+        and expires_at > now
+    ):
+        return dict(payload)
+
+    task = _start_sources_health_cache_task(force=force)
+    if not force and isinstance(payload, dict):
+        return dict(payload)
+
+    try:
+        result = await asyncio.wait_for(asyncio.shield(task), timeout=max(0.01, float(_SOURCES_HEALTH_BUILD_TIMEOUT_SEC)))
+        return dict(result)
+    except asyncio.TimeoutError:
+        return _operating_mode_source_health_fallback("sources_health_build_timeout")
+    except Exception as exc:
+        if isinstance(payload, dict):
+            return dict(payload)
+        return _operating_mode_source_health_fallback("sources_health_build_failed", error=str(exc))
+
+
 @router.get("/sources/health")
-async def get_sources_health():
+async def get_sources_health(force: bool = False):
     """Return a unified health inventory for data and AI sources."""
-    return await _build_sources_health_payload()
+    return await _get_sources_health_payload(force=force)
 
 
 @router.get("/operating-mode")
@@ -6274,7 +6348,14 @@ async def get_gate_audit_summary(limit: int = 500):
 @router.get("/premium-data/status")
 async def get_premium_data_status():
     """Backward-compatible premium data status with richer metadata."""
-    payload = await _build_sources_health_payload()
+    payload = await _get_sources_health_payload()
+    # The cached source-health path is time-bounded and can return a degraded
+    # fallback (empty `categories`) when the background build is slow under DB or
+    # network contention. This endpoint must expose the detailed per-source
+    # inventory, so rebuild directly when the cached payload came back degraded
+    # rather than handing callers empty source dicts.
+    if payload.get("cache_status") == "fallback" or not payload.get("categories"):
+        payload = await _build_sources_health_payload()
     categories = payload.get("categories") or {}
     sources = {
         "glassnode": dict((((categories.get("premium_onchain") or {}).get("sources") or {}).get("glassnode") or {})),

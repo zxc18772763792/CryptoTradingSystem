@@ -763,6 +763,7 @@ def test_premium_data_status_treats_cached_data_as_available(monkeypatch):
     from web.api import ai_research as ai_module
     from core.news.storage import db as news_db
 
+    ai_module._reset_sources_health_cache_for_tests()
     monkeypatch.setattr("core.data.glassnode_collector.load_glassnode_snapshot", lambda: {"sopr": 1.02, "mvrv_z": None})
     monkeypatch.setattr("core.data.glassnode_collector._api_key", lambda: "")
     # `_build_sources_health_payload` performs real news_db queries which can hang on
@@ -1561,3 +1562,51 @@ def test_order_preview_rejects_wrong_status(monkeypatch):
         assert False, "should have raised HTTPException"
     except HTTPException as exc:
         assert exc.status_code == 400
+
+
+def test_normalize_signal_market_timestamp_treats_naive_as_utc():
+    """Market-data parquet/live indexes are tz-naive UTC.
+
+    Naive bar timestamps must be read as UTC; the old Asia/Shanghai (UTC+8)
+    localization shifted each bar 8h earlier and inflated the freshness age.
+    """
+    from web.api import ai_research as ai_module
+
+    naive_bar = pd.Timestamp("2026-06-15 08:00:00")  # tz-naive UTC bar
+    normalized = ai_module._normalize_signal_market_timestamp(naive_bar)
+    assert normalized is not None
+    # 08:00 naive must map to 08:00 UTC, not 00:00 UTC (UTC+8 wall clock).
+    assert normalized.tz_convert(timezone.utc).isoformat().startswith("2026-06-15T08:00:00")
+
+
+def test_signal_market_data_fresh_utc_bar_is_not_stale(monkeypatch):
+    """A fresh UTC bar must not be flagged '数据旧'.
+
+    Regression for the ~8h age inflation that marked every signal stale when
+    naive UTC bar timestamps were interpreted as Asia/Shanghai local time.
+    """
+    from web.api import ai_research as ai_module
+    from core.strategies import strategy_manager as sm
+
+    now_utc_naive = pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
+    idx = pd.date_range(end=now_utc_naive, periods=5, freq="1h")
+    df = pd.DataFrame(
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0},
+        index=idx,
+    )
+
+    async def _fake_load(exchange, symbol, timeframe, limit=300):
+        return df.copy()
+
+    monkeypatch.setattr(sm, "_load_market_data", _fake_load)
+
+    _df, meta = asyncio.run(
+        ai_module._load_signal_market_data(
+            exchange="binance", symbol="BTC/USDT", timeframe="1h", limit=120
+        )
+    )
+    assert meta["market_data_rows"] == 5
+    assert meta["market_data_stale"] is False
+    # Last bar == now, so age is near zero — not ~8h (28800s).
+    assert meta["market_data_age_sec"] is not None
+    assert meta["market_data_age_sec"] < 3600

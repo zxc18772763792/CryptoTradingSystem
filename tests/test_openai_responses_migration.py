@@ -1954,6 +1954,52 @@ def test_news_sync_summary_source_labels_nim_gm_and_ds(monkeypatch):
         assert result["source"] == expected_source
 
 
+def test_news_sync_batch_summary_accepts_nim_result_wrapper(monkeypatch):
+    import core.news.eventizer.llm_glm5 as module
+
+    module._SUMMARY_CACHE.clear()
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "nim-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "google/gemma-3n-e4b-it", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_FORCE_CHAT_COMPLETIONS", True, raising=False)
+
+    def _fake_post(url, *, headers=None, json=None, timeout=None):
+        return _SyncResponse(
+            {
+                "model": "google/gemma-3n-e4b-it",
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"output":[{"idx":0,"summary":"NIM 摘要",'
+                                '"sentiment":"neutral"}]}'
+                            ),
+                        }
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(module.requests, "post", _fake_post)
+
+    result = module.batch_summarize_titles(
+        ["BTC trades flat"],
+        {"llm": {"provider": "openai", "force_chat_completions": True, "summarize_batch_size": 1}},
+        max_length=60,
+    )
+
+    assert result == [
+        {
+            "summary": "NIM 摘要",
+            "sentiment": "neutral",
+            "source": "nim_summary:google-gemma-3n-e4b-it",
+        }
+    ]
+
+
 def test_news_sync_summary_falls_back_to_chat_completions(monkeypatch):
     import core.news.eventizer.llm_glm5 as module
 
