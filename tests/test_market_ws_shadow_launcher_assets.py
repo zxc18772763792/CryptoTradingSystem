@@ -126,3 +126,60 @@ def test_ui_primary_launcher_pins_level3_env_and_gates():
     assert "[switch]$DrillForceRest" in script
     assert 'set "MARKET_WS_FORCE_REST=true"' in script
     assert "force_rest=$($market.force_rest)" in script
+
+
+def test_strategy_primary_launcher_pins_level4_env_and_gates():
+    script = _read("scripts/market_ws_strategy_primary.ps1")
+
+    # Level-4 runtime env: live + strategy_primary + quality guard forced on +
+    # fail-closed for live. Mark-price stream stays pinned off (no scope creep).
+    for expected in (
+        'set "TRADING_MODE=live"',
+        'set "MARKET_WS_ENABLED=true"',
+        'set "MARKET_WS_MODE=strategy_primary"',
+        'set "MARKET_WS_FORCE_REST=false"',
+        'set "MARKET_WS_FAIL_CLOSED_FOR_LIVE=true"',
+        'set "MARKET_WS_QUALITY_GUARD_ENABLED=true"',
+        'set "MARKET_WS_MARK_PRICE_ENABLED=false"',
+    ):
+        assert expected in script
+
+    # Defense-in-depth: BOTH live-confirm switches are required, and the L4 gate
+    # re-evaluates the COMPLETED Level-3 ui_primary report inside start-service.
+    assert "[switch]$ConfirmLive" in script
+    assert "[switch]$ConfirmStrategyPrimary" in script
+    assert "Require-LiveConfirm" in script
+    assert "evaluate_market_ws_shadow_report.py" in script
+    assert "Invoke-Level3Gate" in script
+    assert "Level-3 evaluator gate FAILED" in script
+    assert '"--expect-mode", "ui_primary"' in script
+    assert '"--expect-runtime", "live"' in script
+    assert '"--require-final-runtime-fields"' in script
+
+    # Hard s28.5 fallback-drill-record gate (no skip switch).
+    assert "Require-DrillReport" in script
+    assert "[string]$DrillReport" in script
+
+    # Observation selfcheck pins strategy_primary/live; REST reconcile suppressed
+    # while WS healthy, so do not require shadow-compare growth.
+    assert "--expect-mode strategy_primary" in script
+    assert "--expect-runtime live" in script
+    assert "--min-shadow-compare-delta 0" in script
+    assert "--tolerate-transient" in script
+
+    # READY probe must verify the service truly came up as strategy_primary with
+    # the guard on and fail-closed armed -- never trust the requested mode blindly.
+    assert "expected 'strategy_primary'" in script
+    assert "without the WS quality guard enabled" in script
+    assert "fail_closed_for_live=false" in script
+
+    # Instrumented detach markers + ops auth header, same as Level 1/2/3.
+    assert "MARKET_WS_STRATEGY_PRIMARY_${Kind}_START" in script
+    assert "MARKET_WS_STRATEGY_PRIMARY_${Kind}_EXIT" in script
+    assert '"X-OPS-TOKEN" = $Token' in script
+    assert "Authorization" not in script
+
+    # Fallback drill for L4 rollback proof.
+    assert "[switch]$DrillForceRest" in script
+    assert 'set "MARKET_WS_FORCE_REST=true"' in script
+    assert "force_rest=$($market.force_rest)" in script

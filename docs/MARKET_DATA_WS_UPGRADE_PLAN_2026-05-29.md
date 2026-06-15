@@ -4907,3 +4907,62 @@ force_rest 生效确认: ____  UI 价格连续性: ____
 恢复后 guard recover 时间: ____  ws_trusted: ____
 结论: PASS / FAIL（FAIL → L4 推迟，按 §28.3 定位）
 ```
+
+### 33.8 续作检查点 - 2026-06-15（L4 门禁补齐：新增 strategy_primary launcher + 当前状态核对）
+
+#### 当前运行态核对（2026-06-15）
+- **live 运行态已回落到 REST 基线（L0）**：`.env` 无任何 `MARKET_WS_*` 配置 → 全部取 `settings.py` 默认 → `MARKET_WS_MODE=off`、`MARKET_WS_ENABLED=false`，exchange WS feed 未启动；`TRADING_MODE=live`。
+- **L3 连续性已中断**：当前服务是普通 `uvicorn`（`logs/uvicorn_web_20260615_095551.*`），当日多次重启（00:54 / 09:28 / 09:47 / 09:55），且有 conda 环境重建记录（talib/mamba）。最后一次经门禁 launcher 启动的 ui_primary 服务停在 06-11。
+- **结论**：§28.5 前置条件 #1（L3 稳定一个完整交易日 + fallback 演练记录）当前 **不满足**；进入 L4 前必须先经 ui_primary launcher 重新建立 L3 并完成 6h 观察 + fallback 演练。
+
+#### 本轮代码侧验证（rebuilt env 上复跑）
+- 全量测试：1997 passed / 1 skipped（约 10 分钟）。
+- WS 相关子集 147 passed（ccxt_pro / hub / authority_static / shadow_eval / runtime_price / web_main_runtime 等）。
+- §28.5 #2：order/execution/strategy/runtime 选集 **236 passed**。
+- §28.5 #3：`strategies/ core/strategies/ core/trading/ core/risk/ core/accounting/` 静态扫描 **无 `.get_ticker(` 绕过**。
+- 安全网核对：`_enforce_primary_mode_guard`（primary 模式无 guard → fail-closed 降级 shadow）与 watchdog 重连冷却修复（commit 3433b91）均在位。
+- 附带修复：`core/risk/circuit_breaker.py` 的 `_fire_close_positions` 之前用 `running.create_task(result)` 未持引用，存在被 GC 回收导致熔断平仓任务静默丢失的隐患；已加 `self._bg_tasks` 强引用 + done-callback 清理（39 个熔断器测试通过）。
+
+#### 新增：门禁化 L4 launcher（补齐 §33.6 根因）
+§33.6 越级事故的结构性根因是 **没有 strategy_primary 的门禁 launcher**，只能手搓 cmd 绕过 guard。本轮新增：
+- `scripts/market_ws_strategy_primary.ps1`：完全镜像 ui_primary launcher 的门禁结构，并在 L4 上更严：
+  - 启动需 **同时** `-ConfirmLive` 和 `-ConfirmStrategyPrimary`（双确认，防误启）。
+  - `start-service` 内强制重跑 evaluator 门禁，评估 **已完成的 L3 ui_primary 观察报告**（`--expect-mode ui_primary --expect-runtime live`，无 skip）。
+  - `Require-DrillReport`：强制 `-DrillReport` 指向已记录的 fallback 演练证据，缺失即拒（无 skip）。
+  - pinned env：`MARKET_WS_MODE=strategy_primary` + `QUALITY_GUARD_ENABLED=true` + `FAIL_CLOSED_FOR_LIVE=true` + `MARK_PRICE_ENABLED=false`。
+  - READY 探针校验真实 `mode=strategy_primary`、guard enabled、fail_closed_for_live、force_rest 实际值；不符即抛错。
+  - 保留 `-DrillForceRest` 作 L4 回滚演练；`stop`/`status` 与 ui_primary 对称。
+- `tests/test_market_ws_shadow_launcher_assets.py`：新增 `test_strategy_primary_launcher_pins_level4_env_and_gates`（5 个 launcher 资产测试全过）。
+- PowerShell 语法解析通过；五条拒绝路径已实测：无 token / 无 -ConfirmLive / 无 -ConfirmStrategyPrimary / 无 -DrillReport / gate 无 -EvaluatedReport 均正确拒绝，未触发任何启动。
+
+#### L4 仍未满足（无法在本轮内完成，需人工 + 长跑 + 明确批准）
+1. 重新建立 L3：经 `market_ws_ui_primary.ps1` 启动 ui_primary，6h 观察 selfcheck PASS。
+2. L3 稳定一个完整交易日（无非预期重启/降级，以 launch.json 时间戳为准）。
+3. fallback 演练（`market_ws_ui_primary.ps1 ... -DrillForceRest`）并记录到 §33.7 模板。
+4. **用户明确批准**（§33.6 教训，无例外）。
+
+#### L4 切换命令序列（满足上述 1–4 后执行；全程经 launcher，禁止手搓）
+```powershell
+# 0. 停掉当前 ui_primary 服务（确认端口空出）
+scripts\market_ws_ui_primary.ps1 -Action stop -Port 8000
+# 1. L4 门禁干跑（不启动，仅验证 L3 报告通过 evaluator）
+scripts\market_ws_strategy_primary.ps1 -Action gate -EvaluatedReport <已完成的L3_ui_primary_selfcheck.out.json> -ServiceErrLog <对应service.err.log> -PythonExe <env python>
+# 2. 启动 L4 strategy_primary 服务（双确认 + L3报告 + 演练记录，缺一即拒）
+scripts\market_ws_strategy_primary.ps1 -Action start-service -ConfirmLive -ConfirmStrategyPrimary `
+  -EvaluatedReport <L3报告> -ServiceErrLog <L3 err log> -DrillReport <fallback演练记录> `
+  -Port 8000 -Token <OPS_TOKEN> -PythonExe <env python>
+# 3. 启动 L4 观察 selfcheck（--expect-mode strategy_primary）
+scripts\market_ws_strategy_primary.ps1 -Action start-selfcheck -ConfirmLive -ConfirmStrategyPrimary -Port 8000 -Token <OPS_TOKEN> -PythonExe <env python>
+# 回滚（任一异常）：第一杆 MARKET_WS_FORCE_REST=true（-DrillForceRest 重启），或退回 ui_primary/shadow
+```
+
+#### L3 重建执行记录（2026-06-15 14:49 +08:00）
+重新核对发现当前 live 服务实际处于 **L2 shadow（WS feed healthy）**，持 **2 个真实持仓**（ETH/USDT:USDT long @1584.42、BTW/USDT:USDT short），并非先前误判的 L0。经用户在知情（含持仓重启风险）后明确批准，按门禁 launcher 重建 L3：
+1. L2→L3 gate 干跑 PASS（06-09 报告：samples=1441、violations=0、p99_abs_diff=14.92bps、p95_ws_age=2330ms）。
+2. `market_ws_ui_primary.ps1 -Action stop` 停旧服务（PID 24712）→ 端口释放确认。
+3. `-Action start-service -ConfirmLive`（评估 06-09 L2 报告 + err log）→ READY：PID 432、`trading_mode=live`、`market_ws_mode=ui_primary`、`quality_guard=True`、`force_rest=False`；task `CryptoMarketWsUiPrimary_service_20260615_144900`。
+4. 健康核对：`feed_healthy=True ws_hub_healthy=True fail_closed_for_live=True`；**2 个持仓从持久化状态恢复**，REST 仍为 order/exit 权威。
+5. WS quality guard 预热：t+0 degraded（warmup，REST fallback 兜底）→ **t+360s 恢复 `state=ws ws_trusted=True recover_count=1`**，ws_tick=553，rest_fallback 稳定在 6（仅预热期）。
+6. 6h L3 观察 selfcheck 启动：task `CryptoMarketWsUiPrimary_selfcheck_20260615_145021`，JSON `logs/ui_primary_selfcheck_20260615_145021.out.json`，预计 2026-06-15 20:50 结束。
+
+**L4 剩余前置**：本轮 ui_primary 自 2026-06-15 14:49 起算 → 满一个完整交易日（约 2026-06-16 14:49，期间无非预期重启/降级）+ 6h 观察评估 PASS + fallback 演练记录 + **用户明确 L4 批准**。评估 6h 报告用 `evaluate_market_ws_shadow_report.py --report logs/ui_primary_selfcheck_20260615_145021.out.json --expect-mode ui_primary --expect-runtime live`（阈值同 §33.8 的 Invoke-Level3Gate）。

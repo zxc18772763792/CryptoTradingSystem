@@ -140,6 +140,10 @@ class CircuitBreaker:
             Path(getattr(settings, "CACHE_PATH", Path("./data/cache"))) / "runtime_state" / "circuit_breaker.json"
         )
         self._listeners: List[Callable[[str, Dict[str, Any]], None]] = []
+        # Strong references to fire-and-forget close-position tasks. Without this
+        # the event loop only holds a weak reference and may garbage-collect the
+        # task mid-flight, silently dropping a breaker-triggered position close.
+        self._bg_tasks: set = set()
         self._load_from_disk()
 
     # ── persistence ──
@@ -448,7 +452,9 @@ class CircuitBreaker:
         # Async hook → schedule it on whatever loop is reachable.
         try:
             running = asyncio.get_running_loop()
-            running.create_task(result)
+            task = running.create_task(result)
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
             return
         except RuntimeError:
             pass  # no loop in this thread
