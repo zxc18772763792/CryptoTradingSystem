@@ -102,6 +102,44 @@ def test_market_ws_shadow_report_eval_fails_threshold_violations():
     assert "final_feed_healthy is not true" in result["errors"]
 
 
+def test_market_ws_shadow_report_eval_allows_missing_p99_when_no_shadow_compares():
+    # ui_primary/strategy_primary suppress the periodic REST reconcile while WS is
+    # healthy, so a clean run legitimately has 0 shadow compares and therefore no
+    # p99_abs_diff_bps. With compares not required (min=0), that must NOT fail —
+    # WS price accuracy was already validated at Level-2 shadow.
+    report = _report(
+        expect_mode="ui_primary",
+        expect_runtime="live",
+        final_mode="ui_primary",
+        final_trading_mode="live",
+        final_paper_trading=False,
+        shadow_compare_delta=0,
+        p99_abs_diff_bps=None,
+    )
+
+    result = _evaluate(
+        report,
+        expect_mode="ui_primary",
+        expect_runtime="live",
+        min_shadow_compare_delta=0,
+        log_counts={name: 0 for name in evaluator.DEFAULT_LOG_PATTERNS},
+    )
+
+    assert result["ok"] is True, result["errors"]
+    assert not any("p99_abs_diff_bps is missing" in error for error in result["errors"])
+
+
+def test_market_ws_shadow_report_eval_still_requires_p99_when_compares_present():
+    # Regression guard: when shadow compares actually ran, a missing p99 is still
+    # a hard failure (the accuracy signal must exist when it should).
+    report = _report(shadow_compare_delta=50, p99_abs_diff_bps=None)
+
+    result = _evaluate(report, min_shadow_compare_delta=1)
+
+    assert result["ok"] is False
+    assert any("p99_abs_diff_bps is missing" in error for error in result["errors"])
+
+
 def test_market_ws_shadow_report_eval_preserves_mark_price_observability():
     result = _evaluate(
         report=_report(
