@@ -211,7 +211,15 @@ def evaluate_report(
             max_stale_observed <= int(max_stale_symbol_count),
             f"max_stale_symbol_count_observed {max_stale_observed} > allowed {max_stale_symbol_count}",
         )
-    _add_error(errors, p99_abs_diff_bps is not None, "p99_abs_diff_bps is missing")
+    # p99_abs_diff_bps only exists when WS-vs-REST shadow compares actually ran.
+    # In ui_primary/strategy_primary the periodic shadow reconcile is suppressed
+    # while WS is healthy, so a clean run legitimately produces 0 compares and no
+    # p99 (WS price accuracy is validated earlier, at Level-2 shadow). Require p99
+    # only when compares were required (min>0) or actually occurred; the value
+    # bound below still applies whenever a p99 is present.
+    p99_required = int(min_shadow_compare_delta) > 0 or shadow_compare_delta > 0
+    if p99_required:
+        _add_error(errors, p99_abs_diff_bps is not None, "p99_abs_diff_bps is missing")
     if p99_abs_diff_bps is not None:
         _add_error(
             errors,
