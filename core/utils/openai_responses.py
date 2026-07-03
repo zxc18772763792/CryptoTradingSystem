@@ -442,6 +442,15 @@ def _build_scope_failover_entry(
     }
 
 
+def _failover_entry_matches_targets(raw_entry: Mapping[str, Any], base_urls: Sequence[str]) -> bool:
+    raw_base_urls = raw_entry.get("base_urls")
+    if not isinstance(raw_base_urls, list):
+        return False
+    normalized_raw = [str(item or "").rstrip("/") for item in raw_base_urls if str(item or "").strip()]
+    normalized_current = [str(item or "").rstrip("/") for item in base_urls if str(item or "").strip()]
+    return normalized_raw == normalized_current
+
+
 def _load_scope_failover_entry(
     scope: str,
     canonical: Sequence[Mapping[str, Any]],
@@ -463,7 +472,7 @@ def _load_scope_failover_entry(
                 if not isinstance(raw_entry, dict):
                     raw_entry = {}
                 raw_day = str(raw_entry.get("day") or "")
-                if raw_day != today:
+                if raw_day != today or not _failover_entry_matches_targets(raw_entry, base_urls):
                     raw_mode = "primary"
                     raw_preferred = ""
                     raw_chat_preferred: Sequence[str] = ()
@@ -490,7 +499,7 @@ def _load_scope_failover_entry(
         if not isinstance(raw_entry, dict):
             raw_entry = {}
         raw_day = str(raw_entry.get("day") or "")
-        if raw_day != today:
+        if raw_day != today or not _failover_entry_matches_targets(raw_entry, base_urls):
             raw_mode = "primary"
             raw_preferred = ""
             raw_chat_preferred = ()
@@ -542,7 +551,7 @@ def _remember_scope_failover_state(
                 if not isinstance(raw_entry, dict):
                     raw_entry = {}
                 raw_day = str(raw_entry.get("day") or "")
-                if raw_day != today:
+                if raw_day != today or not _failover_entry_matches_targets(raw_entry, base_urls):
                     raw_mode = "primary"
                     raw_preferred = ""
                     raw_chat_preferred: Sequence[str] = ()
@@ -612,7 +621,7 @@ def _remember_scope_failover_state(
         if not isinstance(raw_entry, dict):
             raw_entry = {}
         raw_day = str(raw_entry.get("day") or "")
-        if raw_day != today:
+        if raw_day != today or not _failover_entry_matches_targets(raw_entry, base_urls):
             raw_mode = "primary"
             raw_preferred = ""
             raw_chat_preferred = ()

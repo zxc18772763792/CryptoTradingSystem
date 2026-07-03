@@ -243,6 +243,56 @@ def test_scoped_openai_failover_sticks_to_backup_until_next_day(monkeypatch, tmp
     ]
 
 
+def test_scoped_openai_failover_resets_when_target_chain_changes(monkeypatch, tmp_path):
+    state_path = tmp_path / "openai_failover_state.json"
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(state_path))
+    monkeypatch.setenv("OPENAI_FAILOVER_TZ", "Asia/Shanghai")
+    monkeypatch.setattr(
+        openai_responses,
+        "_openai_failover_now",
+        lambda: datetime(2026, 4, 6, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    openai_responses.reset_openai_target_preferences()
+
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "scopes": {
+                    "news": {
+                        "day": "2026-04-06",
+                        "mode": "backup",
+                        "preferred_base_url": "https://backup-b.test/v1",
+                        "base_urls": ["https://backup-a.test/v1", "https://backup-b.test/v1"],
+                        "chat_preferred_base_urls": [],
+                        "updated_at": "2026-04-06T12:00:00+08:00",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    targets = openai_endpoint_targets(
+        primary_base_url="https://primary.test/v1",
+        backup_base_urls="https://backup-b.test/v1",
+        primary_api_key="primary-key",
+        backup_api_key="backup-b-key",
+    )
+
+    assert [item["base_url"] for item in openai_responses.prioritize_openai_targets(targets, scope="news")] == [
+        "https://primary.test/v1",
+        "https://backup-b.test/v1",
+    ]
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["scopes"]["news"]["mode"] == "primary"
+    assert state["scopes"]["news"]["base_urls"] == [
+        "https://primary.test/v1",
+        "https://backup-b.test/v1",
+    ]
+
+
 def test_scoped_openai_failover_uses_in_memory_state_without_env(monkeypatch):
     monkeypatch.delenv("OPENAI_FAILOVER_STATE_PATH", raising=False)
     monkeypatch.setattr(

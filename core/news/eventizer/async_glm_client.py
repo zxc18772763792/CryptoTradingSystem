@@ -613,8 +613,9 @@ class AsyncGLMClient:
         Raises:
             RuntimeError: If the OpenAI-compatible API key is missing
         """
+        configured_targets = self._available_endpoint_targets()
         targets = prioritize_openai_targets(
-            self._available_endpoint_targets(),
+            configured_targets,
             scope=_OPENAI_FAILOVER_SCOPE,
         )
         if not targets:
@@ -680,7 +681,7 @@ class AsyncGLMClient:
                                 error_text = await response.text()
                                 logger.warning(f"news llm anthropic-style backup rate limited (429): {error_text[:200]}")
                                 last_error_type = "rate_limit"
-                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 if idx + 1 < total_targets:
                                     logger.warning(
                                         "async_glm_client news anthropic-style backup rate limited; "
@@ -698,7 +699,7 @@ class AsyncGLMClient:
                                 )
                                 last_error_type = "timeout" if response.status in (408, 504) else "other"
                                 if should_failover_openai_status(response.status):
-                                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                    remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 if idx + 1 < total_targets and should_failover_openai_status(response.status):
                                     logger.warning(
                                         f"async_glm_client news anthropic-style backup HTTP {response.status}; "
@@ -711,7 +712,7 @@ class AsyncGLMClient:
                             if not extract_response_text(data):
                                 self._requests_failed += 1
                                 last_error_type = "other"
-                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 if idx + 1 < total_targets:
                                     logger.warning(
                                         "async_glm_client anthropic-style backup returned empty content; "
@@ -720,7 +721,7 @@ class AsyncGLMClient:
                                     continue
                                 return {}, "other"
                         self._requests_success += 1
-                        remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         rate_limiter.reset_backoff()
                         data["_cts_openai_target"] = {
                             "base_url": base_url,
@@ -732,7 +733,7 @@ class AsyncGLMClient:
                     if request_chat_payload and (
                         _force_chat_completions(self._cfg)
                         or should_prefer_openai_target_chat_completions(
-                            targets,
+                            configured_targets,
                             base_url,
                             scope=_OPENAI_FAILOVER_SCOPE,
                         )
@@ -757,7 +758,7 @@ class AsyncGLMClient:
                                 chat_error_text = await chat_response.text()
                                 logger.warning(f"news llm chat/completions rate limited (429): {chat_error_text[:200]}")
                                 last_error_type = "rate_limit"
-                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 if idx + 1 < total_targets:
                                     logger.warning(
                                         "async_glm_client chat-preferred relay rate limited; "
@@ -775,7 +776,7 @@ class AsyncGLMClient:
                                 )
                                 last_error_type = "timeout" if chat_response.status in (408, 504) else "other"
                                 if should_failover_openai_status(chat_response.status):
-                                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                    remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 if idx + 1 < total_targets and should_failover_openai_status(chat_response.status):
                                     logger.warning(
                                         "async_glm_client chat-preferred relay HTTP "
@@ -788,7 +789,7 @@ class AsyncGLMClient:
                             if not extract_response_text(data):
                                 self._requests_failed += 1
                                 last_error_type = "other"
-                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 if idx + 1 < total_targets:
                                     logger.warning(
                                         "async_glm_client chat-preferred relay returned empty content; "
@@ -797,8 +798,8 @@ class AsyncGLMClient:
                                     continue
                                 return {}, "other"
                         self._requests_success += 1
-                        remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                        remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         rate_limiter.reset_backoff()
                         data["_cts_openai_target"] = {
                             "base_url": base_url,
@@ -829,7 +830,7 @@ class AsyncGLMClient:
                             error_text = await response.text()
                             logger.warning(f"news llm rate limited (429): {error_text[:200]}")
                             last_error_type = "rate_limit"
-                            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                            remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                             if idx + 1 < total_targets:
                                 logger.warning(
                                     f"async_glm_client news relay rate limited; trying backup {idx + 2}/{total_targets}"
@@ -841,7 +842,7 @@ class AsyncGLMClient:
                         if response.status >= 400:
                             error_text = await response.text()
                             if request_chat_payload and responses_api_unavailable(response.status, error_text):
-                                remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 chat_url = chat_completions_endpoint(base_url)
                                 logger.warning(
                                     "async_glm_client news relay does not support Responses API; "
@@ -866,7 +867,7 @@ class AsyncGLMClient:
                                         chat_error_text = await chat_response.text()
                                         logger.warning(f"news llm chat/completions rate limited (429): {chat_error_text[:200]}")
                                         last_error_type = "rate_limit"
-                                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                        remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                         if idx + 1 < total_targets:
                                             logger.warning(
                                                 "async_glm_client news chat/completions rate limited; "
@@ -884,7 +885,7 @@ class AsyncGLMClient:
                                         )
                                         last_error_type = "timeout" if chat_response.status in (408, 504) else "other"
                                         if should_failover_openai_status(chat_response.status):
-                                            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                            remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                         if idx + 1 < total_targets and should_failover_openai_status(chat_response.status):
                                             logger.warning(
                                                 "async_glm_client news chat/completions HTTP "
@@ -895,8 +896,8 @@ class AsyncGLMClient:
 
                                     data = await read_aiohttp_responses_json(chat_response)
                                 self._requests_success += 1
-                                remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                                remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                 rate_limiter.reset_backoff()
                                 data["_cts_openai_target"] = {
                                     "base_url": base_url,
@@ -909,7 +910,7 @@ class AsyncGLMClient:
                             logger.warning(f"news llm HTTP {response.status}: {error_text[:300]}")
                             last_error_type = "timeout" if response.status in (408, 504) else "other"
                             if should_failover_openai_status(response.status):
-                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                             if idx + 1 < total_targets and should_failover_openai_status(response.status):
                                 logger.warning(
                                     f"async_glm_client news relay HTTP {response.status}; "
@@ -947,7 +948,7 @@ class AsyncGLMClient:
                                         f"news llm chat/completions rate limited (429): {chat_error_text[:200]}"
                                     )
                                     last_error_type = "rate_limit"
-                                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                    remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                     if idx + 1 < total_targets:
                                         logger.warning(
                                             "async_glm_client empty responses body then chat/completions rate limited; "
@@ -965,7 +966,7 @@ class AsyncGLMClient:
                                     )
                                     last_error_type = "timeout" if chat_response.status in (408, 504) else "other"
                                     if should_failover_openai_status(chat_response.status):
-                                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                        remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                     if idx + 1 < total_targets and should_failover_openai_status(chat_response.status):
                                         logger.warning(
                                             "async_glm_client empty responses body then chat/completions HTTP "
@@ -978,7 +979,7 @@ class AsyncGLMClient:
                                 if not extract_response_text(data):
                                     self._requests_failed += 1
                                     last_error_type = "other"
-                                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                    remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                                     if idx + 1 < total_targets:
                                         logger.warning(
                                             "async_glm_client chat/completions also returned empty content; "
@@ -987,11 +988,11 @@ class AsyncGLMClient:
                                         continue
                                     return {}, "other"
                         if used_chat_fallback:
-                            remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                            remember_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         else:
-                            clear_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                            clear_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         self._requests_success += 1
-                        remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         rate_limiter.reset_backoff()
                         data["_cts_openai_target"] = {
                             "base_url": base_url,
@@ -1003,7 +1004,7 @@ class AsyncGLMClient:
                     self._requests_failed += 1
                     logger.warning("news llm request timed out")
                     last_error_type = "timeout"
-                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets:
                         logger.warning(
                             f"async_glm_client news relay timeout; trying backup {idx + 2}/{total_targets}"
@@ -1014,7 +1015,7 @@ class AsyncGLMClient:
                     self._requests_failed += 1
                     logger.warning(f"news llm transport error: {exc!r}")
                     last_error_type = "other"
-                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets:
                         logger.warning(
                             f"async_glm_client news relay transport failure; "
