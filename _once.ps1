@@ -74,6 +74,37 @@ function Enable-CondaEnv {
     $localCondaRoot = Join-Path $workspaceRoot ".conda\miniforge3"
     $localCondaHook = Join-Path $localCondaRoot "shell\condabin\conda-hook.ps1"
     $localCondabin = Join-Path $localCondaRoot "condabin"
+    $localEnvRoot = Join-Path $localCondaRoot ("envs\{0}" -f $Name)
+    $localEnvPython = Join-Path $localEnvRoot "python.exe"
+
+    if (Test-Path $localEnvPython) {
+        $env:CONDA_PREFIX = $localEnvRoot
+        $env:CONDA_DEFAULT_ENV = $Name
+        if ([string]::IsNullOrWhiteSpace($env:CONDA_SHLVL)) {
+            $env:CONDA_SHLVL = "1"
+        }
+
+        $preferredPaths = @(
+            $localEnvRoot,
+            (Join-Path $localEnvRoot "Library\mingw-w64\bin"),
+            (Join-Path $localEnvRoot "Library\usr\bin"),
+            (Join-Path $localEnvRoot "Library\bin"),
+            (Join-Path $localEnvRoot "Scripts"),
+            (Join-Path $localEnvRoot "bin"),
+            $localCondabin
+        )
+        $pathParts = @($env:Path -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        $orderedPreferredPaths = @($preferredPaths)
+        [array]::Reverse($orderedPreferredPaths)
+        foreach ($entry in $orderedPreferredPaths) {
+            if ((Test-Path $entry) -and ($pathParts -notcontains $entry)) {
+                $env:Path = $entry + ";" + $env:Path
+                $pathParts = @($env:Path -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            }
+        }
+        return $true
+    }
+
     if (Test-Path $localCondabin) {
         $pathParts = @($env:Path -split ";" | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         if ($pathParts -notcontains $localCondabin) {
