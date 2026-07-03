@@ -3995,25 +3995,6 @@ async def run_download_historical_data(
         start_time, end_time = end_time, start_time
     span_days = max(0.0, (end_time - start_time).total_seconds() / 86400.0)
 
-    connector = exchange_manager.get_exchange(exchange)
-    if not connector:
-        for alt_exchange in ["gate", "binance"]:
-            connector = exchange_manager.get_exchange(alt_exchange)
-            if connector:
-                exchange = alt_exchange
-                break
-
-    if not connector:
-        return {
-            "exchange": exchange,
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "count": 0,
-            "error": "没有可用的交易所连接",
-            "start": start_time.isoformat(),
-            "end": end_time.isoformat(),
-        }
-
     async def _download_with_native_source(source_exchange: str) -> Dict[str, Any]:
         estimated_total = _estimate_expected_bars(start_time, end_time, timeframe) or 0
         await _emit_download_progress_message(
@@ -4304,9 +4285,6 @@ async def run_download_historical_data(
     source_errors: List[str] = []
 
     for source_exchange in source_attempts:
-        if exchange_manager.get_exchange(source_exchange) is None:
-            source_errors.append(f"{source_exchange}: connector_unavailable")
-            continue
         try:
             return await _download_with_native_source(source_exchange)
         except Exception as exc:

@@ -4,6 +4,7 @@ from __future__ import annotations
 Historical data management helpers.
 """
 import asyncio
+import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -13,6 +14,14 @@ from loguru import logger
 from config.settings import settings
 from core.data.data_storage import data_storage
 from core.exchanges import Kline, exchange_manager
+
+try:
+    import ccxt.async_support as ccxt
+
+    _CCXT_ASYNC_AVAILABLE = True
+except Exception:  # pragma: no cover - ccxt is an application dependency
+    ccxt = None  # type: ignore
+    _CCXT_ASYNC_AVAILABLE = False
 
 
 _DOWNLOAD_REQUEST_TIMEOUT_SEC = 45.0
@@ -25,6 +34,162 @@ _NON_RETRYABLE_DOWNLOAD_ERROR_MARKERS = (
     "invalid symbol",
     "market not found",
 )
+
+
+def _normalize_market_type(value: str, fallback: str = "spot") -> str:
+    raw = str(value or fallback or "spot").strip().lower()
+    aliases = {
+        "futures": "future",
+        "perp": "swap",
+        "perpetual": "swap",
+    }
+    normalized = aliases.get(raw, raw)
+    return normalized if normalized in {"spot", "future", "swap", "margin"} else "spot"
+
+
+def _public_default_type(exchange: str) -> str:
+    attr = f"{str(exchange or '').strip().upper()}_DEFAULT_TYPE"
+    return _normalize_market_type(str(getattr(settings, attr, "spot") or "spot"))
+
+
+def _proxy_url() -> Optional[str]:
+    proxy = str(settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip()
+    return proxy or None
+
+
+def _resolve_public_market_symbol(client: Any, symbol: str, default_type: str) -> str:
+    raw_symbol = str(symbol or "").strip()
+    markets = getattr(client, "markets", None) or {}
+    if raw_symbol in markets:
+        return raw_symbol
+
+    if "/" not in raw_symbol:
+        return raw_symbol
+
+    base, quote = raw_symbol.split("/", 1)
+    base = base.strip().upper()
+    quote = quote.split(":", 1)[0].strip().upper()
+    if not base or not quote:
+        return raw_symbol
+
+    contract_symbol = f"{base}/{quote}:{quote}"
+    if contract_symbol in markets:
+        return contract_symbol
+
+    candidates = []
+    for market in markets.values():
+        if str(market.get("base") or "").upper() != base:
+            continue
+        if str(market.get("quote") or "").upper() != quote:
+            continue
+        market_symbol = str(market.get("symbol") or "").strip()
+        if market_symbol:
+            candidates.append(market)
+
+    if not candidates:
+        return raw_symbol
+
+    prefer_derivatives = default_type in {"future", "swap"}
+
+    def _score(market: Dict[str, Any]) -> int:
+        score = 0
+        if prefer_derivatives:
+            if bool(market.get(default_type)):
+                score += 100
+            if bool(market.get("future")) or bool(market.get("swap")):
+                score += 50
+            if bool(market.get("linear")):
+                score += 10
+        elif bool(market.get("spot")):
+            score += 100
+        if market.get("active") is False:
+            score -= 25
+        return score
+
+    best = max(candidates, key=_score)
+    return str(best.get("symbol") or raw_symbol)
+
+
+class _PublicCCXTKlineConnector:
+    """Unauthenticated OHLCV source used when live trading connectors are down."""
+
+    def __init__(self, exchange: str):
+        self.name = str(exchange or "").strip().lower()
+        self.default_type = _public_default_type(self.name)
+        self._client: Any = None
+        self._markets_loaded = False
+
+    def _build_client(self) -> Any:
+        if not _CCXT_ASYNC_AVAILABLE or ccxt is None:
+            raise RuntimeError("ccxt async support is unavailable")
+        factory = getattr(ccxt, self.name, None)
+        if factory is None:
+            raise RuntimeError(f"ccxt has no exchange '{self.name}'")
+
+        client_config: Dict[str, Any] = {
+            "enableRateLimit": True,
+            "timeout": 15000,
+            "options": {"defaultType": self.default_type},
+        }
+        proxy = _proxy_url()
+        if proxy:
+            client_config["aiohttp_proxy"] = proxy
+            client_config["proxies"] = {
+                "http": proxy,
+                "https": str(settings.HTTPS_PROXY or proxy),
+            }
+
+        return factory(client_config)
+
+    async def _ensure_client(self) -> Any:
+        if self._client is None:
+            self._client = self._build_client()
+        if not self._markets_loaded:
+            await self._client.load_markets()
+            self._markets_loaded = True
+        return self._client
+
+    async def close(self) -> None:
+        client = self._client
+        self._client = None
+        self._markets_loaded = False
+        if client is None:
+            return
+        close_result = getattr(client, "close", lambda: None)()
+        if asyncio.iscoroutine(close_result):
+            with contextlib.suppress(Exception):
+                await close_result
+
+    async def get_klines(
+        self,
+        symbol: str,
+        timeframe: str,
+        since: Optional[datetime] = None,
+        limit: Optional[int] = None,
+    ) -> List[Kline]:
+        client = await self._ensure_client()
+        mapped_symbol = _resolve_public_market_symbol(client, symbol, self.default_type)
+        since_ms = int(since.timestamp() * 1000) if since else None
+        ohlcv = await client.fetch_ohlcv(
+            mapped_symbol,
+            timeframe,
+            since=since_ms,
+            limit=limit or 1000,
+        )
+        return [
+            Kline(
+                symbol=symbol,
+                timeframe=timeframe,
+                timestamp=datetime.fromtimestamp(candle[0] / 1000, tz=timezone.utc),
+                open=float(candle[1]),
+                high=float(candle[2]),
+                low=float(candle[3]),
+                close=float(candle[4]),
+                volume=float(candle[5]),
+                exchange=self.name,
+            )
+            for candle in ohlcv
+        ]
 
 
 def _is_non_retryable_download_error(error: Exception) -> bool:
@@ -135,9 +300,13 @@ class HistoricalDataManager:
         Download historical klines.
         """
         connector = exchange_manager.get_exchange(exchange)
+        public_connector: Optional[_PublicCCXTKlineConnector] = None
         if not connector:
-            logger.error(f"Exchange not found: {exchange}")
-            return []
+            logger.warning(
+                f"Exchange connector unavailable for {exchange}; using public ccxt OHLCV client"
+            )
+            public_connector = _PublicCCXTKlineConnector(exchange)
+            connector = public_connector
 
         if end_time is None:
             end_time = _utc_now_naive()
@@ -195,6 +364,13 @@ class HistoricalDataManager:
                 last_timestamp = _as_utc_naive(klines[-1].timestamp)
                 next_time = last_timestamp + timedelta(milliseconds=1)
                 if next_time <= current_time:
+                    if all_klines:
+                        progress.current_time = min(current_time, end_time)
+                        progress.updated_at = _utc_now_naive()
+                        progress.last_error = ""
+                        progress.message = "Upstream repeated the latest candle; download is current"
+                        await self._emit_progress(progress_callback, progress)
+                        break
                     raise RuntimeError(
                         f"下载未向前推进，最后K线时间 {last_timestamp.isoformat()}，当前游标 {current_time.isoformat()}"
                     )
@@ -247,6 +423,8 @@ class HistoricalDataManager:
                     progress.updated_at = now
                     await self._emit_progress(progress_callback, progress)
                     logger.error(f"Download non-retryable error for {task_id}: {e}")
+                    if public_connector is not None:
+                        await public_connector.close()
                     raise RuntimeError(
                         f"{symbol} {timeframe} download failed without retry: {progress.last_error}"
                     ) from e
@@ -268,6 +446,8 @@ class HistoricalDataManager:
                     progress.finished_at = now
                     progress.updated_at = now
                     await self._emit_progress(progress_callback, progress)
+                    if public_connector is not None:
+                        await public_connector.close()
                     raise RuntimeError(
                         f"{symbol} {timeframe} 下载失败，连续重试 {progress.consecutive_errors} 次后仍未恢复：{progress.last_error}"
                     ) from e
@@ -302,6 +482,8 @@ class HistoricalDataManager:
             f"total candles: {len(unique_klines)}"
         )
         await self._emit_progress(progress_callback, progress)
+        if public_connector is not None:
+            await public_connector.close()
 
         return unique_klines
 

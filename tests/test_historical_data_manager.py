@@ -39,6 +39,33 @@ class _AwareKlineConnector:
         ]
 
 
+class _RoundedSinceConnector:
+    def __init__(self):
+        self.calls = 0
+
+    async def get_klines(self, **kwargs):
+        self.calls += 1
+        if self.calls == 1:
+            hours = [0, 1]
+        else:
+            hours = [1]
+        base = datetime(2026, 5, 17, 0, 0, 0, tzinfo=timezone.utc)
+        return [
+            Kline(
+                exchange="binance",
+                symbol=kwargs["symbol"],
+                timeframe=kwargs["timeframe"],
+                timestamp=base + timedelta(hours=hour),
+                open=100.0 + hour,
+                high=101.0 + hour,
+                low=99.0 + hour,
+                close=100.5 + hour,
+                volume=10.0 + hour,
+            )
+            for hour in hours
+        ]
+
+
 async def test_download_historical_klines_accepts_utc_aware_exchange_timestamps(monkeypatch):
     manager = HistoricalDataManager()
     connector = _AwareKlineConnector()
@@ -71,6 +98,36 @@ async def test_download_historical_klines_accepts_utc_aware_exchange_timestamps(
     assert progress.status == "completed"
     assert progress.retry_count == 0
     assert progress.current_time.tzinfo is None
+
+
+async def test_download_historical_klines_stops_when_exchange_repeats_latest_candle(monkeypatch):
+    manager = HistoricalDataManager()
+    connector = _RoundedSinceConnector()
+    saved = {}
+
+    monkeypatch.setattr(historical_data_module.exchange_manager, "get_exchange", lambda exchange: connector)
+
+    async def _save_stub(klines, exchange, symbol, timeframe):
+        saved["klines"] = list(klines)
+        return len(klines)
+
+    monkeypatch.setattr(historical_data_module.data_storage, "save_klines_to_parquet", _save_stub)
+
+    klines = await manager.download_historical_klines(
+        exchange="binance",
+        symbol="OMNI/USDT",
+        timeframe="1h",
+        start_time=datetime(2026, 5, 17, 0, 30, 0, tzinfo=timezone.utc),
+        end_time=datetime(2026, 5, 17, 1, 30, 0, tzinfo=timezone.utc),
+    )
+
+    progress = manager.get_download_progress("binance_OMNI/USDT_1h")
+    assert connector.calls == 2
+    assert len(klines) == 1
+    assert len(saved["klines"]) == 1
+    assert progress is not None
+    assert progress.status == "completed"
+    assert progress.retry_count == 0
 
 
 async def test_download_historical_klines_fails_after_bounded_retries(monkeypatch):
