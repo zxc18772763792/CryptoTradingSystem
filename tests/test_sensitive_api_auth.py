@@ -222,6 +222,43 @@ def test_ai_agent_write_route_requires_ops_auth(monkeypatch):
     assert update_mock.await_count == 1
 
 
+def test_ai_agent_status_read_requires_ops_auth_and_is_passive_by_default(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = _build_app(("/api/ai", ai_agent.router))
+    client = TestClient(app)
+
+    status_mock = AsyncMock(return_value={"status": {"running": False}, "config": {}})
+    monkeypatch.setattr(ai_agent.ai_research_module, "get_ai_autonomous_agent_status", status_mock)
+
+    response = client.get("/api/ai/autonomous-agent/status")
+    assert response.status_code == 401
+    assert status_mock.await_count == 0
+
+    response = client.get("/api/ai/autonomous-agent/status", headers=_ops_headers())
+    assert response.status_code == 200
+    assert status_mock.await_count == 1
+    assert status_mock.await_args.kwargs["warm_preview"] is False
+
+
+def test_ml_and_notification_reads_require_ops_auth(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = _build_app(
+        ("/api/ml", ml.router),
+        ("/api/notifications", notifications.router),
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/ml/features")
+    assert response.status_code == 401
+    response = client.get("/api/ml/features", headers=_ops_headers())
+    assert response.status_code == 200
+
+    response = client.get("/api/notifications/channels")
+    assert response.status_code == 401
+    response = client.get("/api/notifications/channels", headers=_ops_headers())
+    assert response.status_code == 200
+
+
 def test_notifications_write_route_requires_ops_auth(monkeypatch):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
     app = _build_app(("/api/notifications", notifications.router))
@@ -588,10 +625,30 @@ def test_sensitive_read_routes_are_dependency_gated():
         ("strategies", "GET", "/{name}/live-vs-backtest"),
         ("strategies", "GET", "/{name}/signals"),
         ("strategies", "GET", "/{name}/monitor-data"),
+        ("ai_agent", "GET", "/runtime-config/autonomous-agent"),
+        ("ai_agent", "GET", "/autonomous-agent/risk-config"),
+        ("ai_agent", "GET", "/autonomous-agent/status"),
+        ("ai_agent", "GET", "/autonomous-agent/journal"),
+        ("ai_agent", "GET", "/autonomous-agent/review"),
+        ("ai_agent", "GET", "/autonomous-agent/scorecard"),
+        ("ai_agent", "GET", "/autonomous-agent/risk-status"),
+        ("ai_agent", "GET", "/autonomous-agent/symbol-ranking"),
+        ("ai_agent", "GET", "/autonomous-agent/live-signals"),
+        ("ml", "GET", "/diagnostics"),
+        ("ml", "GET", "/features"),
+        ("ml", "GET", "/models"),
+        ("ml", "GET", "/jobs/{job_id}"),
+        ("ml", "GET", "/jobs"),
+        ("notifications", "GET", "/channels"),
+        ("notifications", "GET", "/rules"),
+        ("notifications", "GET", "/events"),
         ("data", "GET", "/research/refresh/status"),
     }
     routers = {
         "main": web_main.app.routes,
+        "ai_agent": ai_agent.router.routes,
+        "ml": ml.router.routes,
+        "notifications": notifications.router.routes,
         "trading_analytics": trading_analytics.router.routes,
         "trading_balances": trading_balances.router.routes,
         "trading_runtime": trading_runtime.router.routes,
@@ -634,6 +691,7 @@ def test_live_mode_confirm_requires_approve_live_permission_for_api_key(monkeypa
     )
     switch_mock = AsyncMock(return_value={"success": True, "mode": "live"})
     monkeypatch.setattr(trading_runtime, "switch_trading_mode_service", switch_mock)
+    monkeypatch.setattr(trading_runtime.audit_logger, "log", AsyncMock(return_value=None))
 
     monkeypatch.setattr(
         ops_auth_module,

@@ -1409,7 +1409,7 @@ async def _run_oneclick_workflow(request: Request, job_id: str, payload: MLOneCl
         state.ml_job_tasks.pop(job_id, None)
 
 
-@router.get("/diagnostics")
+@router.get("/diagnostics", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def diagnostics(request: Request) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)
@@ -1436,7 +1436,7 @@ async def diagnostics(request: Request) -> Dict[str, Any]:
     }
 
 
-@router.get("/features")
+@router.get("/features", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def list_features() -> Dict[str, Any]:
     items = [
         {"name": str(column), "label": str(column).upper() if str(column).isalpha() else str(column)}
@@ -1445,7 +1445,7 @@ async def list_features() -> Dict[str, Any]:
     return {"ok": True, "items": items, "count": len(items)}
 
 
-@router.get("/models")
+@router.get("/models", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def list_models(request: Request) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)
@@ -1500,7 +1500,7 @@ async def train_job(request: Request, payload: MLTrainRequest) -> Dict[str, Any]
     return await _run_train_workflow(request, job["job_id"], payload)
 
 
-@router.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_job(request: Request, job_id: str) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)
@@ -1510,7 +1510,7 @@ async def get_job(request: Request, job_id: str) -> Dict[str, Any]:
     return _job_snapshot(job)
 
 
-@router.get("/jobs")
+@router.get("/jobs", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def list_jobs(request: Request) -> Dict[str, Any]:
     _ensure_ml_state(request.app)
     state = _state(request.app)

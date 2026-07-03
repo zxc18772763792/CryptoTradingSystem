@@ -8,7 +8,7 @@ try:
     import feedparser
 except ModuleNotFoundError:
     feedparser = None
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,7 +17,6 @@ import re
 import hashlib
 
 from loguru import logger
-import pandas as pd
 
 
 @dataclass

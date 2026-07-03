@@ -635,7 +635,7 @@ class HalfLifeFactor(TimeSeriesFactor):
                     return np.nan
                 half_life = -np.log(2) / np.log(b)
                 return min(half_life, n)  # Cap at window
-            except:
+            except Exception:
                 return np.nan
 
         # Rolling half-life (negated: low = faster reversion = more signal)

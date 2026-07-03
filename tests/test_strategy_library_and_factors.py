@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 import strategies as strategy_module
 from config import strategy_registry
@@ -262,6 +263,12 @@ def _factor_input(assets: int = 6, rows: int = 600, seed: int = 7):
     return close_df, volume_df
 
 
+# These build the full factor library over multi-bar universes. The build is
+# fast (~1s) after the _long_short_factor vectorization, but give the heaviest
+# tests headroom beyond the 120s global budget so a transient host load spike
+# can't hard-kill the whole suite (pytest-timeout's thread method os._exit()s the
+# process on a single overrun).
+@pytest.mark.timeout(180)
 def test_factor_library_builds_multi_factor_outputs():
     close_df, volume_df = _factor_input(assets=6, rows=600)
     result = build_factor_library(close_df=close_df, volume_df=volume_df, quantile=0.3)
@@ -275,6 +282,7 @@ def test_factor_library_builds_multi_factor_outputs():
     assert "score" in result.asset_scores.columns
 
 
+@pytest.mark.timeout(180)
 def test_factor_library_supports_small_universe():
     close_df, volume_df = _factor_input(assets=2, rows=500, seed=11)
     result = build_factor_library(close_df=close_df, volume_df=volume_df, quantile=0.3)
@@ -283,6 +291,7 @@ def test_factor_library_supports_small_universe():
     assert set(["MKT", "SMB", "MOM", "VOL"]).issubset(result.factors.columns)
 
 
+@pytest.mark.timeout(180)
 def test_factor_library_key_style_factors_are_not_all_zero():
     close_df, volume_df = _factor_input(assets=8, rows=960, seed=23)
     result = build_factor_library(close_df=close_df, volume_df=volume_df, quantile=0.3, timeframe="5m")

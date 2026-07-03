@@ -183,3 +183,35 @@ def test_strategy_primary_launcher_pins_level4_env_and_gates():
     assert "[switch]$DrillForceRest" in script
     assert 'set "MARKET_WS_FORCE_REST=true"' in script
     assert "force_rest=$($market.force_rest)" in script
+
+
+def test_primary_launchers_supervise_listener_watchdog_exit():
+    """Both primary launchers must pin the listener watchdog env and restart the
+    service ONLY on its dead-listener exit code 64, with a bounded loop.
+
+    Guards the "alive but headless" hardening (WinError 64 killed the uvicorn
+    accept loop while the engine kept trading; see
+    core/utils/listener_watchdog.py and proactor_accept_hardening.py).
+    """
+    for rel_path in (
+        "scripts/market_ws_ui_primary.ps1",
+        "scripts/market_ws_strategy_primary.ps1",
+    ):
+        script = _read(rel_path)
+
+        # In-app watchdog env pinned to the launcher's port.
+        assert 'set "LISTENER_WATCHDOG_ENABLED=true"' in script, rel_path
+        assert 'LISTENER_WATCHDOG_PORT=$Port' in script, rel_path
+
+        # Bounded supervised restart, keyed to exit code 64 only.
+        assert "New-SupervisedServiceCmdCommand" in script, rel_path
+        assert ":service_loop" in script, rel_path
+        assert "goto service_loop" in script, rel_path
+        assert '==`"64`"' in script or '=="64"' in script.replace("`", ""), rel_path
+        assert "set /a MARKET_WS_SERVICE_RESTART_COUNT+=1" in script, rel_path
+        assert "GTR $MaxRestarts" in script, rel_path
+        assert "timeout /t $RestartDelaySec /nobreak" in script, rel_path
+
+        # The SERVICE uses the supervised builder; selfchecks keep the plain one.
+        service_builder_idx = script.find("New-SupervisedServiceCmdCommand `")
+        assert service_builder_idx != -1, rel_path

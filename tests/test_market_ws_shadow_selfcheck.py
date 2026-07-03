@@ -231,6 +231,212 @@ def test_market_ws_shadow_selfcheck_keeps_valid_samples_after_probe_timeout(monk
     assert "sample[0]: sample request failed: ReadTimeout: health timed out" in report["errors"]
 
 
+def test_market_ws_shadow_selfcheck_retries_transient_probe_timeout(monkeypatch):
+    # With probe_retries>0, an isolated read timeout is retried and the sample
+    # recovers instead of being voided — the documented L3-FAIL cause.
+    routes = {
+        ("GET", "/health"): [
+            requests.exceptions.ReadTimeout("transient health timeout"),
+            FakeResponse(200, {"status": "healthy"}),
+            FakeResponse(200, {"status": "healthy"}),
+        ],
+        ("GET", "/api/status"): [
+            FakeResponse(200, _api_status_payload()),
+            FakeResponse(200, _api_status_payload()),
+        ],
+        ("GET", "/api/market-data/status"): [
+            FakeResponse(200, _status_payload(ws_tick_count=10, compare_count=3)),
+            FakeResponse(200, _status_payload(ws_tick_count=14, compare_count=5)),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, []))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=1,
+        interval_sec=1,
+        min_samples=2,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=1,
+        min_shadow_compare_delta=1,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        probe_retries=2,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is True
+    assert report["summary"]["sample_error_count"] == 0
+    assert report["summary"]["valid_sample_count"] == 2
+    assert report["summary"]["ws_tick_delta"] == 4
+
+
+def test_market_ws_shadow_selfcheck_records_error_when_retries_exhausted(monkeypatch):
+    # Retries are bounded: a stall that outlasts every attempt still records a
+    # sample_error (default zero-tolerance keeps the run failing).
+    seen = []
+    routes = {
+        ("GET", "/health"): [
+            requests.exceptions.ReadTimeout("attempt 1"),
+            requests.exceptions.ReadTimeout("attempt 2"),
+            FakeResponse(200, {"status": "healthy"}),
+        ],
+        ("GET", "/api/status"): [FakeResponse(200, _api_status_payload())],
+        ("GET", "/api/market-data/status"): [
+            FakeResponse(200, _status_payload(ws_tick_count=10, compare_count=3)),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, seen))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=1,
+        interval_sec=1,
+        min_samples=1,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=0,
+        min_shadow_compare_delta=0,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        probe_retries=1,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is False
+    assert report["summary"]["sample_error_count"] == 1
+    assert any("sample[0]: sample request failed" in e for e in report["errors"])
+    # 2 attempts on the timed-out sample0 (idx0,idx1) + 1 on sample1 (idx2).
+    health_calls = [c for c in seen if c["path"] == "/health"]
+    assert len(health_calls) == 3
+
+
+def test_market_ws_shadow_selfcheck_tolerates_isolated_probe_error_when_opted_in(monkeypatch):
+    # An isolated probe failure (observer hiccup) can be tolerated under an
+    # explicit budget — but only isolated ones, and only with --tolerate-transient.
+    routes = {
+        ("GET", "/health"): [
+            FakeResponse(200, {"status": "healthy"}),
+            requests.exceptions.ReadTimeout("isolated blip"),
+            FakeResponse(200, {"status": "healthy"}),
+        ],
+        ("GET", "/api/status"): [
+            FakeResponse(200, _api_status_payload()),
+            FakeResponse(200, _api_status_payload()),
+        ],
+        ("GET", "/api/market-data/status"): [
+            FakeResponse(200, _status_payload(ws_tick_count=10, compare_count=3)),
+            FakeResponse(200, _status_payload(ws_tick_count=14, compare_count=5)),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, []))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=2,
+        interval_sec=1,
+        min_samples=2,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=1,
+        min_shadow_compare_delta=1,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        tolerate_transient=True,
+        max_sample_errors=1,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is True
+    assert report["summary"]["sample_error_count"] == 1
+    assert not any("sample[1]: sample request failed" in e for e in report["errors"])
+
+
+def test_market_ws_shadow_selfcheck_rejects_consecutive_probe_errors_within_budget(monkeypatch):
+    # Even within the error budget, consecutive failures = a sustained stall and
+    # must hard-fail (the tolerance is for isolated blips only).
+    routes = {
+        ("GET", "/health"): [
+            FakeResponse(200, {"status": "healthy"}),
+            requests.exceptions.ReadTimeout("stall 1"),
+            requests.exceptions.ReadTimeout("stall 2"),
+            FakeResponse(200, {"status": "healthy"}),
+        ],
+        ("GET", "/api/status"): [
+            FakeResponse(200, _api_status_payload()),
+            FakeResponse(200, _api_status_payload()),
+        ],
+        ("GET", "/api/market-data/status"): [
+            FakeResponse(200, _status_payload(ws_tick_count=10, compare_count=3)),
+            FakeResponse(200, _status_payload(ws_tick_count=14, compare_count=5)),
+        ],
+    }
+    monkeypatch.setattr(shadow_check.requests, "request", _fake_request_factory(routes, []))
+
+    report = shadow_check.run_selfcheck(
+        base_url="http://127.0.0.1:8000",
+        token="test-token",
+        duration_sec=3,
+        interval_sec=1,
+        min_samples=2,
+        timeout=3,
+        expect_mode="shadow",
+        expect_runtime="paper",
+        min_ws_tick_delta=1,
+        min_shadow_compare_delta=1,
+        max_shadow_violation_delta=0,
+        max_invalid_payload_delta=0,
+        max_timestamp_regression_delta=0,
+        max_shadow_stale_skip_delta=0,
+        max_feed_watch_timeout_delta=-1,
+        max_feed_watch_error_delta=-1,
+        max_feed_watch_empty_delta=0,
+        max_stale_symbol_count=0,
+        max_price_diff_bps=20,
+        max_ws_age_p95_ms=10_000,
+        tolerate_transient=True,
+        max_sample_errors=2,
+        sleep_fn=lambda _seconds: None,
+    )
+
+    assert report["overall_ok"] is False
+    assert report["summary"]["sample_error_count"] == 2
+    assert report["summary"]["max_consecutive_sample_errors_observed"] == 2
+    assert any("sample[1]: sample request failed" in e for e in report["errors"])
+    assert any("sample[2]: sample request failed" in e for e in report["errors"])
+
+
 def test_market_ws_shadow_selfcheck_reports_all_probe_failures(monkeypatch):
     routes = {
         ("GET", "/health"): [

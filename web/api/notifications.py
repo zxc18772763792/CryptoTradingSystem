@@ -82,7 +82,7 @@ async def _build_context(total_usd: Optional[float], prices: Dict[str, float]) -
     }
 
 
-@router.get("/channels")
+@router.get("/channels", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_channels():
     return {
         "channels": notification_manager.channel_status(),
@@ -107,7 +107,7 @@ async def test_notification(request: NotificationTestRequest):
     }
 
 
-@router.get("/rules")
+@router.get("/rules", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def list_rules():
     return {
         "rules": await notification_manager.list_rules(),
@@ -154,7 +154,7 @@ async def evaluate_rules(request: EvaluateRequest):
     }
 
 
-@router.get("/events")
+@router.get("/events", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def get_events(limit: int = 100):
     return {
         "events": notification_manager.get_events(limit=limit),

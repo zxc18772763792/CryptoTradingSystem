@@ -47,6 +47,36 @@ def _rename_symbol(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return renamed
 
 
+def test_pairs_backtest_hedge_ratio_bounds_preserve_positive_user_floor():
+    from web.api import backtest as backtest_api
+
+    min_hr, max_hr = backtest_api._pairs_hedge_ratio_bounds(
+        {
+            "allow_negative_hedge_ratio": True,
+            "min_hedge_ratio": 0.5,
+            "max_hedge_ratio": 5.0,
+        }
+    )
+
+    assert min_hr == pytest.approx(0.5)
+    assert max_hr == pytest.approx(5.0)
+
+
+def test_pairs_backtest_hedge_ratio_bounds_expand_zero_floor_when_negative_allowed():
+    from web.api import backtest as backtest_api
+
+    min_hr, max_hr = backtest_api._pairs_hedge_ratio_bounds(
+        {
+            "allow_negative_hedge_ratio": True,
+            "min_hedge_ratio": 0.0,
+            "max_hedge_ratio": 2.0,
+        }
+    )
+
+    assert min_hr == pytest.approx(-2.0)
+    assert max_hr == pytest.approx(2.0)
+
+
 def test_run_backtest_custom_pairs_strategy_uses_dual_leg_spread(monkeypatch):
     from web.api import backtest as backtest_api
 

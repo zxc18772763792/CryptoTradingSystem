@@ -1,4 +1,4 @@
-# docker-compose.yml — Compose Spec (no `version:` key required for Compose v2)
+# docker-compose.yml - Compose Spec (no `version:` key required for Compose v2)
 #
 # Required environment variables (fail-fast if unset):
 #   POSTGRES_PASSWORD          Postgres password for the `crypto` user
@@ -9,18 +9,19 @@
 #   POSTGRES_USER (default: crypto)
 #   POSTGRES_DB   (default: crypto_trading)
 #
-# Network model: services communicate over the internal `crypto_net` network
-# only. No ports are published to the host by default — open SSH/VPN tunnels
-# or add an explicit reverse proxy if external access is required. The single
-# exception is `web`, which publishes 8000 because that is the operator UI.
+# Network model: services communicate over the internal `crypto_net` network.
+# The operator UI binds to 0.0.0.0 inside the container but is published only
+# on host loopback. Use SSH/VPN tunnels or an authenticated reverse proxy for
+# external access.
 
 services:
   web:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       - TRADING_MODE=paper
+      - WEB_HOST=0.0.0.0
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-crypto}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}@db:5432/${POSTGRES_DB:-crypto_trading}
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD env var is required}@redis:6379/0
     volumes:
@@ -82,20 +83,18 @@ services:
     networks:
       - crypto_net
 
-  # TODO: prometheus.yml is not present at repo root — create it before
-  # enabling this service. Uncomment the block once the config file exists.
-  # prometheus:
-  #   image: prom/prometheus:latest
-  #   expose:
-  #     - "9090"
-  #   volumes:
-  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-  #   restart: unless-stopped
-  #   mem_limit: 1g
-  #   networks:
-  #     - crypto_net
-  #   profiles:
-  #     - monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    expose:
+      - "9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+    mem_limit: 1g
+    networks:
+      - crypto_net
+    profiles:
+      - monitoring
 
   grafana:
     image: grafana/grafana:latest

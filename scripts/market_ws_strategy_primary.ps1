@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("gate", "precheck", "start-service", "start-selfcheck", "status", "stop")]
     [string]$Action = "status",
     # Real-money guard: every start action refuses unless this switch is present.
@@ -33,9 +33,12 @@ param(
     [int]$DurationSec = 21600,
     [int]$IntervalSec = 60,
     [int]$MinSamples = 355,
-    [int]$HealthWaitSec = 120,
+    # Cold start can take ~10-16 min (markets load, exchange connect, guard
+    # warmup); a short READY budget false-fires while the service is still
+    # legitimately starting, so default to 18 min.
+    [int]$HealthWaitSec = 1080,
     [double]$MaxWsAgeMs = 10000,
-    [string]$PythonExe = "E:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe"
+    [string]$PythonExe = "F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe"
 )
 
 # Level-4 "strategy primary" launcher: runs the trading system in LIVE mode with
@@ -180,6 +183,37 @@ function New-InstrumentedCmdCommand {
     )
 }
 
+function New-SupervisedServiceCmdCommand {
+    # Like New-InstrumentedCmdCommand, but with a bounded restart loop for the
+    # listener-watchdog exit code 64 ("alive but headless": the in-app watchdog
+    # detected a dead HTTP listener and self-exited for supervised restart —
+    # see core/utils/listener_watchdog.py). Any OTHER exit code keeps the old
+    # semantics (no auto-restart of a live service; that is the operator's call).
+    param(
+        [string]$Kind,
+        [string]$Command,
+        [string]$MarkerLog,
+        [int]$MaxRestarts = 5,
+        [int]$RestartDelaySec = 10
+    )
+    $quotedMarkerLog = ConvertTo-CmdLiteral $MarkerLog
+    return @(
+        "set `"MARKET_WS_SERVICE_RESTART_COUNT=0`"",
+        ":service_loop",
+        "echo MARKET_WS_STRATEGY_PRIMARY_${Kind}_START restart=%MARKET_WS_SERVICE_RESTART_COUNT% %DATE% %TIME% >> $quotedMarkerLog",
+        $Command,
+        "set `"MARKET_WS_STRATEGY_PRIMARY_EXIT_CODE=%ERRORLEVEL%`"",
+        "echo MARKET_WS_STRATEGY_PRIMARY_${Kind}_EXIT %MARKET_WS_STRATEGY_PRIMARY_EXIT_CODE% %DATE% %TIME% >> $quotedMarkerLog",
+        "if not `"%MARKET_WS_STRATEGY_PRIMARY_EXIT_CODE%`"==`"64`" exit /b %MARKET_WS_STRATEGY_PRIMARY_EXIT_CODE%",
+        "set /a MARKET_WS_SERVICE_RESTART_COUNT+=1",
+        "if %MARKET_WS_SERVICE_RESTART_COUNT% GTR $MaxRestarts echo MARKET_WS_STRATEGY_PRIMARY_${Kind}_RESTART_LIMIT %DATE% %TIME% >> $quotedMarkerLog",
+        "if %MARKET_WS_SERVICE_RESTART_COUNT% GTR $MaxRestarts exit /b 64",
+        "echo MARKET_WS_STRATEGY_PRIMARY_${Kind}_RESTARTING %MARKET_WS_SERVICE_RESTART_COUNT%/$MaxRestarts %DATE% %TIME% >> $quotedMarkerLog",
+        "timeout /t $RestartDelaySec /nobreak >nul",
+        "goto service_loop"
+    )
+}
+
 function Get-TaskName {
     param([string]$Kind)
     return "CryptoMarketWsStrategyPrimary_{0}_{1}" -f $Kind, $Stamp
@@ -267,7 +301,9 @@ function Get-CommonEnvCommands {
         'set "MARKET_WS_WATCH_TIMEOUT_SEC=25"',
         'set "MARKET_WS_MAX_PRICE_DIFF_BPS=20"',
         'set "MARKET_WS_SYMBOL_MAX_AGE_SEC=10"',
-        'set "MARKET_WS_MARK_PRICE_ENABLED=false"'
+        'set "MARKET_WS_MARK_PRICE_ENABLED=false"',
+        'set "LISTENER_WATCHDOG_ENABLED=true"',
+        "set `"LISTENER_WATCHDOG_PORT=$Port`""
     )
     if ($DrillForceRest) {
         # Same pinned env, kill switch ON: REST becomes authoritative and the
@@ -335,8 +371,19 @@ function Invoke-Level3Gate {
         Write-Host "WARNING: no -ServiceErrLog given; log-pollution gates are NOT being checked." -ForegroundColor Yellow
     }
     Write-Host "Running Level-3 -> Level-4 evaluator gate on $EvaluatedReport ..."
-    & $PythonExe @evalArgs
-    $code = $LASTEXITCODE
+    # The evaluator prints its human summary to stderr. Under this script's
+    # $ErrorActionPreference='Stop' in a NON-interactive shell, PowerShell 5.1
+    # wraps native stderr in a terminating NativeCommandError — which would abort
+    # the launcher even when the gate PASSES (exit 0). Relax EAP only around this
+    # native call so the gate's $LASTEXITCODE is what decides pass/fail.
+    $eapPrev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $PythonExe @evalArgs
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $eapPrev
+    }
     if ($code -eq 0) {
         Write-Host "Level-3 gate PASS" -ForegroundColor Green
         return $true
@@ -402,7 +449,7 @@ function Start-MarketWsService {
     $serviceErr = Join-Path $logRoot ("strategy_primary_service_{0}.err.log" -f $Stamp)
     $commands = @("cd /d $(ConvertTo-CmdLiteral $projectRoot)")
     $commands += Get-CommonEnvCommands
-    $commands += New-InstrumentedCmdCommand `
+    $commands += New-SupervisedServiceCmdCommand `
         -Kind "SERVICE" `
         -Command "$(ConvertTo-CmdLiteral $PythonExe) -m uvicorn web.main:app --host $BindHost --port $Port >> $(ConvertTo-CmdLiteral $serviceOut) 2>> $(ConvertTo-CmdLiteral $serviceErr)" `
         -MarkerLog $serviceErr
@@ -424,6 +471,8 @@ function Start-MarketWsService {
         "X-OPS-CALLER" = "market_ws_strategy_primary_launcher"
     }
     $lastError = $null
+    $waitStarted = Get-Date
+    $nextProgressAt = $waitStarted.AddSeconds(30)
     while ((Get-Date) -lt $deadline) {
         $pidOnPort = Get-ListeningPid -PortNumber $Port
         try {
@@ -450,12 +499,19 @@ function Start-MarketWsService {
         } catch {
             $lastError = $_.Exception.Message
         }
+        if ((Get-Date) -ge $nextProgressAt) {
+            $elapsed = [int]((Get-Date) - $waitStarted).TotalSeconds
+            Write-Host ("...still warming up ({0}s/{1}s, pid={2}); cold start can take 10-16 min. {3}" -f `
+                $elapsed, $HealthWaitSec, $pidOnPort, $(if ($lastError) { "last: $lastError" } else { "" }))
+            $nextProgressAt = (Get-Date).AddSeconds(30)
+        }
         Start-Sleep -Milliseconds 1000
     }
     if ($lastError) {
         Write-Host ("READY_ERR: {0}" -f $lastError) -ForegroundColor Yellow
     }
-    throw "Service did not become ready within $HealthWaitSec seconds."
+    throw ("Service did not become ready within $HealthWaitSec seconds. If cold start is genuinely slower, " +
+           "re-run with a larger -HealthWaitSec, or check the service stderr log.")
 }
 
 function Start-MarketWsSelfcheck {
@@ -500,6 +556,11 @@ function Start-MarketWsSelfcheck {
         "--max-stale-symbol-count 0",
         "--max-price-diff-bps 20",
         "--max-ws-age-p95-ms $MaxWsAgeMs",
+        # Observer-robustness (mirrors the L3 launcher): retry isolated probe
+        # timeouts and tolerate up to 3 isolated probe misses. WS-quality gates
+        # are unchanged.
+        "--probe-retries 2",
+        "--max-sample-errors 3",
         ">> $(ConvertTo-CmdLiteral $selfcheckOut) 2>> $(ConvertTo-CmdLiteral $selfcheckErr)"
     ) -join " "
     $commands += New-InstrumentedCmdCommand `

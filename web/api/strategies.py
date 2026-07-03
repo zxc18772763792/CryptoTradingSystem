@@ -103,31 +103,8 @@ def _strategy_export_payload(info: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _consume_audit_task_result(task) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:
-        logger.warning(f"Background audit log task failed: {exc}")
-
-
 def _schedule_audit_log(**kwargs: Any) -> None:
-    async def _run() -> None:
-        try:
-            await audit_logger.log(**kwargs)
-        except Exception as exc:
-            logger.warning(f"Background audit log failed: {exc}")
-
-    coro = _run()
-    try:
-        task = asyncio.create_task(coro)
-    except RuntimeError as exc:
-        coro.close()
-        logger.warning(f"Failed to schedule audit log: {exc}")
-        return
-    if hasattr(task, "add_done_callback"):
-        task.add_done_callback(_consume_audit_task_result)
+    audit_logger.schedule(**kwargs)
 
 
 _MONITOR_RESAMPLE_RULES: Dict[str, str] = {

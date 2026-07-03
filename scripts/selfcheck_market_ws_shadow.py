@@ -135,25 +135,60 @@ def _watched_symbol_errors(market_ws: Dict[str, Any]) -> Tuple[List[str], List[s
     return [f"{exchange}:{symbol}" for exchange, symbol in watched_symbols], errors
 
 
-def _request_json(base_url: str, token: str, path: str, timeout: float) -> Dict[str, Any]:
+def _request_json(
+    base_url: str,
+    token: str,
+    path: str,
+    timeout: float,
+    *,
+    retries: int = 0,
+    retry_backoff: float = 0.75,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Dict[str, Any]:
     headers = {"X-OPS-CALLER": "selfcheck_market_ws_shadow"}
     if token:
         headers["X-OPS-TOKEN"] = token
     url = _join_url(base_url, path)
-    response = requests.request("GET", url, headers=headers, timeout=max(0.5, float(timeout or 5.0)))
-    return {
-        "url": url,
-        "path": path,
-        "status_code": int(response.status_code),
-        "body": _safe_json(response),
-    }
+    attempts = max(1, int(retries) + 1)
+    last_exc: Optional[Exception] = None
+    for attempt in range(attempts):
+        try:
+            response = requests.request(
+                "GET", url, headers=headers, timeout=max(0.5, float(timeout or 5.0))
+            )
+            return {
+                "url": url,
+                "path": path,
+                "status_code": int(response.status_code),
+                "body": _safe_json(response),
+            }
+        except requests.exceptions.RequestException as exc:
+            # A read/connect timeout or reset is a failed *measurement* (the
+            # observer's own HTTP call hiccuped), not a WS-quality signal. Retry a
+            # bounded number of times so an isolated stall (e.g. a GC pause or a
+            # cold-start warmup blip) doesn't record a sample_error that voids a
+            # multi-hour run. A non-200 status is a real reading and is NOT retried.
+            last_exc = exc
+            if attempt < attempts - 1:
+                sleep_fn(max(0.0, float(retry_backoff)) * (attempt + 1))
+                continue
+            raise
+    raise last_exc if last_exc is not None else RuntimeError("request failed")
 
 
-def _extract_sample(base_url: str, token: str, timeout: float) -> Dict[str, Any]:
+def _extract_sample(
+    base_url: str,
+    token: str,
+    timeout: float,
+    *,
+    retries: int = 0,
+    retry_backoff: float = 0.75,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> Dict[str, Any]:
     sampled_at = datetime.now(timezone.utc).isoformat()
-    health = _request_json(base_url, token, "/health", timeout)
-    status = _request_json(base_url, token, "/api/status", timeout)
-    market = _request_json(base_url, token, "/api/market-data/status", timeout)
+    health = _request_json(base_url, token, "/health", timeout, retries=retries, retry_backoff=retry_backoff, sleep_fn=sleep_fn)
+    status = _request_json(base_url, token, "/api/status", timeout, retries=retries, retry_backoff=retry_backoff, sleep_fn=sleep_fn)
+    market = _request_json(base_url, token, "/api/market-data/status", timeout, retries=retries, retry_backoff=retry_backoff, sleep_fn=sleep_fn)
     status_body = status["body"]
     market_body = market["body"]
     status_market_ws = status_body.get("market_ws") if isinstance(status_body.get("market_ws"), dict) else {}
@@ -259,15 +294,20 @@ def _evaluate_samples(
     max_degraded_samples: int = 0,
     max_consecutive_degraded: int = 1,
     max_degraded_oldest_age_ms: float = 60000.0,
+    max_sample_errors: int = 0,
 ) -> Tuple[bool, List[str], Dict[str, Any]]:
     errors: List[str] = []
     mode = str(expect_mode or "shadow").strip().lower()
     runtime = str(expect_runtime or "paper").strip().lower()
     degraded_indices: List[int] = []
+    sample_error_indices: List[Tuple[int, Any]] = []
     for index, sample in enumerate(samples):
         prefix = f"sample[{index}]"
         if sample.get("sample_error"):
-            errors.append(f"{prefix}: sample request failed: {sample.get('sample_error')}")
+            # Defer: a probe failure is the observer's own HTTP call timing out,
+            # not a WS-quality breach. Default is zero-tolerance; an explicit
+            # bounded budget can tolerate a few *isolated* ones (handled below).
+            sample_error_indices.append((index, sample.get("sample_error")))
             continue
         if sample.get("health_status_code") != 200 or str(sample.get("health_status")).lower() not in {"healthy", "running"}:
             errors.append(f"{prefix}: /health not healthy")
@@ -342,6 +382,32 @@ def _evaluate_samples(
                 f"degraded_sample watched_tick_age_ms {worst_degraded_oldest:.0f} > allowed {max_degraded_oldest_age_ms:.0f}"
             )
 
+    # Probe-failure tolerance. A ``sample_error`` is the observer's own HTTP probe
+    # to the service timing out / erroring — a failed *measurement*, not a
+    # WS-quality breach. Default (max_sample_errors=0) is zero-tolerance: identical
+    # to the prior behavior. With an explicit budget AND --tolerate-transient,
+    # allow up to N *isolated* probe failures but still hard-fail on any consecutive
+    # pair (a sustained stall, not a blip) or on exceeding the budget. The
+    # valid_sample_count floor below still applies independently, so tolerating a
+    # probe miss can never drop the run under its required sample count.
+    total_sample_errors = len(sample_error_indices)
+    longest_sample_error_run = 0
+    if sample_error_indices:
+        err_idx = [i for i, _ in sample_error_indices]
+        longest_sample_error_run = _run = 1
+        for _a, _b in zip(err_idx, err_idx[1:]):
+            _run = _run + 1 if _b == _a + 1 else 1
+            longest_sample_error_run = max(longest_sample_error_run, _run)
+        tolerated = (
+            tolerate_transient
+            and int(max_sample_errors) > 0
+            and total_sample_errors <= int(max_sample_errors)
+            and longest_sample_error_run <= 1
+        )
+        if not tolerated:
+            for index, msg in sample_error_indices:
+                errors.append(f"sample[{index}]: sample request failed: {msg}")
+
     valid_samples = [sample for sample in samples if not sample.get("sample_error")]
     if len(valid_samples) < int(min_samples):
         errors.append(f"valid_sample_count {len(valid_samples)} < required {int(min_samples)}")
@@ -411,6 +477,7 @@ def _evaluate_samples(
         "valid_sample_count": len(valid_samples),
         "sample_attempt_count": len(samples),
         "sample_error_count": len(samples) - len(valid_samples),
+        "max_consecutive_sample_errors_observed": longest_sample_error_run,
         "ws_tick_delta": ws_tick_delta,
         "shadow_compare_delta": shadow_compare_delta,
         "shadow_compare_violation_delta": shadow_violation_delta,
@@ -488,6 +555,9 @@ def run_selfcheck(
     max_degraded_samples: int = 0,
     max_consecutive_degraded: int = 1,
     max_degraded_oldest_age_ms: float = 60000.0,
+    max_sample_errors: int = 0,
+    probe_retries: int = 0,
+    probe_retry_backoff: float = 0.75,
     sleep_fn: Callable[[float], None] = time.sleep,
 ) -> Dict[str, Any]:
     interval = max(0.1, float(interval_sec or 1.0))
@@ -496,7 +566,16 @@ def run_selfcheck(
     samples: List[Dict[str, Any]] = []
     for index in range(sample_count):
         try:
-            samples.append(_extract_sample(base_url, token, timeout))
+            samples.append(
+                _extract_sample(
+                    base_url,
+                    token,
+                    timeout,
+                    retries=int(probe_retries),
+                    retry_backoff=float(probe_retry_backoff),
+                    sleep_fn=sleep_fn,
+                )
+            )
         except Exception as exc:
             samples.append(_failed_sample(exc))
         if index < sample_count - 1:
@@ -523,6 +602,7 @@ def run_selfcheck(
         max_degraded_samples=max_degraded_samples,
         max_consecutive_degraded=max_consecutive_degraded,
         max_degraded_oldest_age_ms=max_degraded_oldest_age_ms,
+        max_sample_errors=max_sample_errors,
     )
     return {
         "overall_ok": ok,
@@ -590,6 +670,28 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-degraded-samples", type=int, default=int(os.getenv("MARKET_WS_SHADOW_MAX_DEGRADED_SAMPLES", "0")))
     parser.add_argument("--max-consecutive-degraded", type=int, default=int(os.getenv("MARKET_WS_SHADOW_MAX_CONSECUTIVE_DEGRADED", "1")))
     parser.add_argument("--max-degraded-oldest-age-ms", type=float, default=float(os.getenv("MARKET_WS_SHADOW_MAX_DEGRADED_OLDEST_AGE_MS", "60000")))
+    parser.add_argument(
+        "--max-sample-errors",
+        type=int,
+        default=int(os.getenv("MARKET_WS_SHADOW_MAX_SAMPLE_ERRORS", "0")),
+        help="With --tolerate-transient, allow up to N isolated (non-consecutive) probe "
+             "failures (observer HTTP timeouts), still failing on any consecutive pair. "
+             "Default 0 = zero-tolerance (a probe failure is not a WS-quality breach).",
+    )
+    parser.add_argument(
+        "--probe-retries",
+        type=int,
+        default=int(os.getenv("MARKET_WS_SHADOW_PROBE_RETRIES", "0")),
+        help="Retry each status probe this many times on transient transport errors "
+             "(read/connect timeout) before recording a sample_error. Default 0 "
+             "(off); the gated launchers opt in for long live observation runs.",
+    )
+    parser.add_argument(
+        "--probe-retry-backoff",
+        type=float,
+        default=float(os.getenv("MARKET_WS_SHADOW_PROBE_RETRY_BACKOFF", "0.75")),
+        help="Linear backoff (seconds) multiplied by attempt index between probe retries.",
+    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
@@ -621,6 +723,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             max_degraded_samples=int(args.max_degraded_samples),
             max_consecutive_degraded=int(args.max_consecutive_degraded),
             max_degraded_oldest_age_ms=float(args.max_degraded_oldest_age_ms),
+            max_sample_errors=int(args.max_sample_errors),
+            probe_retries=int(args.probe_retries),
+            probe_retry_backoff=float(args.probe_retry_backoff),
         )
     except Exception as exc:
         report = {

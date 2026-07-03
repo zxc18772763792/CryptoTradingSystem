@@ -1,171 +1,182 @@
+"""Manual Binance live-account connectivity check.
+
+This script calls real Binance account and open-order read endpoints. It never
+places, cancels, or modifies orders, but it is gated so account reads cannot run
+by accident.
 """
-测试 Binance 完整交易功能 - 修复时间戳问题
-"""
+from __future__ import annotations
+
+import argparse
 import asyncio
-import aiohttp
-from datetime import datetime
-import hmac
 import hashlib
-from urllib.parse import urlencode
+import hmac
+import os
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlencode
 
-sys.path.insert(0, str(__file__).replace('\\scripts\\test_binance_trading.py', ''))
+import aiohttp
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from config.settings import settings
 
-PROXY = 'http://127.0.0.1:7890'
-API_KEY = settings.BINANCE_API_KEY
-API_SECRET = settings.BINANCE_API_SECRET
 
-# 全局时间偏移量
+ALLOW_LIVE_ENV = "ALLOW_BINANCE_LIVE_CHECK"
+DEFAULT_PROXY = os.environ.get("BINANCE_TEST_PROXY", "http://127.0.0.1:7890")
 TIME_OFFSET = 0
 
 
 def sign_request(params: dict, secret: str) -> str:
-    """生成签名"""
     query_string = urlencode(params)
-    signature = hmac.new(
-        secret.encode('utf-8'),
-        query_string.encode('utf-8'),
-        hashlib.sha256
+    return hmac.new(
+        secret.encode("utf-8"),
+        query_string.encode("utf-8"),
+        hashlib.sha256,
     ).hexdigest()
-    return signature
 
 
-async def get_server_time(session) -> int:
-    """获取Binance服务器时间"""
-    url = 'https://api.binance.com/api/v3/time'
-    async with session.get(url, proxy=PROXY, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+async def get_server_time(session: aiohttp.ClientSession, *, proxy: str | None) -> int:
+    url = "https://api.binance.com/api/v3/time"
+    async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
         if resp.status == 200:
             data = await resp.json()
-            return data['serverTime']
+            return int(data["serverTime"])
     return int(time.time() * 1000)
 
 
-async def test_binance_trading():
+async def run_binance_live_account_check(*, proxy: str | None) -> int:
     global TIME_OFFSET
 
-    print('=' * 60)
-    print('测试 Binance 完整交易功能')
-    print('=' * 60)
-    print(f'API Key: {API_KEY[:8]}...{API_KEY[-8:]}')
-    print(f'API Secret: {API_SECRET[:4]}...{API_SECRET[-4:]}')
-    print(f'代理: {PROXY}')
+    api_key = str(settings.BINANCE_API_KEY or "").strip()
+    api_secret = str(settings.BINANCE_API_SECRET or "").strip()
+    if not api_key or not api_secret:
+        print("BINANCE_API_KEY and BINANCE_API_SECRET must be configured.")
+        return 2
+
+    print("=" * 60)
+    print("Binance live-account read check")
+    print("=" * 60)
+    print("API key configured: yes")
+    print("API secret configured: yes")
+    print(f"Proxy: {proxy or 'disabled'}")
 
     async with aiohttp.ClientSession() as session:
-        headers = {'X-MBX-APIKEY': API_KEY}
+        headers = {"X-MBX-APIKEY": api_key}
 
-        # 1. 测试连接并同步时间
-        print('\n1. 同步服务器时间...')
+        print("\n1. Syncing server time...")
         try:
             local_time = int(time.time() * 1000)
-            server_time = await get_server_time(session)
+            server_time = await get_server_time(session, proxy=proxy)
             TIME_OFFSET = server_time - local_time
-            print(f'  本地时间: {datetime.now().strftime("%H:%M:%S.%f")[:-3]}')
-            print(f'  服务器时间: {datetime.fromtimestamp(server_time/1000).strftime("%H:%M:%S.%f")[:-3]}')
-            print(f'  时间偏移: {TIME_OFFSET} ms')
-            print('  [OK] 时间同步完成')
-        except Exception as e:
-            print(f'  [FAIL] {e}')
-            return
+            print(f"  Local time: {datetime.now().strftime('%H:%M:%S.%f')[:-3]}")
+            print(f"  Server time: {datetime.fromtimestamp(server_time / 1000).strftime('%H:%M:%S.%f')[:-3]}")
+            print(f"  Time offset: {TIME_OFFSET} ms")
+        except Exception as exc:
+            print(f"  [FAIL] {exc}")
+            return 1
 
-        # 2. 获取账户信息 (需要签名)
-        print('\n2. 获取账户信息...')
+        print("\n2. Reading account balances...")
         try:
             timestamp = int(time.time() * 1000) + TIME_OFFSET
-            params = {'timestamp': timestamp, 'recvWindow': 60000}
-            params['signature'] = sign_request(params, API_SECRET)
+            params = {"timestamp": timestamp, "recvWindow": 60000}
+            params["signature"] = sign_request(params, api_secret)
+            url = f"https://api.binance.com/api/v3/account?{urlencode(params)}"
 
-            url = f'https://api.binance.com/api/v3/account?{urlencode(params)}'
-
-            async with session.get(url, headers=headers, proxy=PROXY,
-                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 data = await resp.json()
                 if resp.status == 200:
-                    print('  [OK] 账户信息获取成功!')
-                    balances = [b for b in data.get('balances', [])
-                                if float(b['free']) > 0 or float(b['locked']) > 0]
-                    print(f'  持有资产: {len(balances)} 种')
-
-                    for b in balances[:20]:  # 显示前20种资产
-                        free = float(b['free'])
-                        locked = float(b['locked'])
-                        if free > 0 or locked > 0:
-                            print(f'    {b["asset"]}: {free:.6f} (锁定: {locked:.6f})')
+                    balances = [
+                        item
+                        for item in data.get("balances", [])
+                        if float(item.get("free") or 0) > 0 or float(item.get("locked") or 0) > 0
+                    ]
+                    print(f"  [OK] Account read succeeded; non-zero assets: {len(balances)}")
+                    for item in balances[:20]:
+                        free = float(item.get("free") or 0)
+                        locked = float(item.get("locked") or 0)
+                        print(f"    {item.get('asset')}: {free:.6f} (locked: {locked:.6f})")
                 else:
-                    print(f'  [FAIL] 状态码: {resp.status}')
-                    print(f'  错误信息: {data}')
-        except Exception as e:
-            print(f'  [FAIL] {e}')
+                    print(f"  [FAIL] Status: {resp.status}")
+                    print(f"  Response: {data}")
+        except Exception as exc:
+            print(f"  [FAIL] {exc}")
 
-        # 3. 获取BTC价格
-        print('\n3. 获取BTC价格...')
-        btc_price = 0
+        print("\n3. Reading BTC price...")
         try:
-            url = 'https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT'
-            async with session.get(url, proxy=PROXY, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+            async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    btc_price = float(data['price'])
-                    print(f'  [OK] BTC/USDT: ${btc_price:,.2f}')
-        except Exception as e:
-            print(f'  [FAIL] {e}')
+                    print(f"  [OK] BTC/USDT: ${float(data['price']):,.2f}")
+        except Exception as exc:
+            print(f"  [FAIL] {exc}")
 
-        # 4. 查询BTCUSDT交易对精度
-        print('\n4. 查询交易规则...')
+        print("\n4. Reading BTCUSDT trading rules...")
         try:
-            url = 'https://api.binance.com/api/v3/exchangeInfo?symbol=BTCUSDT'
-            async with session.get(url, proxy=PROXY, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            url = "https://api.binance.com/api/v3/exchangeInfo?symbol=BTCUSDT"
+            async with session.get(url, proxy=proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    if data.get('symbols'):
-                        info = data['symbols'][0]
-                        print(f'  [OK] {info["symbol"]} 状态: {info["status"]}')
+                    if data.get("symbols"):
+                        info = data["symbols"][0]
+                        print(f"  [OK] {info['symbol']} status: {info['status']}")
+                        for item in info.get("filters", []):
+                            if item.get("filterType") == "LOT_SIZE":
+                                print(f"  Min quantity: {float(item.get('minQty') or 0)} BTC")
+                                print(f"  Step size: {float(item.get('stepSize') or 0)} BTC")
+                            elif item.get("filterType") == "MIN_NOTIONAL":
+                                print(f"  Min notional: ${float(item.get('minNotional') or 0)}")
+        except Exception as exc:
+            print(f"  [FAIL] {exc}")
 
-                        for f in info['filters']:
-                            if f['filterType'] == 'LOT_SIZE':
-                                min_qty = float(f['minQty'])
-                                step_size = float(f['stepSize'])
-                                print(f'  最小下单量: {min_qty} BTC')
-                                print(f'  下单精度: {step_size} BTC')
-                            elif f['filterType'] == 'MIN_NOTIONAL':
-                                min_notional = float(f.get('minNotional', 0))
-                                print(f'  最小订单金额: ${min_notional}')
-        except Exception as e:
-            print(f'  [FAIL] {e}')
-
-        # 5. 查询开放订单
-        print('\n5. 查询当前挂单...')
+        print("\n5. Reading current BTCUSDT open orders...")
         try:
             timestamp = int(time.time() * 1000) + TIME_OFFSET
-            params = {'timestamp': timestamp, 'recvWindow': 60000, 'symbol': 'BTCUSDT'}
-            params['signature'] = sign_request(params, API_SECRET)
+            params = {"timestamp": timestamp, "recvWindow": 60000, "symbol": "BTCUSDT"}
+            params["signature"] = sign_request(params, api_secret)
+            url = f"https://api.binance.com/api/v3/openOrders?{urlencode(params)}"
 
-            url = f'https://api.binance.com/api/v3/openOrders?{urlencode(params)}'
-
-            async with session.get(url, headers=headers, proxy=PROXY,
-                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, headers=headers, proxy=proxy, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 data = await resp.json()
                 if resp.status == 200:
-                    print(f'  [OK] 查询订单成功, 当前挂单: {len(data)} 个')
+                    print(f"  [OK] Open-order read succeeded; current open orders: {len(data)}")
                     for order in data[:5]:
-                        print(f'    订单ID: {order["orderId"]}, {order["side"]}, {order["type"]}')
+                        print(f"    Order ID: {order.get('orderId')}, {order.get('side')}, {order.get('type')}")
                 else:
-                    print(f'  [FAIL] {data}')
-        except Exception as e:
-            print(f'  [FAIL] {e}')
+                    print(f"  [FAIL] {data}")
+        except Exception as exc:
+            print(f"  [FAIL] {exc}")
 
-        # 6. 测试下单能力 (查询API权限)
-        print('\n6. 检查API权限...')
-        print('  提示: 如果无法下单，请检查Binance API设置')
-        print('  需要开启: Enable Spot & Margin Trading')
+    print("\n" + "=" * 60)
+    print("Read-only Binance live-account check complete.")
+    print("=" * 60)
+    return 0
 
-    print('\n' + '=' * 60)
-    print('测试完成!')
-    print('=' * 60)
-    print('\n如果账户信息显示正常，说明API配置正确，可以用于交易。')
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run a gated, read-only Binance live-account check.")
+    parser.add_argument(
+        "--allow-live-account-check",
+        action="store_true",
+        help=f"Allow real Binance account read endpoints. Alternatively set {ALLOW_LIVE_ENV}=1.",
+    )
+    parser.add_argument("--proxy", default=DEFAULT_PROXY, help="HTTP proxy URL; pass an empty string to disable.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    if not args.allow_live_account_check and os.environ.get(ALLOW_LIVE_ENV) != "1":
+        print(
+            "Refusing to call live Binance account endpoints. "
+            "Re-run with --allow-live-account-check or set ALLOW_BINANCE_LIVE_CHECK=1."
+        )
+        return 2
+    return asyncio.run(run_binance_live_account_check(proxy=str(args.proxy or "").strip() or None))
 
 
 if __name__ == "__main__":
-    asyncio.run(test_binance_trading())
+    raise SystemExit(main())

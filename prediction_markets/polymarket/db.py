@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -68,11 +69,26 @@ def _create_pm_engine(database_url: str):
     return engine
 
 
+def _dispose_pm_engine_sync(engine) -> None:
+    if engine is None:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(engine.dispose())
+        return
+    engine.sync_engine.dispose()
+
+
 def configure_pm_db(database_url: Optional[str] = None) -> str:
     global _PM_DATABASE_URL, pm_engine, PMSessionLocal
     resolved = _normalize_pm_database_url(database_url)
     if pm_engine is not None and PMSessionLocal is not None and resolved == _PM_DATABASE_URL:
         return _PM_DATABASE_URL
+    previous_engine = pm_engine
+    previous_session_factory = PMSessionLocal
+    if previous_engine is not None and previous_session_factory is not None:
+        _dispose_pm_engine_sync(previous_engine)
     pm_engine = _create_pm_engine(resolved)
     PMSessionLocal = async_sessionmaker(pm_engine, class_=AsyncSession, expire_on_commit=False)
     _PM_DATABASE_URL = resolved

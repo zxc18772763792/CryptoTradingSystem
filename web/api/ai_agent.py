@@ -18,7 +18,10 @@ from web.api.ai_research import (
 router = APIRouter()
 
 
-@router.get("/runtime-config/autonomous-agent")
+@router.get(
+    "/runtime-config/autonomous-agent",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def get_ai_autonomous_agent_runtime_config(request: Request):
     return await ai_research_module.get_ai_autonomous_agent_runtime_config(request)
 
@@ -31,7 +34,10 @@ async def update_ai_autonomous_agent_runtime_config(
     return await ai_research_module.update_ai_autonomous_agent_runtime_config(request, payload)
 
 
-@router.get("/autonomous-agent/risk-config")
+@router.get(
+    "/autonomous-agent/risk-config",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def get_ai_autonomous_agent_risk_config(request: Request):
     return await ai_research_module.get_ai_autonomous_agent_risk_config(request)
 
@@ -44,8 +50,11 @@ async def update_ai_autonomous_agent_risk_config(
     return await ai_research_module.update_ai_autonomous_agent_risk_config(request, payload)
 
 
-@router.get("/autonomous-agent/status")
-async def get_ai_autonomous_agent_status(request: Request, warm_preview: bool = True):
+@router.get(
+    "/autonomous-agent/status",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
+async def get_ai_autonomous_agent_status(request: Request, warm_preview: bool = False):
     return await ai_research_module.get_ai_autonomous_agent_status(
         request,
         warm_preview=warm_preview,
@@ -73,17 +82,26 @@ async def run_ai_autonomous_agent_once(
     return await ai_research_module.run_ai_autonomous_agent_once(request, payload)
 
 
-@router.get("/autonomous-agent/journal")
+@router.get(
+    "/autonomous-agent/journal",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def get_ai_autonomous_agent_journal(request: Request, limit: int = 50):
     return await ai_research_module.get_ai_autonomous_agent_journal(request, limit=limit)
 
 
-@router.get("/autonomous-agent/review")
+@router.get(
+    "/autonomous-agent/review",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
     return await ai_research_module.get_ai_autonomous_agent_review(request, limit=limit)
 
 
-@router.get("/autonomous-agent/scorecard")
+@router.get(
+    "/autonomous-agent/scorecard",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def get_ai_autonomous_agent_scorecard(request: Request, limit: int = 200, hours: int = 24 * 7):
     return await ai_research_module.get_ai_autonomous_agent_scorecard(
         request,
@@ -92,12 +110,18 @@ async def get_ai_autonomous_agent_scorecard(request: Request, limit: int = 200, 
     )
 
 
-@router.get("/autonomous-agent/risk-status")
+@router.get(
+    "/autonomous-agent/risk-status",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def get_ai_autonomous_agent_risk_status(request: Request):
     return await ai_research_module.get_ai_autonomous_agent_risk_status(request)
 
 
-@router.get("/autonomous-agent/symbol-ranking")
+@router.get(
+    "/autonomous-agent/symbol-ranking",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 10, refresh: bool = False):
     return await ai_research_module.get_ai_autonomous_agent_symbol_ranking(
         request,
@@ -106,6 +130,9 @@ async def get_ai_autonomous_agent_symbol_ranking(request: Request, limit: int = 
     )
 
 
-@router.get("/autonomous-agent/live-signals")
+@router.get(
+    "/autonomous-agent/live-signals",
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))],
+)
 async def get_autonomous_agent_live_signals(request: Request, symbol: Optional[str] = None):
     return await ai_research_module.get_autonomous_agent_live_signals(request, symbol=symbol)

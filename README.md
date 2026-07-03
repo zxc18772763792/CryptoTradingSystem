@@ -215,6 +215,12 @@ Run the Polymarket worker once:
 python scripts/run_polymarket_worker.py
 ```
 
+Start the optional monitoring profile:
+
+```powershell
+docker compose --profile monitoring up -d grafana prometheus
+```
+
 Run the OpenClaw/Ops self-check:
 
 ```powershell
@@ -258,6 +264,7 @@ See [SECURITY.md](SECURITY.md) for the full pre-push checklist and incident resp
 - [docs/GOVERNANCE.md](docs/GOVERNANCE.md): governance model and approval flows
 - [docs/INTEGRATION.md](docs/INTEGRATION.md): system integration notes
 - [docs/CHANGELOG.md](docs/CHANGELOG.md): tracked repository milestones
+- [`prometheus.yml`](prometheus.yml): default Prometheus scrape config for the compose monitoring profile
 
 ## Git Hygiene
 

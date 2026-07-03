@@ -926,7 +926,7 @@ class ExecutionEngine:
     async def _ensure_queue_worker(self) -> None:
         if not self._running:
             return
-        queue = self._ensure_signal_queue()
+        self._ensure_signal_queue()  # ensure the queue exists; return value unused
         if self._queue_task and not self._queue_task.done():
             task_loop = getattr(self._queue_task, "_loop", None)
             if task_loop is self._signal_queue_loop:

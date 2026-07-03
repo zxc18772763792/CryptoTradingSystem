@@ -175,7 +175,8 @@ class DEXArbitrageStrategy(StrategyBase):
                     })
 
         if best_observed_pct is not None:
-            self._last_spread_obs[self._pair_key(token_a, token_b)] = {
+            directional_key = self._pair_key(token_a, token_b, directional=True)
+            self._last_spread_obs[directional_key] = {
                 "profit_pct": float(best_observed_pct),
                 "at": datetime.now(timezone.utc),
             }
@@ -183,10 +184,12 @@ class DEXArbitrageStrategy(StrategyBase):
         return opportunities
 
     @staticmethod
-    def _pair_key(token_a: Any, token_b: Any) -> str:
-        tokens = sorted(
+    def _pair_key(token_a: Any, token_b: Any, directional: bool = False) -> str:
+        tokens = [
             str(token or "").strip().upper() for token in (token_a, token_b)
-        )
+        ]
+        if not directional:
+            tokens = sorted(tokens)
         return "/".join(tokens)
 
     def check_exit(self, data, position) -> Optional[Signal]:
@@ -204,7 +207,23 @@ class DEXArbitrageStrategy(StrategyBase):
         if len(tokens) != 2:
             return None
 
-        obs = self._last_spread_obs.get(self._pair_key(tokens[0], tokens[1]))
+        metadata = getattr(position, "metadata", None)
+        entry_pair_key = ""
+        if isinstance(metadata, dict):
+            entry_pair_key = str(metadata.get("dex_pair_key") or "").strip().upper()
+
+        directional_key = self._pair_key(tokens[0], tokens[1], directional=True)
+        reverse_key = self._pair_key(tokens[1], tokens[0], directional=True)
+        unordered_key = self._pair_key(tokens[0], tokens[1])
+
+        obs = None
+        for key in (entry_pair_key, directional_key, reverse_key, unordered_key):
+            if not key:
+                continue
+            candidate = self._last_spread_obs.get(key)
+            if isinstance(candidate, dict):
+                obs = candidate
+                break
         if not isinstance(obs, dict):
             return None
         now = datetime.now(timezone.utc)
@@ -281,6 +300,7 @@ class DEXArbitrageStrategy(StrategyBase):
                 metadata={
                     "dex": opp["buy_dex"],
                     "arbitrage_type": "dex_buy",
+                    "dex_pair_key": self._pair_key(token_a, token_b, directional=True),
                     "profit": float(opp["profit"]),
                     "amount": float(amount_in),
                     "quote": float(buy_quote),
@@ -300,6 +320,7 @@ class DEXArbitrageStrategy(StrategyBase):
                 metadata={
                     "dex": opp["sell_dex"],
                     "arbitrage_type": "dex_sell",
+                    "dex_pair_key": self._pair_key(token_a, token_b, directional=True),
                     "profit": float(opp["profit"]),
                     "amount": float(buy_quote),
                     "quote": float(sell_quote),

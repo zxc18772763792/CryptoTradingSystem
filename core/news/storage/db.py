@@ -464,6 +464,19 @@ def _sqlite_table_row_count(conn: sqlite3.Connection, schema_name: str, table_na
     return int((row or [0])[0] or 0)
 
 
+def _sqlite_table_has_rows(conn: sqlite3.Connection, schema_name: str, table_name: str) -> bool:
+    """O(1) non-emptiness probe. The bootstrap's skip decisions only need
+    "is there at least one row" — COUNT(*) is a full btree scan and stalled a
+    cold start for 25+ minutes on a multi-GB news DB on a slow disk (2026-07-03)."""
+    columns = _sqlite_table_columns(conn, schema_name, table_name)
+    if not columns:
+        return False
+    row = conn.execute(
+        f'SELECT EXISTS(SELECT 1 FROM {schema_name}."{table_name}" LIMIT 1)'
+    ).fetchone()
+    return bool((row or [0])[0])
+
+
 def _copy_sqlite_table_rows(conn: sqlite3.Connection, table_name: str) -> int:
     target_columns = _sqlite_table_columns(conn, "main", table_name)
     source_columns = set(_sqlite_table_columns(conn, "legacy", table_name))
@@ -504,20 +517,30 @@ def _bootstrap_sqlite_news_history(*, target_path: Path, legacy_path: Path) -> D
     with sqlite3.connect(str(target_resolved), timeout=timeout_sec) as conn:
         conn.execute(f"PRAGMA busy_timeout={int(timeout_sec * 1000)}")
         conn.execute("PRAGMA journal_mode=WAL")
-        result["target_total_before"] = sum(_sqlite_table_row_count(conn, "main", table_name) for table_name in _NEWS_BOOTSTRAP_TABLES)
-        if result["target_total_before"] > 0:
+        # Skip decisions only need "any rows at all" — use the O(1) probe. The
+        # exact totals are only reported when a copy actually happens (rare
+        # one-time migration), so trading them away on the skip paths is free.
+        target_has_rows = any(
+            _sqlite_table_has_rows(conn, "main", table_name) for table_name in _NEWS_BOOTSTRAP_TABLES
+        )
+        result["target_total_before"] = 1 if target_has_rows else 0
+        if target_has_rows:
             result["skipped"] = "target_not_empty"
             result["target_total_after"] = result["target_total_before"]
             return result
 
         conn.execute(f"ATTACH DATABASE '{escaped_legacy}' AS legacy")
         try:
+            source_has_rows = any(
+                _sqlite_table_has_rows(conn, "legacy", table_name) for table_name in _NEWS_BOOTSTRAP_TABLES
+            )
+            result["source_total"] = 1 if source_has_rows else 0
+            if not source_has_rows:
+                result["skipped"] = "legacy_empty"
+                return result
             result["source_total"] = sum(
                 _sqlite_table_row_count(conn, "legacy", table_name) for table_name in _NEWS_BOOTSTRAP_TABLES
             )
-            if result["source_total"] <= 0:
-                result["skipped"] = "legacy_empty"
-                return result
 
             try:
                 conn.execute("BEGIN")

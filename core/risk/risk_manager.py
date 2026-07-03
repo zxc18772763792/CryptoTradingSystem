@@ -135,6 +135,14 @@ class RiskManager:
         with self._state_lock:
             return self._normalize_scope(getattr(self, "_risk_scope", "paper"))
 
+    def configure_storage(self, root: str | Path) -> Path:
+        """Override the runtime trade-history storage root."""
+        path = Path(root)
+        with self._state_lock:
+            self._trade_history_store_root = path
+            self._trade_history_store_root.mkdir(parents=True, exist_ok=True)
+        return path
+
     def _scope_state_copy(self, scope: str) -> Dict[str, Any]:
         normalized = self._normalize_scope(scope)
         if normalized == self._risk_scope:

@@ -4966,3 +4966,32 @@ scripts\market_ws_strategy_primary.ps1 -Action start-selfcheck -ConfirmLive -Con
 6. 6h L3 观察 selfcheck 启动：task `CryptoMarketWsUiPrimary_selfcheck_20260615_145021`，JSON `logs/ui_primary_selfcheck_20260615_145021.out.json`，预计 2026-06-15 20:50 结束。
 
 **L4 剩余前置**：本轮 ui_primary 自 2026-06-15 14:49 起算 → 满一个完整交易日（约 2026-06-16 14:49，期间无非预期重启/降级）+ 6h 观察评估 PASS + fallback 演练记录 + **用户明确 L4 批准**。评估 6h 报告用 `evaluate_market_ws_shadow_report.py --report logs/ui_primary_selfcheck_20260615_145021.out.json --expect-mode ui_primary --expect-runtime live`（阈值同 §33.8 的 Invoke-Level3Gate）。
+
+### 33.9 事故：主机休眠/断网导致 L3 服务崩溃，6h 观察作废（2026-06-15 23:xx +08:00）
+
+**事故链**：
+- L3 服务（PID 432）14:49→20:37 运行健康。20:37 起 err log 出现大面积 DNS 解析失败（keystore.com.cn 等）+ binance 不可达；**20:52:20 binance health_check 失败，20:52:48 进程以 `0xC0000006`（STATUS_IN_PAGE_ERROR）硬崩溃** —— 典型的笔记本休眠/挂起或磁盘 I/O 故障特征，非 Python 异常。
+- 6h 观察 selfcheck 继续轮询已死服务到 21:05:32 才退出，**最终 JSON 为空（size=0）→ 本轮 L3 观察作废**。
+- 服务从 20:52 到 ~22:58 宕机约 2 小时，期间系统侧对持仓零管理（交易所侧挂单若有则仍在）。
+
+**恢复尝试（22:58）**：经 launcher 重启 L3（PID 35864），但主机刚唤醒 + 网络仍抖动 + 环境重建（冷字节码），**冷启动耗时 ~16 分钟**（23:14:21 才 Application startup complete，正常 ~150s）。恢复后 status=running、mode=ui_primary、feed_healthy=True、guard 重新预热（degraded）。但 `/api/trading/balances` 超时、err log 持续 ccxt `RequestTimeout` 与策略 cycle 45s 超时 → **交易所连通性仍降级**。`/api/trading/positions` 返回 0，但因 exchange sync 同样在超时，**该读数不可信，真实持仓状态需用户在交易所端直接核对**。
+
+**根因与结论（关键）**：
+- 根因是**环境/基础设施**（笔记本休眠 + 网络/代理在唤醒后抖动），非代码缺陷。
+- **L4（strategy_primary）在会休眠/断网的笔记本上不可达**：无法满足"L3 稳定一个完整交易日"，且降级时连交易所都读不可靠。
+- **建议**：live WS 交易必须迁到常开、网络稳定的主机（服务器/VPS），并禁用休眠；在此之前不再尝试推进 L4。
+- L4 时钟因本次崩溃**再次归零**；需环境稳定后重建 L3 并重跑 6h 观察。
+
+**恢复确认（2026-06-16 08:49 +08:00）**：22:58 重启的服务（PID 35864）**整夜稳定运行 ~10h 未再崩溃**（主机本次未休眠）。当前：`mode=ui_primary feed_healthy=True ws_trusted=True guard=ws(recover=1) fail_closed=True`、ws_tick=51419、rest_fb=0；`/api/trading/balances` 正常（交易所可达）→ **`positions=0` 读数现可信，账户已平（崩溃前的 2 个持仓在宕机期间/之后已平，用户需查 trade history 复核 PnL）**。已启动新一轮 6h 观察 `CryptoMarketWsUiPrimary_selfcheck_20260616_085035`（JSON `logs/ui_primary_selfcheck_20260616_085035.out.json`，约 14:50 结束）。L3 连续性自 2026-06-15 22:58 起算。**环境结论不变**：本次未休眠不代表笔记本可靠，live WS 长跑仍建议迁常开主机。
+
+### 33.10 6h 观察 FAIL 根因 + gate 缺陷修复 + CleanEvidence 重跑（2026-06-16 ~ 2026-06-20）
+
+**06-16 6h 观察 FAIL（非 WS 问题）**：`CryptoMarketWsUiPrimary_selfcheck_20260616_085035` 跑满 6h 写出有效报告（359 样本），但 evaluator FAIL，原因有二，**均非 WS 数据质量问题**（WS 极健康：violations=0、invalid=0、regression=0、stale=0、p95_ws_age=932ms）：
+1. **gate 缺陷（已修复 commit db3f618）**：evaluator 无条件要求 `p99_abs_diff_bps`，但 ui_primary 在 WS 健康时抑制周期性 REST reconcile → 0 shadow compare → 无 p99 → **完全健康的 ui_primary 跑必然 FAIL**。修复：仅当 `min_shadow_compare_delta>0` 或实际发生过 compare 时才要求 p99（WS 价格准确性已在 L2 shadow 验证）。补 2 个回归测试。
+2. **news-LLM 子系统拖累（非 WS）**：2 个 selfcheck 探针 ReadTimeout（sample[83]~10:12、sample[250]~12:55）与 news-LLM 卡顿时刻吻合——LLM 配额耗尽（`insufficient_user_quota`，余额 $-0.000548）+ 本地中继 `192.168.1.24:8010` 不可达（connect timeout=120s），长超时拖累事件循环使 `/api/market-data/status` 探针 >20s 超时。selfcheck 对自身探针失败零容忍（line 269-271）→ 357/359 完美样本仍 FAIL。
+
+**关键澄清——持仓非空**：先前 06-16/06-20 "positions=0（账户已平）" 读数**不可信**（balances/positions 端点在 news-LLM 争用期超时返回空）。02:21 干净读数确认实有 **2 个真实持仓**：ETH/USDT:USDT long @1584.42（崩前原始入场）、BTW/USDT:USDT short @0.0752（入场价与早期 0.0896 读数不同，需用户在交易所端核对）。即历次重启均在持仓状态下进行（ui_primary 下 REST 仍为权威，持仓由持久化恢复，仅宕机窗口无管理）。
+
+**CleanEvidence 重跑（2026-06-20 02:09，用户批准）**：原服务（PID 35864）已连续运行 ~4 天未崩（主机本期未休眠）。raw fapi 实测 0.3s（网络健康），balances 超时实为 news-LLM 应用内争用。经 launcher 以 `-CleanEvidence`（禁 news/LLM/data/coinglass/macro/premium/analytics worker）重启 L3：冷启动 ~10min（launcher READY 200s 超时不足，服务自行起来），settled `trading_mode=live ui_primary fail_closed=True`；balances 为冷启动暖机假象（~7.5min 后恢复正常）；guard 因暖机长在启动即 degrade，**~13min 后恢复 `state=ws ws_trusted=True recover=1`**。新 6h 干净观察 `CryptoMarketWsUiPrimary_selfcheck_20260620_022140`（JSON 同名，约 08:21 结束）。L3 连续性自 2026-06-20 02:20 重新起算。
+
+**遗留**：(a) news-LLM 配置需修（配额/中继 192.168.1.24:8010），否则 production-like（非 CleanEvidence）长跑仍会被 news-LLM 噪声拖累；(b) launcher READY 超时（≤200s）小于本应用冷启动耗时（~10-16min），建议加大或改为轮询绑定；(c) 环境/休眠风险与常开主机建议不变。

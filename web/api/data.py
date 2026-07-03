@@ -22,6 +22,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from loguru import logger
 
+from core.utils.shared_ssl import get_shared_ssl_context
+
 from config.settings import settings
 from config.strategy_registry import get_strategy_defaults, get_strategy_recommended_symbols
 from web.api.auth import require_sensitive_ops_permissions
@@ -83,6 +85,11 @@ except Exception:  # pragma: no cover - optional integration
 
 router = APIRouter()
 _RESEARCH_SYMBOLS_TIMEOUT_SEC = 8.0
+
+# Outbound httpx calls in this module must reuse the process-wide TLS context:
+# per-call AsyncClient construction does a blocking CA-bundle read on the event
+# loop and froze the live service on 2026-07-02 under disk saturation. See
+# core/utils/shared_ssl.py (warmed at app startup in web.main's lifespan).
 
 
 _SUB_MINUTE_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
@@ -1500,7 +1507,7 @@ async def _fetch_binance_public_klines(symbol: str, timeframe: str, limit: int =
     req_limit = max(10, min(int(limit or 500), 1000))
     url = "https://api.binance.com/api/v3/klines"
     params = {"symbol": clean_symbol, "interval": interval, "limit": req_limit}
-    async with httpx.AsyncClient(timeout=8.0) as client:
+    async with httpx.AsyncClient(timeout=8.0, verify=get_shared_ssl_context()) as client:
         res = await client.get(url, params=params)
         res.raise_for_status()
         payload = res.json()
@@ -2118,7 +2125,7 @@ async def _fetch_defillama_chain_tvl(
 
     url = f"https://api.llama.fi/v2/historicalChainTvl/{lookup_chain}"
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
+        async with httpx.AsyncClient(timeout=12, verify=get_shared_ssl_context()) as client:
             res = await client.get(url)
             res.raise_for_status()
             rows = res.json() or []
@@ -2189,7 +2196,7 @@ async def _fetch_defillama_chain_tvl(
 async def _fetch_btc_whale_unconfirmed(min_btc: float = 10.0) -> Dict[str, Any]:
     try:
         # Fetch tx + BTC price concurrently to avoid serial latency blowing through API timeout.
-        async with httpx.AsyncClient(timeout=6.5) as client:
+        async with httpx.AsyncClient(timeout=6.5, verify=get_shared_ssl_context()) as client:
             tx_res, px_res = await asyncio.gather(
                 client.get("https://blockchain.info/unconfirmed-transactions?format=json"),
                 client.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"),

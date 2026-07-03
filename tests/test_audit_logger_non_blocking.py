@@ -1,7 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
+
+
+def test_audit_logger_sanitizes_sensitive_details():
+    from core.audit.audit_logger import _sanitize_audit_details
+
+    payload = {
+        "api_key": "key-secret",
+        "token_present": True,
+        "nested": {
+            "password": "pw",
+            "safe": "ok",
+            "items": [{"x-api-key": "nested-key"}],
+        },
+    }
+
+    sanitized = _sanitize_audit_details(payload)
+
+    assert sanitized["api_key"] == "[REDACTED]"
+    assert sanitized["token_present"] is True
+    assert sanitized["nested"]["password"] == "[REDACTED]"
+    assert sanitized["nested"]["safe"] == "ok"
+    assert sanitized["nested"]["items"][0]["x-api-key"] == "[REDACTED]"
 
 
 async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
@@ -102,6 +125,7 @@ def test_trading_create_order_does_not_wait_for_audit(monkeypatch):
         )
 
         assert result.order_id == "ord-1"
+        assert datetime.fromisoformat(result.timestamp).tzinfo == timezone.utc
         await _wait_until(audit_started.is_set)
         release_audit.set()
         await asyncio.sleep(0)

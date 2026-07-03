@@ -47,22 +47,22 @@
 - [ ] [core/trading/order_manager.py:402-595](core/trading/order_manager.py) 实盘下单注入 `newClientOrderId = f"{strategy[:8]}-{ts_ms}-{seq}"`，并基于此做 in-memory dedup
 - [ ] [core/risk/risk_manager.py:666-676](core/risk/risk_manager.py) `allow_close=True` 仅豁免 daily-loss-halt，杠杆/单笔比例仍校验
 - [ ] [core/governance/decision_engine.py:130](core/governance/decision_engine.py) 杠杆检查补 `and not allow_close`，避免无法平仓
-- [ ] [core/marketdata/ws_client.py:25-68](core/marketdata/ws_client.py) WS 客户端目前是 skeleton（`await sleep(1)` 死循环），在 live 路径上启用前必须实现或 `raise NotImplementedError`
+- [x] [core/marketdata/ws_client.py:25-68](core/marketdata/ws_client.py) WS 客户端目前是 skeleton（`await sleep(1)` 死循环），在 live 路径上启用前必须实现或 `raise NotImplementedError`（2026-06-29 已改为显式 skeleton/`NotImplementedError` 防护）
 
 ---
 
 ### P1 — 正确性 Bug（2 周内）
 
 #### 3.1 策略指标计算错误
-- [ ] [strategies/quantitative/momentum.py:133-134](strategies/quantitative/momentum.py) `_calculate_adx` 中 `plus_dm` 就地修改后被 `(minus_dm > plus_dm)` 引用，ADX/+DI/-DI 系统性偏差。修法：先缓存原始 `up_move`/`down_move` 到新变量
-- [ ] [strategies/technical/rsi_strategy.py:236-254](strategies/technical/rsi_strategy.py) `_find_peaks/_find_troughs` 使用 `rolling(center=True)` 含未来数据，回测/生产口径不一致
-- [ ] [strategies/factor_based/factor_strategies.py:1305](strategies/factor_based/factor_strategies.py) `HurstExponentStrategy` 阈值 0.55/0.45 与 VR 实际中性值 1.0 错位，mean-revert 分支永远不进入
-- [ ] [strategies/technical/common_strategies.py:296-350](strategies/technical/common_strategies.py) `VWAPReversionStrategy` 缺 SHORT 入场和上行偏离 SELL/CLOSE_SHORT 对称分支
-- [ ] [strategies/factor_based/factor_strategies.py:1393](strategies/factor_based/factor_strategies.py) `VaRBreakoutStrategy` 使用 `var.iloc[-2]` 不必要再向前推 1 bar
-- [ ] [strategies/quantitative/pairs_trading.py:92](strategies/quantitative/pairs_trading.py) `if min_hr >= 0 < max_hr` 链式比较+隐式覆写用户配置，改为显式 and
-- [ ] [strategies/technical/common_strategies.py:144-145](strategies/technical/common_strategies.py) `StochasticStrategy` 入场条件 `cross_up and k_now <= oversold` 丢失绝大多数实际穿越，改为 `k_prev <= oversold and cross_up`
-- [ ] [strategies/factor_based/factor_strategies.py:1180](strategies/factor_based/factor_strategies.py) `MeanReversionHalfLifeStrategy` 把 `mean` 当 take_profit 绝对价，BUY 时若 mean<current_price 会立即触发"止盈"
-- [ ] [strategies/macro/market_sentiment.py:152-155](strategies/macro/market_sentiment.py), [fund_flow.py:166](strategies/macro/fund_flow.py) Signal 时间戳用采样时间而非 bar 时间，与冲突检测窗口错位
+- [x] [strategies/quantitative/momentum.py:133-134](strategies/quantitative/momentum.py) `_calculate_adx` 中 `plus_dm` 就地修改后被 `(minus_dm > plus_dm)` 引用，ADX/+DI/-DI 系统性偏差。修法：先缓存原始 `up_move`/`down_move` 到新变量（2026-07-02 复核：已委托 `core.indicators.sma_adx`，由 `tests/test_strategy_bug_fixes.py::TestADXSelfReference` 覆盖）
+- [x] [strategies/technical/rsi_strategy.py:236-254](strategies/technical/rsi_strategy.py) `_find_peaks/_find_troughs` 使用 `rolling(center=True)` 含未来数据，回测/生产口径不一致（2026-07-02 复核：已改为因果 extrema，`TestRSIDivergenceCausalExtrema` 覆盖）
+- [x] [strategies/factor_based/factor_strategies.py:1305](strategies/factor_based/factor_strategies.py) `HurstExponentStrategy` 阈值 0.55/0.45 与 VR 实际中性值 1.0 错位，mean-revert 分支永远不进入（2026-07-02 复核：默认阈值已回到 VR=1.0 尺度，`TestHurstThresholds` 覆盖）
+- [x] [strategies/technical/common_strategies.py:296-350](strategies/technical/common_strategies.py) `VWAPReversionStrategy` 缺 SHORT 入场和上行偏离 SELL/CLOSE_SHORT 对称分支（2026-07-02 复核：SELL/CLOSE_SHORT 对称分支已落地，`TestVWAPReversionSymmetry` 覆盖）
+- [x] [strategies/factor_based/factor_strategies.py:1393](strategies/factor_based/factor_strategies.py) `VaRBreakoutStrategy` 使用 `var.iloc[-2]` 不必要再向前推 1 bar（2026-07-02 复核：信号使用最新 VaR，`TestVaRBreakoutIndex` 覆盖）
+- [x] [strategies/quantitative/pairs_trading.py:92](strategies/quantitative/pairs_trading.py), [web/api/backtest.py:1353](web/api/backtest.py) hedge-ratio 下界不再因链式比较或 `0.0` 默认值回退而隐式改写用户配置（2026-06-19 已修复并补回归测试）
+- [x] [strategies/technical/common_strategies.py:144-145](strategies/technical/common_strategies.py) `StochasticStrategy` 入场条件 `cross_up and k_now <= oversold` 丢失绝大多数实际穿越，改为 `k_prev <= oversold and cross_up`（2026-07-02 复核：BUY/SELL 均使用前一根 K 线阈值窗口，`TestStochasticEntryWindow` 覆盖）
+- [x] [strategies/factor_based/factor_strategies.py:1180](strategies/factor_based/factor_strategies.py) `MeanReversionHalfLifeStrategy` 把 `mean` 当 take_profit 绝对价，BUY 时若 mean<current_price 会立即触发"止盈"（2026-07-02 复核：BUY take_profit 已保证高于入场价，`TestMeanReversionHalfLifeTPGuard` 覆盖）
+- [x] [strategies/macro/market_sentiment.py:152-155](strategies/macro/market_sentiment.py), [fund_flow.py:166](strategies/macro/fund_flow.py) Signal 时间戳用采样时间而非 bar 时间，与冲突检测窗口错位（2026-07-02 复核：信号时间使用 bar timestamp，`TestMacroSignalTimestamps` 覆盖）
 
 #### 3.2 回测与研究统计错误
 - [ ] [core/backtest/backtest_engine.py:837-841](core/backtest/backtest_engine.py) `funding_pnl` 双计：funding 阶段和 close 阶段统计同笔费率，cost_decomposition 实际是 2× 真实值
@@ -86,11 +86,11 @@
 #### 3.4 ML / 新闻管线
 - [ ] [core/ai/ml_signal.py:178-184](core/ai/ml_signal.py) 缺失特征列严格校验，缺失即返回 FLAT，不要填 0
 - [ ] [core/ai/ml_signal.py:101-103](core/ai/ml_signal.py) `xgb.XGBClassifier.load_model` 前校验 manifest 中 `feature_set_version`/`feature_columns`
-- [ ] [core/news/eventizer/llm_glm5.py:687-694](core/news/eventizer/llm_glm5.py) `_extract_json_block` 用 `re.search(r"```(?:json)?\s*([\s\S]+?)```", raw)` 替代当前易碎的截取
-- [ ] [core/news/eventizer/llm_glm5.py:1019-1020, 985](core/news/eventizer/llm_glm5.py) `choices[0]` 可能 IndexError；timeout 在 failover 链上实际墙钟为 3× 单倍 timeout，外层 `wait_for` 需匹配
-- [ ] [core/news/storage/db.py:1127-1142, 1416-1422](core/news/storage/db.py) `existing_recent_rows` 全表扫无 LIMIT，11000+ 行已可观察延迟，加 LIMIT + published_at 索引
-- [ ] [core/news/storage/db.py:1149](core/news/storage/db.py) URL 去重未做 normalize，相同 URL 不同 utm 参数绕过去重
-- [ ] [core/news/service/worker.py:519-527](core/news/service/worker.py) `CancelledError` 被外层 `except Exception` 当普通错误，应穿透传播
+- [x] [core/news/eventizer/llm_glm5.py:687-694](core/news/eventizer/llm_glm5.py) `_extract_json_block` 用 `re.search(r"```(?:json)?\s*([\s\S]+?)```", raw)` 替代当前易碎的截取（2026-06-29 已落地并由 `tests/test_openai_responses_migration.py` 覆盖）
+- [x] [core/news/eventizer/llm_glm5.py:1019-1020, 985](core/news/eventizer/llm_glm5.py) `choices[0]` 可能 IndexError；timeout 在 failover 链上实际墙钟为 3× 单倍 timeout，外层 `wait_for` 需匹配（2026-06-29 已补空 choices 防护并加 failover 墙钟预算）
+- [x] [core/news/storage/db.py:1127-1142, 1416-1422](core/news/storage/db.py) `existing_recent_rows` 全表扫无 LIMIT，11000+ 行已可观察延迟，加 LIMIT + published_at 索引（2026-07-01 复核：`_EXISTING_RECENT_SCAN_LIMIT` 已落地，查询按 `published_at DESC` 限流，`NewsRaw.published_at` 与 `ix_news_raw_source_published` 已建索引）
+- [x] [core/news/storage/db.py:1149](core/news/storage/db.py) URL 去重未做 normalize，相同 URL 不同 utm 参数绕过去重（2026-07-01 复核：`_normalize_url_for_dedup()` 已统一去掉 `utm_*`/`fbclid`/`gclid`/`spm`，并由 `tests/test_news_storage_llm_tasks.py` 覆盖 tracking-param 变体）
+- [x] [core/news/service/worker.py:519-527](core/news/service/worker.py) `CancelledError` 被外层 `except Exception` 当普通错误，应穿透传播（2026-06-29 已显式 `except asyncio.CancelledError: raise`）
 - [ ] [core/news/collectors/manager.py:298](core/news/collectors/manager.py) ThreadPoolExecutor 内每次新建/销毁 event loop + aiohttp Session，浪费连接
 
 ---
@@ -125,19 +125,19 @@
 #### 4.4 数据采集与 DEX/CEX
 - [ ] [core/news/collectors/jin10.py:82](core/news/collectors/jin10.py), [newsapi.py:90-91](core/news/collectors/newsapi.py) 缺重试/backoff；NewsAPI 不读 Retry-After
 - [ ] [core/news/collectors/rss.py:94](core/news/collectors/rss.py) XML 解析考虑使用 `defusedxml` 显式禁用外部实体
-- [ ] [core/data/news_collector.py:78-79](core/data/news_collector.py) `bullish_keywords` 含前导空格的 `" adoption"` 永远不命中
-- [ ] [core/realtime/event_bus.py:62-66](core/realtime/event_bus.py) full 队列 `get_nowait` 异常误判 stale 驱逐 active subscriber
+- [x] [core/data/news_collector.py:78-79](core/data/news_collector.py) `bullish_keywords` 含前导空格的 `" adoption"` 永远不命中（2026-06-29 已修正为 `adoption`，并由 `tests/test_news_collector_legacy_async.py` 回归覆盖）
+- [x] [core/realtime/event_bus.py:62-66](core/realtime/event_bus.py) full 队列 `get_nowait` 异常误判 stale 驱逐 active subscriber（2026-06-29 已保留活跃订阅者，并由 `tests/test_realtime_event_bus.py` 覆盖）
 
 ---
 
 ### P3 — 代码质量与测试覆盖（持续）
 
 #### 5.1 测试
-- [ ] [tests/test_strategies.py](tests/test_strategies.py) 仅 20 个测试覆盖核心策略，多为浅断言（`isinstance(list)`）；至少补：方向对称性、min_bars 边界、NaN/Inf 输入、check_exit 持仓方向
-- [ ] 缺失测试的策略：`BollingerSqueezeStrategy`、`MACDHistogramStrategy`、`RSIDivergenceStrategy`、`HurstExponentStrategy`、`SortinoRatioStrategy`、`VaRBreakoutStrategy`、`MaxDrawdownStrategy`、`OrderFlowImbalanceStrategy`、`TradeIntensityStrategy`、`SocialSentimentStrategy`、`MLXGBoostStrategy`、DEX/CEX Arbitrage、`SupplyEventStrategy`
-- [ ] [pytest.ini](pytest.ini) 加 `asyncio_mode = auto`、`--strict-markers`、`--tb=short`、`filterwarnings`、timeout 插件
-- [ ] [tests/conftest.py:43-44](tests/conftest.py) 不要直接写 `_trade_history_store_root` 私有属性，提供 `RiskManager.configure_storage(path)`
-- [ ] [tests/test_funding_rate.py:33,40,52](tests/test_funding_rate.py) 用固定 `datetime(2024,1,1)` 替代 `datetime.now()`，避免午夜跨边界 flaky
+- [ ] 核心策略覆盖仍不完整：`tests/test_strategy_bug_fixes.py` 已补多项回归，但仍需系统覆盖方向对称性、min_bars 边界、NaN/Inf 输入、check_exit 持仓方向
+- [ ] 仍缺完整策略测试的重点：`BollingerSqueezeStrategy`、`MACDHistogramStrategy`、`MaxDrawdownStrategy`、`OrderFlowImbalanceStrategy`、`TradeIntensityStrategy`、`SocialSentimentStrategy`、`MLXGBoostStrategy`、DEX/CEX Arbitrage、`SupplyEventStrategy`；`RSIDivergenceStrategy`、`HurstExponentStrategy`、`SortinoRatioStrategy`、`VaRBreakoutStrategy` 已有 targeted regression，仍可补全矩阵覆盖
+- [x] [pytest.ini](pytest.ini) 加 `asyncio_mode = auto`、`--strict-markers`、`--tb=short`、`filterwarnings`、timeout 插件（2026-06-24 已完成，timeout 提升到 120s 以降低重载下误报）
+- [x] [tests/conftest.py:43-44](tests/conftest.py) 不要直接写 `_trade_history_store_root` 私有属性，提供 `RiskManager.configure_storage(path)`（2026-06-24 已完成）
+- [x] [tests/test_funding_rate.py:33,40,52](tests/test_funding_rate.py) 用固定 `datetime(2024,1,1)` 替代 `datetime.now()`，避免午夜跨边界 flaky（2026-07-02 复核：已使用 `FIXED_FUNDING_TIME`，`tests/test_funding_rate.py` 通过）
 
 #### 5.2 基础设施
 - [ ] [Dockerfile](Dockerfile) 加 `USER nonroot`、`HEALTHCHECK`、多阶段构建、扩展 `.dockerignore`
@@ -156,7 +156,7 @@
 #### 5.4 清洁与文档
 - [ ] 仓库根清理：`MagicMock/`、`.pytest_tmp_broken/`、`fix_mojibake.py`、`_once.ps1`、`report_exit_refactor.md`、`refresh_research_universe.bat` 移入 `scripts/legacy/`
 - [ ] `CLAUDE.md` 60KB 是"任务清单"非规范文档，移到 `docs/plans/`
-- [ ] [docker-compose.yml:58-65](docker-compose.yml) Prometheus 引用不存在的 `./prometheus.yml`，profile 启动即失败
+- [x] [docker-compose.yml:58-65](docker-compose.yml) Prometheus 引用不存在的 `./prometheus.yml`，profile 启动即失败（2026-06-24 已补齐 `prometheus.yml` 并恢复 monitoring profile）
 - [ ] 抽公共工具：`oscillator_entry_strength`、`position_field_extractor`、`adx_indicator`（多策略重复 ~50 行）
 - [ ] 多文件未使用 import 清理（`from datetime import datetime, timezone` 但被 `bar_time` 替代后忘删）
 
@@ -165,7 +165,7 @@
 ## 3. 各模块审查总评（来自 6 个代理）
 
 ### 策略模块
-> 结构清晰、`StrategyBase` 接口统一，但具体策略实现质量参差不齐：振荡器/因子类大量使用 `rolling.apply` lambda；多处"看似双向但仅单向"（VWAPReversion、MaxDrawdown、BollingerMeanReversion close-only）；TrendFollowing ADX 自引用、RSIDivergence 未来泄漏、HurstExponent 阈值错位是 3 个真实统计 bug。**最关键改进**：① 修这 3 个 bug ② 抽公共工具减少 ~30% 重复 ③ 单元测试覆盖率从 ~25% 提到接近 100%。
+> 结构清晰、`StrategyBase` 接口统一，但具体策略实现质量参差不齐：振荡器/因子类大量使用 `rolling.apply` lambda；部分"看似双向但仅单向"问题仍需继续排查（例如 MaxDrawdown、BollingerMeanReversion close-only）。TrendFollowing ADX 自引用、RSIDivergence 未来泄漏、HurstExponent 阈值错位、VWAPReversion SHORT 对称性等已完成回归覆盖。**最关键改进**：① 继续处理剩余策略统计 bug ② 抽公共工具减少 ~30% 重复 ③ 单元测试覆盖率从 ~25% 提到接近 100%。
 
 ### 回测与研究
 > 覆盖了 DSR、purged WF、相关性过滤、IS/OOS、人工审批等行业标准元素，但**实现层有关键正确性漏洞**：funding 双计、所谓 WF 实际无 IS 训练、DSR skew/kurt 永远失效、Sharpe 秒级周期年化爆表、回测填单无 gap 处理、含 IS 的 Full Sharpe 占 40% 评分污染。`threading.RLock` 在 async 框架下不互斥。**优先级最高**：funding 双计 + walk-forward 实现 + Sharpe annualization。
