@@ -19,6 +19,10 @@ def test_model_env_fields_include_news_llm_backup_chain():
     assert "NEWS_LLM_BACKUP_MODEL" in web_main._MODEL_ENV_FIELDS
 
 
+def test_market_ws_guard_recover_window_has_conservative_default():
+    assert web_main._MARKET_WS_RECOVER_HEALTHY_SEC == 300.0
+
+
 def test_news_llm_task_runs_as_internal_fallback(monkeypatch):
     monkeypatch.setattr(web_main, "_NEWS_LLM_BACKGROUND_ENABLED", True)
     monkeypatch.setattr(web_main, "_NEWS_LLM_EXTERNAL_ONLY", False)
