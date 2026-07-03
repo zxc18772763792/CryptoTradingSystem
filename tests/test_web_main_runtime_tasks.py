@@ -77,6 +77,28 @@ def test_optional_external_data_workers_can_be_enabled(monkeypatch):
     assert "kaiko" in factories
 
 
+def test_collect_watch_symbols_prefers_configured_market_ws_symbols(monkeypatch):
+    monkeypatch.setattr(
+        web_main,
+        "_MARKET_WS_CONFIGURED_SYMBOLS",
+        ["OMNI/USDT", "USUAL/USDT", "BTC/USDT", "OMNI/USDT"],
+    )
+    monkeypatch.setattr(web_main, "_MARKET_WS_SYMBOL_LIMIT", 6)
+    monkeypatch.setattr(
+        web_main.strategy_manager,
+        "list_strategies",
+        lambda: [{"state": "running", "symbols": ["MOVE/USDT", "OMNI/USDT"]}],
+    )
+
+    assert web_main._collect_watch_symbols() == [
+        "OMNI/USDT",
+        "USUAL/USDT",
+        "BTC/USDT",
+        "ETH/USDT",
+        "MOVE/USDT",
+    ]
+
+
 def test_exchange_watchdog_factory_can_be_disabled(monkeypatch):
     monkeypatch.setattr(web_main, "_EXCHANGE_WATCHDOG_ENABLED", True)
     factories = web_main._build_runtime_task_factories(FastAPI())
