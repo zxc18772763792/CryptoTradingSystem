@@ -764,11 +764,19 @@ _MARKET_WS_QUALITY_GUARD_ENABLED = _env_bool(
     "MARKET_WS_QUALITY_GUARD_ENABLED",
     bool(getattr(settings, "MARKET_WS_QUALITY_GUARD_ENABLED", False)),
 )
+_MARKET_WS_RECOVER_HEALTHY_SEC = max(
+    0.0,
+    _env_float("MARKET_WS_RECOVER_HEALTHY_SEC", 300.0),
+)
 try:
     from core.marketdata.ws_quality_guard import WsQualityGuard, sample_from_market_ws_status
 
     _market_ws_quality_guard = (
-        WsQualityGuard(enabled=True, max_tick_age_ms=float(_MARKET_WS_SYMBOL_MAX_AGE_SEC) * 1000.0)
+        WsQualityGuard(
+            enabled=True,
+            max_tick_age_ms=float(_MARKET_WS_SYMBOL_MAX_AGE_SEC) * 1000.0,
+            recover_healthy_sec=_MARKET_WS_RECOVER_HEALTHY_SEC,
+        )
         if _MARKET_WS_QUALITY_GUARD_ENABLED
         else None
     )

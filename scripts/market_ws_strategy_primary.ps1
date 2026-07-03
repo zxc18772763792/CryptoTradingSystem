@@ -295,6 +295,7 @@ function Get-CommonEnvCommands {
         'set "MARKET_WS_FORCE_REST=false"',
         'set "MARKET_WS_FAIL_CLOSED_FOR_LIVE=true"',
         'set "MARKET_WS_QUALITY_GUARD_ENABLED=true"',
+        'set "MARKET_WS_RECOVER_HEALTHY_SEC=60"',
         'set "MARKET_WS_EXCHANGES=binance"',
         'set "MARKET_WS_SYMBOLS=BTC/USDT,ETH/USDT,OMNI/USDT,USUAL/USDT,MOVE/USDT,ME/USDT,VANA/USDT"',
         'set "MARKET_WS_SYMBOL_LIMIT=16"',
