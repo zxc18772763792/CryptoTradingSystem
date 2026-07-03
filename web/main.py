@@ -153,6 +153,21 @@ _MARKET_WS_SYMBOL_LIMIT = max(
     1,
     _env_int("MARKET_WS_SYMBOL_LIMIT", int(getattr(settings, "MARKET_WS_SYMBOL_LIMIT", 16) or 16)),
 )
+
+
+def _parse_market_ws_symbols(value: str) -> List[str]:
+    symbols: List[str] = []
+    seen = set()
+    for item in str(value or "").split(","):
+        symbol = item.strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append(symbol)
+    return symbols
+
+
+_MARKET_WS_CONFIGURED_SYMBOLS = _parse_market_ws_symbols(os.getenv("MARKET_WS_SYMBOLS", ""))
 _MARKET_WS_SYMBOL_MAX_AGE_SEC = max(
     0.5,
     _env_float(
@@ -540,17 +555,29 @@ async def _on_position_event(position: Any, event: str) -> None:
 
 
 def _collect_watch_symbols() -> List[str]:
-    symbols = {"BTC/USDT", "ETH/USDT"}
+    symbols: List[str] = []
+    seen = set()
+
+    def _add(symbol: Any) -> None:
+        normalized = str(symbol or "").strip().upper()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        symbols.append(normalized)
+
+    for symbol in _MARKET_WS_CONFIGURED_SYMBOLS:
+        _add(symbol)
+    _add("BTC/USDT")
+    _add("ETH/USDT")
     try:
         for item in strategy_manager.list_strategies():
             if item.get("state") != "running":
                 continue
             for symbol in item.get("symbols", []):
-                if symbol:
-                    symbols.add(str(symbol))
+                _add(symbol)
     except Exception:
         pass
-    return list(symbols)[:_MARKET_WS_SYMBOL_LIMIT]
+    return symbols[:_MARKET_WS_SYMBOL_LIMIT]
 
 
 _MARKET_TICK_PER_CALL_TIMEOUT_SEC = 3.0
