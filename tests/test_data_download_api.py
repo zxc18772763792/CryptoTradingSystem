@@ -360,6 +360,51 @@ def test_run_download_historical_data_falls_back_to_coinglass(monkeypatch):
     }
 
 
+def test_run_download_historical_data_uses_native_source_without_private_connector(monkeypatch):
+    captured = {}
+
+    async def fake_download_historical_klines(**kwargs):
+        captured["download"] = dict(kwargs)
+        return [
+            SimpleNamespace(timestamp=datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc)),
+            SimpleNamespace(timestamp=datetime(2026, 3, 1, 1, 0, tzinfo=timezone.utc)),
+        ]
+
+    async def fake_save_klines_to_parquet(klines, exchange, symbol, timeframe):
+        captured["save"] = {
+            "rows": len(klines),
+            "exchange": exchange,
+            "symbol": symbol,
+            "timeframe": timeframe,
+        }
+
+    monkeypatch.setattr(data_api.exchange_manager, "get_exchange", lambda exchange: None)
+    monkeypatch.setattr(data_api.historical_data_manager, "download_historical_klines", fake_download_historical_klines)
+    monkeypatch.setattr(data_api.data_storage, "save_klines_to_parquet", fake_save_klines_to_parquet)
+
+    result = asyncio.run(
+        data_api.run_download_historical_data(
+            exchange="binance",
+            symbol="OMNI/USDT",
+            timeframe="1h",
+            start_time=datetime(2026, 3, 1, 0, 0, 0),
+            end_time=datetime(2026, 3, 1, 1, 0, 0),
+        )
+    )
+
+    assert result["count"] == 2
+    assert result["source"] == "native"
+    assert result["source_exchange"] == "binance"
+    assert captured["download"]["exchange"] == "binance"
+    assert captured["download"]["symbol"] == "OMNI/USDT"
+    assert captured["save"] == {
+        "rows": 2,
+        "exchange": "binance",
+        "symbol": "OMNI/USDT",
+        "timeframe": "1h",
+    }
+
+
 def test_list_download_tasks_can_filter_specific_ids_beyond_default_limit():
     _reset_download_state()
     base = datetime(2026, 4, 1, tzinfo=timezone.utc)
