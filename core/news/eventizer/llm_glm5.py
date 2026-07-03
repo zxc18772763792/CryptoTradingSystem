@@ -382,8 +382,9 @@ def _openai_post_with_failover(
     timeout_sec: int,
     log_prefix: str,
 ) -> Dict[str, Any]:
+    configured_targets = _openai_endpoint_targets(cfg)
     targets = prioritize_openai_targets(
-        _openai_endpoint_targets(cfg),
+        configured_targets,
         scope=_OPENAI_FAILOVER_SCOPE,
     )
     available = [
@@ -465,7 +466,7 @@ def _openai_post_with_failover(
                 if response.status_code >= 400:
                     err = RuntimeError(f"LLM anthropic HTTP {response.status_code}: {response.text[:300]}")
                     if should_failover_openai_status(response.status_code):
-                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets and should_failover_openai_status(response.status_code):
                         last_exc = err
                         logger.warning(
@@ -477,7 +478,7 @@ def _openai_post_with_failover(
                 data = read_requests_responses_json(response)
                 if not extract_response_text(data):
                     err = RuntimeError("LLM anthropic response missing content")
-                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets:
                         last_exc = err
                         logger.warning(
@@ -486,7 +487,7 @@ def _openai_post_with_failover(
                         )
                         continue
                     raise err
-                remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                 data["_cts_openai_target"] = {
                     "base_url": base_url,
                     "model": str(target.get("model") or "").strip(),
@@ -496,7 +497,7 @@ def _openai_post_with_failover(
             if request_chat_payload and (
                 _force_chat_completions(cfg)
                 or should_prefer_openai_target_chat_completions(
-                    targets,
+                    configured_targets,
                     base_url,
                     scope=_OPENAI_FAILOVER_SCOPE,
                 )
@@ -511,7 +512,7 @@ def _openai_post_with_failover(
                 if chat_response.status_code >= 400:
                     err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")
                     if should_failover_openai_status(chat_response.status_code):
-                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets and should_failover_openai_status(chat_response.status_code):
                         last_exc = err
                         logger.warning(
@@ -523,7 +524,7 @@ def _openai_post_with_failover(
                 chat_data = read_requests_responses_json(chat_response)
                 if not extract_response_text(chat_data):
                     err = RuntimeError("LLM chat response missing content")
-                    remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets:
                         last_exc = err
                         logger.warning(
@@ -532,8 +533,8 @@ def _openai_post_with_failover(
                         )
                         continue
                     raise err
-                remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                remember_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                 chat_data["_cts_openai_target"] = {
                     "base_url": base_url,
                     "model": str(target.get("model") or "").strip(),
@@ -553,7 +554,7 @@ def _openai_post_with_failover(
                 )
                 if response.status_code >= 400:
                     if request_chat_payload and responses_api_unavailable(response.status_code, response.text):
-                        remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         chat_url = chat_completions_endpoint(base_url)
                         logger.warning(
                             f"{log_prefix}: relay does not support Responses API; retrying via chat/completions"
@@ -567,7 +568,7 @@ def _openai_post_with_failover(
                         if chat_response.status_code >= 400:
                             err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")
                             if should_failover_openai_status(chat_response.status_code):
-                                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                                remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                             if idx + 1 < total_targets and should_failover_openai_status(chat_response.status_code):
                                 last_exc = err
                                 logger.warning(
@@ -577,8 +578,8 @@ def _openai_post_with_failover(
                                 advance_to_next_target = True
                                 break
                             raise err
-                        remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                        remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         chat_data = read_requests_responses_json(chat_response)
                         chat_data["_cts_openai_target"] = {
                             "base_url": base_url,
@@ -602,7 +603,7 @@ def _openai_post_with_failover(
                             continue
                         if idx + 1 < total_targets:
                             last_exc = err
-                            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                            remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                             logger.warning(
                                 f"{log_prefix}: relay rejected all token parameter variants; "
                                 f"trying backup {idx + 2}/{total_targets}"
@@ -611,7 +612,7 @@ def _openai_post_with_failover(
                             break
                         raise err
                     if should_failover_openai_status(response.status_code):
-                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     if idx + 1 < total_targets and should_failover_openai_status(response.status_code):
                         last_exc = err
                         logger.warning(
@@ -636,7 +637,7 @@ def _openai_post_with_failover(
                     if chat_response.status_code >= 400:
                         err = RuntimeError(f"LLM chat HTTP {chat_response.status_code}: {chat_response.text[:300]}")
                         if should_failover_openai_status(chat_response.status_code):
-                            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                            remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         if idx + 1 < total_targets and should_failover_openai_status(chat_response.status_code):
                             last_exc = err
                             logger.warning(
@@ -649,7 +650,7 @@ def _openai_post_with_failover(
                     chat_data = read_requests_responses_json(chat_response)
                     if not extract_response_text(chat_data):
                         err = RuntimeError("LLM chat response missing content")
-                        remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                         if idx + 1 < total_targets:
                             last_exc = err
                             logger.warning(
@@ -659,16 +660,16 @@ def _openai_post_with_failover(
                             advance_to_next_target = True
                             break
                         raise err
-                    remember_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                    remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    remember_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                    remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                     chat_data["_cts_openai_target"] = {
                         "base_url": base_url,
                         "model": str(target.get("model") or "").strip(),
                         "index": target.get("index"),
                     }
                     return chat_data
-                clear_openai_target_chat_preference(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
-                remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                clear_openai_target_chat_preference(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                remember_openai_target_success(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
                 data["_cts_openai_target"] = {
                     "base_url": base_url,
                     "model": str(target.get("model") or "").strip(),
@@ -678,7 +679,7 @@ def _openai_post_with_failover(
             if advance_to_next_target:
                 continue
         except requests.RequestException as exc:
-            remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+            remember_openai_target_failure(configured_targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
             if idx + 1 < total_targets:
                 last_exc = exc
                 logger.warning(

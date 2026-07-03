@@ -6,7 +6,7 @@ param(
     [int]$Port = 8000,
     [int]$HealthWaitSec = 180,
     [double]$MaxWsAgeMs = 10000,
-    [string]$NewsNimModel = "google/gemma-3n-e4b-it",
+    [string]$NewsNimModel = "google/gemma-4-31b-it",
     [switch]$ConfirmLive,
     [switch]$ResetNewsLlmFailover,
     [switch]$SkipPrecheck,
