@@ -39,10 +39,10 @@ from core.exchanges.exchange_manager import exchange_manager
 from core.exchanges.base_exchange import OrderSide, OrderType
 from core.exchanges.binance_connector import BinanceConnector
 from core.marketdata.runtime_price_provider import get_realtime_price
-from core.notifications import notification_manager
+from core.notifications import notification_manager as _notification_manager
 from core.risk.risk_manager import risk_manager
 from core.runtime import runtime_state
-from core.strategies import Signal, SignalType, strategy_manager
+from core.strategies import Signal, SignalType, strategy_manager as _strategy_manager
 from core.trading import (
     account_manager,
     account_snapshot_manager,
@@ -58,7 +58,13 @@ from core.trading.binance_rest import (
 )
 from core.trading.order_manager import OrderRequest as CoreOrderRequest
 from core.utils.asyncio_compat import LoopBoundAsyncLock
-from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
+from core.utils.asset_valuation import STABLE_COINS
+from core.utils.shared_ssl import get_shared_ssl_context
+
+# Backward-compatible module aliases for code and tests that monkeypatch
+# `web.api.trading.*` directly.
+notification_manager = _notification_manager
+strategy_manager = _strategy_manager
 
 _BALANCE_FETCH_TIMEOUT_SEC = 18.0  # was 5.5 — too tight for the 3-4 sequential wallet fetches (funding+spot+futures) through a proxy (~1.3s/call); the cache fast-path still serves the UI within seconds, so a longer background-refresh budget just keeps the cache fresh instead of timing out
 _TICKER_FETCH_TIMEOUT_SEC = 1.6
@@ -86,31 +92,10 @@ _LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {
 }
 
 
-def _consume_audit_task_result(task) -> None:
-    try:
-        task.result()
-    except asyncio.CancelledError:
-        return
-    except Exception as exc:
-        logger.warning(f"Background audit log task failed: {exc}")
-
-
 def _schedule_audit_log(**kwargs: Any) -> None:
-    async def _run() -> None:
-        try:
-            await audit_logger.log(**kwargs)
-        except Exception as exc:
-            logger.warning(f"Background audit log failed: {exc}")
+    audit_logger.schedule(**kwargs)
 
-    coro = _run()
-    try:
-        task = asyncio.create_task(coro)
-    except RuntimeError as exc:
-        coro.close()
-        logger.warning(f"Failed to schedule audit log: {exc}")
-        return
-    if hasattr(task, "add_done_callback"):
-        task.add_done_callback(_consume_audit_task_result)
+
 _LIVE_ORDER_DETAILS_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
 _LIVE_CONDITIONAL_ORDER_CACHE: Dict[str, Any] = {"ts": 0.0, "orders": []}
 _RULE_PRICE_CACHE_TTL_SEC = 10.0
@@ -480,6 +465,11 @@ runtime_state.register_cache(
 def _apply_httpx_proxy_kw(
     client_kwargs: Dict[str, Any], proxy_url: Optional[str]
 ) -> None:
+    # Reuse the process-wide TLS context: per-call AsyncClient construction does
+    # a blocking CA-bundle read on the event loop, which froze the live service
+    # on 2026-07-02 under disk saturation (see core/utils/shared_ssl.py; warmed
+    # at startup so this is a cached read here).
+    client_kwargs.setdefault("verify", get_shared_ssl_context())
     proxy = str(proxy_url or "").strip()
     if not proxy:
         return
@@ -4168,7 +4158,7 @@ async def _binance_public_price_usd(asset: str, timeout_sec: float = 1.6) -> flo
     if ccy in STABLE_COINS:
         return 1.0
     symbol = f"{ccy}USDT"
-    async with httpx.AsyncClient(timeout=timeout_sec) as client:
+    async with httpx.AsyncClient(timeout=timeout_sec, verify=get_shared_ssl_context()) as client:
         try:
             resp = await client.get(
                 "https://api.binance.com/api/v3/ticker/price",
@@ -5293,7 +5283,7 @@ async def _create_order_locked(request: OrderRequest):
         price=result_price,
         amount=result_amount,
         filled=result_filled,
-        timestamp=datetime.now().isoformat(),
+        timestamp=datetime.now(timezone.utc).isoformat(),
     )
 
 
@@ -6260,7 +6250,7 @@ async def _fetch_whale_transfers(
     min_btc: float = _ANALYTICS_WHALE_MIN_BTC,
 ) -> Dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=_ANALYTICS_WHALE_TIMEOUT_SEC) as client:
+        async with httpx.AsyncClient(timeout=_ANALYTICS_WHALE_TIMEOUT_SEC, verify=get_shared_ssl_context()) as client:
             tx_res, px_res = await asyncio.gather(
                 client.get(
                     "https://blockchain.info/unconfirmed-transactions?format=json"
@@ -6340,7 +6330,8 @@ async def _fetch_binance_announcements(limit: int = 6) -> List[Dict[str, Any]]:
     announcements: List[Dict[str, Any]] = []
     try:
         async with httpx.AsyncClient(
-            timeout=_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC
+            timeout=_ANALYTICS_ANNOUNCEMENT_TIMEOUT_SEC,
+            verify=get_shared_ssl_context(),
         ) as client:
             resp = await client.get(
                 "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query",
@@ -6571,6 +6562,7 @@ async def _fetch_slowmist_security_alerts(
             headers={"User-Agent": "Mozilla/5.0"},
             follow_redirects=True,
             trust_env=True,
+            verify=get_shared_ssl_context(),
         ) as client:
             resp = await client.get(_SLOWMIST_HACKED_URL)
             resp.raise_for_status()

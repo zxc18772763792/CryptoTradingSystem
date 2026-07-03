@@ -40,7 +40,7 @@ def _isolate_runtime_side_effect_paths(tmp_path: Path, monkeypatch: pytest.Monke
     if risk_module is not None:
         manager = getattr(risk_module, "risk_manager", None)
         if manager is not None:
-            manager._trade_history_store_root = tmp_path / "cache" / "runtime_state"
+            manager.configure_storage(tmp_path / "cache" / "runtime_state")
             manager.clear_runtime_history()
 
     account_module = sys.modules.get("core.trading.account_manager")

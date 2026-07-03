@@ -1343,12 +1343,14 @@ def _build_intraday_cross_section_backtest_components(
 def _pairs_hedge_ratio_bounds(params: Optional[Dict[str, Any]] = None) -> tuple[float, float]:
     cfg = dict(params or {})
     allow_negative = bool(cfg.get("allow_negative_hedge_ratio", True))
-    min_hr = float(cfg.get("min_hedge_ratio", -5.0) or -5.0)
-    max_hr = float(cfg.get("max_hedge_ratio", 5.0) or 5.0)
+    min_raw = cfg.get("min_hedge_ratio", -5.0)
+    max_raw = cfg.get("max_hedge_ratio", 5.0)
+    min_hr = -5.0 if min_raw in (None, "") else float(min_raw)
+    max_hr = 5.0 if max_raw in (None, "") else float(max_raw)
     if min_hr > max_hr:
         min_hr, max_hr = max_hr, min_hr
     if allow_negative:
-        if min_hr >= 0 < max_hr:
+        if min_hr == 0 and max_hr > 0:
             min_hr = -abs(max_hr)
     else:
         min_hr = max(0.0, min_hr)
@@ -2943,10 +2945,10 @@ def _build_positions_legacy(strategy: str, df: pd.DataFrame, params: Optional[Di
 
         in_position = False
         values = []
-        for s, l, a in zip(short_ma.fillna(0), long_ma.fillna(0), adx.fillna(0)):
-            if not in_position and s > l and a >= adx_threshold:
+        for short_value, long_value, adx_value in zip(short_ma.fillna(0), long_ma.fillna(0), adx.fillna(0)):
+            if not in_position and short_value > long_value and adx_value >= adx_threshold:
                 in_position = True
-            elif in_position and s < l:
+            elif in_position and short_value < long_value:
                 in_position = False
             values.append(1.0 if in_position else 0.0)
         position = pd.Series(values, index=df.index)

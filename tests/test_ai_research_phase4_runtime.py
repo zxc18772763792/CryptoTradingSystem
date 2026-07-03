@@ -5,7 +5,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pandas as pd
 
@@ -165,6 +165,24 @@ def test_refresh_runtime_eligibility_snapshot_builds_contract(monkeypatch, tmp_p
     assert "reason_codes" in first
     assert "expires_at" in first
     assert "eligible_for_autonomy" in first
+
+
+def test_resolve_ai_research_base_dir_ignores_mock_state_paths(monkeypatch, tmp_path: Path):
+    from core.research import orchestrator as orchestrator_module
+
+    data_storage_path = tmp_path / "storage" / "klines"
+    monkeypatch.setattr(settings, "DATA_STORAGE_PATH", str(data_storage_path), raising=False)
+    expected = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai").resolve()
+    app = SimpleNamespace(
+        state=SimpleNamespace(
+            ai_research_dir=MagicMock(name="mock.state.ai_research_dir"),
+            ai_candidate_registry=SimpleNamespace(path=MagicMock(name="mock.registry.path")),
+        )
+    )
+
+    resolved = orchestrator_module._resolve_ai_research_base_dir(app)
+
+    assert resolved == expected
 
 
 def test_runtime_eligibility_exposes_autonomy_handoff_watch(monkeypatch, tmp_path: Path):

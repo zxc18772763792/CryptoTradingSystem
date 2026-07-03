@@ -102,6 +102,14 @@ def _state_path_or_default(app: FastAPI, attr: str, default: Path) -> Path:
     return default
 
 
+def _coerce_pathlike(value: Any) -> Optional[Path]:
+    if isinstance(value, (str, Path)):
+        text = str(value).strip()
+        if text:
+            return Path(text).resolve()
+    return None
+
+
 def _prune_research_jobs_inplace(jobs: Dict[str, Any], *, max_finished: int = 200) -> None:
     """Bound the research_jobs dict: keep all active jobs + the most-recent
     `max_finished` finished ones. Finished/cancelled/failed jobs otherwise
@@ -226,12 +234,87 @@ def _job_result_summary(result: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _refresh_runtime_eligibility_snapshot_safe(*, reason: str) -> Optional[Dict[str, Any]]:
+def _resolve_ai_research_base_dir(app: FastAPI) -> Path:
+    default_base_dir = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai").resolve()
+    raw_paths = [
+        getattr(app.state, "ai_research_dir", None),
+        getattr(app.state, "ai_candidate_registry_path", None),
+        getattr(app.state, "ai_proposal_registry_path", None),
+        getattr(app.state, "ai_experiment_registry_path", None),
+        getattr(app.state, "ai_experiment_run_registry_path", None),
+        getattr(app.state, "ai_lifecycle_registry_path", None),
+        getattr(app.state, "ai_research_jobs_path", None),
+    ]
+    for raw in raw_paths:
+        path = _coerce_pathlike(raw)
+        if path is None:
+            continue
+        if path.suffix:
+            return path.parent
+        return path
+    registry_paths = [
+        getattr(getattr(app.state, "ai_candidate_registry", None), "path", None),
+        getattr(getattr(app.state, "ai_proposal_registry", None), "path", None),
+        getattr(getattr(app.state, "ai_experiment_registry", None), "path", None),
+        getattr(getattr(app.state, "ai_experiment_run_registry", None), "path", None),
+        getattr(getattr(app.state, "ai_lifecycle_registry", None), "path", None),
+    ]
+    for raw in registry_paths:
+        path = _coerce_pathlike(raw)
+        if path is not None:
+            return path.parent
+    return default_base_dir
+
+
+def _runtime_eligibility_snapshot_path_for_app(app: FastAPI) -> Path:
+    base_dir = _resolve_ai_research_base_dir(app)
+    runtime_dir = base_dir.parent / "runtime" if base_dir.name.lower() == "ai" else base_dir / "runtime"
+    path = runtime_dir / "eligibility_snapshot.json"
+    app.state.ai_runtime_eligibility_snapshot_path = path
+    return path
+
+
+def _refresh_runtime_eligibility_snapshot_safe(
+    *, reason: str, app: Optional[FastAPI] = None
+) -> Optional[Dict[str, Any]]:
     try:
-        return refresh_runtime_eligibility_snapshot()
+        if app is None:
+            return refresh_runtime_eligibility_snapshot()
+        ensure_ai_research_runtime_state(app)
+        candidates = [
+            item.model_dump(mode="json")
+            for item in app.state.ai_candidate_registry.list(limit=None)
+        ]
+        proposals = [
+            item.model_dump(mode="json")
+            for item in app.state.ai_proposal_registry.list(limit=None)
+        ]
+        return refresh_runtime_eligibility_snapshot(
+            candidates=candidates,
+            proposals=proposals,
+            snapshot_path=_runtime_eligibility_snapshot_path_for_app(app),
+        )
     except Exception as exc:
         logger.warning(f"runtime eligibility snapshot refresh failed ({reason}): {exc}")
         return None
+
+
+def _refresh_runtime_eligibility_snapshot_safe_compat(
+    *, reason: str, app: Optional[FastAPI] = None
+) -> Optional[Dict[str, Any]]:
+    """Call the snapshot refresher with a fallback for legacy monkeypatches.
+
+    Some tests patch `_refresh_runtime_eligibility_snapshot_safe` with the
+    older `lambda *, reason: ...` signature. Keep app-scoped refreshes in
+    production while remaining compatible with those narrow stubs.
+    """
+
+    try:
+        return _refresh_runtime_eligibility_snapshot_safe(reason=reason, app=app)
+    except TypeError as exc:
+        if "unexpected keyword argument 'app'" not in str(exc):
+            raise
+        return _refresh_runtime_eligibility_snapshot_safe(reason=reason)
 
 
 def _compact_thesis(text: str, max_len: int = 24) -> str:
@@ -451,7 +534,7 @@ def _recover_missing_proposals_from_candidates(app: FastAPI) -> int:
 
 
 def ensure_ai_research_runtime_state(app: FastAPI) -> None:
-    base_dir = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "ai").resolve()
+    base_dir = _resolve_ai_research_base_dir(app)
     _state_path_or_default(app, "ai_research_dir", base_dir)
     proposal_path = _state_path_or_default(app, "ai_proposal_registry_path", base_dir / "proposals.json")
     experiment_path = _state_path_or_default(app, "ai_experiment_registry_path", base_dir / "experiments.json")
@@ -842,7 +925,7 @@ def delete_proposal(
         _persist_research_jobs(app)
 
     if removed_candidates > 0 or removed_proposal > 0:
-        _refresh_runtime_eligibility_snapshot_safe(reason="delete_proposal")
+        _refresh_runtime_eligibility_snapshot_safe_compat(reason="delete_proposal", app=app)
 
     return {
         "proposal_id": str(proposal_id),
@@ -884,7 +967,7 @@ def delete_orphan_candidate(
     lifecycle_removed = app.state.ai_lifecycle_registry.delete_for_object("candidate", candidate_id)
 
     if removed_candidate > 0:
-        _refresh_runtime_eligibility_snapshot_safe(reason="delete_orphan_candidate")
+        _refresh_runtime_eligibility_snapshot_safe_compat(reason="delete_orphan_candidate", app=app)
 
     return {
         "candidate_id": str(candidate_id),
@@ -1454,7 +1537,7 @@ async def _finalize_research_run(
     if candidate is None:
         transition_proposal(proposal, to_state="rejected", lifecycle_registry=app.state.ai_lifecycle_registry, actor=actor, reason="no valid candidate produced")
         save_proposal(app, proposal)
-        _refresh_runtime_eligibility_snapshot_safe(reason="finalize_research_no_candidate")
+        _refresh_runtime_eligibility_snapshot_safe_compat(reason="finalize_research_no_candidate", app=app)
         return {
             "proposal": proposal,
             "experiment": experiment,
@@ -1547,7 +1630,7 @@ async def _finalize_research_run(
     latest_path = (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "latest.json").resolve()
     latest_path.parent.mkdir(parents=True, exist_ok=True)
     latest_path.write_text(json.dumps(latest_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    _refresh_runtime_eligibility_snapshot_safe(reason="finalize_research_saved")
+    _refresh_runtime_eligibility_snapshot_safe_compat(reason="finalize_research_saved", app=app)
 
     return {
         "proposal": proposal,
@@ -2015,5 +2098,5 @@ async def promote_existing_candidate(
     result = await promote_candidate(app, proposal=proposal, candidate=candidate, promotion=promotion, actor=actor)
     app.state.ai_candidate_registry.save(candidate)
     save_proposal(app, proposal)
-    _refresh_runtime_eligibility_snapshot_safe(reason="promote_existing_candidate_saved")
+    _refresh_runtime_eligibility_snapshot_safe_compat(reason="promote_existing_candidate_saved", app=app)
     return result

@@ -5,13 +5,17 @@ import json
 import time
 from pathlib import Path
 
-from config.settings import settings
+from fastapi.testclient import TestClient
+
 from core.ops.service import api as ops_api
 from core.research import orchestrator as ai_orchestrator
 
 
-def _runtime_snapshot_path() -> Path:
-    return (Path(settings.DATA_STORAGE_PATH) / ".." / "research" / "runtime" / "eligibility_snapshot.json").resolve()
+def _runtime_snapshot_path(client: TestClient) -> Path:
+    raw = getattr(client.app.state, "ai_runtime_eligibility_snapshot_path", None)
+    if raw:
+        return Path(raw).resolve()
+    raise AssertionError("ai_runtime_eligibility_snapshot_path was not set on app state")
 
 
 def test_create_ai_proposal_generates_templates_and_registry_entry(client, ops_headers):
@@ -120,7 +124,7 @@ def test_run_ai_proposal_sync_updates_status_and_result(client, ops_headers, mon
     assert validation_body["ok"] is True
     assert validation_body["data"]["validation_summary"]["deployment_score"] == validation["deployment_score"]
 
-    snapshot_path = _runtime_snapshot_path()
+    snapshot_path = _runtime_snapshot_path(client)
     assert snapshot_path.exists()
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     records = list(snapshot.get("records") or [])
@@ -239,7 +243,7 @@ def test_ai_candidate_and_lifecycle_endpoints(client, ops_headers, monkeypatch):
     assert promote["data"]["candidate_id"] == candidate_id
     assert promote["data"]["promotion"]["decision"] in {"paper", "shadow", "live_candidate"}
 
-    snapshot_path = _runtime_snapshot_path()
+    snapshot_path = _runtime_snapshot_path(client)
     assert snapshot_path.exists()
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     promoted = next(item for item in snapshot.get("records", []) if item["candidate_id"] == candidate_id)

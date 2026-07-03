@@ -1,4 +1,4 @@
-"""CCXT-based exchange adapter (read-only methods first, execution methods TODO)."""
+"""CCXT-based exchange adapter for market data and guarded order workflows."""
 from __future__ import annotations
 
 import asyncio
@@ -52,8 +52,8 @@ class CCXTExchangeAdapter(ExchangeAdapter):
     """Incremental CCXT adapter.
 
     Current scope:
-    - read-only REST methods implemented (markets/ticker/balances/positions/funding)
-    - execution methods intentionally left TODO to avoid changing live path
+    - read-only REST methods for markets, ticker, balances, positions, and funding
+    - guarded execution helpers routed through ``supports_execution`` checks
     """
 
     def __init__(

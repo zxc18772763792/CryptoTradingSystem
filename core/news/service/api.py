@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from config.env_utils import env_bool as _env_bool
@@ -41,6 +41,12 @@ class WorkerRunRequest(BaseModel):
     llm_limit: int = 8
     pull_only: bool = False
     llm_only: bool = False
+
+
+async def _require_ops_auth(request: Request):
+    from core.ops.service.auth import require_ops_auth  # noqa: PLC0415
+
+    return await require_ops_auth(request)
 
 
 def _config_paths() -> Dict[str, Path]:
@@ -157,12 +163,12 @@ def create_app() -> FastAPI:
             "sources": (cfg.get("defaults") or {}).get("news_sources") or [],
         }
 
-    @app.post("/ingest/pull_now")
+    @app.post("/ingest/pull_now", dependencies=[Depends(_require_ops_auth)])
     async def ingest_pull_now(payload: IngestRequest = IngestRequest()) -> Dict[str, Any]:
         cfg = getattr(app.state, "cfg", load_service_config())
         return await run_ingest_pull_now(cfg=cfg, payload=payload)
 
-    @app.get("/worker/status")
+    @app.get("/worker/status", dependencies=[Depends(_require_ops_auth)])
     async def worker_status() -> Dict[str, Any]:
         cfg = getattr(app.state, "cfg", load_service_config())
         return {
@@ -172,7 +178,7 @@ def create_app() -> FastAPI:
             "llm_queue": await news_db.get_llm_queue_stats(),
         }
 
-    @app.post("/worker/run_once")
+    @app.post("/worker/run_once", dependencies=[Depends(_require_ops_auth)])
     async def worker_run_once(payload: WorkerRunRequest = WorkerRunRequest()) -> Dict[str, Any]:
         cfg = getattr(app.state, "cfg", load_service_config())
         out: Dict[str, Any] = {"ts": datetime.now(timezone.utc).isoformat()}
@@ -185,7 +191,7 @@ def create_app() -> FastAPI:
         out["llm_queue"] = await news_db.get_llm_queue_stats()
         return out
 
-    @app.get("/events")
+    @app.get("/events", dependencies=[Depends(_require_ops_auth)])
     async def events(symbol: Optional[str] = Query(default=None), since: Optional[str] = Query(default=None), limit: int = Query(default=200, ge=1, le=1000)) -> Dict[str, Any]:
         cfg = getattr(app.state, "cfg", load_service_config())
         mapper = cfg.get("_symbol_mapper")
@@ -194,7 +200,7 @@ def create_app() -> FastAPI:
         rows = await news_db.list_events(symbol=symbol_norm, since=since_ts, limit=limit)
         return {"count": len(rows), "symbol": symbol_norm, "since": since_ts.isoformat(), "items": rows}
 
-    @app.post("/signal")
+    @app.post("/signal", dependencies=[Depends(_require_ops_auth)])
     async def signal(payload: SignalRequest) -> Dict[str, Any]:
         cfg = getattr(app.state, "cfg", load_service_config())
         gate = getattr(app.state, "risk_gate", RiskGate(cfg))
@@ -210,7 +216,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=500, detail=f"signal generation failed: {exc}") from exc
         return result
 
-    @app.get("/report/daily")
+    @app.get("/report/daily", dependencies=[Depends(_require_ops_auth)])
     async def report_daily(date: str = Query(..., description="YYYY-MM-DD")) -> Dict[str, Any]:
         try:
             day = datetime.strptime(date, "%Y-%m-%d").date()

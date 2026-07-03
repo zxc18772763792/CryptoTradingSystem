@@ -197,6 +197,16 @@ def test_docker_compose_does_not_pin_version_and_requires_secrets():
     assert "GRAFANA_ADMIN_PASSWORD:?" in text
 
 
+def test_monitoring_profile_mounts_tracked_prometheus_config():
+    compose = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    prom = (REPO_ROOT / "prometheus.yml").read_text(encoding="utf-8")
+
+    assert "prometheus:" in compose
+    assert "./prometheus.yml:/etc/prometheus/prometheus.yml:ro" in compose
+    assert "- monitoring" in compose
+    assert "job_name: prometheus" in prom
+
+
 def test_dockerignore_blocks_secrets_and_runtime_dirs():
     text = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
     for entry in (
@@ -219,3 +229,17 @@ def test_dockerignore_blocks_secrets_and_runtime_dirs():
 def test_cleanup_script_log_retention_default_is_30():
     text = (REPO_ROOT / "scripts" / "cleanup_repo.ps1").read_text(encoding="utf-8")
     assert "[int]$LogRetentionDays = 30" in text
+
+
+def test_risk_manager_exposes_storage_configurator(tmp_path):
+    from core.risk.risk_manager import RiskManager
+
+    storage_root = tmp_path / "cache" / "runtime_state"
+    manager = RiskManager(use_persisted_overlay=False)
+
+    assert manager.configure_storage(storage_root) == storage_root
+
+    manager.clear_runtime_history()
+
+    scope = manager.get_account_scope()
+    assert (storage_root / f"risk_trade_history_{scope}.json").exists()

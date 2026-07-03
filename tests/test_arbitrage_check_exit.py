@@ -386,6 +386,42 @@ class TestDEXArbitrageCheckExit:
         assert sig is not None
         assert sig.signal_type == SignalType.CLOSE_SHORT
 
+    def test_directional_observations_do_not_overwrite_each_other(self):
+        uni = {
+            ("ETH", "USDC"): Decimal("3000"),
+            ("USDC", "ETH"): Decimal(1) / Decimal("3200"),
+        }
+        sushi = {
+            ("ETH", "USDC"): Decimal("2800"),
+            ("USDC", "ETH"): Decimal(1) / Decimal("2600"),
+        }
+        strategy = self._strategy(uni, sushi)
+
+        strategy._last_spread_obs["ETH/USDC"] = {"profit_pct": -0.123, "at": _utcnow()}
+
+        asyncio.run(strategy.find_arbitrage_opportunities("USDC", "ETH", Decimal("1")))
+
+        assert strategy._last_spread_obs["ETH/USDC"]["profit_pct"] == pytest.approx(-0.123)
+        assert "USDC/ETH" in strategy._last_spread_obs
+
+    def test_short_leg_prefers_entry_pair_metadata_over_reverse_symbol_key(self):
+        strategy = self._strategy({}, {})
+        strategy._last_spread_obs["ETH/USDC"] = {"profit_pct": -0.002, "at": _utcnow()}
+        strategy._last_spread_obs["USDC/ETH"] = {"profit_pct": 0.08, "at": _utcnow()}
+
+        sig = strategy.check_exit(
+            _make_df([3000.0] * 5, symbol="USDC/ETH"),
+            _pos(
+                "short",
+                symbol="USDC/ETH",
+                entry_price=3000.0,
+                metadata={"dex_pair_key": "ETH/USDC"},
+            ),
+        )
+        assert sig is not None
+        assert sig.signal_type == SignalType.CLOSE_SHORT
+        assert sig.metadata["current_profit_pct"] < 0
+
     def test_no_close_while_spread_persists(self):
         # sushi sells ETH→USDC at 2900 but buys back at 2700 → the (uni buy,
         # sushi sell) round trip still nets ~7.4%, well above entry threshold.

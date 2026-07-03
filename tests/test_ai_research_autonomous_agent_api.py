@@ -803,7 +803,7 @@ def test_autonomous_agent_status_endpoint_does_not_require_ai_research_runtime(m
     assert result["status"]["trading_mode"] == "paper"
 
 
-def test_autonomous_agent_status_endpoint_can_skip_preview_warm(monkeypatch):
+def test_autonomous_agent_status_endpoint_skips_preview_warm_by_default(monkeypatch):
     from web.api import ai_agent as ai_module
 
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
@@ -822,10 +822,14 @@ def test_autonomous_agent_status_endpoint_can_skip_preview_warm(monkeypatch):
         lambda **kwargs: warm_calls.append(kwargs) or True,
     )
 
-    result = asyncio.run(ai_module.get_ai_autonomous_agent_status(request, warm_preview=False))
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_status(request))
 
     assert result["status"]["running"] is True
     assert warm_calls == []
+
+    result = asyncio.run(ai_module.get_ai_autonomous_agent_status(request, warm_preview=True))
+    assert result["status"]["running"] is True
+    assert warm_calls == [{"limit": 7, "force": False}]
 
 
 def test_autonomous_agent_status_endpoint_returns_structured_safety(monkeypatch):

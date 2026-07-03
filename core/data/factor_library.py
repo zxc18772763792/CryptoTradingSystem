@@ -63,38 +63,56 @@ def _long_short_factor(
     long_high: bool = True,
 ) -> pd.Series:
     quantile = max(0.05, min(float(quantile or 0.3), 0.49))
-    values: List[float] = []
     idx = metric_df.index.intersection(returns_df.index)
+    if len(idx) == 0:
+        return pd.Series([], index=idx, dtype=float)
+    cols = metric_df.columns.intersection(returns_df.columns)
+    if len(cols) < 2:
+        # No cross-section to rank — every timestamp would yield 0.0.
+        return pd.Series(0.0, index=idx, dtype=float)
 
-    for ts in idx:
-        mrow = metric_df.loc[ts]
-        rrow = returns_df.loc[ts]
-        valid = mrow.dropna().index.intersection(rrow.dropna().index)
+    # Vectorized rewrite of the former per-timestamp ``.loc``/``to_numeric``/
+    # ``sort_values`` loop. That loop ran O(timestamps x factors) pandas row
+    # constructions (~30 calls x N bars) and dominated factor-library build
+    # time. We align once into numpy arrays and rank per row on plain arrays;
+    # semantics are preserved bit-for-bit except that tied metric values now
+    # break by column order (a stable sort), where the old quicksort was
+    # already order-undefined.
+    sub_metric = metric_df.reindex(index=idx, columns=cols)
+    sub_returns = returns_df.reindex(index=idx, columns=cols)
+    # ``raw_valid`` mirrors the original ``mrow.dropna() & rrow.dropna()``
+    # intersection (a NaN-only check, applied before to_numeric), so a
+    # non-numeric metric cell still counts toward len(valid)/k exactly as before.
+    raw_valid = sub_metric.notna().to_numpy() & sub_returns.notna().to_numpy()
+    metric_num = sub_metric.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    returns_num = sub_returns.apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    # ``metric_values`` columns: valid columns whose metric is also numeric.
+    metric_value_mask = raw_valid & ~np.isnan(metric_num)
+    valid_count = raw_valid.sum(axis=1)
 
-        if len(valid) < 2:
-            values.append(0.0)
+    out = np.zeros(len(idx), dtype=float)
+    for i in range(len(idx)):
+        vc = int(valid_count[i])
+        if vc < 2:
             continue
-
-        metric_values = pd.to_numeric(mrow.loc[valid], errors="coerce").dropna()
-        if len(metric_values) < 2 or float(metric_values.max() - metric_values.min()) <= 1e-12:
-            values.append(0.0)
+        value_cols = np.flatnonzero(metric_value_mask[i])
+        if value_cols.size < 2:
             continue
+        mvals = metric_num[i, value_cols]
+        if float(mvals.max() - mvals.min()) <= 1e-12:
+            continue
+        k = max(1, int(vc * quantile))
+        order = value_cols[np.argsort(mvals, kind="stable")]  # ascending
+        low_cols = order[:k]
+        high_cols = order[-k:]
+        rrow = returns_num[i]
+        # Selected columns come from ``raw_valid`` (returns non-NaN), so a plain
+        # mean is exact here and avoids np.nanmean's per-call overhead, which
+        # dominated build time (~50k calls). ``k>=1`` so neither leg is empty.
+        out[i] = float(rrow[high_cols].mean() - rrow[low_cols].mean()) if long_high \
+            else float(rrow[low_cols].mean() - rrow[high_cols].mean())
 
-        k = max(1, int(len(valid) * quantile))
-        ranked = metric_values.sort_values(ascending=True)
-        low = list(ranked.head(k).index)
-        high = list(ranked.tail(k).index)
-
-        if long_high:
-            long_leg, short_leg = high, low
-        else:
-            long_leg, short_leg = low, high
-
-        long_ret = float(rrow.loc[long_leg].mean()) if long_leg else 0.0
-        short_ret = float(rrow.loc[short_leg].mean()) if short_leg else 0.0
-        values.append(long_ret - short_ret)
-
-    return pd.Series(values, index=idx, dtype=float)
+    return pd.Series(out, index=idx, dtype=float)
 
 
 def _rolling_beta(returns_df: pd.DataFrame, market_ret: pd.Series, window: int) -> pd.DataFrame:

@@ -24,6 +24,7 @@ from config.env_utils import env_float as _env_float
 from config.env_utils import env_int as _env_int
 from config.env_utils import sync_settings_to_environ
 from config.settings import settings
+from core.audit import audit_logger
 from core.ai.autonomous_agent import autonomous_trading_agent
 
 _MODEL_ENV_FIELDS = (
@@ -51,6 +52,13 @@ sync_settings_to_environ(settings, _MODEL_ENV_FIELDS)
 from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager
 from core.marketdata.hub import market_data_hub
+from core.utils.proactor_accept_hardening import install_proactor_accept_hardening
+
+# Must run at import time, BEFORE uvicorn binds its listener: a client RST on a
+# connection still queued in the accept backlog otherwise closes the listening
+# socket permanently (WinError 64 -> proactor `sock.close()`), leaving the
+# process alive but the API dead. See core/utils/proactor_accept_hardening.py.
+install_proactor_accept_hardening()
 
 from core.notifications import notification_manager
 from core.ops.service import create_router as create_ops_router, initialize_ops_runtime, shutdown_ops_runtime
@@ -114,6 +122,13 @@ _EXCHANGE_WATCHDOG_ENABLED = _env_bool(
     "EXCHANGE_WATCHDOG_ENABLED",
     bool(getattr(settings, "EXCHANGE_WATCHDOG_ENABLED", True)),
 )
+# Self-probe of our own HTTP listener ("alive but headless" detector, see
+# core/utils/listener_watchdog.py). Launchers pin LISTENER_WATCHDOG_PORT to the
+# port they bind; default matches the standard local deployment.
+_LISTENER_WATCHDOG_ENABLED = _env_bool("LISTENER_WATCHDOG_ENABLED", True)
+_LISTENER_WATCHDOG_PORT = int(_env_float("LISTENER_WATCHDOG_PORT", 8000))
+_LISTENER_WATCHDOG_INTERVAL_SEC = max(5.0, _env_float("LISTENER_WATCHDOG_INTERVAL_SEC", 15.0))
+_LISTENER_WATCHDOG_MAX_FAILURES = max(1, int(_env_float("LISTENER_WATCHDOG_MAX_FAILURES", 3)))
 _MARKET_WS_ENABLED = _env_bool(
     "MARKET_WS_ENABLED",
     bool(getattr(settings, "MARKET_WS_ENABLED", False)),
@@ -1053,7 +1068,6 @@ async def _news_refresh_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
 
     if _NEWS_STARTUP_DELAY_SEC > 0:
         await asyncio.sleep(_NEWS_STARTUP_DELAY_SEC)
-    emit_counter = 0
     sleep_seconds = _NEWS_PULL_INTERVAL_SEC
     while not stop_event.is_set():
         try:
@@ -1088,11 +1102,7 @@ async def _news_refresh_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
             else:
                 sleep_seconds = _NEWS_PULL_INTERVAL_SEC
 
-            emit_counter += 1
-            should_emit = True
-            if should_emit:
-                emit_counter = 0
-                await _emit_news_preview(app=app, limit=12, hours=24)
+            await _emit_news_preview(app=app, limit=12, hours=24)
             _touch_runtime_task("news", success=True)
         except Exception as e:
             logger.debug(f"background news refresh failed: {e}")
@@ -1688,6 +1698,48 @@ async def _exchange_watchdog_worker(stop_event: asyncio.Event) -> None:
         await asyncio.sleep(_INTERVAL)
 
 
+async def _listener_watchdog_worker(stop_event: asyncio.Event) -> None:
+    """Detect an "alive but headless" service: process running, listener dead.
+
+    Layer-2 defense behind the proactor accept hardening (which prevents the
+    known WinError-64 listener kill). A raw loopback TCP connect probes our own
+    port; after the listener has been up once, N consecutive probe failures
+    mean it silently died — exit with LISTENER_DEAD_EXIT_CODE so the launcher's
+    bounded restart loop revives the service instead of leaving live positions
+    under app-managed stops with no API. TCP connects succeed off the backlog
+    even when the event loop is busy, so slow-but-alive never false-trips.
+    """
+    from core.utils.listener_watchdog import (
+        LISTENER_DEAD_EXIT_CODE,
+        ListenerWatchdogPolicy,
+        probe_listener,
+    )
+
+    policy = ListenerWatchdogPolicy(max_consecutive_failures=_LISTENER_WATCHDOG_MAX_FAILURES)
+    port = int(_LISTENER_WATCHDOG_PORT)
+    while not stop_event.is_set():
+        try:
+            ok = await asyncio.to_thread(probe_listener, "127.0.0.1", port, timeout_sec=3.0)
+            if policy.observe(ok):
+                logger.critical(
+                    f"listener_watchdog: HTTP listener on 127.0.0.1:{port} dead for "
+                    f"{policy.consecutive_failures} consecutive probes — exiting with "
+                    f"code {LISTENER_DEAD_EXIT_CODE} for supervised restart"
+                )
+                await asyncio.sleep(1.0)  # give loguru's sinks a beat to flush
+                os._exit(LISTENER_DEAD_EXIT_CODE)
+            if not ok and policy.armed:
+                logger.warning(
+                    f"listener_watchdog: probe {policy.consecutive_failures}/"
+                    f"{_LISTENER_WATCHDOG_MAX_FAILURES} failed on 127.0.0.1:{port}"
+                )
+            _touch_runtime_task("listener_watchdog", success=True)
+        except Exception as exc:
+            logger.debug(f"listener_watchdog: unexpected error: {exc}")
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(stop_event.wait(), timeout=_LISTENER_WATCHDOG_INTERVAL_SEC)
+
+
 async def _cusum_monitor_worker(stop_event: asyncio.Event, app: FastAPI) -> None:
     """Periodically scan all running candidates for CUSUM decay (every 5 min)."""
     from core.monitoring.cusum_watcher import run_cusum_checks_for_all_candidates
@@ -1874,6 +1926,11 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "factory": lambda stop_event: _exchange_watchdog_worker(stop_event),
             "restart_on_failure": True,  # must stay alive for the session lifetime
         }
+    if _LISTENER_WATCHDOG_ENABLED:
+        factories["listener_watchdog"] = {
+            "factory": lambda stop_event: _listener_watchdog_worker(stop_event),
+            "restart_on_failure": True,  # headless detection must survive worker errors
+        }
     if _is_market_ws_stream_enabled():
         factories["market_ws_feed"] = {
             "factory": lambda stop_event: _market_ws_feed_worker(stop_event),
@@ -1951,6 +2008,14 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting Crypto Trading System...")
+
+    # Warm the process-wide TLS context off-loop so no later httpx client
+    # construction ever does a blocking CA-bundle read on the event loop
+    # (the 2026-07-02 service freeze; see core/utils/shared_ssl.py).
+    from core.utils.shared_ssl import warm_shared_ssl_context
+
+    with contextlib.suppress(Exception):
+        await warm_shared_ssl_context()
 
     await runtime_bootstrap.initialize_shared_runtime(
         include_news=True,
@@ -2088,6 +2153,11 @@ async def lifespan(app: FastAPI):
         await asyncio.wait_for(execution_engine.stop(), timeout=15)
     with contextlib.suppress(Exception):
         position_manager.flush()
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(
+            audit_logger.drain_background_tasks(timeout=5.0, cancel_pending=True),
+            timeout=7,
+        )
     with contextlib.suppress(Exception):
         await asyncio.wait_for(
             runtime_bootstrap.shutdown_shared_runtime(

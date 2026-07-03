@@ -4,9 +4,8 @@
 """
 import json
 import os
-import pickle
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 from uuid import uuid4
@@ -86,6 +85,87 @@ def _normalize_parquet_frame_index(df: pd.DataFrame) -> pd.DataFrame:
     normalized.index = idx
     normalized = normalized[~normalized.index.isna()]
     return normalized.sort_index()
+
+
+_CACHE_TYPE_KEY = "__cts_cache_type__"
+
+
+def _json_cache_default(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return {_CACHE_TYPE_KEY: "datetime", "value": value.isoformat()}
+    if isinstance(value, date):
+        return {_CACHE_TYPE_KEY: "date", "value": value.isoformat()}
+    if isinstance(value, Path):
+        return {_CACHE_TYPE_KEY: "path", "value": str(value)}
+    if isinstance(value, set):
+        return list(value)
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable for cache")
+
+
+def _json_cache_object_hook(value: Dict[str, Any]) -> Any:
+    type_name = value.get(_CACHE_TYPE_KEY)
+    if not type_name:
+        return value
+    raw = value.get("value")
+    try:
+        if type_name == "datetime":
+            return datetime.fromisoformat(str(raw))
+        if type_name == "date":
+            return date.fromisoformat(str(raw))
+        if type_name == "path":
+            return str(raw)
+    except Exception:
+        return value
+    return value
+
+
+def _cache_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=_json_cache_default)
+
+
+def _cache_loads(raw: Union[str, bytes, bytearray]) -> Any:
+    text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else str(raw)
+    return json.loads(text, object_hook=_json_cache_object_hook)
+
+
+def _coerce_cache_datetime(value: Any, default: datetime) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return default
+    return default
+
+
+def _cache_is_expired(expires_at: Any) -> bool:
+    expiry = _coerce_cache_datetime(expires_at, datetime.max.replace(tzinfo=timezone.utc))
+    now = datetime.now(timezone.utc) if expiry.tzinfo else datetime.now()
+    return expiry < now
+
+
+def _quarantine_unsafe_cache_file(cache_file: Path, reason: Union[Exception, str]) -> None:
+    if not cache_file.exists():
+        return
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target = cache_file.with_name(f"{cache_file.stem}.unsafe_{ts}{cache_file.suffix}")
+    try:
+        cache_file.rename(target)
+        logger.warning(f"Quarantined unsafe cache file {cache_file}: {reason}")
+    except Exception as exc:
+        logger.warning(f"Failed to quarantine unsafe cache file {cache_file}: {exc}")
 
 
 _LOCAL_OFFSET = pd.Timedelta(hours=8)  # Asia/Shanghai, no DST
@@ -422,9 +502,12 @@ class DataStorage:
             return False
 
         try:
-            serialized = pickle.dumps(value)
+            serialized = _cache_dumps(value)
             await self._redis.setex(key, ttl, serialized)
             return True
+        except TypeError as e:
+            logger.warning(f"Cache value for key {key!r} is not JSON serializable: {e}")
+            return False
         except Exception as e:
             logger.error(f"Cache set error: {e}")
             return False
@@ -437,7 +520,14 @@ class DataStorage:
         try:
             serialized = await self._redis.get(key)
             if serialized:
-                return pickle.loads(serialized)
+                return _cache_loads(serialized)
+            return None
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError) as e:
+            logger.warning(f"Ignoring non-JSON cache payload for key {key!r}: {e}")
+            try:
+                await self._redis.delete(key)
+            except Exception:
+                pass
             return None
         except Exception as e:
             logger.error(f"Cache get error: {e}")
@@ -478,11 +568,12 @@ class DataStorage:
         cache_file = self.cache_path / f"{key}.cache"
         cache_data = {
             "data": data,
-            "expires_at": datetime.now() + timedelta(seconds=ttl),
+            "expires_at": datetime.now(timezone.utc) + timedelta(seconds=ttl),
         }
 
-        with open(cache_file, "wb") as f:
-            pickle.dump(cache_data, f)
+        self.cache_path.mkdir(parents=True, exist_ok=True)
+        with open(cache_file, "w", encoding="utf-8") as f:
+            f.write(_cache_dumps(cache_data))
 
         return str(cache_file)
 
@@ -494,14 +585,22 @@ class DataStorage:
             return None
 
         try:
-            with open(cache_file, "rb") as f:
-                cache_data = pickle.load(f)
+            with open(cache_file, "r", encoding="utf-8") as f:
+                cache_data = json.load(f, object_hook=_json_cache_object_hook)
 
-            if cache_data["expires_at"] < datetime.now():
+            if not isinstance(cache_data, dict):
+                raise ValueError("cache file root is not an object")
+
+            if _cache_is_expired(cache_data.get("expires_at")):
                 cache_file.unlink()
                 return None
 
-            return cache_data["data"]
+            return cache_data.get("data")
+
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+            logger.warning(f"Ignoring unsafe cache file {cache_file}: {e}")
+            _quarantine_unsafe_cache_file(cache_file, e)
+            return None
 
         except Exception as e:
             logger.error(f"Cache file load error: {e}")
@@ -546,14 +645,17 @@ class DataStorage:
         if self.cache_path.exists():
             for cache_file in self.cache_path.glob("*.cache"):
                 try:
-                    with open(cache_file, "rb") as f:
-                        data = pickle.load(f)
-                    if data.get("expires_at", datetime.max) < datetime.now():
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        data = json.load(f, object_hook=_json_cache_object_hook)
+                    if isinstance(data, dict) and _cache_is_expired(data.get("expires_at")):
                         if not dry_run:
                             size = cache_file.stat().st_size
                             cache_file.unlink()
                             result["files_removed"] += 1
                             result["space_freed_mb"] += size / (1024 * 1024)
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as e:
+                    if not dry_run:
+                        _quarantine_unsafe_cache_file(cache_file, e)
                 except Exception:
                     pass
 

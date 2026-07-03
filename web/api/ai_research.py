@@ -3205,7 +3205,7 @@ async def update_ai_autonomous_agent_risk_config(
     return {"updated": True, "config": _build_autonomous_agent_risk_config()}
 
 
-async def get_ai_autonomous_agent_status(request: Request, warm_preview: bool = True):
+async def get_ai_autonomous_agent_status(request: Request, warm_preview: bool = False):
     trading_mode = _current_trading_mode()
     cfg = autonomous_trading_agent.get_runtime_config()
     if isinstance(cfg, dict):
@@ -4108,7 +4108,7 @@ async def handoff_candidate_to_autonomy(request: Request, candidate_id: str):
     try:
         from core.research.orchestrator import _refresh_runtime_eligibility_snapshot_safe  # noqa: PLC0415
 
-        _refresh_runtime_eligibility_snapshot_safe(reason="autonomy_handoff")
+        _refresh_runtime_eligibility_snapshot_safe(reason="autonomy_handoff", app=request.app)
     except Exception:
         pass
     return {
