@@ -44,8 +44,29 @@ def test_compare_optimization_plan_caps_intraday_large_sets():
 
     assert plan["adaptive_capped"] is True
     assert plan["selected_count"] == 9
-    assert plan["effective_trials"] == 24
-    assert "24" in plan["summary"]
+    assert plan["effective_trials"] == 8
+    assert plan["planned_total_trials"] == 72
+    assert plan["budget_capped"] is True
+    assert "72" in plan["summary"]
+
+
+def test_compare_optimization_plan_caps_user_timeout_shape():
+    from web.api import backtest as backtest_api
+
+    plan = backtest_api._build_compare_optimization_plan(
+        strategy_count=15,
+        eligible_count=15,
+        timeframe="5m",
+        data_points=288,
+        requested_trials=48,
+        pre_optimize=True,
+    )
+
+    assert plan["adaptive_capped"] is True
+    assert plan["selected_count"] == 15
+    assert plan["effective_trials"] == 4
+    assert plan["planned_total_trials"] == 60
+    assert "全部 15" in plan["summary"]
 
 
 def test_compare_optimization_plan_keeps_requested_trials_for_small_sets():
@@ -103,7 +124,7 @@ def test_compare_backtests_limits_preoptimization_scope_for_intraday(monkeypatch
     async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
         return df.copy()
 
-    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None):
+    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None, **kwargs):
         return _fake_attach_backtest_enrichment_if_needed(df)
 
     def fake_run_backtest_core(strategy: str, df: pd.DataFrame, timeframe: str, initial_capital: float, **kwargs):
@@ -161,9 +182,10 @@ def test_compare_backtests_limits_preoptimization_scope_for_intraday(monkeypatch
 
     assert payload["compare_optimization"]["adaptive_capped"] is True
     assert payload["compare_optimization"]["selected_count"] == 9
-    assert payload["compare_optimization"]["effective_trials"] == 24
+    assert payload["compare_optimization"]["effective_trials"] == 8
+    assert payload["compare_optimization"]["planned_total_trials"] == 72
     assert len(optimize_calls) == 9
-    assert all(item["max_trials"] == 24 for item in optimize_calls)
+    assert all(item["max_trials"] == 8 for item in optimize_calls)
 
     optimized_rows = [row for row in payload["results"] if row.get("optimization_applied")]
     skipped_rows = [row for row in payload["results"] if row.get("optimization_skipped_for_budget")]
@@ -198,7 +220,7 @@ def test_compare_backtests_limits_preoptimization_scope_for_large_history(monkey
     async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
         return df.copy()
 
-    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None):
+    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None, **kwargs):
         return _fake_attach_backtest_enrichment_if_needed(df)
 
     def fake_run_backtest_core(strategy: str, df: pd.DataFrame, timeframe: str, initial_capital: float, **kwargs):
@@ -274,7 +296,7 @@ def test_compare_backtests_sanitizes_non_finite_metrics_for_json(monkeypatch):
     async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
         return df.copy()
 
-    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None):
+    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None, **kwargs):
         return _fake_attach_backtest_enrichment_if_needed(df)
 
     def fake_run_backtest_core(strategy: str, df: pd.DataFrame, timeframe: str, initial_capital: float, **kwargs):
@@ -320,7 +342,7 @@ def test_compare_backtests_applies_shared_params_json(monkeypatch):
     async def fake_load_backtest_df(symbol: str, timeframe: str, start_time=None, end_time=None):
         return df.copy()
 
-    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None):
+    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None, **kwargs):
         return _fake_attach_backtest_enrichment_if_needed(df)
 
     def fake_run_backtest_core(strategy: str, df: pd.DataFrame, timeframe: str, initial_capital: float, **kwargs):
@@ -389,7 +411,7 @@ def test_compare_backtests_reuses_intraday_cross_section_market_bundle(monkeypat
         load_calls.append(str(symbol))
         return df_by_symbol.get(str(symbol), pd.DataFrame()).copy()
 
-    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None):
+    async def fake_attach_backtest_enrichment_if_needed(strategy: str, df: pd.DataFrame, symbol: str, start_time=None, end_time=None, **kwargs):
         return _fake_attach_backtest_enrichment_if_needed(df)
 
     def fake_run_backtest_core(strategy: str, df: pd.DataFrame, timeframe: str, initial_capital: float, **kwargs):

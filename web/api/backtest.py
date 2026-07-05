@@ -198,6 +198,11 @@ _BACKTEST_COMPARE_FAST_MAX_TRIALS = {
     "short": 32,
     "default": 48,
 }
+_BACKTEST_COMPARE_FAST_TOTAL_TRIAL_BUDGET = {
+    "intraday": 72,
+    "short": 96,
+    "default": 120,
+}
 _BACKTEST_EXIT_TEMPLATE_CHOICES = ["Original", *EXIT_TEMPLATE_PRESETS.keys()]
 _DEFAULT_BACKTEST_EXIT_TEMPLATE = "SignalPlusTimeStop"
 _BACKTEST_BIDIRECTIONAL_OHLCV_STRATEGIES = {
@@ -611,6 +616,7 @@ async def _attach_backtest_enrichment_if_needed(
     symbol: str,
     start_time: Optional[datetime],
     end_time: Optional[datetime],
+    enrichment_cache: Optional[Dict[tuple, Optional[Dict[str, Any]]]] = None,
 ) -> pd.DataFrame:
     if df.empty:
         return df
@@ -620,16 +626,31 @@ async def _attach_backtest_enrichment_if_needed(
     out = df.copy()
 
     if family == "ai_glm":
+        cache_key = (
+            str(symbol or "").strip(),
+            str(start_time or ""),
+            str(end_time or ""),
+        )
         try:
-            enrichment = await build_research_enrichment(
-                symbol=symbol,
-                start_time=start_time,
-                end_time=end_time,
-            )
-            news_events_count = int(enrichment.get("events_count", 0) or 0)
-            funding_available = bool(enrichment.get("funding_available", False))
-            out = attach_research_enrichment(out, symbol, enrichment)
+            enrichment: Optional[Dict[str, Any]]
+            if enrichment_cache is not None and cache_key in enrichment_cache:
+                enrichment = enrichment_cache.get(cache_key)
+            else:
+                enrichment = await build_research_enrichment(
+                    symbol=symbol,
+                    start_time=start_time,
+                    end_time=end_time,
+                )
+                if enrichment_cache is not None:
+                    enrichment_cache[cache_key] = enrichment
+
+            if enrichment is not None:
+                news_events_count = int(enrichment.get("events_count", 0) or 0)
+                funding_available = bool(enrichment.get("funding_available", False))
+                out = attach_research_enrichment(out, symbol, enrichment)
         except Exception:
+            if enrichment_cache is not None:
+                enrichment_cache[cache_key] = None
             out = df.copy()
 
     out.attrs["news_events_count"] = int(news_events_count)
@@ -1914,6 +1935,9 @@ def _build_compare_optimization_plan(
             "effective_trials": 0,
             "eligible_count": int(eligible_count),
             "selected_count": 0,
+            "max_total_trials": 0,
+            "planned_total_trials": 0,
+            "budget_capped": False,
             "adaptive_capped": False,
             "summary": "未启用预优化",
             "skip_reason": "未启用预优化",
@@ -1955,17 +1979,37 @@ def _build_compare_optimization_plan(
         selected_count = min(selected_count, _BACKTEST_COMPARE_FAST_SHORTLIST_CAP)
         effective_trials = min(effective_trials, 8 if tier == "default" else 6)
 
+    max_total_trials = int(_BACKTEST_COMPARE_FAST_TOTAL_TRIAL_BUDGET[tier])
+    budget_capped = False
+    if int(eligible_count) >= 6:
+        budget_trials = max(4, int(max_total_trials // max(1, selected_count)))
+        if effective_trials > budget_trials:
+            effective_trials = budget_trials
+            budget_capped = True
+
     selected_count = max(1, min(int(selected_count), int(eligible_count)))
     effective_trials = max(4, int(effective_trials))
-    adaptive_capped = bool(selected_count < int(eligible_count) or effective_trials < requested)
+    planned_total_trials = int(selected_count * effective_trials)
+    adaptive_capped = bool(
+        selected_count < int(eligible_count)
+        or effective_trials < requested
+        or budget_capped
+    )
 
     if adaptive_capped:
+        coverage_text = (
+            f"优化全部 {eligible_count} 个候选"
+            if selected_count >= int(eligible_count)
+            else f"仅优化前 {selected_count}/{eligible_count} 个候选"
+        )
         summary = (
-            f"已切换为快速预优化：仅优化前 {selected_count}/{eligible_count} 个候选，"
-            f"每个最多 {effective_trials} 次，以控制 {timeframe} 多策略对比耗时"
+            f"已切换为快速预优化：{coverage_text}，每个最多 {effective_trials} 次，"
+            f"预计最多 {planned_total_trials} 次试跑，以控制 {timeframe} 多策略对比耗时"
         )
         skip_reason = (
             f"多策略对比已启用快速预优化，仅对前 {selected_count} 个候选执行限量优化"
+            if selected_count < int(eligible_count)
+            else "多策略对比已启用快速预优化，全部候选均参与，已下调单候选试跑次数"
         )
     else:
         summary = f"已对 {eligible_count} 个候选执行预优化，每个最多 {effective_trials} 次"
@@ -1976,6 +2020,9 @@ def _build_compare_optimization_plan(
         "effective_trials": effective_trials,
         "eligible_count": int(eligible_count),
         "selected_count": selected_count,
+        "max_total_trials": max_total_trials,
+        "planned_total_trials": planned_total_trials,
+        "budget_capped": bool(budget_capped),
         "adaptive_capped": adaptive_capped,
         "summary": summary,
         "skip_reason": skip_reason,
@@ -4679,6 +4726,7 @@ async def compare_backtests(
         return out
 
     intraday_cs_raw_bundle_cache: Dict[tuple, Dict[str, pd.DataFrame]] = {}
+    compare_enrichment_cache: Dict[tuple, Optional[Dict[str, Any]]] = {}
 
     async def _load_compare_intraday_cross_section_inputs(
         *,
@@ -4761,6 +4809,7 @@ async def compare_backtests(
                 symbol=resolved_loop_symbol,
                 start_time=_utc_naive_datetime(parsed_start),
                 end_time=_utc_naive_datetime(parsed_end),
+                enrichment_cache=compare_enrichment_cache,
             )
             baseline_metrics = await asyncio.to_thread(
                 _run_backtest_core,
