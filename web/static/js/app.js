@@ -2384,6 +2384,10 @@ const allStaleCount=Number(mw.stale_symbol_count||0);
 const wsStaleRaw=mw.ws_stale_symbol_count;
 const wsStaleCount=Number(wsStaleRaw==null?allStaleCount:wsStaleRaw);
 const staleCount=(enabled&&mode!=='off')?wsStaleCount:allStaleCount;
+// 与 ws_quality_guard 同语义：单个冷门币自然无成交≠行情故障；
+// 仅当全部 WS 符号同时过期（分母未知则保守沿用旧行为）才判 stale。
+const wsSymbolCount=Number(mw.ws_symbol_count||0);
+const allWsStale=staleCount>0&&(wsSymbolCount<=0||staleCount>=wsSymbolCount);
 const fallbackCount=Number(mw.rest_fallback_count||0);
 const violationCount=Number(mw.shadow_compare_violation_count||0);
 const markPriceEnabled=!!mw.mark_price_enabled;
@@ -2401,7 +2405,7 @@ if(statusStale){
 }else if(!enabled||mode==='off'){
   text=configured?'行情: REST':'行情: REST';
   tone='';
-}else if(staleCount>0){
+}else if(allWsStale){
   text='行情: stale';
   tone='negative';
 }else if(mode==='shadow'){
@@ -2410,6 +2414,7 @@ if(statusStale){
 }else if(mode==='ui_primary'||mode==='strategy_primary'){
   if(feedHealthy&&wsHubHealthy){
     text=mode==='strategy_primary'?'行情: WS strategy':'行情: WS primary';
+    if(staleCount>0)text+=`（${staleCount}币静默）`;
     tone='connected';
   }else{
     text='行情: REST fallback';
