@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("start-service", "start-selfcheck", "status", "stop")]
     [string]$Action = "status",
     [string]$BindHost = "127.0.0.1",
@@ -8,7 +8,7 @@ param(
     [int]$DurationSec = 21600,
     [int]$IntervalSec = 60,
     [int]$HealthWaitSec = 120,
-    [string]$PythonExe = "C:\Users\lenovo\.conda\envs\crypto_trading\python.exe"
+    [string]$PythonExe = "F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe"
 )
 
 $ErrorActionPreference = "Stop"
