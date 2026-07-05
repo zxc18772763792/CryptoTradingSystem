@@ -59,6 +59,33 @@ def test_openai_endpoint_targets_support_per_source_models():
     ]
 
 
+def test_openai_endpoint_targets_keep_duplicate_backup_base_url_for_distinct_models():
+    targets = openai_endpoint_targets(
+        primary_base_url="https://primary.test/v1",
+        backup_base_urls="https://kuaipao.ai,https://kuaipao.ai",
+        primary_api_key="primary-key",
+        backup_api_key="kuaipao-key",
+        primary_model="google/gemma-4-31b-it",
+        backup_model="qwen3-vl-flash,deepseek-v4-flash",
+    )
+
+    assert [target["base_url"] for target in targets] == [
+        "https://primary.test/v1",
+        "https://kuaipao.ai",
+        "https://kuaipao.ai",
+    ]
+    assert [target["api_key"] for target in targets] == [
+        "primary-key",
+        "kuaipao-key",
+        "kuaipao-key",
+    ]
+    assert [target["model"] for target in targets] == [
+        "google/gemma-4-31b-it",
+        "qwen3-vl-flash",
+        "deepseek-v4-flash",
+    ]
+
+
 def test_openai_endpoint_targets_detect_anthropic_style_backup():
     targets = openai_endpoint_targets(
         primary_base_url="https://primary.test/v1",
@@ -291,6 +318,53 @@ def test_scoped_openai_failover_resets_when_target_chain_changes(monkeypatch, tm
         "https://primary.test/v1",
         "https://backup-b.test/v1",
     ]
+
+
+def test_scoped_openai_failover_retries_primary_after_cooldown(monkeypatch, tmp_path):
+    state_path = tmp_path / "openai_failover_state.json"
+    monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(state_path))
+    monkeypatch.setenv("OPENAI_FAILOVER_TZ", "Asia/Shanghai")
+    monkeypatch.setenv("OPENAI_FAILOVER_PRIMARY_RETRY_SEC", "60")
+    monkeypatch.setattr(
+        openai_responses,
+        "_openai_failover_now",
+        lambda: datetime(2026, 4, 6, 12, 2, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+    openai_responses.reset_openai_target_preferences()
+
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "scopes": {
+                    "news": {
+                        "day": "2026-04-06",
+                        "mode": "backup",
+                        "preferred_base_url": "https://backup.test/v1",
+                        "base_urls": ["https://primary.test/v1", "https://backup.test/v1"],
+                        "chat_preferred_base_urls": [],
+                        "updated_at": "2026-04-06T12:00:00+08:00",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    targets = openai_endpoint_targets(
+        primary_base_url="https://primary.test/v1",
+        backup_base_urls="https://backup.test/v1",
+        primary_api_key="primary-key",
+        backup_api_key="backup-key",
+    )
+
+    assert [item["base_url"] for item in openai_responses.prioritize_openai_targets(targets, scope="news")] == [
+        "https://primary.test/v1",
+        "https://backup.test/v1",
+    ]
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["scopes"]["news"]["mode"] == "primary"
 
 
 def test_scoped_openai_failover_uses_in_memory_state_without_env(monkeypatch):

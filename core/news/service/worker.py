@@ -75,8 +75,8 @@ def _is_llm_summary_source(source: Any) -> bool:
         and (
             "glm" in text
             or text.startswith(("llm", "openai", "codex", "responses"))
-            or text.startswith(("nim_summary:", "gm_summary:", "ds_summary:"))
-            or text in {"nim_summary", "gm_summary", "ds_summary"}
+            or text.startswith(("nim_summary:", "gm_summary:", "ds_summary:", "qwen_summary:"))
+            or text in {"nim_summary", "gm_summary", "ds_summary", "qwen_summary"}
             or text.endswith("_summary")
         )
     )

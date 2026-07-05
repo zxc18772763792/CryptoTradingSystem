@@ -179,6 +179,11 @@
             key.includes("ds-") ||
             key.includes(":ds")
         ) return "DS摘要";
+        if (
+            key.includes("qwen_summary") ||
+            key.includes("qwen3-vl-flash") ||
+            key.includes("qwen")
+        ) return "Qwen摘要";
         if (key.includes("openai") || key.includes("responses") || key.includes("codex") || key.startsWith("gpt")) {
             return "GPT摘要";
         }

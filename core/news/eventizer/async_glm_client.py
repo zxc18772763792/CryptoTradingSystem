@@ -127,16 +127,19 @@ def _local_gemma_timeout(total: Any, connect: Any = None) -> aiohttp.ClientTimeo
     )
 
 
-def _merge_csv_values(*values: Any) -> str:
+def _merge_csv_values(*values: Any, preserve_duplicates: bool = False) -> str:
     merged: List[str] = []
     seen: set[str] = set()
     for value in values:
         normalized = _normalize_openai_base_urls(value)
         for item in normalized.split(","):
             part = str(item or "").strip().rstrip("/")
-            if not part or part in seen:
+            if not part:
                 continue
-            seen.add(part)
+            if not preserve_duplicates:
+                if part in seen:
+                    continue
+                seen.add(part)
             merged.append(part)
     return ",".join(merged)
 
@@ -282,7 +285,11 @@ def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
             or DEFAULT_OPENAI_BASE_URL
         ),
         backup_base_urls=(
-            _merge_csv_values(_news_llm_backup_base_url(), llm_cfg.get("backup_base_url"))
+            _merge_csv_values(
+                _news_llm_backup_base_url(),
+                llm_cfg.get("backup_base_url"),
+                preserve_duplicates=True,
+            )
             if news_llm_configured
             else _merge_csv_values(
                 _runtime_setting("OPENAI_BACKUP_BASE_URL"),
@@ -356,6 +363,8 @@ def _summary_source_label(base_url: Any, model: Any) -> str:
     base_text = str(base_url or "").strip().lower()
     if "nvidia" in text or "integrate.api.nvidia" in text or "nim" in text:
         return "nim_summary"
+    if "qwen" in text:
+        return "qwen_summary"
     if "deepseek" in text or "kuaipao.ai" in base_text or re.search(r"(?:^|[-_:./])ds(?:$|[-_:./])", text):
         return "ds_summary"
     if "gemma4-local" in text or "local-gemma" in text or "192.168." in text or "localhost" in text or "127.0.0.1" in text:
@@ -1504,7 +1513,11 @@ class AsyncGLMClient:
             choices = response.get("choices") if isinstance(response, dict) else None
             if not choices:
                 raise ValueError("LLM summarize batch missing choices")
-            summary_source = _summary_source_with_model(self._summary_source, response)
+            summary_source = _summary_source_with_model(
+                self._summary_source,
+                response,
+                response.get("_cts_openai_target") if isinstance(response, dict) else None,
+            )
 
             message = choices[0].get("message") or {}
             content = _normalize_llm_content(message.get("content")).strip()

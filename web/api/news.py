@@ -747,7 +747,7 @@ def _is_llm_summary_source(source: Any) -> bool:
         return False
     if text in {"glm", "glm5", "llm", "llm_cache", "glm_cache", "glm5_cache", "openai", "openai_responses", "codex", "responses"}:
         return True
-    if text in {"nim_summary", "gm_summary", "ds_summary"}:
+    if text in {"nim_summary", "gm_summary", "ds_summary", "qwen_summary"}:
         return True
     return (
         ("glm" in text)
@@ -758,6 +758,7 @@ def _is_llm_summary_source(source: Any) -> bool:
         or text.startswith("nim_summary:")
         or text.startswith("gm_summary:")
         or text.startswith("ds_summary:")
+        or text.startswith("qwen_summary:")
         or text.endswith("_summary")
     )
 

@@ -135,6 +135,30 @@ def _split_endpoint_candidates(value: Any) -> List[str]:
     return items
 
 
+def _split_endpoint_candidates_preserve_duplicates(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        raw_items = list(value)
+    else:
+        text = str(value or "").strip()
+        if not text:
+            return []
+        raw_items = (
+            text.replace("\r", ",")
+            .replace("\n", ",")
+            .replace(";", ",")
+            .split(",")
+        )
+
+    items: List[str] = []
+    for item in raw_items:
+        base_url = str(item or "").strip().rstrip("/")
+        if base_url:
+            items.append(base_url)
+    return items
+
+
 def _split_api_key_candidates(value: Any) -> List[str]:
     if value is None:
         return []
@@ -194,9 +218,7 @@ def openai_endpoint_targets(
     extra_targets: Sequence[Mapping[str, Any]] | None = None,
 ) -> List[Dict[str, Any]]:
     base_urls = _split_endpoint_candidates(primary_base_url)
-    for item in _split_endpoint_candidates(backup_base_urls):
-        if item not in base_urls:
-            base_urls.append(item)
+    base_urls.extend(_split_endpoint_candidates_preserve_duplicates(backup_base_urls))
 
     primary_keys = _split_api_key_candidates(primary_api_key)
     backup_keys = _split_api_key_candidates(backup_api_key)
@@ -342,6 +364,39 @@ def _openai_failover_now() -> datetime:
         return datetime.now(timezone.utc)
 
 
+def _openai_failover_primary_retry_sec() -> int:
+    raw = str(
+        os.getenv("OPENAI_FAILOVER_PRIMARY_RETRY_SEC")
+        or os.getenv("OPENAI_FAILOVER_RETRY_PRIMARY_SEC")
+        or ""
+    ).strip()
+    if not raw:
+        return 0
+    try:
+        return max(0, int(float(raw)))
+    except Exception:
+        return 0
+
+
+def _failover_entry_should_retry_primary(raw_entry: Mapping[str, Any]) -> bool:
+    retry_sec = _openai_failover_primary_retry_sec()
+    if retry_sec <= 0:
+        return False
+    if str(raw_entry.get("mode") or "").strip().lower() != "backup":
+        return False
+    raw_updated_at = str(raw_entry.get("updated_at") or "").strip()
+    if not raw_updated_at:
+        return False
+    try:
+        updated_at = datetime.fromisoformat(raw_updated_at.replace("Z", "+00:00"))
+    except Exception:
+        return False
+    now = _openai_failover_now()
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=now.tzinfo)
+    return (now - updated_at).total_seconds() >= retry_sec
+
+
 def _openai_failover_today() -> str:
     return _openai_failover_now().date().isoformat()
 
@@ -472,7 +527,11 @@ def _load_scope_failover_entry(
                 if not isinstance(raw_entry, dict):
                     raw_entry = {}
                 raw_day = str(raw_entry.get("day") or "")
-                if raw_day != today or not _failover_entry_matches_targets(raw_entry, base_urls):
+                if (
+                    raw_day != today
+                    or not _failover_entry_matches_targets(raw_entry, base_urls)
+                    or _failover_entry_should_retry_primary(raw_entry)
+                ):
                     raw_mode = "primary"
                     raw_preferred = ""
                     raw_chat_preferred: Sequence[str] = ()
@@ -499,7 +558,11 @@ def _load_scope_failover_entry(
         if not isinstance(raw_entry, dict):
             raw_entry = {}
         raw_day = str(raw_entry.get("day") or "")
-        if raw_day != today or not _failover_entry_matches_targets(raw_entry, base_urls):
+        if (
+            raw_day != today
+            or not _failover_entry_matches_targets(raw_entry, base_urls)
+            or _failover_entry_should_retry_primary(raw_entry)
+        ):
             raw_mode = "primary"
             raw_preferred = ""
             raw_chat_preferred = ()
@@ -551,7 +614,11 @@ def _remember_scope_failover_state(
                 if not isinstance(raw_entry, dict):
                     raw_entry = {}
                 raw_day = str(raw_entry.get("day") or "")
-                if raw_day != today or not _failover_entry_matches_targets(raw_entry, base_urls):
+                if (
+                    raw_day != today
+                    or not _failover_entry_matches_targets(raw_entry, base_urls)
+                    or _failover_entry_should_retry_primary(raw_entry)
+                ):
                     raw_mode = "primary"
                     raw_preferred = ""
                     raw_chat_preferred: Sequence[str] = ()
@@ -621,7 +688,11 @@ def _remember_scope_failover_state(
         if not isinstance(raw_entry, dict):
             raw_entry = {}
         raw_day = str(raw_entry.get("day") or "")
-        if raw_day != today or not _failover_entry_matches_targets(raw_entry, base_urls):
+        if (
+            raw_day != today
+            or not _failover_entry_matches_targets(raw_entry, base_urls)
+            or _failover_entry_should_retry_primary(raw_entry)
+        ):
             raw_mode = "primary"
             raw_preferred = ""
             raw_chat_preferred = ()
