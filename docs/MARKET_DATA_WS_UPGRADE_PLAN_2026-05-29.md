@@ -4995,3 +4995,21 @@ scripts\market_ws_strategy_primary.ps1 -Action start-selfcheck -ConfirmLive -Con
 **CleanEvidence 重跑（2026-06-20 02:09，用户批准）**：原服务（PID 35864）已连续运行 ~4 天未崩（主机本期未休眠）。raw fapi 实测 0.3s（网络健康），balances 超时实为 news-LLM 应用内争用。经 launcher 以 `-CleanEvidence`（禁 news/LLM/data/coinglass/macro/premium/analytics worker）重启 L3：冷启动 ~10min（launcher READY 200s 超时不足，服务自行起来），settled `trading_mode=live ui_primary fail_closed=True`；balances 为冷启动暖机假象（~7.5min 后恢复正常）；guard 因暖机长在启动即 degrade，**~13min 后恢复 `state=ws ws_trusted=True recover=1`**。新 6h 干净观察 `CryptoMarketWsUiPrimary_selfcheck_20260620_022140`（JSON 同名，约 08:21 结束）。L3 连续性自 2026-06-20 02:20 重新起算。
 
 **遗留**：(a) news-LLM 配置需修（配额/中继 192.168.1.24:8010），否则 production-like（非 CleanEvidence）长跑仍会被 news-LLM 噪声拖累；(b) launcher READY 超时（≤200s）小于本应用冷启动耗时（~10-16min），建议加大或改为轮询绑定；(c) 环境/休眠风险与常开主机建议不变。
+
+### 34. L4 上线 + 基建迁移 + 守卫判据修复 检查点（2026-06-27 ~ 2026-07-05）
+
+**L4 正式上线（真金白银已验证）**：全部五项前置齐备后（通过版 L3 报告 `ui_primary_selfcheck_20260625_152533`、7 天 L3 连续性、fallback 演练 `fallback_drill_20260627_011335.json`、用户明确批准、持仓核对），经门禁 launcher 切换 strategy_primary。试单策略（Hurst ETH/USDT 5m，allocation=1%≈$100 名义，SL3%/TP6%，12h 限时）完成 4 个真实回合，净 +$1.30；WS 定价经 hub metadata 核验（source=ws、ws_trusted=true）；利润保护动态上移并自动离场。
+
+**存储迁移**：根因确认原 E:（USB 机械盘）为一切慢/卡/崩的放大器（import 卡死、事件循环冻结、20-48min 冷启动）。热路径先迁 D:（内置 NVMe，冷启动 80s），后按用户决定全量落 F:（USB SSD exFAT，冷启动 ~40s）。F: 为权威工作副本；D: 为热备；E: 转归档。exFAT 缓解措施：禁 USB 选择性暂停、盘不休眠；git maintenance.auto=false（multi-pack-index 在 exFAT 写入失败）。
+
+**四层加固（均有测试）**：
+1. proactor accept 补丁：瞬时单连接错误（WinError 64 等）不再永久关闭监听 socket（曾致"活着但失联"）。
+2. 共享 SSL 上下文：httpx 客户端逐次构造在事件循环上做阻塞证书读取，磁盘饱和时冻结全服务；改为进程级单例+启动预热（data.py 3 处、trading.py 9 处已迁）。
+3. listener watchdog：TCP 自检端口，连续失败以 exit 64 退出。
+4. launcher 有界自动重启：仅 exit 64 重启、上限 5 次。
+
+**守卫判据两连修（2026-07-04/05）**：
+- 单币过期≠场馆故障：冷门 watchlist 币（MOVE/USUAL/VANA/ME）自然静默曾致守卫日翻 130 次；改为全部 WS 符号同时过期才计不健康（仪表盘徽章同语义修复）。
+- 门口拒收≠质量污染：hub 拒收的无效行情曾以 delta≥1 一票否决守卫（日翻 387 次），且降级→REST 回退→冷门币残缺行情→再拒收构成自激环；影子价差违规保持 1 次即降级，拒收改独立阈值（默认 5/窗口）+ 拒收显名日志（last_invalid_payload 入快照）。修复后实测：degrade 仅暖机 1 次、invalid=0、rest_fallback=0，自激环消失。
+
+**当前态势**：L4 strategy_primary @F:，守卫稳定，空仓。回滚杆不变：MARKET_WS_FORCE_REST=true 或退 ui_primary launcher。遗留：news sqlite 等热文件仍经 data 目录（现为 F: 本地实目录，已无 junction）；启动 news bootstrap 已改 O(1)（EXISTS 探测）。
