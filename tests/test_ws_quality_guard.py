@@ -128,3 +128,46 @@ def test_sample_from_market_ws_status_maps_fields():
 def test_status_clears_error_sentinels():
     s = sample_from_market_ws_status({"feed_last_error": "none"}, now=1.0)
     assert s.feed_last_error is None
+
+
+def test_partial_stale_symbols_do_not_flap_the_guard():
+    """Regression (2026-07-04): 4 illiquid watchlist alts going >10s without a
+    trade flapped the guard 130x/day while BTC/ETH streamed fine. Per-symbol
+    silence is not venue unhealth; only ALL WS symbols stale is."""
+    from core.marketdata.ws_quality_guard import WsQualityGuard, WsQualitySample
+
+    guard = WsQualityGuard(enabled=True, min_samples=4)
+    for i in range(20):
+        decision = guard.observe(WsQualitySample(
+            ts=float(i * 5), feed_healthy=True, hub_healthy=True,
+            ws_stale_symbol_count=4, ws_symbol_count=6, last_tick_age_ms=500.0,
+        ))
+    assert decision.state == "ws"
+    assert decision.force_rest is False
+
+
+def test_all_stale_symbols_still_degrade_the_guard():
+    from core.marketdata.ws_quality_guard import WsQualityGuard, WsQualitySample
+
+    guard = WsQualityGuard(enabled=True, min_samples=4)
+    decision = None
+    for i in range(8):
+        decision = guard.observe(WsQualitySample(
+            ts=float(i * 5), feed_healthy=True, hub_healthy=True,
+            ws_stale_symbol_count=6, ws_symbol_count=6, last_tick_age_ms=500.0,
+        ))
+    assert decision.state == "degraded"
+    assert decision.force_rest is True
+
+
+def test_stale_with_unknown_symbol_count_stays_conservative():
+    from core.marketdata.ws_quality_guard import WsQualityGuard, WsQualitySample
+
+    guard = WsQualityGuard(enabled=True, min_samples=4)
+    decision = None
+    for i in range(8):
+        decision = guard.observe(WsQualitySample(
+            ts=float(i * 5), feed_healthy=True, hub_healthy=True,
+            ws_stale_symbol_count=1, ws_symbol_count=0, last_tick_age_ms=500.0,
+        ))
+    assert decision.state == "degraded"

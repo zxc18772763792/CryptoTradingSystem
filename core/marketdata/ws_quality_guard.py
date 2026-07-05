@@ -40,6 +40,7 @@ class WsQualitySample:
     feed_healthy: bool = False
     hub_healthy: bool = False
     ws_stale_symbol_count: int = 0
+    ws_symbol_count: int = 0          # total WS-sourced symbols (for stale-fraction)
     last_tick_age_ms: Optional[float] = None
     rest_fallback_count: int = 0      # cumulative counter (tracked, not yet a trigger)
     shadow_violation_count: int = 0   # cumulative counter (price-divergence breaches)
@@ -100,7 +101,16 @@ class WsQualityGuard:
     def _is_sample_healthy(self, s: WsQualitySample) -> bool:
         if not s.feed_healthy or not s.hub_healthy:
             return False
-        if s.ws_stale_symbol_count and s.ws_stale_symbol_count > 0:
+        # Per-symbol staleness is NOT a venue-health signal: an illiquid
+        # watchlist symbol legitimately goes >10s without a trade, and one such
+        # symbol flapped the guard 130x/day (2026-07-04) while BTC/ETH streamed
+        # perfectly. Per-read fail-closed already protects execution on a stale
+        # symbol. Only ALL WS symbols simultaneously stale marks the sample
+        # unhealthy here (venue-level death; feed/hub checks also catch it).
+        if (
+            s.ws_stale_symbol_count > 0
+            and s.ws_stale_symbol_count >= max(1, int(s.ws_symbol_count or 0))
+        ):
             return False
         if s.feed_last_error:
             return False
@@ -215,6 +225,7 @@ def sample_from_market_ws_status(status: Optional[Dict[str, Any]], now: Optional
         feed_healthy=bool(s.get("feed_healthy")),
         hub_healthy=bool(hub),
         ws_stale_symbol_count=stale,
+        ws_symbol_count=_i("ws_symbol_count"),
         last_tick_age_ms=_f("last_tick_age_ms"),
         rest_fallback_count=_i("rest_fallback_count"),
         shadow_violation_count=_i("shadow_compare_violation_count"),
