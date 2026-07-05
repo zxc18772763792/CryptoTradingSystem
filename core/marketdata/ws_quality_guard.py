@@ -73,6 +73,7 @@ class WsQualityGuard:
         min_samples: int = 4,
         degrade_unhealthy_fraction: float = 0.5,
         degrade_breach_delta: int = 1,
+        degrade_invalid_delta: int = 5,
         recover_healthy_sec: float = 300.0,
     ) -> None:
         self.enabled = bool(enabled)
@@ -81,6 +82,12 @@ class WsQualityGuard:
         self.min_samples = max(1, int(min_samples))
         self.degrade_unhealthy_fraction = min(1.0, max(0.0, float(degrade_unhealthy_fraction)))
         self.degrade_breach_delta = max(1, int(degrade_breach_delta))
+        # Invalid payloads are rejected AT THE HUB DOOR — no bad tick reaches a
+        # consumer — so a lone malformed REST snapshot must not flip venue
+        # authority (it flapped the guard 387x/day on 2026-07-05). Shadow price
+        # violations DO reach the distrust bar at degrade_breach_delta; door
+        # rejections only degrade at this higher, sustained rate per window.
+        self.degrade_invalid_delta = max(1, int(degrade_invalid_delta))
         self.recover_healthy_sec = max(0.0, float(recover_healthy_sec))
         self._samples: Deque[Tuple[float, WsQualitySample, bool]] = deque()
         self._state = self.WS
@@ -132,10 +139,8 @@ class WsQualityGuard:
         unhealthy_frac = 1.0 - healthy_frac
         violations = [s.shadow_violation_count for _, s, _ in self._samples]
         invalids = [s.invalid_payload_count for _, s, _ in self._samples]
-        breach_delta = max(
-            (max(violations) - min(violations)) if violations else 0,
-            (max(invalids) - min(invalids)) if invalids else 0,
-        )
+        violation_delta = (max(violations) - min(violations)) if violations else 0
+        invalid_delta = (max(invalids) - min(invalids)) if invalids else 0
 
         reasons: List[str] = []
         action = "none"
@@ -148,8 +153,10 @@ class WsQualityGuard:
                 reasons.append(
                     f"unhealthy_fraction={unhealthy_frac:.2f}>={self.degrade_unhealthy_fraction:.2f} over {n} samples"
                 )
-            if breach_delta >= self.degrade_breach_delta:
-                reasons.append(f"quality_breach_delta={breach_delta}>={self.degrade_breach_delta}")
+            if violation_delta >= self.degrade_breach_delta:
+                reasons.append(f"shadow_violation_delta={violation_delta}>={self.degrade_breach_delta}")
+            if invalid_delta >= self.degrade_invalid_delta:
+                reasons.append(f"invalid_payload_delta={invalid_delta}>={self.degrade_invalid_delta}")
             if reasons:
                 self._state = self.DEGRADED
                 self._degraded_since = now

@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
 
+from loguru import logger
+
 
 MarketTickSource = Literal["ws", "rest_fallback", "rest_snapshot"]
 
@@ -202,6 +204,7 @@ class MarketDataHub:
         self._rest_fallback_count = 0
         self._rest_snapshot_count = 0
         self._invalid_payload_count = 0
+        self._last_invalid_payload: Optional[Dict[str, Any]] = None
         self._timestamp_regression_count = 0
         self._fallback_reasons: Dict[str, int] = {}
         self._last_error: Optional[str] = None
@@ -224,6 +227,7 @@ class MarketDataHub:
         self._rest_fallback_count = 0
         self._rest_snapshot_count = 0
         self._invalid_payload_count = 0
+        self._last_invalid_payload = None
         self._timestamp_regression_count = 0
         self._fallback_reasons.clear()
         self._last_error = None
@@ -275,6 +279,33 @@ class MarketDataHub:
                 self._rest_snapshot_count += 1
         return tick
 
+    def _reject_payload(
+        self, exchange: str, symbol: str, source: Any, reason: str, payload: Any
+    ) -> None:
+        """Count + surface a rejected tick. Rejected data never enters the hub,
+        so this is telemetry for finding the *producer* of bad ticks — the 199
+        silent rejections/day (2026-07-05) were undiagnosable without it."""
+        self._invalid_payload_count += 1
+        compact = None
+        if isinstance(payload, dict):
+            compact = {
+                k: payload.get(k)
+                for k in ("last", "close", "bid", "ask", "mark", "raw_symbol")
+                if payload.get(k) is not None
+            }
+        self._last_invalid_payload = {
+            "exchange": exchange or "?",
+            "symbol": symbol or "?",
+            "source": str(source),
+            "reason": reason,
+            "payload": compact,
+            "at": _utc_now().isoformat(),
+        }
+        logger.debug(
+            "market hub rejected tick: {}:{} source={} reason={} payload={}",
+            exchange, symbol, source, reason, compact,
+        )
+
     def upsert_tick(
         self,
         exchange: Any,
@@ -287,7 +318,7 @@ class MarketDataHub:
         name = normalize_exchange_name(exchange)
         norm_symbol = normalize_market_symbol(symbol)
         if not name or not norm_symbol or not isinstance(payload, dict):
-            self._invalid_payload_count += 1
+            self._reject_payload(name, norm_symbol, source, "malformed", payload)
             return None
 
         last = _coerce_float(payload.get("last") if payload.get("last") is not None else payload.get("close"))
@@ -317,19 +348,19 @@ class MarketDataHub:
             else payload.get("volume_24h")
         )
         if last is not None and last <= 0:
-            self._invalid_payload_count += 1
+            self._reject_payload(name, norm_symbol, source, "nonpositive_last", payload)
             return None
         if bid is not None and bid < 0:
-            self._invalid_payload_count += 1
+            self._reject_payload(name, norm_symbol, source, "negative_bid", payload)
             return None
         if ask is not None and ask < 0:
-            self._invalid_payload_count += 1
+            self._reject_payload(name, norm_symbol, source, "negative_ask", payload)
             return None
         if bid is not None and ask is not None and bid > ask:
-            self._invalid_payload_count += 1
+            self._reject_payload(name, norm_symbol, source, "crossed_book", payload)
             return None
         if last is None and mark is None and bid is None and ask is None:
-            self._invalid_payload_count += 1
+            self._reject_payload(name, norm_symbol, source, "no_price_fields", payload)
             return None
 
         timestamp_exchange = _coerce_datetime(
@@ -618,6 +649,7 @@ class MarketDataHub:
             "rest_fallback_count": self._rest_fallback_count,
             "rest_snapshot_count": self._rest_snapshot_count,
             "invalid_payload_count": self._invalid_payload_count,
+            "last_invalid_payload": dict(self._last_invalid_payload) if self._last_invalid_payload else None,
             "timestamp_regression_count": self._timestamp_regression_count,
             "fallback_reasons": dict(sorted(self._fallback_reasons.items())),
             "shadow_compare_count": self._shadow_compare_count,

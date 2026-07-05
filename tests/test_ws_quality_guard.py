@@ -60,7 +60,10 @@ def test_quality_breach_delta_degrades_even_when_healthy():
 
 
 def test_invalid_payload_delta_degrades():
-    g = WsQualityGuard(enabled=True, window_sec=120, min_samples=10, degrade_breach_delta=2)
+    # Invalid payloads use their own (laxer) threshold since 2026-07-05: door-
+    # rejected ticks never reach consumers, so only a sustained rate flips venue
+    # authority. Shadow violations keep the strict degrade_breach_delta.
+    g = WsQualityGuard(enabled=True, window_sec=120, min_samples=10, degrade_invalid_delta=2)
     g.observe(_healthy(0, invalid_payload_count=5))
     g.observe(_healthy(10, invalid_payload_count=6))  # delta=1 < 2 -> no
     assert g.state == "ws"
@@ -169,5 +172,50 @@ def test_stale_with_unknown_symbol_count_stays_conservative():
         decision = guard.observe(WsQualitySample(
             ts=float(i * 5), feed_healthy=True, hub_healthy=True,
             ws_stale_symbol_count=1, ws_symbol_count=0, last_tick_age_ms=500.0,
+        ))
+    assert decision.state == "degraded"
+
+
+def test_single_invalid_payload_does_not_flip_guard():
+    """Regression (2026-07-05): a lone hub-rejected tick (~16/h from illiquid
+    REST snapshots) flapped the guard 387x/day. Door rejections never reach a
+    consumer, so only a sustained rate degrades; one-off stays healthy."""
+    from core.marketdata.ws_quality_guard import WsQualityGuard, WsQualitySample
+
+    guard = WsQualityGuard(enabled=True, min_samples=4)
+    decision = None
+    for i in range(10):
+        decision = guard.observe(WsQualitySample(
+            ts=float(i * 5), feed_healthy=True, hub_healthy=True,
+            ws_symbol_count=6, last_tick_age_ms=500.0,
+            invalid_payload_count=1 if i >= 5 else 0,  # one increment mid-window
+        ))
+    assert decision.state == "ws"
+
+
+def test_sustained_invalid_payloads_still_degrade():
+    from core.marketdata.ws_quality_guard import WsQualityGuard, WsQualitySample
+
+    guard = WsQualityGuard(enabled=True, min_samples=4, degrade_invalid_delta=5)
+    decision = None
+    for i in range(10):
+        decision = guard.observe(WsQualitySample(
+            ts=float(i * 5), feed_healthy=True, hub_healthy=True,
+            ws_symbol_count=6, last_tick_age_ms=500.0,
+            invalid_payload_count=i,  # +1 per sample -> delta 9 in window
+        ))
+    assert decision.state == "degraded"
+
+
+def test_single_shadow_violation_still_degrades_immediately():
+    from core.marketdata.ws_quality_guard import WsQualityGuard, WsQualitySample
+
+    guard = WsQualityGuard(enabled=True, min_samples=4)
+    decision = None
+    for i in range(6):
+        decision = guard.observe(WsQualitySample(
+            ts=float(i * 5), feed_healthy=True, hub_healthy=True,
+            ws_symbol_count=6, last_tick_age_ms=500.0,
+            shadow_violation_count=1 if i >= 4 else 0,
         ))
     assert decision.state == "degraded"
