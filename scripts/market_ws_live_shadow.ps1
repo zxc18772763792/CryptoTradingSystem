@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("precheck", "start-service", "start-selfcheck", "status", "stop")]
     [string]$Action = "status",
     # Real-money guard: every start action refuses unless this switch is present.
@@ -12,7 +12,7 @@ param(
     [int]$MinSamples = 1430,
     [int]$HealthWaitSec = 120,
     [double]$MaxWsAgeMs = 10000,
-    [string]$PythonExe = "C:\Users\lenovo\.conda\envs\crypto_trading\python.exe"
+    [string]$PythonExe = "F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe"
 )
 
 # Level-2 "live shadow" launcher: runs the trading system in LIVE mode for 24h
