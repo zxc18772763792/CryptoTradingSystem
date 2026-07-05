@@ -110,6 +110,7 @@ class _SyncSSELikeResponse(_SyncResponse):
 @pytest.fixture(autouse=True)
 def _reset_openai_target_state(monkeypatch):
     import core.utils.openai_responses as response_helpers
+    import core.news.eventizer.async_glm_client as news_async_module
     import core.news.eventizer.llm_glm5 as news_sync_module
 
     for name in (
@@ -126,9 +127,11 @@ def _reset_openai_target_state(monkeypatch):
         monkeypatch.setattr(settings, name, False if name == "NEWS_LLM_FORCE_CHAT_COMPLETIONS" else "", raising=False)
 
     response_helpers.reset_openai_target_preferences()
+    news_async_module.AsyncGLMClient._summary_cache.clear()
     news_sync_module._SUMMARY_CACHE.clear()
     yield
     response_helpers.reset_openai_target_preferences()
+    news_async_module.AsyncGLMClient._summary_cache.clear()
     news_sync_module._SUMMARY_CACHE.clear()
 
 
@@ -1928,6 +1931,14 @@ def test_news_sync_summary_source_labels_nim_gm_and_ds(monkeypatch):
             },
             "ds_summary:deepseek-v4-flash",
         ),
+        (
+            {
+                "NEWS_LLM_API_KEY": "qwen-key",
+                "NEWS_LLM_BASE_URL": "https://kuaipao.ai",
+                "NEWS_LLM_MODEL": "qwen3-vl-flash",
+            },
+            "qwen_summary:qwen3-vl-flash",
+        ),
     ]
 
     for env_patch, expected_source in cases:
@@ -2431,6 +2442,48 @@ def test_async_glm_client_summarize_batch_marks_openai_source(monkeypatch):
     assert "temperature" not in request_mock.await_args.kwargs["chat_fallback_payload"]
 
 
+def test_async_glm_client_summarize_batch_labels_nim_target(monkeypatch):
+    import core.news.eventizer.async_glm_client as module
+
+    monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "nim-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "google/gemma-4-31b-it", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "", raising=False)
+    monkeypatch.setattr(settings, "ZHIPU_API_KEY", "", raising=False)
+
+    client = module.AsyncGLMClient({"llm": {"provider": "openai"}})
+    request_mock = AsyncMock(
+        return_value=(
+            {
+                "model": "google/gemma-4-31b-it",
+                "_cts_openai_target": {
+                    "base_url": "https://integrate.api.nvidia.com/v1",
+                    "model": "google/gemma-4-31b-it",
+                    "index": 0,
+                },
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"items":[{"idx":0,"summary":"headline summary",'
+                                '"sentiment":"neutral"}]}'
+                            ),
+                        }
+                    }
+                ],
+            },
+            "none",
+        )
+    )
+    monkeypatch.setattr(client, "_request", request_mock)
+
+    result = asyncio.run(client.summarize_batch(["BTC trades flat"], max_length=60))
+
+    assert result[0]["source"] == "nim_summary:google-gemma-4-31b-it"
+
+
 def test_news_feed_summarize_cfg_uses_llm_defaults_when_env_absent(monkeypatch):
     import web.api.news as module
 
@@ -2498,9 +2551,9 @@ def test_news_llm_runtime_snapshot_reports_nim_translation_chain(monkeypatch):
     monkeypatch.setattr(settings, "NEWS_LLM_API_KEY", "nvidia-key", raising=False)
     monkeypatch.setattr(settings, "NEWS_LLM_BASE_URL", "https://integrate.api.nvidia.com/v1", raising=False)
     monkeypatch.setattr(settings, "NEWS_LLM_MODEL", "google/gemma-4-31b-it", raising=False)
-    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "local-key,ds-key", raising=False)
-    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "http://192.168.1.24:8010/v1,https://kuaipao.ai", raising=False)
-    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "gemma4-local,deepseek-v4-flash", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_API_KEY", "kuaipao-key", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_BASE_URL", "https://kuaipao.ai,https://kuaipao.ai", raising=False)
+    monkeypatch.setattr(settings, "NEWS_LLM_BACKUP_MODEL", "qwen3-vl-flash,deepseek-v4-flash", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_BASE_URL", "", raising=False)
     monkeypatch.setattr(settings, "OPENAI_BACKUP_MODEL", "", raising=False)
 
@@ -2510,12 +2563,12 @@ def test_news_llm_runtime_snapshot_reports_nim_translation_chain(monkeypatch):
     assert [target["role"] for target in payload["targets"]] == ["primary", "backup", "backup"]
     assert [target["summary_label"] for target in payload["targets"]] == [
         "nim_summary",
-        "gm_summary",
+        "qwen_summary",
         "ds_summary",
     ]
     assert [target["model"] for target in payload["targets"]] == [
         "google/gemma-4-31b-it",
-        "gemma4-local",
+        "qwen3-vl-flash",
         "deepseek-v4-flash",
     ]
     assert all(target["api_key_configured"] for target in payload["targets"])

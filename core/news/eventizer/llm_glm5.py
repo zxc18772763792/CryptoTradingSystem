@@ -107,16 +107,19 @@ def _local_gemma_timeout_sec(timeout_sec: int) -> int:
     return max(int(timeout_sec or 0), max(30, _env_int("NEWS_LLM_LOCAL_TARGET_TIMEOUT_SEC", 120)))
 
 
-def _merge_csv_values(*values: Any) -> str:
+def _merge_csv_values(*values: Any, preserve_duplicates: bool = False) -> str:
     merged: List[str] = []
     seen: set[str] = set()
     for value in values:
         normalized = _normalize_openai_base_urls(value)
         for item in normalized.split(","):
             part = str(item or "").strip().rstrip("/")
-            if not part or part in seen:
+            if not part:
                 continue
-            seen.add(part)
+            if not preserve_duplicates:
+                if part in seen:
+                    continue
+                seen.add(part)
             merged.append(part)
     return ",".join(merged)
 
@@ -246,7 +249,11 @@ def _llm_provider(cfg: Dict[str, Any]) -> str:
 def _openai_endpoint_targets(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
     llm_cfg = cfg.get("llm") or {}
     news_llm_configured = _news_llm_configured(cfg)
-    news_backup_base_urls = _merge_csv_values(_news_llm_backup_base_url(), llm_cfg.get("backup_base_url"))
+    news_backup_base_urls = _merge_csv_values(
+        _news_llm_backup_base_url(),
+        llm_cfg.get("backup_base_url"),
+        preserve_duplicates=True,
+    )
     news_backup_config_present = bool(_news_llm_backup_base_url()) or "backup_base_url" in llm_cfg
     news_backup_api_key = _news_llm_backup_api_key()
     news_backup_model = _first_non_empty(_news_llm_backup_model(), llm_cfg.get("backup_model"))
@@ -341,6 +348,8 @@ def _summary_source_label(base_url: Any, model: Any) -> str:
     base_text = str(base_url or "").strip().lower()
     if "nvidia" in text or "integrate.api.nvidia" in text or "nim" in text:
         return "nim_summary"
+    if "qwen" in text:
+        return "qwen_summary"
     if "deepseek" in text or "kuaipao.ai" in base_text or re.search(r"(?:^|[-_:./])ds(?:$|[-_:./])", text):
         return "ds_summary"
     if "gemma4-local" in text or "local-gemma" in text or "192.168." in text or "localhost" in text or "127.0.0.1" in text:
