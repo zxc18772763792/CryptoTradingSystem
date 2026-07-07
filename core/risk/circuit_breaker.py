@@ -101,6 +101,14 @@ class _PortfolioState:
     weekly_dd: float = 0.0
     last_reset_at: Optional[str] = None
     last_reset_by: Optional[str] = None
+    # Manual-reset latch: while active, the SAME persisting drawdown does not
+    # immediately re-trip (the pre-2026-07-07 behavior made the reset button a
+    # lie — re-tripped within minutes on the unchanged rolling window). The
+    # latch pierces if the dd WORSENS beyond the reset-time level, and re-arms
+    # once the dd first recovers below thresholds.
+    manual_override_active: bool = False
+    manual_override_daily_dd: float = 0.0
+    manual_override_weekly_dd: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -357,12 +365,57 @@ class CircuitBreaker:
             self._portfolio.tripped = False
             self._portfolio.last_reset_at = now_iso
             self._portfolio.last_reset_by = str(operator or "unknown")
+            # Arm the manual-override latch at the CURRENT dd level: the same
+            # persisting rolling-window condition must not instantly undo the
+            # operator's decision; only a worsening beyond this level trips.
+            self._portfolio.manual_override_active = True
+            self._portfolio.manual_override_daily_dd = float(self._portfolio.daily_dd or 0.0)
+            self._portfolio.manual_override_weekly_dd = float(self._portfolio.weekly_dd or 0.0)
             self._persist()
-        logger.info(f"circuit_breaker: portfolio reset by {operator}")
+        logger.info(
+            f"circuit_breaker: portfolio reset by {operator}; manual-override latch armed "
+            f"(daily_dd<={self._portfolio.manual_override_daily_dd:.4f}, "
+            f"weekly_dd<={self._portfolio.manual_override_weekly_dd:.4f} suppressed until recovery)"
+        )
         self._notify("portfolio_reset", {
             "operator": operator,
             "reset_at": now_iso,
         })
+        return True
+
+    # Piercing margin: the latch only suppresses the SAME condition; a further
+    # 0.5pp drawdown beyond the reset-time level is a NEW deterioration and
+    # trips normally (a real crash always pierces within one evaluation).
+    MANUAL_OVERRIDE_PIERCE_MARGIN = 0.005
+
+    def is_portfolio_trip_suppressed(self, daily_dd: float, weekly_dd: float) -> bool:
+        """True when a breach should be swallowed by the manual-reset latch."""
+        with self._lock:
+            st = self._portfolio
+            if st.tripped or not st.manual_override_active:
+                return False
+            margin = float(self.MANUAL_OVERRIDE_PIERCE_MARGIN)
+            if float(daily_dd) > st.manual_override_daily_dd + margin:
+                return False
+            if float(weekly_dd) > st.manual_override_weekly_dd + margin:
+                return False
+            return True
+
+    def rearm_portfolio_if_recovered(self) -> bool:
+        """Clear the manual-override latch once the condition has cleared.
+
+        Called on evaluation passes with NO portfolio breach: the drawdown has
+        recovered below thresholds, so future breaches are genuinely new and
+        the breaker re-arms to full strictness.
+        """
+        with self._lock:
+            if not self._portfolio.manual_override_active:
+                return False
+            self._portfolio.manual_override_active = False
+            self._portfolio.manual_override_daily_dd = 0.0
+            self._portfolio.manual_override_weekly_dd = 0.0
+            self._persist()
+        logger.info("circuit_breaker: portfolio manual-override latch cleared (condition recovered); breaker re-armed")
         return True
 
     def tripped_strategy_states(self) -> Dict[str, Dict[str, Any]]:
@@ -789,19 +842,29 @@ def evaluate_strategy_drawdowns(
     return result
 
 
-def evaluate_portfolio_drawdown() -> Dict[str, float]:
-    """Use ``risk_manager`` equity timeline for portfolio-level drawdown."""
+def evaluate_portfolio_drawdown() -> Dict[str, Any]:
+    """Use ``risk_manager`` equity timeline for portfolio-level drawdown.
+
+    Besides the bare ratios, expose the binding peak/trough (value+timestamp)
+    snapshots so an operator can see at a glance WHICH equity reading produced
+    the drawdown — a phantom warmup reading becomes a one-glance diagnosis.
+    """
     try:
         from core.risk.risk_manager import risk_manager  # noqa: PLC0415
     except Exception:
         return {"daily_dd": 0.0, "weekly_dd": 0.0}
     try:
-        daily = float(risk_manager.get_rolling_drawdown_snapshot(hours=24).get("drawdown") or 0.0)
-        weekly = float(risk_manager.get_rolling_drawdown_snapshot(hours=24 * 7).get("drawdown") or 0.0)
+        daily_snap = risk_manager.get_rolling_drawdown_snapshot(hours=24)
+        weekly_snap = risk_manager.get_rolling_drawdown_snapshot(hours=24 * 7)
     except Exception as exc:
         logger.debug(f"circuit_breaker: portfolio drawdown computation failed: {exc}")
         return {"daily_dd": 0.0, "weekly_dd": 0.0}
-    return {"daily_dd": daily, "weekly_dd": weekly}
+    return {
+        "daily_dd": float(daily_snap.get("drawdown") or 0.0),
+        "weekly_dd": float(weekly_snap.get("drawdown") or 0.0),
+        "daily_snapshot": daily_snap,
+        "weekly_snapshot": weekly_snap,
+    }
 
 
 def run_circuit_breaker_checks(
@@ -973,13 +1036,28 @@ def run_circuit_breaker_checks(
         port_breaches.append(f"7d_dd {port_weekly:.4f} >= {breaker.portfolio_weekly_threshold:.4f}")
     if port_breaches:
         reason = "; ".join(port_breaches)
-        transitioned = breaker.trip_portfolio(reason, daily_dd=port_daily, weekly_dd=port_weekly)
-        report["portfolio_trip"] = {
-            "reason": reason,
-            "daily_dd": port_daily,
-            "weekly_dd": port_weekly,
-            "new_trip": transitioned,
-        }
+        if breaker.is_portfolio_trip_suppressed(port_daily, port_weekly):
+            # Manual-reset latch: same persisting condition after an operator
+            # reset — honor the human decision until it worsens or recovers.
+            report["portfolio_trip"] = {
+                "reason": reason,
+                "daily_dd": port_daily,
+                "weekly_dd": port_weekly,
+                "new_trip": False,
+                "suppressed_by_manual_reset": True,
+            }
+        else:
+            transitioned = breaker.trip_portfolio(reason, daily_dd=port_daily, weekly_dd=port_weekly)
+            report["portfolio_trip"] = {
+                "reason": reason,
+                "daily_dd": port_daily,
+                "weekly_dd": port_weekly,
+                "new_trip": transitioned,
+            }
+    else:
+        # No breach -> the condition has cleared; re-arm the breaker to full
+        # strictness if a manual-override latch was active.
+        breaker.rearm_portfolio_if_recovered()
 
     return report
 
