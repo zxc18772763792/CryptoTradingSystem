@@ -502,6 +502,39 @@ def test_summary_reads_live_exchange_rows_for_live_strategy_when_global_mode_is_
     assert perf["return_pct"] < 0
 
 
+def test_strategy_summary_reuses_short_ttl_cache_and_fresh_bypasses(monkeypatch):
+    from web.api import strategies as strategies_api
+
+    calls = []
+
+    def fake_dashboard_summary(signal_limit=20):
+        calls.append(signal_limit)
+        return {
+            "strategy_performance": {},
+            "running": [],
+            "recent_signals": [],
+            "timestamp": f"call-{len(calls)}",
+        }
+
+    monkeypatch.setattr(strategies_api.strategy_manager, "get_dashboard_summary", fake_dashboard_summary)
+    monkeypatch.setattr(strategies_api, "_load_exchange_position_rows_cached", _async_return([]))
+    monkeypatch.setattr(strategies_api.risk_manager, "get_risk_report", lambda: {"equity": {"current": 0.0}})
+    monkeypatch.setattr(strategies_api.risk_manager, "get_trade_history", lambda limit=5000: [])
+
+    strategies_api.invalidate_strategy_summary_cache()
+    try:
+        first = asyncio.run(strategies_api.get_strategy_summary())
+        second = asyncio.run(strategies_api.get_strategy_summary())
+        fresh = asyncio.run(strategies_api.get_strategy_summary(fresh=True))
+    finally:
+        strategies_api.invalidate_strategy_summary_cache()
+
+    assert calls == [20, 20]
+    assert first == second
+    assert first["timestamp"] == "call-1"
+    assert fresh["timestamp"] == "call-2"
+
+
 def test_exchange_position_loader_uses_binance_fallback_when_forced_in_paper(monkeypatch):
     from web.api import strategies as strategies_api
 
@@ -827,6 +860,117 @@ def test_monitor_data_includes_strategy_open_orders_and_marks_signal_fallback(mo
     assert payload["open_orders"][0]["id"] == "open-1"
     assert payload["open_orders"][0]["stop_loss"] == 1.381
     assert payload["open_orders"][0]["take_profit"] == 1.447
+
+
+def test_monitor_data_exposes_risk_blocked_entry_status(monkeypatch):
+    from web.api import strategies as strategies_api
+
+    strategy_name = "risk_blocked_monitor"
+
+    class DummyStrategy:
+        def get_recent_signals(self, limit: int = 200):
+            return [
+                SimpleNamespace(
+                    timestamp=datetime.fromisoformat("2026-04-16T08:00:00"),
+                    signal_type="buy",
+                    price=2.023,
+                    strength=0.72,
+                    stop_loss=2.0,
+                    take_profit=2.08,
+                )
+            ]
+
+    async def fake_load_klines_from_parquet(
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        start_time=None,
+        end_time=None,
+    ):
+        idx = pd.date_range("2026-04-16 06:00:00", periods=120, freq="15min")
+        return _ohlcv_frame(idx, start_price=2.0)
+
+    monkeypatch.setattr(strategies_api.strategy_manager, "get_strategy", lambda name: DummyStrategy())
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "get_strategy_info",
+        lambda name: {
+            "name": name,
+            "symbols": ["NEAR/USDT"],
+            "timeframe": "15m",
+            "state": "running",
+            "exchange": "binance",
+            "runtime_mode": "live",
+        },
+    )
+    monkeypatch.setattr(
+        strategies_api.strategy_manager,
+        "_configs",
+        {strategy_name: SimpleNamespace(allocation=0.15)},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        strategies_api.data_storage,
+        "load_klines_from_parquet",
+        fake_load_klines_from_parquet,
+    )
+    monkeypatch.setattr(
+        strategies_api.execution_engine,
+        "get_live_trade_review",
+        lambda **kwargs: {"count": 0, "items": []},
+    )
+    monkeypatch.setattr(
+        strategies_api.execution_engine,
+        "get_signal_diagnostics",
+        lambda: {
+            "submitted": 1,
+            "executed": 0,
+            "risk_rejected": 1,
+            "last_signal": {
+                "strategy": strategy_name,
+                "symbol": "NEAR/USDT",
+                "signal_type": "buy",
+            },
+            "last_result": {
+                "status": "circuit_breaker_blocked",
+                "strategy": strategy_name,
+                "symbol": "NEAR/USDT",
+                "reason": "24h_dd 0.0342 >= 0.0300",
+            },
+            "last_updated_at": "2026-04-16T08:01:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        strategies_api.risk_manager,
+        "get_risk_report",
+        lambda: {
+            "risk_level": "critical",
+            "trading_halted": True,
+            "halt_reason": "daily stop triggered",
+            "equity": {"current": 2000.0},
+            "discipline": {
+                "fresh_entry_allowed": False,
+                "reduce_only": True,
+                "degrade_mode": "halted",
+                "reasons": ["daily stop triggered"],
+            },
+        },
+    )
+    monkeypatch.setattr(strategies_api.risk_manager, "get_trade_history", lambda limit=5000: [])
+    monkeypatch.setattr(strategies_api.position_manager, "get_positions_by_strategy", lambda name: [])
+    monkeypatch.setattr(strategies_api.order_manager, "get_open_orders", _async_return([]))
+
+    payload = asyncio.run(strategies_api.get_strategy_monitor_data(strategy_name, bars=120))
+
+    assert payload["signal_mode"] == "strategy_signal"
+    assert payload["entry_status"]["status"] == "circuit_breaker_blocked"
+    assert payload["entry_status"]["blocked"] is True
+    assert payload["entry_status"]["live_entry_allowed"] is False
+    assert payload["entry_status"]["reason"] == "24h_dd 0.0342 >= 0.0300"
+    assert payload["entry_status"]["risk"]["trading_halted"] is True
+    assert payload["entry_status"]["diagnostic_counts"]["risk_rejected"] == 1
+    assert payload["ohlcv_freshness"]["available"] is True
 
 
 def test_monitor_data_enriches_pairs_strategy_with_dual_leg_series(monkeypatch):

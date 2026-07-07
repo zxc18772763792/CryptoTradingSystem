@@ -207,6 +207,48 @@ def test_evaluate_strategy_drawdowns_filters_to_active_names():
     assert set(grouped) == {"RunningStrat"}
 
 
+def test_system_portfolio_drawdown_excludes_manual_rows_and_external_unrealized():
+    history = [
+        {
+            "strategy": "ManualDesk",
+            "action": "manual_order",
+            "pnl": -500.0,
+            "mode": "live",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        },
+        {
+            "strategy": "manual_demo",
+            "action": "close",
+            "pnl": -250.0,
+            "mode": "live",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    ]
+
+    dds = cb_mod._system_portfolio_drawdown_from_trade_history(
+        history,
+        runtime_mode="live",
+        account_equity=10000.0,
+        current_system_unrealized_pnl=0.0,
+    )
+
+    assert dds["source"] == "system_owned_pnl"
+    assert dds["daily_dd"] == 0.0
+    assert dds["weekly_dd"] == 0.0
+
+
+def test_system_portfolio_drawdown_counts_system_unrealized_loss():
+    dds = cb_mod._system_portfolio_drawdown_from_trade_history(
+        [],
+        runtime_mode="live",
+        account_equity=10000.0,
+        current_system_unrealized_pnl=-400.0,
+    )
+
+    assert dds["daily_dd"] == pytest.approx(0.04)
+    assert dds["weekly_dd"] == pytest.approx(0.04)
+
+
 def test_run_checks_trips_breaching_strategy(cb, monkeypatch):
     monkeypatch.setattr(cb_mod, "circuit_breaker", cb)
     history = [

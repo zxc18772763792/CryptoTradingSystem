@@ -804,6 +804,64 @@ def _drawdown_from_pnl(
     return float(worst_dd)
 
 
+def _system_portfolio_drawdown_from_trade_history(
+    trade_history: List[Dict[str, Any]],
+    *,
+    runtime_mode: Optional[str],
+    account_equity: float,
+    current_system_unrealized_pnl: float,
+) -> Dict[str, Any]:
+    def _is_manual_strategy_label(value: Any) -> bool:
+        return str(value or "").strip().lower().startswith("manual")
+
+    rows: List[Dict[str, Any]] = []
+    for row in trade_history or []:
+        if not isinstance(row, dict):
+            continue
+        strategy = str(row.get("strategy") or row.get("strategy_name") or "").strip()
+        if _is_manual_strategy_label(strategy):
+            continue
+        action = str(row.get("action") or "").strip().lower()
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        source = str(metadata.get("source") or row.get("source") or "").strip().lower()
+        if action == "manual_order" or source in {"manual", "external", "exchange_live"}:
+            continue
+        eligible, _ = _trade_row_is_runtime_eligible(
+            row,
+            active_names=None,
+            runtime_mode=runtime_mode,
+        )
+        if eligible:
+            rows.append(row)
+
+    floating_loss = min(0.0, float(current_system_unrealized_pnl or 0.0))
+    if abs(floating_loss) > 1e-9:
+        rows.append(
+            {
+                "strategy": "__open_system_unrealized__",
+                "pnl": floating_loss,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "mode": runtime_mode or "",
+            }
+        )
+
+    return {
+        "daily_dd": _drawdown_from_pnl(
+            rows,
+            hours=24,
+            base_capital_override=account_equity if account_equity > 0 else None,
+        ),
+        "weekly_dd": _drawdown_from_pnl(
+            rows,
+            hours=24 * 7,
+            base_capital_override=account_equity if account_equity > 0 else None,
+        ),
+        "source": "system_owned_pnl",
+        "system_trade_rows": len(rows),
+        "system_unrealized_pnl_usd": round(float(current_system_unrealized_pnl or 0.0), 4),
+    }
+
+
 def evaluate_strategy_drawdowns(
     trade_history: List[Dict[str, Any]],
     *,
@@ -853,6 +911,20 @@ def evaluate_portfolio_drawdown() -> Dict[str, Any]:
         from core.risk.risk_manager import risk_manager  # noqa: PLC0415
     except Exception:
         return {"daily_dd": 0.0, "weekly_dd": 0.0}
+    runtime_mode = _current_runtime_mode()
+    if runtime_mode == "live":
+        try:
+            account_equity = _resolve_account_equity()
+            trade_history = list(risk_manager.get_trade_history(limit=50000, scope="live") or [])
+            current_system_unrealized = float(getattr(risk_manager, "_current_unrealized_pnl", 0.0) or 0.0)
+            return _system_portfolio_drawdown_from_trade_history(
+                trade_history,
+                runtime_mode=runtime_mode,
+                account_equity=account_equity,
+                current_system_unrealized_pnl=current_system_unrealized,
+            )
+        except Exception as exc:
+            logger.debug(f"circuit_breaker: system-owned portfolio drawdown failed: {exc}")
     try:
         daily_snap = risk_manager.get_rolling_drawdown_snapshot(hours=24)
         weekly_snap = risk_manager.get_rolling_drawdown_snapshot(hours=24 * 7)

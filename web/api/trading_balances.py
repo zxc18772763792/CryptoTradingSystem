@@ -792,6 +792,8 @@ async def _build_all_balances_payload():
     live_daily_total_pnl = 0.0
     live_daily_realized_pnl: Optional[float] = None
     live_daily_realized_source = ""
+    live_total_daily_realized_pnl: Optional[float] = None
+    live_total_daily_realized_source = ""
     balance_warning_present = any(
         isinstance(v, dict) and (v.get("error") or v.get("warning"))
         for v in results.values()
@@ -841,10 +843,16 @@ async def _build_all_balances_payload():
             )
             resolved_realized = realized_payload.get("pnl")
             if resolved_realized is not None:
-                live_daily_realized_pnl = float(resolved_realized)
-            live_daily_realized_source = str(realized_payload.get("source") or "")
+                live_total_daily_realized_pnl = float(resolved_realized)
+            live_total_daily_realized_source = str(realized_payload.get("source") or "")
         except Exception as e:
             trading_api.logger.debug(f"Failed to resolve live realized PnL: {e}")
+        try:
+            system_realized_payload = trading_api._resolve_live_system_daily_realized_pnl()
+            live_daily_realized_pnl = float(system_realized_payload.get("pnl") or 0.0)
+            live_daily_realized_source = str(system_realized_payload.get("source") or "")
+        except Exception as e:
+            trading_api.logger.debug(f"Failed to resolve system realized PnL: {e}")
 
         for label, usd_value in (
             live_position_snapshot.get("distribution") or {}
@@ -968,7 +976,13 @@ async def _build_all_balances_payload():
             else None
         ),
         current_unrealized_pnl=(
-            float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0)
+            float(
+                live_position_snapshot.get(
+                    "system_unrealized_pnl_usd",
+                    live_position_snapshot.get("unrealized_pnl_usd", 0.0),
+                )
+                or 0.0
+            )
             if not is_paper_mode
             else sum(
                 float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
@@ -1129,8 +1143,43 @@ async def _build_all_balances_payload():
         "live_daily_total_pnl_usd": round(live_daily_total_pnl, 2)
         if not is_paper_mode
         else None,
+        "live_total_daily_realized_pnl_usd": (
+            round(float(live_total_daily_realized_pnl or 0.0), 4)
+            if (not is_paper_mode and live_total_daily_realized_pnl is not None)
+            else None
+        ),
+        "live_total_daily_realized_source": live_total_daily_realized_source
+        if not is_paper_mode
+        else "",
+        "live_system_daily_realized_pnl_usd": (
+            round(float(live_daily_realized_pnl or 0.0), 4)
+            if not is_paper_mode
+            else None
+        ),
+        "live_system_daily_realized_source": live_daily_realized_source
+        if not is_paper_mode
+        else "",
         "live_unrealized_pnl_usd": (
             round(float(live_position_snapshot.get("unrealized_pnl_usd") or 0.0), 4)
+            if not is_paper_mode
+            else 0.0
+        ),
+        "live_system_unrealized_pnl_usd": (
+            round(
+                float(
+                    live_position_snapshot.get(
+                        "system_unrealized_pnl_usd",
+                        live_position_snapshot.get("unrealized_pnl_usd", 0.0),
+                    )
+                    or 0.0
+                ),
+                4,
+            )
+            if not is_paper_mode
+            else 0.0
+        ),
+        "live_external_unrealized_pnl_usd": (
+            round(float(live_position_snapshot.get("external_unrealized_pnl_usd") or 0.0), 4)
             if not is_paper_mode
             else 0.0
         ),
@@ -1138,6 +1187,16 @@ async def _build_all_balances_payload():
             int(live_position_snapshot.get("position_count") or 0)
             if not is_paper_mode
             else len(paper_positions)
+        ),
+        "live_system_position_count": (
+            int(live_position_snapshot.get("system_position_count") or 0)
+            if not is_paper_mode
+            else len(paper_positions)
+        ),
+        "live_external_position_count": (
+            int(live_position_snapshot.get("external_position_count") or 0)
+            if not is_paper_mode
+            else 0
         ),
         "unpriced_assets": total_unpriced_assets,
         "connected_exchanges": trading_api.exchange_manager.get_connected_exchanges(),
