@@ -106,6 +106,7 @@ class StrategyManager:
         # kline fetch is skipped after a timeout/failure, so a slow endpoint
         # does not block every strategy cycle for the full fetch timeout.
         self._live_fetch_backoff_until: Dict[Tuple[str, str, str], float] = {}
+        self._live_fetch_failure_count: Dict[Tuple[str, str, str], int] = {}
         self._live_fetch_timeout_sec: float = max(
             1.0, float(getattr(settings, "LIVE_KLINE_FETCH_TIMEOUT_SEC", _MARKET_DATA_FETCH_TIMEOUT_SEC) or _MARKET_DATA_FETCH_TIMEOUT_SEC)
         )
@@ -115,6 +116,10 @@ class StrategyManager:
                 getattr(settings, "LIVE_KLINE_FETCH_BACKOFF_SEC", _DEFAULT_LIVE_FETCH_BACKOFF_SEC)
                 or _DEFAULT_LIVE_FETCH_BACKOFF_SEC
             ),
+        )
+        self._live_fetch_backoff_max_sec: float = max(
+            self._live_fetch_backoff_sec,
+            float(getattr(settings, "LIVE_KLINE_FETCH_MAX_BACKOFF_SEC", 120.0) or 120.0),
         )
         # Shared market data cache: (exchange, symbol, timeframe, limit) -> (df, timestamp)
         # TTL is dynamic per timeframe to keep sub-minute strategies responsive while
@@ -442,6 +447,17 @@ class StrategyManager:
         # Use at most one-sixth of the bar size, capped at 30s and floored at 1s.
         return float(max(1.0, min(self._market_data_cache_max_ttl, tf_seconds / 6.0)))
 
+    def _record_live_fetch_failure(self, key: Tuple[str, str, str]) -> Tuple[float, int]:
+        failures = int(self._live_fetch_failure_count.get(key, 0) or 0) + 1
+        self._live_fetch_failure_count[key] = failures
+        exponent = min(failures - 1, 4)
+        backoff_sec = min(
+            self._live_fetch_backoff_max_sec,
+            self._live_fetch_backoff_sec * (2**exponent),
+        )
+        self._live_fetch_backoff_until[key] = time.monotonic() + backoff_sec
+        return backoff_sec, failures
+
     @staticmethod
     def _naive_timestamp(value: Any) -> pd.Timestamp:
         ts = pd.Timestamp(value)
@@ -565,22 +581,20 @@ class StrategyManager:
                         df = df[~df.index.duplicated(keep="last")].sort_index()
                 # Healthy fetch clears any prior backoff for this feed.
                 self._live_fetch_backoff_until.pop(backoff_key, None)
+                self._live_fetch_failure_count.pop(backoff_key, None)
             except asyncio.TimeoutError:
-                self._live_fetch_backoff_until[backoff_key] = (
-                    time.monotonic() + self._live_fetch_backoff_sec
-                )
+                backoff_sec, failures = self._record_live_fetch_failure(backoff_key)
                 logger.warning(
                     f"Live kline fetch timed out after {self._live_fetch_timeout_sec:.0f}s "
                     f"for {exchange} {symbol} {timeframe}; backing off "
-                    f"{self._live_fetch_backoff_sec:.0f}s, using local/cache data"
+                    f"{backoff_sec:.0f}s after {failures} consecutive failure(s), "
+                    "using local/cache data"
                 )
             except Exception as e:
-                self._live_fetch_backoff_until[backoff_key] = (
-                    time.monotonic() + self._live_fetch_backoff_sec
-                )
+                backoff_sec, failures = self._record_live_fetch_failure(backoff_key)
                 logger.debug(
                     f"Failed to fetch live klines for {exchange} {symbol} {timeframe}: {e}; "
-                    f"backing off {self._live_fetch_backoff_sec:.0f}s"
+                    f"backing off {backoff_sec:.0f}s after {failures} consecutive failure(s)"
                 )
 
         if df.empty:
@@ -850,6 +864,55 @@ class StrategyManager:
             if account:
                 return account_mode
         return self._resolve_strategy_runtime_mode(name, params=params, metadata=metadata)
+
+    def set_strategy_runtime_mode(self, name: str, mode: str) -> Dict[str, Any]:
+        """Atomically switch a registered instance between paper/live.
+
+        The effective mode is derived from FIVE places (live object, params,
+        metadata, StrategyConfig, and the isolated account's mode). Flipping
+        only one leaves a split-brain instance whose stored field disagrees with
+        its order-routing account, so this rewires all of them under the lock.
+        Refuses while the strategy is running — the mode is baked into the
+        account scope/risk baseline at start, so switching a running instance
+        would desync execution mid-flight; stop, switch, then start.
+        """
+        from core.trading.account_manager import account_manager
+
+        normalized = self._normalize_runtime_mode(mode)
+        strategy = self._strategies.get(name)
+        config = self._configs.get(name)
+        if strategy is None or config is None:
+            return {"ok": False, "reason": "not_found"}
+        if getattr(strategy, "is_running", False):
+            return {"ok": False, "reason": "running", "message": "先停止策略再切换运行模式"}
+        previous = self.get_strategy_runtime_mode(name)
+        if previous == normalized:
+            return {"ok": True, "changed": False, "runtime_mode": normalized}
+
+        # 1) live object
+        strategy._runtime_mode = normalized
+        # 2/3) live object params + metadata
+        for store in (getattr(strategy, "params", None), getattr(strategy, "metadata", None)):
+            if isinstance(store, dict):
+                store["runtime_mode"] = normalized
+                store.pop("trading_mode", None)
+                store.pop("mode", None)
+        # 4) persisted StrategyConfig params + metadata
+        config.params = dict(config.params or {})
+        config.params["runtime_mode"] = normalized
+        config.params.pop("trading_mode", None)
+        config.params.pop("mode", None)
+        config.metadata = dict(config.metadata or {})
+        config.metadata["runtime_mode"] = normalized
+        # 5) isolated account order-routing mode (the execution authority)
+        account_id = self._strategy_account_id(name)
+        if account_id:
+            try:
+                account_manager.set_mode(account_id, normalized)
+            except Exception as exc:
+                logger.warning(f"set_strategy_runtime_mode: account set_mode failed for {name}/{account_id}: {exc}")
+        logger.info(f"strategy runtime_mode switched: {name} {previous} -> {normalized}")
+        return {"ok": True, "changed": True, "runtime_mode": normalized, "previous": previous, "account_id": account_id}
 
     async def _run_async_strategy(self, strategy: StrategyBase, symbol: str, config: StrategyConfig) -> List[Signal]:
         async_method = getattr(strategy, "generate_signals_async", None)

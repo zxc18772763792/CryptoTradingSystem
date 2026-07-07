@@ -151,10 +151,195 @@ _MONITOR_EXCHANGE_POSITION_CACHE: Dict[str, Any] = {
 
 # Same idea for per-strategy open-orders: a failing strategy name should not
 # produce one DEBUG line every 12s for the entire process lifetime.
-_MONITOR_OPEN_ORDERS_NEG_TTL_SEC = 5.0
+_MONITOR_OPEN_ORDERS_NEG_TTL_SEC = 30.0
 _MONITOR_OPEN_ORDERS_NEG_CACHE: Dict[Tuple[str, str], float] = {}
 
+_STRATEGY_SUMMARY_CACHE_TTL_SEC = 6.0
+_STRATEGY_SUMMARY_CACHE: Dict[str, Any] = {
+    "ts": 0.0,
+    "key": None,
+    "payload": None,
+}
+
 _BINANCE_USDM_CROSS_SECTION_STRATEGIES = set(INTRADAY_CROSS_SECTION_SPECS.keys())
+
+
+def invalidate_strategy_summary_cache() -> None:
+    _STRATEGY_SUMMARY_CACHE.update({"ts": 0.0, "key": None, "payload": None})
+
+
+def _callable_identity(func: Any) -> Tuple[int, int]:
+    return (id(getattr(func, "__self__", None)), id(getattr(func, "__func__", func)))
+
+
+def _strategy_summary_cache_key(limit: int) -> Tuple[Any, ...]:
+    return (
+        int(limit),
+        _callable_identity(strategy_manager.get_dashboard_summary),
+        _callable_identity(strategy_manager.get_strategy_info),
+        _callable_identity(_load_exchange_position_rows_cached),
+        _callable_identity(risk_manager.get_trade_history),
+        _callable_identity(execution_engine.get_live_trade_review),
+    )
+
+
+def _get_cached_strategy_summary(cache_key: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
+    payload = _STRATEGY_SUMMARY_CACHE.get("payload")
+    cached_at = float(_STRATEGY_SUMMARY_CACHE.get("ts") or 0.0)
+    if (
+        payload is not None
+        and _STRATEGY_SUMMARY_CACHE.get("key") == cache_key
+        and time.time() - cached_at <= _STRATEGY_SUMMARY_CACHE_TTL_SEC
+    ):
+        return deepcopy(payload)
+    return None
+
+
+def _store_strategy_summary_cache(cache_key: Tuple[Any, ...], payload: Dict[str, Any]) -> None:
+    _STRATEGY_SUMMARY_CACHE.update(
+        {
+            "ts": time.time(),
+            "key": cache_key,
+            "payload": deepcopy(payload),
+        }
+    )
+
+
+def _diagnostic_strategy_name(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("strategy") or payload.get("strategy_name") or "").strip()
+
+
+def _monitor_ohlcv_freshness(
+    df: Optional[pd.DataFrame],
+    *,
+    timeframe: str,
+    checked_at: datetime,
+) -> Dict[str, Any]:
+    target_sec = max(60, _timeframe_to_seconds(timeframe))
+    stale_after_sec = max(target_sec * 3, 1800)
+    payload: Dict[str, Any] = {
+        "available": False,
+        "latest_bar_at": None,
+        "age_seconds": None,
+        "stale_after_seconds": stale_after_sec,
+        "is_stale": True,
+    }
+    if df is None or df.empty:
+        return payload
+    try:
+        latest = pd.Timestamp(df.index.max())
+        payload["latest_bar_at"] = latest.isoformat()
+        if latest.tzinfo is None:
+            latest_dt = latest.to_pydatetime().replace(tzinfo=timezone.utc)
+        else:
+            latest_dt = latest.to_pydatetime().astimezone(timezone.utc)
+        age_seconds = max(0.0, (checked_at.astimezone(timezone.utc) - latest_dt).total_seconds())
+        payload.update(
+            {
+                "available": True,
+                "age_seconds": round(age_seconds, 3),
+                "is_stale": age_seconds > stale_after_sec,
+            }
+        )
+    except Exception:
+        return payload
+    return payload
+
+
+def _build_monitor_entry_status(name: str, runtime_mode: str) -> Dict[str, Any]:
+    mode = str(runtime_mode or "").strip().lower()
+    risk_summary: Dict[str, Any] = {
+        "available": False,
+        "trading_halted": False,
+        "halt_reason": "",
+        "fresh_entry_allowed": True,
+        "reduce_only": False,
+        "degrade_mode": "",
+        "reasons": [],
+        "risk_level": "",
+    }
+    try:
+        report = risk_manager.get_risk_report()
+        discipline = dict(report.get("discipline") or {}) if isinstance(report, dict) else {}
+        risk_summary.update(
+            {
+                "available": True,
+                "trading_halted": bool(report.get("trading_halted")),
+                "halt_reason": str(report.get("halt_reason") or ""),
+                "fresh_entry_allowed": bool(discipline.get("fresh_entry_allowed", True)),
+                "reduce_only": bool(discipline.get("reduce_only", False)),
+                "degrade_mode": str(discipline.get("degrade_mode") or ""),
+                "reasons": list(discipline.get("reasons") or []),
+                "risk_level": str(report.get("risk_level") or ""),
+            }
+        )
+    except Exception:
+        pass
+
+    diagnostics: Dict[str, Any] = {}
+    try:
+        raw_diagnostics = execution_engine.get_signal_diagnostics()
+        if isinstance(raw_diagnostics, dict):
+            diagnostics = dict(raw_diagnostics)
+    except Exception:
+        diagnostics = {}
+
+    last_signal = diagnostics.get("last_signal") if isinstance(diagnostics.get("last_signal"), dict) else None
+    last_result = diagnostics.get("last_result") if isinstance(diagnostics.get("last_result"), dict) else None
+    matched_last_signal = last_signal if _diagnostic_strategy_name(last_signal) == name else None
+    matched_last_result = last_result if _diagnostic_strategy_name(last_result) == name else None
+
+    if mode == "paper":
+        status = "paper_only"
+        blocked = False
+        live_entry_allowed = False
+        reason = "strategy runtime is paper; it will not place live orders"
+    else:
+        risk_blocked = bool(
+            risk_summary.get("trading_halted")
+            or risk_summary.get("fresh_entry_allowed") is False
+        )
+        blocked = risk_blocked
+        live_entry_allowed = not risk_blocked
+        status = "blocked_by_risk" if risk_blocked else "ready"
+        reason = (
+            str(risk_summary.get("halt_reason") or "")
+            or "; ".join(str(item) for item in risk_summary.get("reasons") or [] if item)
+        )
+    if matched_last_result and str(matched_last_result.get("status") or "").strip():
+        result_status = str(matched_last_result.get("status") or "").strip()
+        if result_status in {"circuit_breaker_blocked", "risk_rejected", "ai_rejected", "order_failed", "order_timeout"}:
+            status = result_status
+            blocked = result_status in {"circuit_breaker_blocked", "risk_rejected", "ai_rejected"}
+            live_entry_allowed = live_entry_allowed and not blocked
+            reason = str(matched_last_result.get("reason") or reason or result_status)
+
+    return {
+        "status": status,
+        "blocked": bool(blocked),
+        "live_entry_allowed": bool(live_entry_allowed),
+        "reason": reason,
+        "runtime_mode": mode or "paper",
+        "risk": risk_summary,
+        "last_signal": matched_last_signal,
+        "last_result": matched_last_result,
+        "diagnostics_updated_at": diagnostics.get("last_updated_at"),
+        "diagnostic_counts": {
+            key: diagnostics.get(key)
+            for key in (
+                "submitted",
+                "executed",
+                "risk_rejected",
+                "order_failed",
+                "order_timeout",
+                "skipped_zero_qty",
+                "derivatives_filtered",
+            )
+            if key in diagnostics
+        },
+    }
 
 
 def _recommended_symbols(strategy_type: str) -> List[str]:
@@ -1286,6 +1471,8 @@ async def _load_strategy_open_orders(
     exchange: str,
     runtime_mode: str,
 ) -> List[Dict[str, Any]]:
+    if str(runtime_mode or "").strip().lower() == "paper":
+        return []
     now = time.time()
     neg_key = (str(name or ""), str(exchange or ""))
     neg_until = float(_MONITOR_OPEN_ORDERS_NEG_CACHE.get(neg_key) or 0.0)
@@ -1294,7 +1481,7 @@ async def _load_strategy_open_orders(
     try:
         rows = await asyncio.wait_for(
             order_manager.get_open_orders(exchange=exchange),
-            timeout=4.5,
+            timeout=1.5,
         )
     except Exception as exc:
         # Suppress repeat DEBUG within the negative window — one call can fail
@@ -1421,6 +1608,13 @@ class StrategyConfigUpdateRequest(BaseModel):
 
 class StrategyAllocationRequest(BaseModel):
     allocation: float = Field(..., ge=0.0, le=1.0)
+
+
+class StrategyRuntimeModeRequest(BaseModel):
+    runtime_mode: str = Field(..., pattern="^(paper|live)$")
+    # Switching TO live means real orders — require explicit confirmation, same
+    # spirit as the L4 launcher's -ConfirmLive.
+    confirm_live: bool = False
 
 
 class AllocationRebalanceRequest(BaseModel):
@@ -2043,7 +2237,13 @@ async def audit_strategy_library(
 
 
 @router.get("/summary", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
-async def get_strategy_summary(limit: int = 20):
+async def get_strategy_summary(limit: int = 20, fresh: bool = False):
+    cache_key = _strategy_summary_cache_key(limit)
+    if not fresh:
+        cached = _get_cached_strategy_summary(cache_key)
+        if cached is not None:
+            return cached
+
     summary = strategy_manager.get_dashboard_summary(signal_limit=limit)
     performance = summary.get("strategy_performance")
     performance_rows = performance if isinstance(performance, dict) else {}
@@ -2106,6 +2306,7 @@ async def get_strategy_summary(limit: int = 20):
         }
     if isinstance(performance, dict):
         summary["strategy_performance"] = performance_rows
+    _store_strategy_summary_cache(cache_key, summary)
     return summary
 
 
@@ -2588,6 +2789,37 @@ async def pause_strategy(name: str):
     raise HTTPException(status_code=400, detail="Failed to pause strategy")
 
 
+@router.put("/{name}/runtime-mode", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+async def set_strategy_runtime_mode(name: str, request: StrategyRuntimeModeRequest):
+    """Switch a registered instance between paper and live (dropdown backend).
+
+    Atomic across all mode-bearing sites. Refuses while running (stop first),
+    and requires confirm_live=true to enter live (real orders).
+    """
+    info = strategy_manager.get_strategy_info(name)
+    if not info:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    target = str(request.runtime_mode).strip().lower()
+    if target == "live" and not request.confirm_live:
+        raise HTTPException(status_code=400, detail="切换到实盘需 confirm_live=true（将下真实订单）")
+    result = strategy_manager.set_strategy_runtime_mode(name, target)
+    if not result.get("ok"):
+        reason = result.get("reason")
+        if reason == "not_found":
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        raise HTTPException(status_code=409, detail=result.get("message") or f"cannot switch mode: {reason}")
+    if result.get("changed"):
+        await _persist_if_exists(name)
+        _schedule_audit_log(
+            module="strategy",
+            action="set_runtime_mode",
+            status="success",
+            message=name,
+            details={"runtime_mode": target, "previous": result.get("previous")},
+        )
+    return {"success": True, "name": name, "runtime_mode": result.get("runtime_mode"), "changed": bool(result.get("changed"))}
+
+
 @router.put("/{name}/params", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
 async def update_strategy_params(name: str, request: StrategyUpdateRequest):
     info = strategy_manager.get_strategy_info(name)
@@ -2762,11 +2994,12 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     pair_monitor: Optional[Dict[str, Any]] = None
     monitor_df = pd.DataFrame()
     monitor_load_bars = bars
+    checked_at = datetime.now(timezone.utc)
     if strategy_type == "PairsTradingStrategy":
         lookback_period = max(10, int(_safe_float(strategy_params.get("lookback_period"), 48)))
         monitor_load_bars = min(500, bars + max(50, lookback_period * 2))
     try:
-        end_time = datetime.now(timezone.utc)
+        end_time = checked_at
         df, ohlcv_source_timeframe = await _load_monitor_ohlcv_with_fallback(
             exchange=exchange,
             symbol=symbol,
@@ -2985,6 +3218,12 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
     equity = performance_view.get("equity", [])
     metrics = performance_view.get("metrics", {})
     positions_data = performance_view.get("positions", [])
+    ohlcv_freshness = _monitor_ohlcv_freshness(
+        monitor_df,
+        timeframe=timeframe,
+        checked_at=checked_at,
+    )
+    entry_status = _build_monitor_entry_status(name, runtime_mode)
 
     payload = {
         "name":       name,
@@ -2993,10 +3232,12 @@ async def get_strategy_monitor_data(name: str, bars: int = 200):
         "timeframe":  timeframe,
         "runtime_mode": runtime_mode,
         "ohlcv_source_timeframe": ohlcv_source_timeframe,
+        "ohlcv_freshness": ohlcv_freshness,
         "portfolio_mode": pair_monitor.get("portfolio_mode") if pair_monitor else None,
         "pair_symbol": pair_symbol or None,
         "pair_ohlcv_source_timeframe": pair_ohlcv_source_timeframe,
         "pair_metrics": (pair_monitor.get("metrics") if pair_monitor else None),
+        "entry_status": entry_status,
         "is_running": is_running,
         "runner_alive": runner_alive,
         "runner_alive_known": runner_alive_known,

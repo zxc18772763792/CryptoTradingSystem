@@ -38,6 +38,7 @@ const STRATEGY_CATEGORY_ALIASES={机器学习:'ML',量化因子:'量化',量化�
 const BACKTEST_GROUP_ORDER=['趋势类','震荡类','动量类','均值回归类','突破类','成交量类','波动率类','风险类','统计套利类','Fama因子类','微观结构类','套利类','量化类','ML类','宏观类','其他'];
 const STRATEGY_LIST_TIMEOUT_MS=20000;
 const STRATEGY_SUMMARY_TIMEOUT_MS=20000;
+const STRATEGY_SUMMARY_REUSE_MAX_AGE_MS=30000;
 const TRADING_ORDERS_TIMEOUT_MS=20000;
 const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;
 const TRADING_POSITIONS_TIMEOUT_MS=30000;
@@ -1918,7 +1919,7 @@ await api('/strategies/register',{
 });
 notify(`ML 策略注册成功: ${strategyName}`);
 closeMlRegisterModal();
-await Promise.all([loadStrategies(),loadStrategySummary()]);
+await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);
 activateTab('strategies');
 setTimeout(()=>openEditor(strategyName).catch(()=>{}),80);
 }
@@ -2129,10 +2130,10 @@ const startedAt=Number(tabBootstrapState.startedAt[tab]||0);
 return startedAt>0&&(Date.now()-startedAt)<Math.max(0,Number(windowMs||0));
 }
 function refreshDashboardCore(){
-return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary(),loadModeInfo()]);
+return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk(),loadModeInfo()]);
 }
 function refreshDashboardPrimary(){
-return Promise.allSettled([loadSummary(),loadOrders(),loadOpenOrders(),loadRisk(),loadStrategySummary(),loadModeInfo()]);
+return Promise.allSettled([loadSummary(),loadOrders(),loadOpenOrders(),loadRisk(),loadModeInfo()]);
 }
 function refreshTradingCore(){
 return Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk()]);
@@ -2148,7 +2149,7 @@ try{
 return Promise.allSettled(tasks);
 }
 function refreshStrategiesSecondary(){
-return Promise.allSettled([loadStrategySummary(),loadStrategyHealth()]);
+return Promise.allSettled([loadStrategyHealth()]);
 }
 function replaceStuckLoading(containerId,message){
 const box=document.getElementById(containerId);
@@ -2164,7 +2165,7 @@ dashboardSecondaryTimer=setTimeout(()=>{
   if(document.hidden||getActiveTabName()!=='dashboard')return;
   const group=sharedPollGroupForTab('dashboard');
   if(group&&!canRunSharedPolling(group))return;
-  Promise.allSettled([loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]).catch(()=>{});
+  Promise.allSettled([loadStrategySummary(),loadPnlHeatmap(),loadNotificationCenter(),loadAuditLogs()]).catch(()=>{});
 },Math.max(0,Number(delayMs||0)));
 }
 function scheduleDashboardSlowHints(delayMs=18000){
@@ -2295,6 +2296,11 @@ const resultAtKey=`${taskKey}LastResultAt`;
 const maxAgeMs=Math.max(0,Number(options?.maxAgeMs??SUMMARY_TASK_REUSE_MAX_AGE_MS)||0);
 const existingTask=summaryFetchState[taskKey];
 const existingStartedAt=Number(summaryFetchState[startedAtKey]||0);
+if(options?.reuseLastResult){
+  const lastResult=summaryFetchState[resultKey];
+  const lastResultAt=Number(summaryFetchState[resultAtKey]||0);
+  if(lastResult&&lastResultAt&&Date.now()-lastResultAt<=maxAgeMs)return Promise.resolve(lastResult);
+}
 if(existingTask){
   const ageMs=Date.now()-existingStartedAt;
   if(ageMs<=maxAgeMs)return existingTask;
@@ -3020,6 +3026,18 @@ await Promise.allSettled([loadOrders(),loadOpenOrders(),loadConditionalOrders()]
 finally{delete state.cancelingOrders[key];}
 }
 
+async function switchStrategyRuntimeMode(name,mode,isRunning,sel){
+  const revert=mode==='live'?'paper':'live';
+  if(isRunning){notify('运行中不可切换模式，请先停止策略',true);if(sel)sel.value=revert;return;}
+  if(mode==='live'){
+    if(!confirm(`确认把「${name}」切换为【实盘】？\n\n实盘模式会用真实资金下单。强烈建议先把资金占比设到很小（如 0.01）再启动。`)){if(sel)sel.value='paper';return;}
+  }
+  try{
+    await api(`/strategies/${encodeURIComponent(name)}/runtime-mode`,{method:'PUT',timeoutMs:15000,body:JSON.stringify({runtime_mode:mode,confirm_live:mode==='live'})});
+    notify(`「${name}」已切换为${mode==='live'?'实盘':'模拟'}模式`);
+    await Promise.all([loadStrategies(),loadStrategySummary?.({force:true})].filter(Boolean));
+  }catch(e){notify(`切换模式失败: ${e.message}`,true);if(sel)sel.value=revert;}
+}
 async function loadStrategies(){return runRequestSingleFlight('strategies',async()=>{try{
 await ensureStrategyCatalog();
 const d=await api('/strategies/list',{timeoutMs:STRATEGY_LIST_TIMEOUT_MS});
@@ -3128,6 +3146,7 @@ return `<div class="registered-strategy-card ${active?'active':''}" onclick="sel
     <div class="meta-chip"><span class="k">资金占比</span><span class="v">${a.toFixed(2)}</span></div>
     <div class="meta-chip"><span class="k">运行时长</span><span class="v">${esc(uptime)}</span></div>
     <div class="meta-chip"><span class="k">收益率</span><span class="v ${Number.isFinite(rp)?(rp>=0?'positive':'negative'):''}">${esc(rpText)}</span></div>
+    <div class="meta-chip"><span class="k">运行模式</span><span class="v"><select class="strategy-mode-select ${String(s.runtime_mode||'paper')==='live'?'is-live':''}" onclick="event.stopPropagation()" onchange="event.stopPropagation();switchStrategyRuntimeMode(${jsArg(s.name)},this.value,${stateName==='running'?'true':'false'},this)" ${stateName==='running'?'disabled title="运行中不可切换，先停止策略"':''}><option value="paper" ${String(s.runtime_mode||'paper')!=='live'?'selected':''}>模拟</option><option value="live" ${String(s.runtime_mode||'')==='live'?'selected':''}>实盘</option></select></span></div>
   </div>
   <div class="badges">
     <span title="run_count">run:${r.run_count||0}</span>
@@ -3225,7 +3244,7 @@ const profile={
 const name=`${type}_${Date.now()}`;
 await api('/strategies/register',{method:'POST',body:JSON.stringify({name,strategy_type:type,params:{},symbols:profile.symbols,timeframe:profile.timeframe,exchange:profile.exchange,allocation:DEFAULT_STRATEGY_ALLOCATION})});
 notify(`策略 ${type} 注册成功`);
-await Promise.all([loadStrategies(),loadStrategySummary()]);
+await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);
 activateTab('strategies');
 setTimeout(()=>openEditor(name).catch(()=>{}),80);
 }catch(e){notify(`策略注册失败: ${e.message}`,true);}
@@ -3249,7 +3268,7 @@ const payload={
  };
  await api('/strategies/register',{method:'POST',body:JSON.stringify(payload)});
  notify(`已复制策略实例：${cloneName}`);
- await Promise.all([loadStrategies(),loadStrategySummary()]);
+ await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);
  activateTab('strategies');
  setTimeout(()=>openEditor(cloneName).catch(()=>{}),80);
 }catch(e){notify(`复制策略实例失败: ${e.message}`,true);}
@@ -3264,7 +3283,7 @@ if(state.selectedStrategyName===name){
   if(panel){panel.classList.remove('strategy-edit-active');panel.innerHTML='点击策略卡片后在此编辑';}
 }
 notify(`已删除策略实例: ${name}`);
-await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+await Promise.all([loadStrategies(),loadStrategySummary({force:true}),loadStrategyHealth()]);
 return true;
 }catch(e){notify(`删除策略实例失败: ${e.message}`,true);return false;}
 }
@@ -3282,7 +3301,7 @@ state.selectedStrategyName='';
 const panel=document.getElementById('strategy-edit-panel');
 if(panel){panel.classList.remove('strategy-edit-active');panel.innerHTML='点击策略卡片后在此编辑';}
 notify(`清空完成：成功 ${ok}，失败 ${fail}${fail?'（可重试）':''}`,fail>0);
-await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+await Promise.all([loadStrategies(),loadStrategySummary({force:true}),loadStrategyHealth()]);
 }catch(e){notify(`一键清空失败: ${e.message}`,true);}
 }
 async function selectRegisteredStrategy(name){
@@ -3293,7 +3312,7 @@ const panel=document.getElementById('strategy-edit-panel');
 if(panel)panel.scrollIntoView({behavior:'smooth',block:'nearest'});
 await loadStrategies();
 }
-async function saveAllocation(name){const safeName=String(name||'');const i=document.querySelector(`input[data-alloc="${CSS.escape(safeName)}"]`);if(!i)return;try{await api(`/strategies/${encodeURIComponent(safeName)}/allocation`,{method:'PUT',body:JSON.stringify({allocation:Number(i.value||0)})});notify(`策略 ${safeName} 资金占比已更新`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`更新资金占比失败: ${e.message}`,true);}}
+async function saveAllocation(name){const safeName=String(name||'');const i=document.querySelector(`input[data-alloc="${CSS.escape(safeName)}"]`);if(!i)return;try{await api(`/strategies/${encodeURIComponent(safeName)}/allocation`,{method:'PUT',body:JSON.stringify({allocation:Number(i.value||0)})});notify(`策略 ${safeName} 资金占比已更新`);await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);}catch(e){notify(`更新资金占比失败: ${e.message}`,true);}}
 async function toggleStrategy(name,st){
 const act=st==='running'?'stop':'start';
 const key=`${act}:${name}`;
@@ -3301,12 +3320,12 @@ state.strategyBusy=state.strategyBusy||{};
 if(state.strategyBusy[key])return;
 if(!confirm(`确认${act==='start'?'启动':'停止'}策略？\n${name}`))return;
 state.strategyBusy[key]=true;
-try{await api(`/strategies/${encodeURIComponent(name)}/${act}`,{method:'POST',timeoutMs:15000});notify(`策略已${act==='start'?'启动':'停止'}`);await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`策略${act}失败: ${e.message}`,true);}
+try{await api(`/strategies/${encodeURIComponent(name)}/${act}`,{method:'POST',timeoutMs:15000});notify(`策略已${act==='start'?'启动':'停止'}`);await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);}catch(e){notify(`策略${act}失败: ${e.message}`,true);}
 finally{delete state.strategyBusy[key];}
 }
 
-async function loadStrategySummary(){return runRequestSingleFlight('strategySummary',async()=>{try{
-const d=await api('/strategies/summary?limit=20',{timeoutMs:STRATEGY_SUMMARY_TIMEOUT_MS});
+function renderStrategySummary(d){
+if(!d)return;
 state.summary=d;
 const running=d.running||[],signals=(d.recent_signals||[]).slice(0,12),stale=(d.stale_running||[]);
 const perf=d.strategy_performance||{};
@@ -3326,7 +3345,21 @@ rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtim
 }
 renderStrategyHealthAlerts(d,state.strategyHealth);
 renderStrategyConsolePanel();
-}catch(e){console.error(e);const msg=esc(e.message||'未知错误');const a=document.getElementById('active-strategies');if(a&&(/加载中/.test(String(a.textContent||''))||!String(a.innerHTML||'').trim()))a.innerHTML=`<div class="list-item"><span>策略摘要加载失败</span><span>${msg}</span></div>`;const r=document.getElementById('recent-signals');if(r&&(/加载中/.test(String(r.textContent||''))||!String(r.innerHTML||'').trim()))r.innerHTML=`<div class="list-item"><span>近期信号加载失败</span><span>${msg}</span></div>`;const rt=document.getElementById('strategy-runtime-tbody');if(rt&&(/加载中/.test(String(rt.textContent||''))||!String(rt.innerHTML||'').trim()))rt.innerHTML=`<tr><td colspan="8">运行中策略摘要加载失败：${msg}</td></tr>`;const box=document.getElementById('strategy-health-alerts');if(box&&/加载中/.test(String(box.textContent||'')))box.innerHTML=`<div class="list-item"><span>策略健康摘要加载失败</span><span>${msg}</span></div>`;renderStrategyConsolePanel();}});}
+}
+function renderStrategySummaryError(e){const msg=esc(e.message||'未知错误');const a=document.getElementById('active-strategies');if(a&&(/加载中/.test(String(a.textContent||''))||!String(a.innerHTML||'').trim()))a.innerHTML=`<div class="list-item"><span>策略摘要加载失败</span><span>${msg}</span></div>`;const r=document.getElementById('recent-signals');if(r&&(/加载中/.test(String(r.textContent||''))||!String(r.innerHTML||'').trim()))r.innerHTML=`<div class="list-item"><span>近期信号加载失败</span><span>${msg}</span></div>`;const rt=document.getElementById('strategy-runtime-tbody');if(rt&&(/加载中/.test(String(rt.textContent||''))||!String(rt.innerHTML||'').trim()))rt.innerHTML=`<tr><td colspan="8">运行中策略摘要加载失败：${msg}</td></tr>`;const box=document.getElementById('strategy-health-alerts');if(box&&/加载中/.test(String(box.textContent||'')))box.innerHTML=`<div class="list-item"><span>策略健康摘要加载失败</span><span>${msg}</span></div>`;renderStrategyConsolePanel();}
+async function loadStrategySummary(options={}){
+const o=options||{};
+const force=!!o.force;
+const limit=Math.max(1,Math.min(100,Number(o.limit||20)||20));
+const maxAgeMs=Math.max(0,Number(o.maxAgeMs??STRATEGY_SUMMARY_REUSE_MAX_AGE_MS)||0);
+const slot=force?'strategySummaryFreshTask':'strategySummaryTask';
+const freshParam=force?'&fresh=1':'';
+try{
+  const d=await runSummaryTaskSingleFlight(slot,()=>api(`/strategies/summary?limit=${limit}${freshParam}`,{timeoutMs:STRATEGY_SUMMARY_TIMEOUT_MS}),{maxAgeMs,reuseLastResult:!force});
+  renderStrategySummary(d);
+  return d;
+}catch(e){console.error(e);renderStrategySummaryError(e);return null;}
+}
 function renderStrategyHealthAlerts(summary,health){
 const box=document.getElementById('strategy-health-alerts');if(!box)return;
 const stale=(summary?.stale_running||[]);const staleCount=Number(summary?.stale_running_count||stale.length||0);const runningCount=Number(summary?.running_count||0);
@@ -3365,7 +3398,8 @@ lastErr=e.message;
 }
 }
 try{
-const s=await api('/strategies/summary?limit=20',{timeoutMs:STRATEGY_SUMMARY_TIMEOUT_MS});
+const s=await loadStrategySummary();
+if(!s)throw new Error(lastErr);
 renderStrategyHealthAlerts(s,state.strategyHealth);
 renderStrategyConsolePanel();
 out.textContent=JSON.stringify({fallback:'summary',running_count:(s.running||[]).length,stale_running:s.stale_running||[],runtime:s.runtime||{},timestamp:s.timestamp||new Date().toISOString(),note:'健康监控接口不可用，已降级显示策略摘要'},null,2);
@@ -3385,13 +3419,13 @@ try{
 const res=await api('/strategies/start-all',{method:'POST'});
 const autoCount=(res?.auto_registered||[]).length||0;
 notify(autoCount?`已启动全部策略（自动注册 ${autoCount} 个）`:'已启动全部策略');
-await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+await Promise.all([loadStrategies(),loadStrategySummary({force:true}),loadStrategyHealth()]);
 }catch(e){notify(`启动全部失败: ${e.message}`,true);}
 });
-if(pAll)pAll.onclick=()=>runBusyButton(pAll,'停止中...',async()=>{if(!confirm('确认停止全部策略？'))return;try{await api('/strategies/stop-all',{method:'POST'});notify('已停止全部策略');await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);}catch(e){notify(`停止全部失败: ${e.message}`,true);}});
-if(chk)chk.onclick=async()=>{try{const r=await api('/strategies/health/check',{method:'POST'});if(out)out.textContent=JSON.stringify(r,null,2);notify('策略健康检查完成');await Promise.all([loadStrategySummary(),loadStrategyHealth(),loadNotificationCenter()]);}catch(e){if(out)out.textContent=`健康检查失败: ${e.message}`;notify(`健康检查失败: ${e.message}`,true);}};
-if(rr)rr.onclick=()=>Promise.all([loadStrategies(),loadStrategySummary()]).catch(()=>{});
-if(rs)rs.onclick=()=>runBusyButton(rs,'停止中...',async()=>{if(!confirm('确认停止全部已注册策略？'))return;try{await api('/strategies/stop-all',{method:'POST'});notify('已停止全部策略');await Promise.all([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);}catch(e){notify(`停止全部失败: ${e.message}`,true);}});
+if(pAll)pAll.onclick=()=>runBusyButton(pAll,'停止中...',async()=>{if(!confirm('确认停止全部策略？'))return;try{await api('/strategies/stop-all',{method:'POST'});notify('已停止全部策略');await Promise.all([loadStrategies(),loadStrategySummary({force:true}),loadStrategyHealth()]);}catch(e){notify(`停止全部失败: ${e.message}`,true);}});
+if(chk)chk.onclick=async()=>{try{const r=await api('/strategies/health/check',{method:'POST'});if(out)out.textContent=JSON.stringify(r,null,2);notify('策略健康检查完成');await Promise.all([loadStrategySummary({force:true}),loadStrategyHealth(),loadNotificationCenter()]);}catch(e){if(out)out.textContent=`健康检查失败: ${e.message}`;notify(`健康检查失败: ${e.message}`,true);}};
+if(rr)rr.onclick=()=>Promise.all([loadStrategies(),loadStrategySummary({force:true})]).catch(()=>{});
+if(rs)rs.onclick=()=>runBusyButton(rs,'停止中...',async()=>{if(!confirm('确认停止全部已注册策略？'))return;try{await api('/strategies/stop-all',{method:'POST'});notify('已停止全部策略');await Promise.all([loadStrategies(),loadStrategySummary({force:true}),loadStrategyHealth()]);}catch(e){notify(`停止全部失败: ${e.message}`,true);}});
 if(rc)rc.onclick=clearAllRegisteredStrategies;
 if(fSearch)fSearch.addEventListener('input',queueFilterRender);
 if(fCat)fCat.addEventListener('change',queueFilterRender);
@@ -3460,7 +3494,7 @@ await api(`/strategies/${encodedName}/config`,{method:'PUT',body:JSON.stringify(
 await api(`/strategies/${encodedName}/params`,{method:'PUT',body:JSON.stringify({params:draft.params})});
 await api(`/strategies/${encodedName}/allocation`,{method:'PUT',body:JSON.stringify({allocation:draft.allocation})});
 notify(`策略 ${name} 参数已更新`);
-await Promise.all([loadStrategies(),loadStrategySummary()]);
+await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);
 await openEditor(name);
 }catch(e){notify(`参数更新失败: ${e.message}`,true);}
 };
@@ -3482,7 +3516,7 @@ if(saveAsBtn)saveAsBtn.onclick=async()=>{
     };
     await api('/strategies/register',{method:'POST',body:JSON.stringify(payload)});
     notify(`已另存为新实例：${newName}`);
-    await Promise.all([loadStrategies(),loadStrategySummary()]);
+    await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);
     activateTab('strategies');
     setTimeout(()=>openEditor(newName).catch(()=>{}),80);
   }catch(e){notify(`另存为新实例失败: ${e.message}`,true);}
@@ -6030,7 +6064,7 @@ if(autoStart){
   try{await api(`/strategies/${encodeURIComponent(actualName)}/start`,{method:'POST'});}catch(e){notify(`实例已注册但自动启动失败: ${e.message}`,true);}
 }
 notify(`已注册新实例：${actualName}${autoStart?'（已启动）':''}`);
-await Promise.all([loadStrategies(),loadStrategySummary()]);
+await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);
 activateTab('strategies');
 setTimeout(async()=>{
   try{
@@ -6293,7 +6327,7 @@ softRefreshTimer=setTimeout(()=>{
   const tab=getActiveTabName();
   const group=sharedPollGroupForTab(tab);
   if(group&&!canRunSharedPolling(group))return;
-  if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadStrategySummary(),loadRisk()]);
+  if(tab==='dashboard')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadRisk()]);
   else if(tab==='trading')Promise.allSettled([loadSummary(),loadPositions(),loadOrders(),loadOpenOrders(),loadConditionalOrders(),loadAccounts(),loadModeInfo(),loadRisk(),loadLiveTradeReview({showLoading:false,minIntervalMs:15000})]);
   else if(tab==='strategies')refreshStrategiesCore();
   else if(tab==='ai-research')refreshAiResearchModules();
@@ -6453,7 +6487,7 @@ if(out)out.textContent=`策略库加载失败: ${e.message||e2.message}`;
 }
 }
 }
-function bindStrategyAdvanced(){const exp=document.getElementById('btn-strategy-export-all'),imp=document.getElementById('btn-strategy-import-json'),rk=document.getElementById('btn-strategy-ranking'),lib=document.getElementById('btn-strategy-library'),out=document.getElementById('strategy-health-output');if(exp)exp.onclick=async()=>{try{const d=await api('/strategies/export');if(out)out.textContent=JSON.stringify(d,null,2);notify('策略JSON已导出到面板');}catch(e){notify(`导出失败: ${e.message}`,true);}};if(imp)imp.onclick=async()=>{try{const raw=document.getElementById('strategy-import-json').value.trim();if(!raw){notify('请先粘贴JSON',true);return;}const payload=JSON.parse(raw);const d=await api('/strategies/import',{method:'POST',body:JSON.stringify(payload)});if(out)out.textContent=JSON.stringify(d,null,2);notify('策略导入完成');await Promise.all([loadStrategies(),loadStrategySummary()]);}catch(e){notify(`导入失败: ${e.message}`,true);}};if(rk)rk.onclick=async()=>{try{const s=document.getElementById('backtest-symbol')?.value||'BTC/USDT',tf=document.getElementById('backtest-timeframe')?.value||'1h';const d=await api(`/strategies/ranking?symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=10000&top_n=20`);if(out)out.textContent=JSON.stringify(d,null,2);notify('策略评分完成');}catch(e){notify(`评分失败: ${e.message}`,true);}};if(lib)lib.onclick=loadStrategyLibrary;}
+function bindStrategyAdvanced(){const exp=document.getElementById('btn-strategy-export-all'),imp=document.getElementById('btn-strategy-import-json'),rk=document.getElementById('btn-strategy-ranking'),lib=document.getElementById('btn-strategy-library'),out=document.getElementById('strategy-health-output');if(exp)exp.onclick=async()=>{try{const d=await api('/strategies/export');if(out)out.textContent=JSON.stringify(d,null,2);notify('策略JSON已导出到面板');}catch(e){notify(`导出失败: ${e.message}`,true);}};if(imp)imp.onclick=async()=>{try{const raw=document.getElementById('strategy-import-json').value.trim();if(!raw){notify('请先粘贴JSON',true);return;}const payload=JSON.parse(raw);const d=await api('/strategies/import',{method:'POST',body:JSON.stringify(payload)});if(out)out.textContent=JSON.stringify(d,null,2);notify('策略导入完成');await Promise.all([loadStrategies(),loadStrategySummary({force:true})]);}catch(e){notify(`导入失败: ${e.message}`,true);}};if(rk)rk.onclick=async()=>{try{const s=document.getElementById('backtest-symbol')?.value||'BTC/USDT',tf=document.getElementById('backtest-timeframe')?.value||'1h';const d=await api(`/strategies/ranking?symbol=${encodeURIComponent(s)}&timeframe=${tf}&initial_capital=10000&top_n=20`);if(out)out.textContent=JSON.stringify(d,null,2);notify('策略评分完成');}catch(e){notify(`评分失败: ${e.message}`,true);}};if(lib)lib.onclick=loadStrategyLibrary;}
 
 function getResearchOutputEl(){return document.getElementById('research-output')||document.getElementById('analytics-output')||document.getElementById('factor-output');}
 function getResearchSummaryEl(){return document.getElementById('research-quick-summary');}
@@ -9105,7 +9139,7 @@ const r=await api('/trading/paper/reset?clear_snapshots=true',{method:'POST',tim
 notify('模拟盘历史已清零');
 const out=document.getElementById('accounts-output');
 if(out)out.textContent=JSON.stringify(r,null,2);
-await Promise.all([loadOrders(),loadPositions(),loadSummary(),loadRisk(),loadConditionalOrders(),loadAccounts(),loadStrategySummary(),loadPnlHeatmap()]);
+await Promise.all([loadOrders(),loadPositions(),loadSummary(),loadRisk(),loadConditionalOrders(),loadAccounts(),loadStrategySummary({force:true}),loadPnlHeatmap()]);
 }catch(err){notify(`模拟盘清零失败: ${err.message}`,true);}
 };
 }
@@ -9287,19 +9321,35 @@ async function _loadMonitorData(name) {
         const sources = (data && typeof data.performance_sources === 'object' && data.performance_sources) ? data.performance_sources : {};
         const freshness = (data && typeof data.performance_freshness === 'object' && data.performance_freshness) ? data.performance_freshness : {};
         const denominator = (data && typeof data.return_denominator === 'object' && data.return_denominator) ? data.return_denominator : {};
+        const entryStatus = (data && typeof data.entry_status === 'object' && data.entry_status) ? data.entry_status : {};
+        const ohlcvFreshness = (data && typeof data.ohlcv_freshness === 'object' && data.ohlcv_freshness) ? data.ohlcv_freshness : {};
         const sourceText = `收益口径：已实现=${sources.realized || '--'}，浮盈=${sources.unrealized || '--'}，分母=${denominator.source || sources.capital_base || '--'}；刷新 ${freshness.refresh_interval_sec || 12}s`;
+        const extraNotes = [];
+        const entryReason = String(entryStatus.reason || '').trim();
+        const runtimeMode = String(entryStatus.runtime_mode || data?.runtime_mode || '').trim().toLowerCase();
+        if (runtimeMode === 'paper') {
+            extraNotes.push('当前实例是 paper runtime，不会向实盘账户开单。');
+        } else if (entryStatus.blocked) {
+            extraNotes.push(`当前实盘入场被阻断：${entryReason || entryStatus.status || '风险限制'}`);
+        }
+        if (ohlcvFreshness.is_stale) {
+            const ageSec = Number(ohlcvFreshness.age_seconds);
+            const ageText = Number.isFinite(ageSec) ? `${Math.round(ageSec / 60)} 分钟` : '未知时长';
+            extraNotes.push(`监控K线已陈旧（最新 ${ohlcvFreshness.latest_bar_at || '--'}，约 ${ageText} 前）。`);
+        }
+        const extraText = extraNotes.length ? ` ${extraNotes.join(' ')}` : '';
         if (signalMode === 'strategy_signal') {
             signalNoteEl.style.display = '';
             signalNoteEl.className = 'monitor-note monitor-note-warning';
-            signalNoteEl.textContent = `当前图上标记仅来自策略信号（${strategySignalCount} 条），尚未匹配到真实成交；这些标记不会直接带来已实现盈亏或资产变化。${sourceText}`;
+            signalNoteEl.textContent = `当前图上标记仅来自策略信号（${strategySignalCount} 条），尚未匹配到真实成交；这些标记不会直接带来已实现盈亏或资产变化。${extraText} ${sourceText}`;
         } else if (signalMode === 'executed_trade') {
             signalNoteEl.style.display = '';
-            signalNoteEl.className = 'monitor-note monitor-note-positive';
-            signalNoteEl.textContent = `当前图上标记来自真实成交（${executedCount} 笔），该策略当前未成交挂单 ${openOrderCount} 笔。${sourceText}`;
+            signalNoteEl.className = extraNotes.length ? 'monitor-note monitor-note-warning' : 'monitor-note monitor-note-positive';
+            signalNoteEl.textContent = `当前图上标记来自真实成交（${executedCount} 笔），该策略当前未成交挂单 ${openOrderCount} 笔。${extraText} ${sourceText}`;
         } else {
             signalNoteEl.style.display = '';
-            signalNoteEl.className = 'monitor-note';
-            signalNoteEl.textContent = `当前没有可用于监控的真实成交或策略信号。${sourceText}`;
+            signalNoteEl.className = extraNotes.length ? 'monitor-note monitor-note-warning' : 'monitor-note';
+            signalNoteEl.textContent = `当前没有可用于监控的真实成交或策略信号。${extraText} ${sourceText}`;
         }
     }
 
