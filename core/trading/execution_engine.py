@@ -4117,6 +4117,8 @@ class ExecutionEngine:
                     else None
                 ),
                 params={
+                    "trading_mode": self._current_trading_mode(),
+                    "runtime_mode": self._current_trading_mode(),
                     "leverage": leverage,
                     "market_type": str(trade_policy.get("market_type") or ""),
                 },
@@ -4838,6 +4840,8 @@ class ExecutionEngine:
                 account_id=account_id,
                 reduce_only=True,
                 params={
+                    "trading_mode": self._current_trading_mode(),
+                    "runtime_mode": self._current_trading_mode(),
                     "close_reason": close_reason,
                     "leverage": float(position.leverage or 1.0),
                     "market_type": str(trade_policy.get("market_type") or ""),
@@ -4851,6 +4855,8 @@ class ExecutionEngine:
             return None
 
         close_params = {
+            "trading_mode": self._current_trading_mode(),
+            "runtime_mode": self._current_trading_mode(),
             "close_reason": close_reason,
             "leverage": float(position.leverage or 1.0),
             "market_type": str(trade_policy.get("market_type") or ""),
@@ -5465,6 +5471,8 @@ class ExecutionEngine:
             reduce_only=reduce_only,
             params=dict(
                 request_params,
+                trading_mode=mode,
+                runtime_mode=mode,
                 leverage=float(leverage),
                 trace_id=governance_check.trace_id,
                 governance_prechecked=True,

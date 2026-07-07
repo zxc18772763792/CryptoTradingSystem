@@ -580,18 +580,86 @@ def _parse_iso(ts: Any) -> Optional[datetime]:
 
 def _resolve_account_equity() -> float:
     """Best-effort fetch of live account equity for drawdown anchoring."""
+    def _safe_positive(value: Any) -> float:
+        try:
+            numeric = float(value or 0.0)
+        except Exception:
+            return 0.0
+        return numeric if numeric > 0 else 0.0
+
+    def _report_equity(report: Dict[str, Any]) -> float:
+        equity = report.get("equity") if isinstance(report, dict) else {}
+        if not isinstance(equity, dict):
+            return 0.0
+        for key in ("current", "risk_current", "risk_equity_input", "day_start"):
+            numeric = _safe_positive(equity.get(key))
+            if numeric > 0:
+                return numeric
+        return 0.0
+
     try:
         from core.risk.risk_manager import risk_manager  # noqa: PLC0415
-        for attr in ("_current_equity", "_day_start_equity"):
-            value = float(getattr(risk_manager, attr, 0.0) or 0.0)
-            if value > 0:
-                return value
+
+        runtime_mode = _current_runtime_mode()
+        if runtime_mode == "live":
+            try:
+                report = risk_manager.get_risk_report(scope="live") or {}
+            except TypeError:
+                report = risk_manager.get_risk_report() or {}
+            equity = _report_equity(report)
+            if equity >= _credible_equity_floor():
+                return equity
+
+            cached_equity = _resolve_cached_live_account_equity()
+            if cached_equity > 0:
+                return cached_equity
+
+            report = risk_manager.get_risk_report() or {}
+            equity = _report_equity(report)
+            if equity >= _credible_equity_floor():
+                return equity
+
+        active_scope = ""
+        try:
+            active_scope = str(risk_manager.get_account_scope() or "").strip().lower()
+        except Exception:
+            active_scope = ""
+        if runtime_mode != "live" or active_scope == "live":
+            for attr in ("_current_equity", "_day_start_equity"):
+                value = _safe_positive(getattr(risk_manager, attr, 0.0))
+                if value > 0:
+                    return value
         report = risk_manager.get_risk_report() or {}
-        equity = float((report.get("equity") or {}).get("current") or 0.0)
+        equity = _report_equity(report)
         if equity > 0:
             return equity
     except Exception:
         pass
+    return 0.0
+
+
+def _resolve_cached_live_account_equity() -> float:
+    """Read the live balance baseline persisted by the trading balance view."""
+    candidates = [
+        Path(getattr(settings, "CACHE_PATH", "data/cache")) / "analytics" / "live_equity_baseline.json",
+        Path("data/cache/analytics/live_equity_baseline.json"),
+    ]
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    floor = _credible_equity_floor()
+    for path in candidates:
+        try:
+            if not path.exists():
+                continue
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("day") or "") != today:
+                continue
+            equity = float(payload.get("portfolio_total_usd") or 0.0)
+            if equity >= floor:
+                return equity
+        except Exception as exc:
+            logger.debug(f"circuit_breaker: failed to read live equity baseline {path}: {exc}")
     return 0.0
 
 

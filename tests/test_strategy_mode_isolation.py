@@ -415,6 +415,30 @@ def test_unknown_account_order_inherits_active_live_mode(monkeypatch):
     assert manager._request_meta(request)["mode"] == "live"
 
 
+def test_explicit_live_order_mode_overrides_main_account_paper_profile(monkeypatch):
+    manager = OrderManager()
+    manager.set_paper_trading(False)
+    monkeypatch.setattr(
+        account_manager,
+        "get_account_mode",
+        lambda account_id, default="paper": "paper",
+    )
+
+    request = OrderRequest(
+        symbol="NEAR/USDT",
+        side=OrderSide.SELL,
+        order_type=OrderType.MARKET,
+        amount=78.0,
+        price=2.01,
+        exchange="binance",
+        account_id="main",
+        params={"trading_mode": "live"},
+    )
+
+    assert manager._resolve_request_mode(request) == "live"
+    assert manager._request_meta(request)["mode"] == "live"
+
+
 def test_paper_order_reuses_prechecked_governance_trace(monkeypatch):
     manager = OrderManager()
     manager.set_paper_trading(True)

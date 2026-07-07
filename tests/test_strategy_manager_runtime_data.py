@@ -102,6 +102,65 @@ def test_live_fetch_failure_backoff_escalates_and_caps():
     assert manager._live_fetch_backoff_until[key] > time.monotonic()
 
 
+def test_load_market_data_timeout_uses_binance_public_fallback_and_persists(monkeypatch):
+    async def _run() -> None:
+        module = importlib.import_module("core.strategies.strategy_manager")
+        manager = StrategyManager()
+        local_df = _sample_bars(
+            [
+                "2026-04-02 10:00:00",
+                "2026-04-02 10:15:00",
+            ]
+        )
+        fallback_df = _sample_bars(
+            [
+                "2026-04-02 10:00:00",
+                "2026-04-02 10:15:00",
+                "2026-04-02 10:30:00",
+                "2026-04-02 10:45:00",
+            ]
+        )
+        save_mock = AsyncMock()
+        monkeypatch.setattr(
+            module.data_storage,
+            "load_klines_from_parquet",
+            AsyncMock(return_value=local_df),
+        )
+        monkeypatch.setattr(module.data_storage, "save_klines_to_parquet", save_mock)
+        monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda exchange: object())
+        monkeypatch.setattr(
+            manager,
+            "_load_live_market_data",
+            AsyncMock(side_effect=asyncio.TimeoutError()),
+        )
+        monkeypatch.setattr(
+            manager,
+            "_load_binance_public_market_data",
+            AsyncMock(return_value=fallback_df),
+        )
+
+        result = await manager._load_market_data(
+            "binance",
+            "BTC/USDT",
+            "15m",
+            limit=4,
+        )
+
+        assert result.index.max() == pd.Timestamp("2026-04-02 10:45:00")
+        saved_klines = save_mock.await_args.args[0]
+        assert [k.timestamp for k in saved_klines] == [
+            datetime(2026, 4, 2, 10, 30, tzinfo=timezone.utc),
+            datetime(2026, 4, 2, 10, 45, tzinfo=timezone.utc),
+        ]
+        assert save_mock.await_args.kwargs == {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "timeframe": "15m",
+        }
+
+    asyncio.run(_run())
+
+
 def test_run_strategy_once_processes_each_completed_bar_only_once():
     async def _run() -> None:
         manager = StrategyManager()
