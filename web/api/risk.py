@@ -41,7 +41,7 @@ async def evaluate_circuit_breaker(
     request: Request,
 ):
     """Force an immediate evaluation pass. Useful for ops manual checks."""
-    report = run_circuit_breaker_checks()
+    report = run_circuit_breaker_checks(auto_clear_false_trips=True)
     return report
 
 

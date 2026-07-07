@@ -1,6 +1,7 @@
 """Unit tests for the Phase 4.2 portfolio/per-strategy circuit breaker."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -247,6 +248,52 @@ def test_system_portfolio_drawdown_counts_system_unrealized_loss():
 
     assert dds["daily_dd"] == pytest.approx(0.04)
     assert dds["weekly_dd"] == pytest.approx(0.04)
+
+
+def test_resolve_account_equity_uses_live_baseline_when_risk_equity_is_tiny(
+    tmp_path, monkeypatch
+):
+    cache_dir = tmp_path / "analytics"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "live_equity_baseline.json").write_text(
+        json.dumps(
+            {
+                "day": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "portfolio_total_usd": 9988.5,
+                "by_exchange": {"binance": 9988.5},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(cb_mod.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(cb_mod, "_current_runtime_mode", lambda: "live")
+
+    from core.risk.risk_manager import risk_manager
+
+    monkeypatch.setattr(
+        risk_manager,
+        "get_risk_report",
+        lambda *args, **kwargs: {"equity": {"current": 1.1574}},
+    )
+
+    assert cb_mod._resolve_account_equity() == pytest.approx(9988.5)
+
+
+def test_risk_api_evaluate_enables_false_trip_auto_clear(monkeypatch):
+    import asyncio
+    from web.api import risk as risk_api
+
+    calls = []
+    monkeypatch.setattr(
+        risk_api,
+        "run_circuit_breaker_checks",
+        lambda **kwargs: calls.append(kwargs) or {"enabled": True},
+    )
+
+    payload = asyncio.run(risk_api.evaluate_circuit_breaker(request=None))
+
+    assert payload == {"enabled": True}
+    assert calls == [{"auto_clear_false_trips": True}]
 
 
 def test_run_checks_trips_breaching_strategy(cb, monkeypatch):

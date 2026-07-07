@@ -10,13 +10,16 @@ from decimal import Decimal
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
+import httpx
 import pandas as pd
 from loguru import logger
 
 from config.settings import settings
 from core.data.data_storage import data_storage
+from core.exchanges.base_exchange import Kline
 from core.exchanges.exchange_manager import exchange_manager
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
+from core.utils.shared_ssl import get_shared_ssl_context
 
 _SUB_MINUTE_TIMEFRAMES = {"1s", "5s", "10s", "30s"}
 _RESAMPLE_RULES = {
@@ -81,6 +84,23 @@ _DEFAULT_LIVE_FETCH_BACKOFF_SEC = 30.0
 _CANONICAL_KLINE_LIMIT = 500
 _STRATEGY_CYCLE_TIMEOUT_SEC = 45.0
 _SIGNAL_NOTIFY_CALLBACK_TIMEOUT_SEC = 2.0
+_BINANCE_PUBLIC_KLINE_INTERVALS = {
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+    "1M",
+}
 
 
 class StrategyManager:
@@ -574,6 +594,13 @@ class StrategyManager:
                     timeout=self._live_fetch_timeout_sec,
                 )
                 if not live_df.empty:
+                    await self._persist_new_market_data(
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        live_df=live_df,
+                        existing_df=df,
+                    )
                     if df.empty:
                         df = live_df
                     else:
@@ -590,12 +617,44 @@ class StrategyManager:
                     f"{backoff_sec:.0f}s after {failures} consecutive failure(s), "
                     "using local/cache data"
                 )
+                fallback_df = await self._load_binance_public_market_data(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    limit=fetch_limit,
+                )
+                if not fallback_df.empty:
+                    await self._persist_new_market_data(
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        live_df=fallback_df,
+                        existing_df=df,
+                    )
+                    df = fallback_df if df.empty else pd.concat([df, fallback_df])
+                    df = df[~df.index.duplicated(keep="last")].sort_index()
             except Exception as e:
                 backoff_sec, failures = self._record_live_fetch_failure(backoff_key)
                 logger.debug(
                     f"Failed to fetch live klines for {exchange} {symbol} {timeframe}: {e}; "
                     f"backing off {backoff_sec:.0f}s after {failures} consecutive failure(s)"
                 )
+                fallback_df = await self._load_binance_public_market_data(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    limit=fetch_limit,
+                )
+                if not fallback_df.empty:
+                    await self._persist_new_market_data(
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        live_df=fallback_df,
+                        existing_df=df,
+                    )
+                    df = fallback_df if df.empty else pd.concat([df, fallback_df])
+                    df = df[~df.index.duplicated(keep="last")].sort_index()
 
         if df.empty:
             for fallback in ["gate", "binance"]:
@@ -662,6 +721,125 @@ class StrategyManager:
             frame["timestamp"], utc=True
         ).dt.tz_localize(None)
         return frame.set_index("timestamp").sort_index()
+
+    @staticmethod
+    def _timestamp_to_utc_datetime(value: Any) -> datetime:
+        ts = pd.Timestamp(value)
+        if ts.tzinfo is None:
+            return ts.to_pydatetime().replace(tzinfo=timezone.utc)
+        return ts.tz_convert("UTC").to_pydatetime()
+
+    async def _persist_new_market_data(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        live_df: pd.DataFrame,
+        existing_df: pd.DataFrame,
+    ) -> None:
+        if live_df.empty:
+            return
+        new_df = live_df.copy()
+        if not existing_df.empty:
+            try:
+                latest_existing = pd.to_datetime(existing_df.index).max()
+                new_df = new_df[pd.to_datetime(new_df.index) > latest_existing]
+            except Exception:
+                pass
+        if new_df.empty:
+            return
+        klines: List[Kline] = []
+        for ts, row in new_df.sort_index().iterrows():
+            try:
+                klines.append(
+                    Kline(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        timestamp=self._timestamp_to_utc_datetime(ts),
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=float(row["volume"]),
+                        exchange=exchange,
+                    )
+                )
+            except Exception:
+                continue
+        if not klines:
+            return
+        try:
+            await data_storage.save_klines_to_parquet(
+                klines,
+                exchange=exchange,
+                symbol=symbol,
+                timeframe=timeframe,
+            )
+        except Exception as exc:
+            logger.debug(
+                f"Failed to persist live klines for {exchange} {symbol} {timeframe}: {exc}"
+            )
+
+    async def _load_binance_public_market_data(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+    ) -> pd.DataFrame:
+        if str(exchange or "").strip().lower() != "binance":
+            return pd.DataFrame()
+        tf = str(timeframe or "").strip()
+        if tf not in _BINANCE_PUBLIC_KLINE_INTERVALS:
+            return pd.DataFrame()
+        clean_symbol = str(symbol or "").split(":", 1)[0].replace("/", "").upper()
+        if not clean_symbol:
+            return pd.DataFrame()
+        req_limit = max(10, min(int(limit or _CANONICAL_KLINE_LIMIT), 1000))
+        timeout_sec = max(4.0, min(12.0, float(self._live_fetch_timeout_sec or 8.0)))
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout_sec,
+                verify=get_shared_ssl_context(),
+            ) as client:
+                response = await client.get(
+                    "https://fapi.binance.com/fapi/v1/klines",
+                    params={"symbol": clean_symbol, "interval": tf, "limit": req_limit},
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            logger.debug(
+                f"Binance public kline fallback failed for {symbol} {timeframe}: {exc}"
+            )
+            return pd.DataFrame()
+
+        rows: List[Dict[str, Any]] = []
+        for item in payload or []:
+            if not isinstance(item, list) or len(item) < 6:
+                continue
+            try:
+                rows.append(
+                    {
+                        "timestamp": datetime.fromtimestamp(
+                            float(item[0]) / 1000.0,
+                            tz=timezone.utc,
+                        ).replace(tzinfo=None),
+                        "open": float(item[1]),
+                        "high": float(item[2]),
+                        "low": float(item[3]),
+                        "close": float(item[4]),
+                        "volume": float(item[5]),
+                    }
+                )
+            except Exception:
+                continue
+        if not rows:
+            return pd.DataFrame()
+        frame = pd.DataFrame(rows).set_index("timestamp").sort_index()
+        return frame.tail(req_limit)
 
     @staticmethod
     def _trades_to_ohlcv_df(trades: List[Dict[str, Any]], timeframe: str) -> pd.DataFrame:
