@@ -17542,3 +17542,8 @@ body:has(#ai-agent.active) .container {
     padding: 1px 6px;
     border-radius: 3px;
 }
+
+/* 策略运行模式下拉：实盘态红色高亮，一眼可辨真钱风险 */
+.strategy-mode-select{background:#162232;color:#e8eef9;border:1px solid #2c3e50;border-radius:4px;font-size:12px;padding:1px 4px;}
+.strategy-mode-select.is-live{color:#ff6b6b;border-color:#ff6b6b;font-weight:600;}
+.strategy-mode-select:disabled{opacity:.6;cursor:not-allowed;}
