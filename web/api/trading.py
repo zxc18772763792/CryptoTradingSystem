@@ -92,6 +92,63 @@ _LIVE_POSITION_DETAILS_CACHE: Dict[str, Any] = {
 }
 
 
+def _normalize_position_symbol(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if ":" in text:
+        text = text.split(":", 1)[0]
+    return text
+
+
+def _normalize_position_side(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    text = str(raw or "").strip().lower()
+    if text in {"sell", "short"}:
+        return "short"
+    if text in {"buy", "long"}:
+        return "long"
+    return text
+
+
+def _is_manual_strategy_label(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return text.startswith("manual")
+
+
+def _is_system_owned_local_position(position: Any) -> bool:
+    strategy = str(getattr(position, "strategy", "") or "").strip()
+    if not strategy or _is_manual_strategy_label(strategy):
+        return False
+    metadata = getattr(position, "metadata", {}) or {}
+    source = str(metadata.get("source") or "").strip().lower() if isinstance(metadata, dict) else ""
+    return source not in {"manual", "exchange_live", "external"}
+
+
+def _local_system_position_qty_by_key() -> Dict[Tuple[str, str, str], float]:
+    try:
+        local_positions = position_manager.get_all_positions(scope="live")
+    except TypeError:
+        local_positions = position_manager.get_all_positions()
+    except Exception:
+        return {}
+
+    quantities: Dict[Tuple[str, str, str], float] = {}
+    for pos in local_positions or []:
+        if not _is_system_owned_local_position(pos):
+            continue
+        qty = abs(_safe_float(getattr(pos, "quantity", 0.0), default=0.0))
+        if qty <= 0:
+            continue
+        key = (
+            str(getattr(pos, "exchange", "") or "").strip().lower(),
+            _normalize_position_symbol(getattr(pos, "symbol", "")),
+            _normalize_position_side(getattr(pos, "side", "")),
+        )
+        if not all(key):
+            continue
+        quantities[key] = quantities.get(key, 0.0) + qty
+    return quantities
+
+
 def _schedule_audit_log(**kwargs: Any) -> None:
     audit_logger.schedule(**kwargs)
 
@@ -3512,9 +3569,15 @@ async def _collect_live_position_snapshot(
     if execution_engine.is_paper_mode():
         return {
             "unrealized_pnl_usd": 0.0,
+            "system_unrealized_pnl_usd": 0.0,
+            "external_unrealized_pnl_usd": 0.0,
             "position_count": 0,
+            "system_position_count": 0,
+            "external_position_count": 0,
             "by_exchange": {},
             "distribution": {},
+            "system_distribution": {},
+            "external_distribution": {},
         }
 
     fresh = _fresh_live_position_snapshot(force_refresh)
@@ -3542,9 +3605,15 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
     if not rows:
         snapshot = {
             "unrealized_pnl_usd": 0.0,
+            "system_unrealized_pnl_usd": 0.0,
+            "external_unrealized_pnl_usd": 0.0,
             "position_count": 0,
+            "system_position_count": 0,
+            "external_position_count": 0,
             "by_exchange": {},
             "distribution": {},
+            "system_distribution": {},
+            "external_distribution": {},
         }
         _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = now_ts
         _LIVE_POSITION_SNAPSHOT_CACHE["data"] = dict(snapshot)
@@ -3558,6 +3627,8 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
         base = base or text or "UNKNOWN"
         side_text = "多" if str(side or "").lower() == "long" else "空"
         return f"{base} {side_text}(合约)"
+
+    system_qty_by_key = _local_system_position_qty_by_key()
 
     async def _fetch_one(exchange_name: str, connector: Any) -> Dict[str, Any]:
         try:
@@ -3587,7 +3658,13 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
                         "exchange": exchange_name,
                         "position_count": 0,
                         "unrealized_pnl_usd": 0.0,
+                        "system_position_count": 0,
+                        "system_unrealized_pnl_usd": 0.0,
+                        "external_position_count": 0,
+                        "external_unrealized_pnl_usd": 0.0,
                         "distribution": {},
+                        "system_distribution": {},
+                        "external_distribution": {},
                         "error": str(fallback_err or e),
                     }
             else:
@@ -3595,7 +3672,13 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
                     "exchange": exchange_name,
                     "position_count": 0,
                     "unrealized_pnl_usd": 0.0,
+                    "system_position_count": 0,
+                    "system_unrealized_pnl_usd": 0.0,
+                    "external_position_count": 0,
+                    "external_unrealized_pnl_usd": 0.0,
                     "distribution": {},
+                    "system_distribution": {},
+                    "external_distribution": {},
                     "error": (
                         f"position request timeout after {_LIVE_POSITION_FETCH_TIMEOUT_SEC:.1f}s"
                         if isinstance(e, asyncio.TimeoutError)
@@ -3605,7 +3688,18 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
 
         count = 0
         unrealized = 0.0
+        system_count = 0
+        external_count = 0
+        system_unrealized = 0.0
+        external_unrealized = 0.0
         distribution: Dict[str, float] = {}
+        system_distribution: Dict[str, float] = {}
+        external_distribution: Dict[str, float] = {}
+        system_remaining = {
+            key: qty
+            for key, qty in system_qty_by_key.items()
+            if key[0] == str(exchange_name or "").strip().lower()
+        }
         for pos in positions or []:
             amount = abs(
                 float(
@@ -3620,7 +3714,7 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
             if amount <= 0:
                 continue
             count += 1
-            unrealized += float(
+            pos_unrealized = float(
                 (
                     pos.get("unrealized_pnl")
                     if isinstance(pos, dict)
@@ -3628,6 +3722,7 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
                 )
                 or 0.0
             )
+            unrealized += pos_unrealized
             current_price = float(
                 (
                     pos.get("current_price")
@@ -3646,31 +3741,66 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
                     or 0.0
                 )
             notional_usd = amount * max(current_price, 0.0)
+            symbol_value = str(
+                (
+                    pos.get("symbol")
+                    if isinstance(pos, dict)
+                    else getattr(pos, "symbol", "")
+                )
+                or ""
+            )
+            side_value = str(
+                (
+                    pos.get("side")
+                    if isinstance(pos, dict)
+                    else getattr(pos, "side", "")
+                )
+                or ""
+            )
+            match_key = (
+                str(exchange_name or "").strip().lower(),
+                _normalize_position_symbol(symbol_value),
+                _normalize_position_side(side_value),
+            )
+            owned_qty = min(amount, max(0.0, float(system_remaining.get(match_key, 0.0) or 0.0)))
+            if owned_qty > 0:
+                system_remaining[match_key] = max(
+                    0.0,
+                    float(system_remaining.get(match_key, 0.0) or 0.0) - owned_qty,
+                )
+            external_qty = max(0.0, amount - owned_qty)
+            owned_ratio = min(1.0, max(0.0, owned_qty / amount)) if amount > 0 else 0.0
+            system_pnl = pos_unrealized * owned_ratio
+            external_pnl = pos_unrealized - system_pnl
+            system_unrealized += system_pnl
+            external_unrealized += external_pnl
+            if owned_qty > 1e-12:
+                system_count += 1
+            if external_qty > 1e-12:
+                external_count += 1
             if notional_usd > 0:
                 label = _contract_bucket_label(
-                    str(
-                        (
-                            pos.get("symbol")
-                            if isinstance(pos, dict)
-                            else getattr(pos, "symbol", "")
-                        )
-                        or ""
-                    ),
-                    str(
-                        (
-                            pos.get("side")
-                            if isinstance(pos, dict)
-                            else getattr(pos, "side", "")
-                        )
-                        or ""
-                    ),
+                    symbol_value,
+                    side_value,
                 )
                 distribution[label] = distribution.get(label, 0.0) + float(notional_usd)
+                system_notional = notional_usd * owned_ratio
+                external_notional = notional_usd - system_notional
+                if system_notional > 0:
+                    system_distribution[label] = system_distribution.get(label, 0.0) + float(system_notional)
+                if external_notional > 0:
+                    external_distribution[label] = external_distribution.get(label, 0.0) + float(external_notional)
         return {
             "exchange": exchange_name,
             "position_count": count,
             "unrealized_pnl_usd": unrealized,
+            "system_position_count": system_count,
+            "system_unrealized_pnl_usd": system_unrealized,
+            "external_position_count": external_count,
+            "external_unrealized_pnl_usd": external_unrealized,
             "distribution": distribution,
+            "system_distribution": system_distribution,
+            "external_distribution": external_distribution,
         }
 
     fetched = await asyncio.gather(
@@ -3680,7 +3810,13 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
     by_exchange: Dict[str, Dict[str, Any]] = {}
     total_count = 0
     total_unrealized = 0.0
+    total_system_count = 0
+    total_system_unrealized = 0.0
+    total_external_count = 0
+    total_external_unrealized = 0.0
     total_distribution: Dict[str, float] = {}
+    total_system_distribution: Dict[str, float] = {}
+    total_external_distribution: Dict[str, float] = {}
     for row in fetched:
         ex_name = str(row.get("exchange") or "").lower()
         if not ex_name:
@@ -3688,11 +3824,21 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
         by_exchange[ex_name] = {
             "position_count": int(row.get("position_count") or 0),
             "unrealized_pnl_usd": round(float(row.get("unrealized_pnl_usd") or 0.0), 4),
+            "system_position_count": int(row.get("system_position_count") or 0),
+            "system_unrealized_pnl_usd": round(float(row.get("system_unrealized_pnl_usd") or 0.0), 4),
+            "external_position_count": int(row.get("external_position_count") or 0),
+            "external_unrealized_pnl_usd": round(float(row.get("external_unrealized_pnl_usd") or 0.0), 4),
             "error": row.get("error"),
             "distribution": dict(row.get("distribution") or {}),
+            "system_distribution": dict(row.get("system_distribution") or {}),
+            "external_distribution": dict(row.get("external_distribution") or {}),
         }
         total_count += int(row.get("position_count") or 0)
         total_unrealized += float(row.get("unrealized_pnl_usd") or 0.0)
+        total_system_count += int(row.get("system_position_count") or 0)
+        total_system_unrealized += float(row.get("system_unrealized_pnl_usd") or 0.0)
+        total_external_count += int(row.get("external_position_count") or 0)
+        total_external_unrealized += float(row.get("external_unrealized_pnl_usd") or 0.0)
         for label, usd_value in (row.get("distribution") or {}).items():
             key = str(label or "").strip()
             if not key:
@@ -3700,6 +3846,14 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
             total_distribution[key] = total_distribution.get(key, 0.0) + float(
                 usd_value or 0.0
             )
+        for label, usd_value in (row.get("system_distribution") or {}).items():
+            key = str(label or "").strip()
+            if key:
+                total_system_distribution[key] = total_system_distribution.get(key, 0.0) + float(usd_value or 0.0)
+        for label, usd_value in (row.get("external_distribution") or {}).items():
+            key = str(label or "").strip()
+            if key:
+                total_external_distribution[key] = total_external_distribution.get(key, 0.0) + float(usd_value or 0.0)
 
     # Fallback: include local live strategy/manual positions when exchange snapshots
     # are unavailable, so dashboard exposure still reflects actual contract holdings.
@@ -3723,8 +3877,14 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
                 {
                     "position_count": 0,
                     "unrealized_pnl_usd": 0.0,
+                    "system_position_count": 0,
+                    "system_unrealized_pnl_usd": 0.0,
+                    "external_position_count": 0,
+                    "external_unrealized_pnl_usd": 0.0,
                     "error": None,
                     "distribution": {},
+                    "system_distribution": {},
+                    "external_distribution": {},
                 },
             )
             if int(exchange_row.get("position_count") or 0) > 0:
@@ -3748,24 +3908,54 @@ async def _collect_live_position_snapshot_refresh() -> Dict[str, Any]:
             exchange_row["unrealized_pnl_usd"] = float(
                 exchange_row.get("unrealized_pnl_usd") or 0.0
             ) + float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            is_system_owned = _is_system_owned_local_position(pos)
+            pnl_value = float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            if is_system_owned:
+                exchange_row["system_position_count"] = int(exchange_row.get("system_position_count") or 0) + 1
+                exchange_row["system_unrealized_pnl_usd"] = float(exchange_row.get("system_unrealized_pnl_usd") or 0.0) + pnl_value
+            else:
+                exchange_row["external_position_count"] = int(exchange_row.get("external_position_count") or 0) + 1
+                exchange_row["external_unrealized_pnl_usd"] = float(exchange_row.get("external_unrealized_pnl_usd") or 0.0) + pnl_value
             local_distribution = dict(exchange_row.get("distribution") or {})
             local_distribution[label] = local_distribution.get(label, 0.0) + float(
                 notional_usd
             )
             exchange_row["distribution"] = local_distribution
+            if is_system_owned:
+                local_system_distribution = dict(exchange_row.get("system_distribution") or {})
+                local_system_distribution[label] = local_system_distribution.get(label, 0.0) + float(notional_usd)
+                exchange_row["system_distribution"] = local_system_distribution
+            else:
+                local_external_distribution = dict(exchange_row.get("external_distribution") or {})
+                local_external_distribution[label] = local_external_distribution.get(label, 0.0) + float(notional_usd)
+                exchange_row["external_distribution"] = local_external_distribution
             total_count += 1
-            total_unrealized += float(getattr(pos, "unrealized_pnl", 0.0) or 0.0)
+            total_unrealized += pnl_value
             total_distribution[label] = total_distribution.get(label, 0.0) + float(
                 notional_usd
             )
+            if is_system_owned:
+                total_system_count += 1
+                total_system_unrealized += pnl_value
+                total_system_distribution[label] = total_system_distribution.get(label, 0.0) + float(notional_usd)
+            else:
+                total_external_count += 1
+                total_external_unrealized += pnl_value
+                total_external_distribution[label] = total_external_distribution.get(label, 0.0) + float(notional_usd)
         except Exception:
             continue
 
     snapshot = {
         "unrealized_pnl_usd": round(total_unrealized, 4),
+        "system_unrealized_pnl_usd": round(total_system_unrealized, 4),
+        "external_unrealized_pnl_usd": round(total_external_unrealized, 4),
         "position_count": int(total_count),
+        "system_position_count": int(total_system_count),
+        "external_position_count": int(total_external_count),
         "by_exchange": by_exchange,
         "distribution": total_distribution,
+        "system_distribution": total_system_distribution,
+        "external_distribution": total_external_distribution,
     }
     _LIVE_POSITION_SNAPSHOT_CACHE["ts"] = now_ts
     _LIVE_POSITION_SNAPSHOT_CACHE["data"] = dict(snapshot)
@@ -3782,7 +3972,17 @@ def _apply_live_snapshot_to_risk_report(
 ) -> Dict[str, Any]:
     out = dict(risk_report or {})
     equity = dict(out.get("equity") or {})
-    live_unrealized = float(live_snapshot.get("unrealized_pnl_usd") or 0.0)
+    live_total_unrealized = float(live_snapshot.get("unrealized_pnl_usd") or 0.0)
+    live_system_unrealized = float(
+        live_snapshot.get("system_unrealized_pnl_usd", live_total_unrealized) or 0.0
+    )
+    live_external_unrealized = float(
+        live_snapshot.get(
+            "external_unrealized_pnl_usd",
+            live_total_unrealized - live_system_unrealized,
+        )
+        or 0.0
+    )
     daily_equity_delta = float(equity.get("daily_pnl_usd") or 0.0)
     daily_total = (
         float(live_daily_total_pnl)
@@ -3801,10 +4001,13 @@ def _apply_live_snapshot_to_risk_report(
         or str(equity.get("daily_realized_pnl_source") or "").strip()
         or ("live_resolved" if has_live_realized else "risk_manager")
     )
-    daily_stop_basis = daily_realized + min(0.0, live_unrealized)
+    daily_stop_basis = daily_realized + min(0.0, live_system_unrealized)
     daily_unrealized_component = daily_total - daily_realized
 
-    equity["current_unrealized_pnl_usd"] = round(live_unrealized, 4)
+    equity["current_unrealized_pnl_usd"] = round(live_system_unrealized, 4)
+    equity["system_unrealized_pnl_usd"] = round(live_system_unrealized, 4)
+    equity["external_unrealized_pnl_usd"] = round(live_external_unrealized, 4)
+    equity["total_open_unrealized_pnl_usd"] = round(live_total_unrealized, 4)
     equity["daily_total_pnl_usd"] = round(daily_total, 4)
     equity["daily_pnl_usd"] = round(daily_total, 4)
     equity["daily_realized_pnl_usd"] = round(daily_realized, 4)
@@ -3844,9 +4047,10 @@ def _apply_live_snapshot_to_risk_report(
         equity["daily_stop_basis_ratio"] = round(stop_ratio, 6)
         equity["daily_pnl_ratio"] = round(stop_ratio, 6)
     equity["pnl_scope_note"] = (
-        "daily_total_pnl_usd is account equity change; current_unrealized_pnl_usd is "
-        "total open-position unrealized PnL, not today's unrealized delta; "
-        "daily_stop_basis_usd = daily_realized_pnl_usd + current floating loss."
+        "daily_total_pnl_usd is account equity change; current_unrealized_pnl_usd "
+        "is system-owned strategy unrealized PnL; external_unrealized_pnl_usd is "
+        "shown for visibility but excluded from strategy circuit-breaker basis; "
+        "daily_stop_basis_usd = daily_realized_pnl_usd + current system floating loss."
     )
     out["equity"] = equity
     limits = dict(out.get("limits") or {})
@@ -3858,6 +4062,11 @@ def _apply_live_snapshot_to_risk_report(
         out["risk_level"] = "high"
     out["live_positions"] = {
         "position_count": int(live_snapshot.get("position_count") or 0),
+        "system_position_count": int(live_snapshot.get("system_position_count") or 0),
+        "external_position_count": int(live_snapshot.get("external_position_count") or 0),
+        "unrealized_pnl_usd": round(live_total_unrealized, 4),
+        "system_unrealized_pnl_usd": round(live_system_unrealized, 4),
+        "external_unrealized_pnl_usd": round(live_external_unrealized, 4),
         "by_exchange": live_snapshot.get("by_exchange") or {},
     }
     return out
@@ -3872,9 +4081,7 @@ async def _build_effective_risk_report(
     live_snapshot = await _collect_live_position_snapshot(
         force_refresh=force_live_refresh
     )
-    realized_payload = await _resolve_live_daily_realized_pnl(
-        force_refresh=force_live_refresh
-    )
+    realized_payload = _resolve_live_system_daily_realized_pnl()
     resolved_realized = realized_payload.get("pnl")
     return _apply_live_snapshot_to_risk_report(
         report,
@@ -4293,6 +4500,49 @@ def _resolve_live_daily_realized_from_runtime_history(
         "source": "runtime_trade_history",
         "row_count": int(summed.get("row_count") or 0),
         "day_start": day_start.isoformat(),
+    }
+
+
+def _is_system_realized_pnl_row(row: Dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    strategy = str(row.get("strategy") or row.get("strategy_name") or "").strip()
+    if not strategy or _is_manual_strategy_label(strategy):
+        return False
+    action = str(row.get("action") or "").strip().lower()
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    source = str(metadata.get("source") or row.get("source") or "").strip().lower()
+    if action == "manual_order" or source in {"manual", "external", "exchange_live"}:
+        return False
+    mode = str(row.get("mode") or row.get("runtime_mode") or row.get("trading_mode") or "").strip().lower()
+    if mode and mode != "live":
+        return False
+    order_id = str(row.get("order_id") or "").strip()
+    if order_id.startswith("paper_"):
+        return False
+    return True
+
+
+def _resolve_live_system_daily_realized_pnl(
+    *,
+    day_start: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    resolved_day_start = day_start or _current_utc_day_start()
+    try:
+        rows = risk_manager.get_trade_history(limit=50000, scope="live")
+    except Exception:
+        rows = []
+    system_rows = [
+        row
+        for row in (rows or [])
+        if isinstance(row, dict) and _is_system_realized_pnl_row(row)
+    ]
+    summed = _sum_realized_pnl_since(system_rows, day_start=resolved_day_start)
+    return {
+        "pnl": float(summed.get("pnl") or 0.0),
+        "source": "system_runtime_trade_history",
+        "row_count": int(summed.get("row_count") or 0),
+        "day_start": resolved_day_start.isoformat(),
     }
 
 

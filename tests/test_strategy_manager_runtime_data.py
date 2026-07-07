@@ -85,6 +85,23 @@ def test_market_data_cache_ttl_scales_with_timeframe():
     assert manager._market_data_cache_ttl_for_timeframe("5m") == 30.0
 
 
+def test_live_fetch_failure_backoff_escalates_and_caps():
+    manager = StrategyManager()
+    manager._live_fetch_backoff_sec = 10.0
+    manager._live_fetch_backoff_max_sec = 25.0
+    key = ("binance", "BTC/USDT", "15m")
+
+    first, first_count = manager._record_live_fetch_failure(key)
+    second, second_count = manager._record_live_fetch_failure(key)
+    third, third_count = manager._record_live_fetch_failure(key)
+
+    assert (first, first_count) == (10.0, 1)
+    assert (second, second_count) == (20.0, 2)
+    assert (third, third_count) == (25.0, 3)
+    assert manager._live_fetch_failure_count[key] == 3
+    assert manager._live_fetch_backoff_until[key] > time.monotonic()
+
+
 def test_run_strategy_once_processes_each_completed_bar_only_once():
     async def _run() -> None:
         manager = StrategyManager()

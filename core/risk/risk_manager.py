@@ -640,13 +640,11 @@ class RiskManager:
         breach_ratio = stop_basis_ratio <= -abs(self.max_daily_loss_ratio)
         breach_usd = self.max_daily_loss_usd > 0 and stop_basis_usd <= -abs(self.max_daily_loss_usd)
         breached = bool(breach_ratio or breach_usd)
-        # Catastrophic backstop: if the equity drop is at least 2x the
-        # configured daily loss limit, do NOT honour the "no system trades"
-        # exemption — a 2x breach almost certainly means the system was
-        # trading but its ledger drifted out of sync (e.g. exchange auto-
-        # liquidation, manual override). We treat it as a real loss event.
+        # Catastrophic backstop must use the system-owned stop basis, not total
+        # account equity. External/manual losses can be visible in equity while
+        # still being outside this trading system's halt authority.
         catastrophic = bool(
-            daily_pnl_ratio <= -2.0 * abs(self.max_daily_loss_ratio or 0.0)
+            stop_basis_ratio <= -2.0 * abs(self.max_daily_loss_ratio or 0.0)
             and self.max_daily_loss_ratio > 0
         )
         # Only honour the "untracked external equity move" exemption when there is

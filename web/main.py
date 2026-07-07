@@ -1860,7 +1860,10 @@ async def _circuit_breaker_monitor_worker(stop_event: asyncio.Event, app: FastAP
     await asyncio.sleep(45)  # stagger startup after CUSUM
     while not stop_event.is_set():
         try:
-            report = await asyncio.to_thread(run_circuit_breaker_checks)
+            report = await asyncio.to_thread(
+                run_circuit_breaker_checks,
+                auto_clear_false_trips=True,
+            )
             # `trip_strategy` fires the close-positions hook itself; the
             # circuit breaker schedules async hooks back onto this loop.
             new_strategy_trips = [
