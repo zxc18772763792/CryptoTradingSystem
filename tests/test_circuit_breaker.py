@@ -297,3 +297,63 @@ def test_run_checks_auto_clear_false_trip_requires_explicit_opt_in(cb, monkeypat
     assert report["strategy_auto_clears"][0]["strategy"] == "LiveStrat"
     assert cb.check_portfolio().is_allow
     assert cb.check_strategy("LiveStrat").is_allow
+
+
+def test_manual_reset_suppresses_same_persisting_drawdown(cb, monkeypatch):
+    """Regression (2026-07-07): the rolling 24h dd persists after a manual
+    reset, so the next evaluation re-tripped within minutes and the reset
+    button was effectively a lie. Same condition -> suppressed."""
+    monkeypatch.setattr(cb_mod, "circuit_breaker", cb)
+    dd = {"daily_dd": 0.05, "weekly_dd": 0.0}
+    run_circuit_breaker_checks(trade_history=[], portfolio_drawdown=dd)
+    assert cb.check_portfolio().is_close_only
+    assert cb.reset_portfolio("test_operator") is True
+
+    report = run_circuit_breaker_checks(trade_history=[], portfolio_drawdown=dd)
+    assert report["portfolio_trip"]["suppressed_by_manual_reset"] is True
+    assert report["portfolio_trip"]["new_trip"] is False
+    assert not cb.check_portfolio().is_close_only
+
+
+def test_manual_reset_latch_pierced_by_worsening_drawdown(cb, monkeypatch):
+    monkeypatch.setattr(cb_mod, "circuit_breaker", cb)
+    run_circuit_breaker_checks(trade_history=[], portfolio_drawdown={"daily_dd": 0.05, "weekly_dd": 0.0})
+    cb.reset_portfolio("test_operator")
+
+    # +0.6pp beyond the reset-time level (> 0.5pp margin) = new deterioration.
+    report = run_circuit_breaker_checks(trade_history=[], portfolio_drawdown={"daily_dd": 0.056, "weekly_dd": 0.0})
+    assert report["portfolio_trip"]["new_trip"] is True
+    assert cb.check_portfolio().is_close_only
+
+
+def test_manual_reset_latch_rearms_after_recovery(cb, monkeypatch):
+    monkeypatch.setattr(cb_mod, "circuit_breaker", cb)
+    run_circuit_breaker_checks(trade_history=[], portfolio_drawdown={"daily_dd": 0.05, "weekly_dd": 0.0})
+    cb.reset_portfolio("test_operator")
+
+    # Condition clears -> latch removed, breaker back to full strictness.
+    run_circuit_breaker_checks(trade_history=[], portfolio_drawdown={"daily_dd": 0.01, "weekly_dd": 0.0})
+    assert cb.portfolio_state()["manual_override_active"] is False
+
+    # The SAME 5% dd later is now a genuinely new event -> trips again.
+    report = run_circuit_breaker_checks(trade_history=[], portfolio_drawdown={"daily_dd": 0.05, "weekly_dd": 0.0})
+    assert report["portfolio_trip"]["new_trip"] is True
+    assert cb.check_portfolio().is_close_only
+
+
+def test_drawdown_snapshot_reports_binding_peak_and_trough_timestamps():
+    from core.risk.risk_manager import RiskManager
+
+    rm = RiskManager.__new__(RiskManager)  # snapshot helper is self-contained
+    points = [
+        {"timestamp": "2026-07-07T02:50:00+00:00", "equity": 10550.0},
+        {"timestamp": "2026-07-07T02:56:00+00:00", "equity": 11126.0},  # phantom peak
+        {"timestamp": "2026-07-07T03:10:00+00:00", "equity": 10540.0},  # binding trough
+        {"timestamp": "2026-07-07T03:20:00+00:00", "equity": 10545.0},
+    ]
+    snap = rm._drawdown_snapshot_for_points(points, hours=24)
+    assert snap["peak_equity"] == 11126.0
+    assert snap["peak_ts"] == "2026-07-07T02:56:00+00:00"
+    assert snap["trough_equity"] == 10540.0
+    assert snap["trough_ts"] == "2026-07-07T03:10:00+00:00"
+    assert round(snap["drawdown"], 4) == round((11126.0 - 10540.0) / 11126.0, 4)

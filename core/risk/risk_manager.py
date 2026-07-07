@@ -1076,25 +1076,38 @@ class RiskManager:
         return points
 
     def _drawdown_snapshot_for_points(self, points: List[Dict[str, Any]], *, hours: int) -> Dict[str, Any]:
-        equities = [float(row.get("equity") or 0.0) for row in points if float(row.get("equity") or 0.0) > 0]
-        if not equities:
+        rows = [
+            (str(row.get("timestamp") or ""), float(row.get("equity") or 0.0))
+            for row in points
+            if float(row.get("equity") or 0.0) > 0
+        ]
+        if not rows:
             return {
                 "hours": int(hours),
                 "drawdown": 0.0,
                 "peak_equity": None,
                 "trough_equity": None,
+                "peak_ts": None,
+                "trough_ts": None,
                 "point_count": 0,
                 "window_start": None,
                 "window_end": None,
             }
-        peak = equities[0]
-        trough = equities[0]
+        peak = rows[0][1]
+        peak_ts = rows[0][0]
+        trough = rows[0][1]
         max_drawdown = 0.0
+        # Track the binding peak/trough pair WITH timestamps so a phantom
+        # equity reading is identifiable at a glance (the 2026-07-07 false
+        # portfolio trip was undiagnosable without them).
         peak_at = peak
         trough_at = trough
-        for equity in equities:
+        peak_at_ts = peak_ts
+        trough_at_ts = rows[0][0]
+        for ts, equity in rows:
             if equity > peak:
                 peak = equity
+                peak_ts = ts
                 trough = equity
             if equity < trough:
                 trough = equity
@@ -1102,15 +1115,19 @@ class RiskManager:
             if drawdown > max_drawdown:
                 max_drawdown = drawdown
                 peak_at = peak
+                peak_at_ts = peak_ts
                 trough_at = equity
+                trough_at_ts = ts
         return {
             "hours": int(hours),
             "drawdown": round(float(max_drawdown), 6),
             "peak_equity": round(float(peak_at), 4),
             "trough_equity": round(float(trough_at), 4),
-            "point_count": len(equities),
-            "window_start": str(points[0].get("timestamp") or "") if points else None,
-            "window_end": str(points[-1].get("timestamp") or "") if points else None,
+            "peak_ts": peak_at_ts or None,
+            "trough_ts": trough_at_ts or None,
+            "point_count": len(rows),
+            "window_start": rows[0][0] or None,
+            "window_end": rows[-1][0] or None,
         }
 
     def get_rolling_drawdown_snapshot(
