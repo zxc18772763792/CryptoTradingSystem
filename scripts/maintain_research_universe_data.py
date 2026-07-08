@@ -20,8 +20,18 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.data import data_storage, download_binance_1s_daily_archive, second_level_backfill_manager  # noqa: E402
+from core.data.coinglass_altcoin import build_exchange_altcoin_universe  # noqa: E402
 from core.exchanges import exchange_manager  # noqa: E402
+from core.utils.aiohttp_resolver_hardening import install_aiohttp_threaded_resolver  # noqa: E402
 from maintain_top100_data import _download_symbol_timeframe, _load_binance_spot_usdt_symbols  # noqa: E402
+
+# This standalone maintainer talks to CoinGlass (to mirror the altcoin-radar
+# universe) and Binance from its OWN process, so it must install the same DNS
+# hardening the web service does. Otherwise aiohttp's default c-ares resolver
+# queries the broken link-local DNS server and every CoinGlass fetch fails,
+# silently collapsing the radar-aligned universe back to the static fallback.
+# See core/utils/aiohttp_resolver_hardening.py.
+install_aiohttp_threaded_resolver()
 
 
 DEFAULT_RESEARCH_SYMBOLS: List[str] = [
@@ -405,6 +415,39 @@ async def _refresh_idle_seconds_if_allowed(
     return payload
 
 
+async def _resolve_radar_aligned_universe(exchange_name: str) -> List[str]:
+    """Union the static research anchors with the live altcoin-radar universe.
+
+    The altcoin radar scans ``build_exchange_altcoin_universe`` (a dynamic,
+    CoinGlass-ranked altcoin set). If we only backfill the static major-coin
+    list, those altcoins never get local K-line and the radar silently drops
+    factor/correlation for them. Merging both keeps every scanned symbol backed
+    by fresh OHLCV. Best-effort: any failure (CoinGlass down, minute budget
+    exhausted, DNS) falls back to the static universe rather than aborting the
+    whole refresh.
+    """
+    anchors = list(DEFAULT_RESEARCH_SYMBOLS)
+    try:
+        payload = await build_exchange_altcoin_universe(exchange_name)
+        radar_symbols = [str(item) for item in (payload.get("symbols") or []) if item]
+    except Exception as exc:  # noqa: BLE001 - universe resolution must never abort the refresh
+        logger.warning(
+            "radar-aligned universe resolution failed ({}); falling back to the "
+            "static {}-symbol research universe",
+            exc,
+            len(anchors),
+        )
+        return _normalize_symbol_list(anchors)
+    merged = _normalize_symbol_list(anchors + radar_symbols)
+    logger.info(
+        "radar-aligned universe: {} static anchors + {} radar symbols -> {} unique",
+        len(anchors),
+        len(radar_symbols),
+        len(merged),
+    )
+    return merged
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Incrementally maintain the default 30-symbol research universe.")
     parser.add_argument("--exchange", default="binance", help="Exchange name for local parquet storage.")
@@ -429,6 +472,17 @@ async def main() -> None:
         help="Optional comma-separated symbol override. Defaults to the built-in 30-symbol research universe.",
     )
     parser.add_argument(
+        "--radar-universe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Union the static research anchors with the live altcoin-radar "
+            "universe (CoinGlass) so radar-scanned altcoins get local K-line "
+            "and keep factor/correlation. Ignored when --symbols is given. Pass "
+            "--no-radar-universe for the legacy static-only universe."
+        ),
+    )
+    parser.add_argument(
         "--summary-out",
         default="data/research/research_universe_incremental_latest.json",
         help="Path to write the latest maintenance summary JSON.",
@@ -447,9 +501,12 @@ async def main() -> None:
         else list(DEFAULT_IDLE_SECONDS_SYMBOLS)
     )
     seconds_days = max(1, min(3, int(args.seconds_days or DEFAULT_IDLE_SECONDS_DAYS)))
-    requested_symbols = _normalize_symbol_list(
-        str(args.symbols or "").split(",") if str(args.symbols or "").strip() else list(DEFAULT_RESEARCH_SYMBOLS)
-    )
+    if str(args.symbols or "").strip():
+        requested_symbols = _normalize_symbol_list(str(args.symbols).split(","))
+    elif bool(args.radar_universe):
+        requested_symbols = await _resolve_radar_aligned_universe(exchange_name)
+    else:
+        requested_symbols = _normalize_symbol_list(list(DEFAULT_RESEARCH_SYMBOLS))
 
     logger.info(
         "Research universe incremental refresh start: exchange={} symbols={} timeframes={} days={} overlap={} idle_seconds={}",

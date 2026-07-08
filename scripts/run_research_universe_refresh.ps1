@@ -9,7 +9,12 @@ param(
     [switch]$DisableIdleSeconds,
     [string]$LogPath = "",
     [switch]$Quiet,
-    [switch]$Force
+    [switch]$Force,
+    # A healthy incremental refresh finishes in a few minutes. If an existing
+    # maintain_research process is older than this, it is treated as hung and
+    # killed so it cannot block the pipeline (a dangling connector once wedged
+    # one for ~1.6 days, silently starving every scheduled refresh).
+    [int]$MaxRefreshAgeMinutes = 30
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,6 +56,16 @@ function Enable-CondaEnv {
 }
 
 function Resolve-PythonExecutable {
+    # Pin the F: conda env first. This project's authoritative home is F:, but
+    # the Task Scheduler context often has no conda on PATH and the conda-hook
+    # candidates in Enable-CondaEnv do not know about F:\9_Crypto\.conda\
+    # miniforge3 -- so resolution previously fell through to a stale E:-drive
+    # python found on PATH. See the crypto-test-env note.
+    $pinnedPython = "F:\9_Crypto\.conda\miniforge3\envs\$EnvName\python.exe"
+    if (Test-Path $pinnedPython) {
+        return $pinnedPython
+    }
+
     if ($env:CONDA_PREFIX) {
         $condaPython = Join-Path $env:CONDA_PREFIX "python.exe"
         if (Test-Path $condaPython) {
@@ -88,11 +103,33 @@ function Get-RunningRefreshProcess {
     )
 }
 
-if ((-not $Force) -and (Get-RunningRefreshProcess).Count) {
-    if (-not $Quiet) {
-        Write-Host "Research universe refresh is already running. Skipping duplicate launch." -ForegroundColor Yellow
+if (-not $Force) {
+    $runningRefreshes = @(Get-RunningRefreshProcess)
+    if ($runningRefreshes.Count) {
+        $now = Get-Date
+        $staleRefreshes = @($runningRefreshes | Where-Object {
+            $started = $null
+            try { $started = [datetime]$_.CreationDate } catch { $started = $null }
+            ($null -ne $started) -and (($now - $started).TotalMinutes -ge $MaxRefreshAgeMinutes)
+        })
+        # Only intervene when EVERY running refresh is stale: a fresh one is
+        # legitimately in progress and must not be killed. When all are stale,
+        # they are hung (a dangling connector once wedged one for ~1.6 days,
+        # silently blocking every scheduled refresh) -- kill them and proceed.
+        if ($staleRefreshes.Count -and ($staleRefreshes.Count -eq $runningRefreshes.Count)) {
+            foreach ($proc in $staleRefreshes) {
+                Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+                if (-not $Quiet) {
+                    Write-Host ("Killed hung research refresh PID={0} (age >= {1} min); proceeding with a fresh run." -f $proc.ProcessId, $MaxRefreshAgeMinutes) -ForegroundColor Yellow
+                }
+            }
+        } else {
+            if (-not $Quiet) {
+                Write-Host "Research universe refresh is already running (within max age). Skipping duplicate launch." -ForegroundColor Yellow
+            }
+            exit 0
+        }
     }
-    exit 0
 }
 
 if (-not (Enable-CondaEnv -Name $EnvName) -and (-not $Quiet)) {
