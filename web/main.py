@@ -53,12 +53,19 @@ from core.data import data_storage, second_level_backfill_manager
 from core.exchanges import exchange_manager
 from core.marketdata.hub import market_data_hub
 from core.utils.proactor_accept_hardening import install_proactor_accept_hardening
+from core.utils.aiohttp_resolver_hardening import install_aiohttp_threaded_resolver
 
 # Must run at import time, BEFORE uvicorn binds its listener: a client RST on a
 # connection still queued in the accept backlog otherwise closes the listening
 # socket permanently (WinError 64 -> proactor `sock.close()`), leaving the
 # process alive but the API dead. See core/utils/proactor_accept_hardening.py.
 install_proactor_accept_hardening()
+
+# Force aiohttp onto the OS resolver before any connector/session is created:
+# aiodns makes aiohttp default to c-ares, which on this host queries a broken
+# link-local DNS server (fe80::1) and fails every outbound call (CoinGlass, news,
+# source-health). See core/utils/aiohttp_resolver_hardening.py.
+install_aiohttp_threaded_resolver()
 
 from core.notifications import notification_manager
 from core.ops.service import create_router as create_ops_router, initialize_ops_runtime, shutdown_ops_runtime
