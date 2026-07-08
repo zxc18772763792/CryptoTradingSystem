@@ -67,3 +67,53 @@ def test_refresh_recent_1s_symbol_normalizes_naive_latest_timestamp(monkeypatch)
     assert captured["start_time"].tzinfo == timezone.utc
     assert captured["start_time"] <= captured["end_time"]
     assert result["recent_window_start"].endswith("+00:00")
+
+
+def test_radar_aligned_universe_merges_anchors_and_radar_symbols(monkeypatch):
+    module = _load_module()
+    # Two radar symbols overlap the static anchors (BTC/ETH) and must not be
+    # duplicated; the fresh altcoins (XMR, ZEC) must be appended.
+    monkeypatch.setattr(
+        module,
+        "build_exchange_altcoin_universe",
+        AsyncMock(return_value={"symbols": ["XMR/USDT", "BTC/USDT", "ZEC/USDT", "eth/usdt"]}),
+    )
+
+    result = asyncio.run(module._resolve_radar_aligned_universe("binance"))
+
+    # Static anchors come first and every anchor is present.
+    assert result[: len(module.DEFAULT_RESEARCH_SYMBOLS)] == module.DEFAULT_RESEARCH_SYMBOLS
+    # The fresh radar altcoins were unioned in.
+    assert "XMR/USDT" in result
+    assert "ZEC/USDT" in result
+    # No duplicates despite the overlapping / lowercase radar entries.
+    assert len(result) == len(set(result))
+    assert result.count("BTC/USDT") == 1
+    assert result.count("ETH/USDT") == 1
+
+
+def test_radar_aligned_universe_falls_back_to_static_on_error(monkeypatch):
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "build_exchange_altcoin_universe",
+        AsyncMock(side_effect=RuntimeError("coinglass minute headroom too low")),
+    )
+
+    result = asyncio.run(module._resolve_radar_aligned_universe("binance"))
+
+    # A CoinGlass failure must degrade to the static universe, never abort.
+    assert result == module.DEFAULT_RESEARCH_SYMBOLS
+
+
+def test_radar_aligned_universe_handles_empty_radar_payload(monkeypatch):
+    module = _load_module()
+    monkeypatch.setattr(
+        module,
+        "build_exchange_altcoin_universe",
+        AsyncMock(return_value={"symbols": []}),
+    )
+
+    result = asyncio.run(module._resolve_radar_aligned_universe("binance"))
+
+    assert result == module.DEFAULT_RESEARCH_SYMBOLS
