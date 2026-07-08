@@ -1,7 +1,11 @@
 param(
     [string]$EnvName = "crypto_trading",
     [string]$Exchange = "binance",
-    [string]$Timeframes = "1m,5m,15m,1h",
+    # Must include every timeframe the altcoin radar / research views read. The
+    # radar defaults to 4h (DEFAULT_TIMEFRAME) and there is NO 1h->4h aggregation
+    # in _load_local_or_aggregate, so 4h and 1d must be fetched natively or the
+    # radar sees empty/stale frames no matter how fresh 1h is.
+    [string]$Timeframes = "1m,5m,15m,1h,4h,1d",
     [int]$Days = 90,
     [int]$OverlapBars = 48,
     [string]$SecondsSymbols = "BTC/USDT,ETH/USDT",
