@@ -6,19 +6,19 @@ from __future__ import annotations
 import asyncio
 import os
 from datetime import datetime, timezone
-
-
-def _utcnow() -> datetime:
-    """Timezone-aware UTC now. Use as `default=_utcnow` in Column definitions."""
-    return datetime.now(timezone.utc)
 from typing import AsyncGenerator
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, JSON, String, Text, UniqueConstraint, event
+from sqlalchemy import Boolean, Column, DateTime, Float, Integer, JSON, String, Text, UniqueConstraint, event, inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 
 from config.settings import settings
+
+
+def _utcnow() -> datetime:
+    """Timezone-aware UTC now. Use as `default=_utcnow` in Column definitions."""
+    return datetime.now(timezone.utc)
 
 
 class Base(DeclarativeBase):
@@ -521,15 +521,16 @@ try:
 except Exception:
     _SQLITE_BUSY_TIMEOUT_SEC = 8.0
 _SQLITE_CONNECT_ARGS = {"timeout": _SQLITE_BUSY_TIMEOUT_SEC}
+_IS_SQLITE = str(settings.DATABASE_URL).startswith("sqlite")
 _ENGINE_KWARGS = {
     "echo": False,
     "future": True,
-    "connect_args": _SQLITE_CONNECT_ARGS,
 }
-if str(settings.DATABASE_URL).startswith("sqlite"):
+if _IS_SQLITE:
     # SQLite plus the default queue pool is a poor fit for this app's bursty
     # background jobs and dashboard polling. Create short-lived connections
     # instead of letting requests pile up behind an exhausted pool.
+    _ENGINE_KWARGS["connect_args"] = _SQLITE_CONNECT_ARGS
     _ENGINE_KWARGS["poolclass"] = NullPool
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -537,7 +538,6 @@ engine = create_async_engine(
 )
 
 
-@event.listens_for(engine.sync_engine, "connect")
 def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
     cursor = dbapi_connection.cursor()
     try:
@@ -547,6 +547,10 @@ def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
         cursor.execute("PRAGMA foreign_keys=ON")
     finally:
         cursor.close()
+
+
+if _IS_SQLITE:
+    event.listen(engine.sync_engine, "connect", _configure_sqlite_connection)
 
 # 创建异步会话工厂
 async_session_maker = async_sessionmaker(
@@ -599,13 +603,21 @@ async def close_db():
 
 
 async def _migrate_analytics_history_schema(conn) -> None:
+    async def _existing_columns(table_name: str) -> set[str]:
+        def _read(sync_conn) -> set[str]:
+            return {
+                str(column.get("name") or "")
+                for column in inspect(sync_conn).get_columns(table_name)
+            }
+
+        return await conn.run_sync(_read)
+
     trading_mode_columns = {
         "trades": "idx_trades_mode",
         "positions": "idx_positions_mode",
     }
     for table_name, index_name in trading_mode_columns.items():
-        result = await conn.exec_driver_sql(f"PRAGMA table_info('{table_name}')")
-        existing = {str(row[1]) for row in result.fetchall()}
+        existing = await _existing_columns(table_name)
         if "mode" not in existing:
             await conn.exec_driver_sql(
                 f"ALTER TABLE {table_name} ADD COLUMN mode TEXT DEFAULT 'paper' NOT NULL"
@@ -638,8 +650,7 @@ async def _migrate_analytics_history_schema(conn) -> None:
         ],
     }
     for table_name, columns in table_columns.items():
-        result = await conn.exec_driver_sql(f"PRAGMA table_info('{table_name}')")
-        existing = {str(row[1]) for row in result.fetchall()}
+        existing = await _existing_columns(table_name)
         for column_name, ddl in columns:
             if column_name in existing:
                 continue

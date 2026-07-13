@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -46,6 +47,33 @@ def _read_parquet_tail(path: Path, *, tail_rows: int) -> pd.DataFrame:
     if df.empty or "close" not in df.columns:
         return pd.DataFrame()
     return df[["close"]].tail(max(1, int(tail_rows)))
+
+
+def _beta_and_corr(asset_returns: pd.Series, benchmark_returns: pd.Series) -> Optional[tuple[float, float]]:
+    pairs: List[tuple[float, float]] = []
+    for raw_asset, raw_benchmark in zip(asset_returns.tolist(), benchmark_returns.tolist()):
+        try:
+            asset = float(raw_asset)
+            benchmark = float(raw_benchmark)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(asset) and math.isfinite(benchmark):
+            pairs.append((asset, benchmark))
+    if len(pairs) < 2:
+        return None
+
+    mean_asset = sum(asset for asset, _benchmark in pairs) / len(pairs)
+    mean_benchmark = sum(benchmark for _asset, benchmark in pairs) / len(pairs)
+    centered = [(asset - mean_asset, benchmark - mean_benchmark) for asset, benchmark in pairs]
+    asset_ss = sum(asset * asset for asset, _benchmark in centered)
+    benchmark_ss = sum(benchmark * benchmark for _asset, benchmark in centered)
+    if benchmark_ss <= 1e-12:
+        return None
+
+    cross = sum(asset * benchmark for asset, benchmark in centered)
+    beta = cross / benchmark_ss
+    corr = 0.0 if asset_ss <= 1e-18 else cross / math.sqrt(asset_ss * benchmark_ss)
+    return beta, corr
 
 
 @lru_cache(maxsize=512)
@@ -139,8 +167,8 @@ def resolve_benchmark_beta(
             "benchmark_symbol": benchmark_text,
         }
 
-    variance = float(joined["benchmark"].var())
-    if variance <= 1e-12:
+    stats = _beta_and_corr(joined["asset"], joined["benchmark"])
+    if stats is None:
         return {
             "available": False,
             "beta": None,
@@ -148,9 +176,7 @@ def resolve_benchmark_beta(
             "sample_size": int(len(joined)),
             "benchmark_symbol": benchmark_text,
         }
-    covariance = float(joined["asset"].cov(joined["benchmark"]))
-    beta = covariance / variance
-    corr = float(joined["asset"].corr(joined["benchmark"]))
+    beta, corr = stats
     return {
         "available": True,
         "beta": round(max(-3.0, min(3.0, beta)), 6),

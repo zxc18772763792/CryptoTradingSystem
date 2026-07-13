@@ -1480,7 +1480,10 @@ async def _load_strategy_open_orders(
         return []
     try:
         rows = await asyncio.wait_for(
-            order_manager.get_open_orders(exchange=exchange),
+            order_manager.get_open_orders(
+                exchange=exchange,
+                trading_mode=runtime_mode,
+            ),
             timeout=1.5,
         )
     except Exception as exc:

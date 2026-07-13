@@ -20,8 +20,12 @@ def test_research_universe_refresh_scripts_exist_and_are_wired():
     assert "1m,5m,15m,1h" in runner
     assert "BTC/USDT,ETH/USDT" in runner
     assert "CryptoTradingSystem_ResearchUniverseRefresh" in ensure
-    assert "Register-ScheduledTask" in ensure
+    assert "schtasks /Create /F /TN $Name /XML $xmlPath" in ensure
     assert "schtasks /Create" in ensure
+    assert "<MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>" in ensure
+    assert "<ExecutionTimeLimit>PT45M</ExecutionTimeLimit>" in ensure
+    assert "[int]$IntervalMinutes = 60" in ensure
+    assert '"-MaxRefreshAgeMinutes", "45"' in ensure
     assert "Test-IsAdministrator" in ensure
     assert "StartNowIfCreated" in ensure
     assert "1m,5m,15m,1h" in ensure
@@ -33,3 +37,11 @@ def test_research_universe_refresh_scripts_exist_and_are_wired():
     assert "Ensure-ResearchUniverseRefreshTask" in once
     assert "ensure_research_universe_refresh_task.ps1" in once
     assert "Research universe incremental refresh task is auto-ensured on start." in web_ps
+
+
+def test_research_refresh_runner_waits_for_stale_process_termination():
+    runner = _read("scripts/run_research_universe_refresh.ps1")
+
+    assert "[int]$MaxRefreshAgeMinutes = 45" in runner
+    assert "$killDeadline" in runner
+    assert "did not terminate within 10 seconds" in runner

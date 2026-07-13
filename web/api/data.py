@@ -1255,7 +1255,7 @@ def _research_retired_filter(
     tf = str(timeframe or "").lower().upper()
     retired = cov[
         (cov["timeframe"].astype(str).str.upper() == tf) &
-        (cov["retired_like"] == True)
+        cov["retired_like"].astype(bool)
     ]
     retired_set = set(retired["symbol"].astype(str).str.upper().tolist())
     filtered: List[str] = []
@@ -5329,6 +5329,48 @@ def _pair_scan_score_range(value: float, low: float, high: float) -> float:
     return max(0.0, min((clipped - low) / (high - low), 1.0))
 
 
+def _pair_scan_finite_pairs(left: pd.Series, right: pd.Series) -> List[tuple[float, float]]:
+    pairs: List[tuple[float, float]] = []
+    for raw_left, raw_right in zip(left.tolist(), right.tolist()):
+        try:
+            left_value = float(raw_left)
+            right_value = float(raw_right)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(left_value) and math.isfinite(right_value):
+            pairs.append((left_value, right_value))
+    return pairs
+
+
+def _pair_scan_pearson(left: pd.Series, right: pd.Series) -> Optional[float]:
+    pairs = _pair_scan_finite_pairs(left, right)
+    if len(pairs) < 3:
+        return None
+    mean_left = sum(left_value for left_value, _right_value in pairs) / len(pairs)
+    mean_right = sum(right_value for _left_value, right_value in pairs) / len(pairs)
+    centered = [(left_value - mean_left, right_value - mean_right) for left_value, right_value in pairs]
+    left_ss = sum(left_value * left_value for left_value, _right_value in centered)
+    right_ss = sum(right_value * right_value for _left_value, right_value in centered)
+    if left_ss <= 1e-18 or right_ss <= 1e-18:
+        return None
+    cross = sum(left_value * right_value for left_value, right_value in centered)
+    return cross / math.sqrt(left_ss * right_ss)
+
+
+def _pair_scan_ols_slope(dependent: pd.Series, independent: pd.Series) -> Optional[float]:
+    pairs = _pair_scan_finite_pairs(dependent, independent)
+    if len(pairs) < 2:
+        return None
+    mean_y = sum(y_value for y_value, _x_value in pairs) / len(pairs)
+    mean_x = sum(x_value for _y_value, x_value in pairs) / len(pairs)
+    centered = [(y_value - mean_y, x_value - mean_x) for y_value, x_value in pairs]
+    x_ss = sum(x_value * x_value for _y_value, x_value in centered)
+    if x_ss <= 1e-12:
+        return None
+    xy = sum(y_value * x_value for y_value, x_value in centered)
+    return xy / x_ss
+
+
 def _pair_scan_half_life(spread: pd.Series) -> Optional[float]:
     if spread is None or len(spread) < 20:
         return None
@@ -5340,14 +5382,10 @@ def _pair_scan_half_life(spread: pd.Series) -> Optional[float]:
     aligned = pd.concat([lagged.rename("lagged"), delta.rename("delta")], axis=1).dropna()
     if len(aligned) < 20:
         return None
-    x = (aligned["lagged"] - aligned["lagged"].mean()).values.reshape(-1, 1)
-    y = aligned["delta"].values
-    if len(x) < 20:
+    if len(aligned) < 20:
         return None
-    try:
-        coef, *_ = np.linalg.lstsq(x, y, rcond=None)
-        beta = float(coef[0]) if len(coef) else 0.0
-    except Exception:
+    beta = _pair_scan_ols_slope(aligned["delta"], aligned["lagged"])
+    if beta is None:
         return None
     if not math.isfinite(beta) or beta >= 0:
         return None
@@ -5438,7 +5476,7 @@ def _pair_scan_pair_metrics(
 
     log1 = np.log(price1)
     log2 = np.log(price2)
-    level_corr = float(log1.corr(log2)) if len(log1) >= 3 else float("nan")
+    level_corr = _pair_scan_pearson(log1, log2) if len(log1) >= 3 else None
 
     returns = pd.concat(
         [log1.diff().rename("ret1"), log2.diff().rename("ret2")],
@@ -5446,20 +5484,16 @@ def _pair_scan_pair_metrics(
     ).dropna()
     if len(returns) < max(20, min_overlap // 4):
         return None
-    return_corr = float(returns["ret1"].corr(returns["ret2"])) if len(returns) >= 3 else float("nan")
-    if not math.isfinite(level_corr) or not math.isfinite(return_corr):
+    return_corr = _pair_scan_pearson(returns["ret1"], returns["ret2"]) if len(returns) >= 3 else None
+    if level_corr is None or return_corr is None:
         return None
     if abs(level_corr) < 0.55 or abs(return_corr) < 0.15:
         return None
     if level_corr * return_corr < 0:
         return None
 
-    try:
-        centered_x = (price2 - float(price2.mean())).values.reshape(-1, 1)
-        centered_y = (price1 - float(price1.mean())).values
-        coef, *_ = np.linalg.lstsq(centered_x, centered_y, rcond=None)
-        hedge_ratio = float(coef[0]) if len(coef) else 1.0
-    except Exception:
+    hedge_ratio = _pair_scan_ols_slope(price1, price2)
+    if hedge_ratio is None:
         hedge_ratio = 1.0
     if not math.isfinite(hedge_ratio) or abs(hedge_ratio) < 0.05:
         return None

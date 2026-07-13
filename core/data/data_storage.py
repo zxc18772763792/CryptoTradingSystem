@@ -25,6 +25,12 @@ from config.database import (
 )
 from core.exchanges import Kline
 from core.data.path_utils import candidate_symbol_dirs, canonical_symbol_dir
+from core.data.parquet_lock import parquet_partition_lock
+
+
+PARQUET_WRITE_LOCK_TIMEOUT_SECONDS = float(
+    os.getenv("PARQUET_WRITE_LOCK_TIMEOUT_SECONDS", "30")
+)
 
 
 def _quarantine_corrupted_parquet(file_path: Path, error: Exception) -> None:
@@ -54,6 +60,92 @@ def _normalize_parquet_boundary(dt: Optional[datetime]) -> Optional[datetime]:
     if dt.tzinfo is None:
         return dt
     return dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _parquet_index_column(file_path: Path) -> Optional[str]:
+    """Find the physical timestamp index column used by a pandas parquet file."""
+
+    schema = pq.read_schema(file_path)
+    metadata = schema.metadata or {}
+    pandas_metadata = metadata.get(b"pandas")
+    if pandas_metadata:
+        try:
+            index_columns = json.loads(pandas_metadata).get("index_columns") or []
+            for item in index_columns:
+                if isinstance(item, str) and item in schema.names:
+                    return item
+        except (TypeError, ValueError, UnicodeDecodeError):
+            pass
+    for candidate in ("timestamp", "__index_level_0__"):
+        if candidate in schema.names:
+            return candidate
+    return None
+
+
+def _read_parquet_frame(
+    file_path: Path,
+    *,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> pd.DataFrame:
+    """Read a parquet frame, pruning legacy monolith row groups when bounded."""
+
+    if start_time is None and end_time is None:
+        return pd.read_parquet(file_path)
+    index_column = _parquet_index_column(file_path)
+    if not index_column:
+        logger.warning(
+            f"Parquet file {file_path} has no discoverable timestamp index; "
+            "falling back to a full compatibility read"
+        )
+        return pd.read_parquet(file_path)
+    filters = []
+    if start_time is not None:
+        filters.append((index_column, ">=", start_time))
+    if end_time is not None:
+        filters.append((index_column, "<=", end_time))
+    return pd.read_parquet(file_path, filters=filters)
+
+
+def _parquet_max_timestamp(file_path: Path) -> Optional[datetime]:
+    """Return a parquet file's latest timestamp from row-group metadata."""
+
+    parquet_file = pq.ParquetFile(file_path)
+    index_column = _parquet_index_column(file_path)
+    if not index_column:
+        return None
+    maxima: List[pd.Timestamp] = []
+    for row_group_idx in range(parquet_file.num_row_groups):
+        row_group = parquet_file.metadata.row_group(row_group_idx)
+        for column_idx in range(row_group.num_columns):
+            column = row_group.column(column_idx)
+            if column.path_in_schema != index_column:
+                continue
+            statistics = column.statistics
+            if statistics is not None and statistics.has_min_max:
+                maxima.append(pd.Timestamp(statistics.max))
+            break
+    if not maxima:
+        # Some legacy writers omitted min/max statistics. Reading only the
+        # newest row group remains bounded and avoids materializing the whole
+        # monolith just to discover its final timestamp.
+        if parquet_file.num_row_groups <= 0:
+            return None
+        table = parquet_file.read_row_group(
+            parquet_file.num_row_groups - 1,
+            columns=[index_column],
+        )
+        values = table.column(index_column).to_pandas()
+        if values.empty:
+            return None
+        maxima.append(pd.Timestamp(values.max()))
+    latest = max(maxima)
+    if latest.tzinfo is not None:
+        latest = latest.tz_convert("UTC").tz_localize(None)
+    now_utc = pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
+    if latest > now_utc + pd.Timedelta(minutes=2):
+        latest -= _LOCAL_OFFSET
+    return latest.to_pydatetime()
 
 
 def _normalize_parquet_frame_index(df: pd.DataFrame) -> pd.DataFrame:
@@ -326,41 +418,49 @@ class DataStorage:
             grouped = df.groupby(df.index.date, sort=True)
             for part_day, day_df in grouped:
                 part_path = parts_dir / f"{part_day.isoformat()}.parquet"
-                merged_df = _normalize_parquet_frame_index(day_df)
-                if part_path.exists():
+                with parquet_partition_lock(
+                    part_path,
+                    timeout_seconds=PARQUET_WRITE_LOCK_TIMEOUT_SECONDS,
+                ):
+                    incoming_df = _normalize_parquet_frame_index(day_df)
+                    merged_df = incoming_df
+                    existing_df: Optional[pd.DataFrame] = None
+                    if part_path.exists():
+                        try:
+                            existing_df = pd.read_parquet(part_path)
+                            existing_df = _normalize_parquet_frame_index(existing_df)
+                            existing_df = _heal_local_existing_against_utc(
+                                existing_df, incoming_df
+                            )
+                            merged_df = pd.concat([existing_df, incoming_df])
+                        except Exception as e:
+                            logger.warning(f"Failed to merge partition file {part_path}: {e}")
+                            _quarantine_corrupted_parquet(part_path, e)
+                    merged_df = merged_df[~merged_df.index.duplicated(keep="last")]
+                    merged_df = merged_df.sort_index()
+                    if existing_df is not None and merged_df.equals(existing_df):
+                        continue
+                    table = pa.Table.from_pandas(merged_df)
+                    # The lock protects the full read-modify-write transaction;
+                    # os.replace additionally keeps readers from observing a
+                    # partially-written file.
+                    tmp_path = part_path.with_name(f"{part_path.name}.{uuid4().hex}.tmp")
                     try:
-                        existing_df = pd.read_parquet(part_path)
-                        existing_df = _normalize_parquet_frame_index(existing_df)
-                        existing_df = _heal_local_existing_against_utc(
-                            existing_df, merged_df
+                        pq.write_table(
+                            table,
+                            str(tmp_path),
+                            compression="zstd",
+                            compression_level=9,
                         )
-                        merged_df = pd.concat([existing_df, merged_df])
-                    except Exception as e:
-                        logger.warning(f"Failed to merge partition file {part_path}: {e}")
-                        _quarantine_corrupted_parquet(part_path, e)
-                merged_df = merged_df[~merged_df.index.duplicated(keep="last")]
-                merged_df = merged_df.sort_index()
-                table = pa.Table.from_pandas(merged_df)
-                # Atomic publish: write to a unique temp file then os.replace so
-                # concurrent readers (load path / backfill) never observe a
-                # half-written partition (which previously caused silent data loss).
-                tmp_path = part_path.with_name(f"{part_path.name}.{uuid4().hex}.tmp")
-                try:
-                    pq.write_table(
-                        table,
-                        str(tmp_path),
-                        compression="zstd",
-                        compression_level=9,
-                    )
-                    os.replace(tmp_path, part_path)
-                except Exception:
-                    try:
-                        if tmp_path.exists():
-                            tmp_path.unlink()
-                    except OSError:
-                        pass
-                    raise
-                written_parts.append(part_path)
+                        os.replace(tmp_path, part_path)
+                    except Exception:
+                        try:
+                            if tmp_path.exists():
+                                tmp_path.unlink()
+                        except OSError:
+                            pass
+                        raise
+                    written_parts.append(part_path)
             return written_parts
 
         written_parts = await asyncio.to_thread(_save_sync)
@@ -389,7 +489,11 @@ class DataStorage:
 
                 if file_path.exists():
                     try:
-                        single_df = pd.read_parquet(file_path)
+                        single_df = _read_parquet_frame(
+                            file_path,
+                            start_time=start_time,
+                            end_time=end_time,
+                        )
                         if not single_df.empty:
                             single_df = _normalize_parquet_frame_index(single_df)
                             frames.append(single_df)
@@ -443,6 +547,42 @@ class DataStorage:
             return df
 
         return await asyncio.to_thread(_load_sync)
+
+    async def get_latest_kline_timestamp(
+        self,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+    ) -> Optional[datetime]:
+        """Return the newest local bar timestamp without loading bar history."""
+
+        def _latest_sync() -> Optional[datetime]:
+            candidates: List[datetime] = []
+            for symbol_root in candidate_symbol_dirs(self.storage_path, exchange, symbol):
+                legacy_path = symbol_root / f"{timeframe}.parquet"
+                if legacy_path.exists():
+                    try:
+                        latest = _parquet_max_timestamp(legacy_path)
+                        if latest is not None:
+                            candidates.append(latest)
+                    except Exception as exc:
+                        logger.warning(f"Failed to inspect parquet metadata {legacy_path}: {exc}")
+
+                parts_dir = symbol_root / f"{timeframe}_parts"
+                if not parts_dir.exists():
+                    continue
+                for part_path in sorted(parts_dir.glob("*.parquet"), reverse=True):
+                    try:
+                        latest = _parquet_max_timestamp(part_path)
+                    except Exception as exc:
+                        logger.warning(f"Failed to inspect parquet metadata {part_path}: {exc}")
+                        continue
+                    if latest is not None:
+                        candidates.append(latest)
+                        break
+            return max(candidates) if candidates else None
+
+        return await asyncio.to_thread(_latest_sync)
 
     async def load_klines_from_db(
         self,
@@ -635,7 +775,6 @@ class DataStorage:
         dry_run: bool = True,
     ) -> Dict:
         """清理旧数据"""
-        cutoff = datetime.now() - timedelta(days=days)
         result = {
             "files_removed": 0,
             "space_freed_mb": 0,

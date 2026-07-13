@@ -9,11 +9,9 @@ Tests cover requirements A-D from airesearch_todo.txt:
 from __future__ import annotations
 
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -69,9 +67,7 @@ def test_planner_filter_returns_only_supported():
 def test_planner_filtered_templates_in_proposal():
     """A: filtered_templates field on proposal captures dropped strategies."""
     from core.ai.research_planner import PlannerGenerateRequest, generate_research_proposal
-    from core.research.strategy_research import get_supported_research_strategies
 
-    supported = set(get_supported_research_strategies())
     # Inject a fake unsupported strategy by patching the default template list
     fake_unsupported = "NonExistentFakeStrategy"
     req = PlannerGenerateRequest(
@@ -821,7 +817,7 @@ def test_backtest_optimize_summary_contains_trade_points_and_zero_trade_reason()
 
 def test_candidate_params_populated_from_grid_search():
     """B: When parameter_space is set, candidate.params must be non-empty."""
-    from core.research.strategy_research import ResearchConfig, _generate_param_combos, _run_backtest_core, _compute_score
+    from core.research.strategy_research import _compute_score, _generate_param_combos, _run_backtest_core
 
     df = _make_ohlcv(400)
     param_grid = {"fast_period": [5, 10, 15], "slow_period": [20, 30]}
@@ -1057,18 +1053,9 @@ def test_registry_thread_safety(tmp_path: Path):
 
 def test_promotion_uses_candidate_params():
     """B: promote_candidate should use candidate.params when promoting."""
-    from core.deployment.promotion_engine import promote_candidate
-    from core.ai.proposal_schemas import ResearchProposal
-    from core.research.experiment_schemas import StrategyCandidate, PromotionDecision
+    from core.research.experiment_schemas import StrategyCandidate
 
     now = _now()
-    proposal = ResearchProposal(
-        proposal_id="p-test",
-        created_at=now,
-        updated_at=now,
-        thesis="test params promotion",
-        status="validated",
-    )
     candidate = StrategyCandidate(
         candidate_id="c-test",
         proposal_id="p-test",
@@ -1080,22 +1067,6 @@ def test_promotion_uses_candidate_params():
         params={"fast_period": 8, "slow_period": 25},  # B: non-default params
         score=50.0,
     )
-    promotion = PromotionDecision(
-        candidate_id="c-test",
-        decision="paper",
-        reason="test",
-        constraints={"allocation_cap": 0.1, "runtime_mode": "paper"},
-        created_at=now,
-    )
-    # Mock app with minimal state
-    app = MagicMock()
-    app.state.ai_proposal_registry = MagicMock()
-    app.state.ai_proposal_registry.save = MagicMock()
-    app.state.ai_lifecycle_registry = MagicMock()
-    app.state.ai_lifecycle_registry.append = MagicMock()
-    app.state.strategy_registry = MagicMock()
-    app.state.strategy_registry.get = MagicMock(return_value=None)
-
     # promote_candidate is async — just verify it reads candidate.params
     assert candidate.params == {"fast_period": 8, "slow_period": 25}
 
@@ -1724,6 +1695,8 @@ def test_cusum_watcher_triggers():
             patch("web.api.ai_research._trades_to_returns", return_value=negative_returns),
             patch("core.monitoring.cusum_watcher._send_cusum_notification"),
             patch("core.monitoring.cusum_watcher._demote_on_decay", new=AsyncMock(return_value="shadow_running")),
+            patch("core.audit.gate_counterfactuals.record_gate_counterfactual"),
+            patch("core.observability.score_calibration.update_family_regime_priors", return_value={"applied": 1}),
         ):
             result = await run_cusum_checks_for_all_candidates(app)
         return result

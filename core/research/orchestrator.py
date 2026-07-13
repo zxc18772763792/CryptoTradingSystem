@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -1044,12 +1045,33 @@ def _correlation_filter_candidates(
     existing_candidates: already-registered strategies (paper/shadow/live)
     whose equity curves count as pre-accepted baselines.
     """
-    import numpy as np
-
     def _get_curve(c: StrategyCandidate) -> Optional[List[float]]:
         best_meta = dict(c.metadata.get("best") or {})
         raw = best_meta.get("equity_curve_sample") or []
         return list(raw) if len(raw) >= 10 else None
+
+    def _abs_pearson_corr(left: List[float], right: List[float]) -> Optional[float]:
+        pairs: List[tuple[float, float]] = []
+        for raw_x, raw_y in zip(left, right):
+            try:
+                x = float(raw_x)
+                y = float(raw_y)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(x) and math.isfinite(y):
+                pairs.append((x, y))
+        if len(pairs) < 2:
+            return None
+
+        mean_x = sum(x for x, _y in pairs) / len(pairs)
+        mean_y = sum(y for _x, y in pairs) / len(pairs)
+        centered = [(x - mean_x, y - mean_y) for x, y in pairs]
+        sum_xx = sum(x * x for x, _y in centered)
+        sum_yy = sum(y * y for _x, y in centered)
+        if sum_xx < 1e-18 or sum_yy < 1e-18:
+            return None
+        corr = sum(x * y for x, y in centered) / math.sqrt(sum_xx * sum_yy)
+        return abs(corr)
 
     def _params_key(c: StrategyCandidate) -> tuple[tuple[str, str], ...]:
         params = dict(c.params or {})
@@ -1168,11 +1190,9 @@ def _correlation_filter_candidates(
                 if peer_curve is None or acc_id == cand_id:
                     continue
                 n = min(len(my_curve), len(peer_curve))
-                x = np.array(my_curve[:n], dtype=float)
-                y = np.array(peer_curve[:n], dtype=float)
-                if x.std() < 1e-9 or y.std() < 1e-9:
+                corr = _abs_pearson_corr(my_curve[:n], peer_curve[:n])
+                if corr is None:
                     continue
-                corr = abs(float(np.corrcoef(x, y)[0, 1]))
                 if corr > max_corr:
                     max_corr = corr
                     corr_peer = acc_id

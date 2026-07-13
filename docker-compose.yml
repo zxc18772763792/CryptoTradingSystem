@@ -29,10 +29,18 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     mem_limit: 1g
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5)"]
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 60s
     networks:
       - crypto_net
 
@@ -47,8 +55,10 @@ services:
       - ./logs:/app/logs
       - ./.env:/app/.env:ro
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     mem_limit: 1g
     networks:
@@ -68,18 +78,30 @@ services:
       - "5432"
     restart: unless-stopped
     mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - crypto_net
 
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?REDIS_PASSWORD env var is required}"]
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD env var is required}
     expose:
       - "6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped
     mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
     networks:
       - crypto_net
 

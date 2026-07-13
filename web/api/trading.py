@@ -5630,6 +5630,7 @@ async def _get_orders_locked(
             order_manager.get_open_orders(
                 symbol=symbol,
                 exchange=exchange,
+                trading_mode=execution_engine.get_trading_mode(),
             ),
             timeout=4.5,
         )
@@ -5811,7 +5812,11 @@ async def _cancel_all_orders_locked(
     symbol: Optional[str] = None,
     exchange: str = "binance",
 ):
-    count = await order_manager.cancel_all_orders(symbol, exchange)
+    count = await order_manager.cancel_all_orders(
+        symbol,
+        exchange,
+        trading_mode=execution_engine.get_trading_mode(),
+    )
     _schedule_audit_log(
         module="trading",
         action="cancel_all_orders",

@@ -10,7 +10,8 @@ param(
     [bool]$StartNewsLlmWorker = $false,
     [bool]$StartPmWorker = $false,
     [bool]$EnableAnalyticsHistory = $false,
-    [bool]$TestDataSources = $false
+    [bool]$TestDataSources = $false,
+    [switch]$DisableSupervisorBootstrap
 )
 
 $ErrorActionPreference = "Stop"
@@ -300,6 +301,60 @@ function Ensure-ResearchUniverseRefreshTask {
     }
 }
 
+function Start-WebSupervisor {
+    param([string]$PythonExecutable)
+
+    if ($DisableSupervisorBootstrap.IsPresent) { return }
+    $supervisorScript = Join-Path $PSScriptRoot "scripts\supervise_web.ps1"
+    if (-not (Test-Path $supervisorScript)) { throw "Web supervisor script not found: $supervisorScript" }
+    $existing = @(
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $name = [string]$_.Name
+                $cmd = [string]$_.CommandLine
+                $name -and $name.ToLowerInvariant() -eq "powershell.exe" -and
+                $cmd -and [int]$_.ProcessId -ne [int]$PID -and
+                $cmd -match '(?i)-File\s+(?:"[^"]*supervise_web\.ps1"|[^\s"]*supervise_web\.ps1)(?:\s|$)' -and
+                $cmd -match ("(?i)-Port\s+{0}(?:\s|$)" -f [int]$Port)
+            }
+    )
+    if ($existing.Count) {
+        Write-Host ("Web supervisor already running (PID={0})." -f (($existing | Select-Object -ExpandProperty ProcessId) -join ", "))
+        return
+    }
+    $stopPath = Join-Path $PSScriptRoot ("runtime\web_supervisor_{0}.stop" -f $Port)
+    Remove-Item $stopPath -Force -ErrorAction SilentlyContinue
+    $args = @(
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $supervisorScript,
+        "-ProjectRoot", $PSScriptRoot, "-PythonExecutable", $PythonExecutable,
+        "-EnvName", $EnvName, "-BindHost", $BindHost, "-Port", "$Port",
+        "-HealthWaitSec", "$HealthWaitSec"
+    )
+    if ($AllowPersistedLiveMode) { $args += "-AllowPersistedLiveMode" }
+    if ($StartAutonomousAgent) { $args += "-StartAutonomousAgent" }
+    if ($StartNewsWorker) { $args += "-StartNewsWorker" }
+    if ($StartNewsLlmWorker) { $args += "-StartNewsLlmWorker" }
+    if ($StartPmWorker) { $args += "-StartPmWorker" }
+    if ($EnableAnalyticsHistory) { $args += "-EnableAnalyticsHistory" }
+    $supervisorStdout = Join-Path $PSScriptRoot "logs\web_supervisor.out.log"
+    $supervisorStderr = Join-Path $PSScriptRoot "logs\web_supervisor.err.log"
+    $supervisor = Start-Process -FilePath "powershell.exe" -ArgumentList $args `
+        -WorkingDirectory $PSScriptRoot -WindowStyle Hidden `
+        -RedirectStandardOutput $supervisorStdout -RedirectStandardError $supervisorStderr -PassThru
+    Write-Host "Started web supervisor PID=$($supervisor.Id)."
+    Write-Host "Web supervisor log: $(Join-Path $PSScriptRoot 'logs\web_supervisor.log')"
+}
+
+function Invoke-NativeRuntimePrecheck {
+    param([string]$PythonExecutable)
+    $checkScript = Join-Path $PSScriptRoot "scripts\check_native_runtime.py"
+    if (-not (Test-Path $checkScript)) { throw "Native runtime precheck not found: $checkScript" }
+    & $PythonExecutable $checkScript
+    if ($LASTEXITCODE -ne 0) {
+        throw "Native runtime precheck failed with exit code $LASTEXITCODE. Web startup is blocked."
+    }
+}
+
 Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env")
 Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env.local")
 
@@ -375,6 +430,7 @@ if ($pidOnPort) {
             $agentResponse = Start-AutonomousAgent -WebPort $Port
             Show-AutonomousAgentStartSummary -Response $agentResponse
         }
+        Start-WebSupervisor -PythonExecutable (Resolve-PythonExecutable)
         if ($OpenBrowser) {
             Open-WebConsole -WebPort $Port
         }
@@ -391,6 +447,7 @@ if (Enable-CondaEnv -Name $EnvName) {
 
 $pythonExe = Resolve-PythonExecutable
 Write-Host "Python executable: $pythonExe"
+Invoke-NativeRuntimePrecheck -PythonExecutable $pythonExe
 Write-Host "Startup profile: $startupProfile"
 if ($ignoredEnvWorkerFlags.Count) {
     Write-Host ("Managed start ignored .env worker flags: {0}" -f ($ignoredEnvWorkerFlags -join ", ")) -ForegroundColor Yellow
@@ -483,7 +540,7 @@ while ((Get-Date) -lt $statusDeadline) {
         break
     }
     try {
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec $healthTimeoutSec
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/readyz" -TimeoutSec $healthTimeoutSec
         if ($health) {
             if (-not $healthReadyAt) {
                 $healthReadyAt = Get-Date
@@ -556,7 +613,7 @@ if ($proc.HasExited) {
     if ($lastProbeError) {
         Write-Host ("Last probe error: {0}" -f $lastProbeError) -ForegroundColor Yellow
     }
-    Write-Host "Stopping unhealthy web process because /health never became ready inside the startup window." -ForegroundColor Red
+    Write-Host "Stopping unhealthy web process because /readyz never became ready inside the startup window." -ForegroundColor Red
     Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     Write-Host "Inspect startup logs:" -ForegroundColor Yellow
     Write-Host "  stdout: $webStdoutPath" -ForegroundColor Yellow
@@ -568,6 +625,8 @@ if ($proc.HasExited) {
 }
 
 # 测试数据源 (可选)
+Start-WebSupervisor -PythonExecutable $pythonExe
+
 $shouldTestDataSources = $TestDataSources
 if (-not $shouldTestDataSources) {
     $rawTestToggle = [string]($env:TEST_DATA_SOURCES)

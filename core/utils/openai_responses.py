@@ -405,13 +405,21 @@ def _openai_failover_today() -> str:
 def _openai_failover_file_lock(path: Path):
     lock_path = path.with_suffix(path.suffix + ".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+b") as handle:
-        if os.name == "nt":
-            import msvcrt
-
+    # Do not use append mode here.  On Windows every write to an ``a+b`` file
+    # is forced to EOF even after seek(0), so the one-byte lock file grew on
+    # every acquisition.  os.open gives us create-if-missing semantics without
+    # append behavior.
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT)
+    with os.fdopen(fd, "r+b") as handle:
+        handle.seek(0)
+        if handle.read(1) != b"0":
             handle.seek(0)
             handle.write(b"0")
             handle.flush()
+        handle.truncate(1)
+        if os.name == "nt":
+            import msvcrt
+
             handle.seek(0)
             msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
             try:
