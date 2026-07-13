@@ -74,3 +74,34 @@ def test_switch_missing_instance(monkeypatch):
     from core.strategies import strategy_manager as mgr
     res = mgr.set_strategy_runtime_mode("NOPE_DOES_NOT_EXIST", "live")
     assert res["ok"] is False and res["reason"] == "not_found"
+
+
+def test_resolver_prefers_registered_object_over_stale_metadata(monkeypatch):
+    """Regression: crash-restored cfg.metadata said "paper" while the live
+    object/params said "live"; the metadata-first resolver then re-provisioned
+    the LIVE strategy's isolated account as paper on start (protective orders /
+    position scope would resolve against the wrong mode). The registered
+    object's runtime_mode must win."""
+    from core.strategies import strategy_manager as mgr
+
+    strat = _FakeStrategy("live")
+    monkeypatch.setitem(mgr._strategies, "X", strat)
+    resolved = mgr._resolve_strategy_runtime_mode(
+        "X",
+        params={"runtime_mode": "live", "account_id": "strategy_x"},
+        metadata={"runtime_mode": "paper"},  # stale persisted copy
+    )
+    assert resolved == "live"
+
+
+def test_resolver_unregistered_still_uses_metadata_chain(monkeypatch):
+    """Registration-time resolution (no live object yet) keeps prior semantics."""
+    from core.strategies import strategy_manager as mgr
+
+    mgr._strategies.pop("Y_NOT_REGISTERED", None)
+    resolved = mgr._resolve_strategy_runtime_mode(
+        "Y_NOT_REGISTERED",
+        params={"runtime_mode": "live", "account_id": "strategy_y"},
+        metadata={"runtime_mode": "paper"},
+    )
+    assert resolved == "paper"
