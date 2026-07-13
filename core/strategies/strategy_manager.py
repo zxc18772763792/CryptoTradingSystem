@@ -173,7 +173,16 @@ class StrategyManager:
             resolved_params.get("account_id")
             or self._default_strategy_account_id(name)
         ).strip()
+        # For a REGISTERED instance the live object's runtime_mode is the source
+        # of truth and must win over any stored params/metadata copies. The
+        # split-brain this guards against actually happened: a crash left
+        # cfg.metadata.runtime_mode stale ("paper") while the object/params said
+        # "live", and because this resolver was metadata-first while
+        # get_strategy_runtime_mode is object-first, starting the strategy
+        # silently re-provisioned its LIVE isolated account as paper.
+        registered = self._strategies.get(name)
         candidates = [
+            getattr(registered, "runtime_mode", None) if registered is not None else None,
             resolved_metadata.get("runtime_mode"),
             resolved_params.get("runtime_mode"),
             resolved_params.get("trading_mode"),
