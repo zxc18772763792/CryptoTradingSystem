@@ -83,6 +83,7 @@ from web.api import ai_research
 from web.api import ml
 from web.api.auth import (
     _has_valid_local_ui_session,
+    renew_local_ui_session_cookie,
     require_sensitive_ops_permissions,
     set_local_ui_session_cookie,
 )
@@ -2243,6 +2244,20 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _sliding_local_ui_session(request: Request, call_next):
+    # Keep an open dashboard authenticated: requests that already carry a
+    # valid loopback session cookie get it re-issued, so the 8h max-age acts
+    # as an idle timeout instead of a hard expiry that silently 401s every
+    # panel ("状态延迟"). See web/api/auth.py::renew_local_ui_session_cookie.
+    response = await call_next(request)
+    try:
+        renew_local_ui_session_cookie(request, response)
+    except Exception:
+        pass
+    return response
 
 static_path = Path(__file__).parent / "static"
 static_path.mkdir(parents=True, exist_ok=True)

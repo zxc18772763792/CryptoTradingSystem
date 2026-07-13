@@ -116,6 +116,22 @@ def set_local_ui_session_cookie(request: Request, response: Response) -> None:
     )
 
 
+def renew_local_ui_session_cookie(request: Request, response: Response) -> bool:
+    """Sliding renewal for the loopback UI session.
+
+    The cookie hard-expired ``_LOCAL_UI_COOKIE_MAX_AGE_SEC`` (8h) after the
+    last full page load, so a dashboard left open silently 401'ed on every
+    poll and the UI showed "状态延迟" (it bit twice in production). Re-issuing
+    the cookie whenever a request already carries a VALID one turns the
+    expiry into an idle timeout: an open, polling page stays authenticated
+    indefinitely, while a browser idle for 8h still expires as before.
+    """
+    if not _has_valid_local_ui_session(request):
+        return False
+    set_local_ui_session_cookie(request, response)
+    return True
+
+
 def _has_valid_local_ui_session(request: Request) -> bool:
     if not _is_loopback_request(request):
         return False

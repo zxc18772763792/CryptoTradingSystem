@@ -719,3 +719,68 @@ def test_live_mode_confirm_requires_approve_live_permission_for_api_key(monkeypa
     assert response.status_code == 200
     assert response.json()["mode"] == "live"
     assert switch_mock.await_count == 1
+
+
+def test_loopback_ui_cookie_sliding_renewal(monkeypatch):
+    """Regression: the 8h cookie hard-expired under an open dashboard, so every
+    poll 401'ed and the UI showed "状态延迟". With sliding renewal, any request
+    carrying a VALID cookie gets it re-issued (idle timeout semantics)."""
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    monkeypatch.setattr(web_auth, "_request_client_ip", lambda request: "127.0.0.1")
+
+    app = _build_app()
+
+    @app.middleware("http")
+    async def sliding(request: Request, call_next):
+        response = await call_next(request)
+        web_auth.renew_local_ui_session_cookie(request, response)
+        return response
+
+    @app.get("/")
+    async def index(request: Request):
+        response = JSONResponse({"ok": True})
+        web_auth.set_local_ui_session_cookie(request, response)
+        return response
+
+    @app.get("/api/anything")
+    async def anything(request: Request):
+        return JSONResponse({"ok": True})
+
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+
+    # No cookie yet -> API response must NOT issue one (renewal is not issuance).
+    bare = client.get("/api/anything")
+    assert web_auth._LOCAL_UI_COOKIE_NAME not in (bare.headers.get("set-cookie") or "")
+
+    # Acquire the session cookie from the index page.
+    home = client.get("/")
+    assert web_auth._LOCAL_UI_COOKIE_NAME in client.cookies
+
+    # Any subsequent request carrying the valid cookie gets it RE-ISSUED,
+    # extending max-age (sliding renewal).
+    renewed = client.get("/api/anything")
+    set_cookie = renewed.headers.get("set-cookie") or ""
+    assert web_auth._LOCAL_UI_COOKIE_NAME in set_cookie
+    assert "Max-Age" in set_cookie or "max-age" in set_cookie
+
+
+def test_loopback_ui_cookie_renewal_rejects_invalid_cookie(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    monkeypatch.setattr(web_auth, "_request_client_ip", lambda request: "127.0.0.1")
+
+    app = _build_app()
+
+    @app.middleware("http")
+    async def sliding(request: Request, call_next):
+        response = await call_next(request)
+        web_auth.renew_local_ui_session_cookie(request, response)
+        return response
+
+    @app.get("/api/anything")
+    async def anything(request: Request):
+        return JSONResponse({"ok": True})
+
+    client = TestClient(app, base_url="http://127.0.0.1:8000")
+    client.cookies.set(web_auth._LOCAL_UI_COOKIE_NAME, "forged-value")
+    response = client.get("/api/anything")
+    assert web_auth._LOCAL_UI_COOKIE_NAME not in (response.headers.get("set-cookie") or "")
