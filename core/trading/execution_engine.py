@@ -3434,6 +3434,14 @@ class ExecutionEngine:
         price_changed = current_price > 0 and abs(old_current - current_price) > max(1e-9, abs(old_current) * 1e-6)
         if not (quantity_changed or entry_changed or price_changed):
             return False
+        # Only a quantity/entry divergence is a MATERIAL reconcile event — the
+        # caller's WARNING ("exchange_position_size_changed") + callback + force
+        # persist are meant for that. A moving mark price is normal market
+        # drift; it used to count as "changed" too, so every ~12s pass warned
+        # and force-wrote scope state to the exFAT volume around the clock.
+        # Price-only drift still refreshes the fields below, but persists
+        # throttled and reports "no material change".
+        material_change = quantity_changed or entry_changed
 
         leverage = max(1e-9, float(snapshot.get("leverage") or getattr(local_pos, "leverage", 1.0) or 1.0))
         local_pos.quantity = quantity
@@ -3456,8 +3464,8 @@ class ExecutionEngine:
         metadata["last_exchange_sync_source"] = "live_position_reconcile"
         local_pos.metadata = metadata
         position_manager._dirty = True
-        position_manager._persist_scope_state(force=True)
-        return True
+        position_manager._persist_scope_state(force=material_change)
+        return material_change
 
     async def _reconcile_local_positions_with_exchange(self) -> None:
         """In live mode, drop stale local positions that no longer exist on exchange."""
