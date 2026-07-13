@@ -49,6 +49,21 @@ $script:WorkerDefinitions = @(
 )
 $script:ResearchUniverseTaskName = "CryptoTradingSystem_ResearchUniverseRefresh"
 
+function Get-WebSupervisorProcesses {
+    return @(
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                $name = [string]$_.Name
+                $cmd = [string]$_.CommandLine
+                $name -and $name.ToLowerInvariant() -eq "powershell.exe" -and
+                $cmd -and
+                [int]$_.ProcessId -ne [int]$PID -and
+                $cmd -match '(?i)-File\s+(?:"[^"]*supervise_web\.ps1"|[^\s"]*supervise_web\.ps1)(?:\s|$)' -and
+                $cmd -match ("(?i)-Port\s+{0}(?:\s|$)" -f [int]$Port)
+            }
+    )
+}
+
 function Get-ListeningPid {
     param([int]$PortNumber)
 
@@ -250,7 +265,7 @@ function Get-HealthSummary {
     $statusHeaders = Get-OpsAuthHeaders -EnvValues $envValues
 
     try {
-        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/health" -TimeoutSec $healthTimeoutSec
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/readyz" -TimeoutSec $healthTimeoutSec
     }
     catch {
         return $null
@@ -391,6 +406,13 @@ function Show-Status {
         Write-Host ("  Analytics    : default off unless -EnableAnalyticsHistory is used [env ANALYTICS_HISTORY_ENABLED={0}]" -f (Format-ConfigValue -Value $analyticsEnvValue))
     }
     Write-Host ("  Research job : {0}" -f (Get-ResearchUniverseTaskSummary))
+    $supervisors = @(Get-WebSupervisorProcesses)
+    $supervisorText = if ($supervisors.Count) {
+        "running (PID=" + (($supervisors | Select-Object -ExpandProperty ProcessId) -join ", ") + ")"
+    } else {
+        "not observed"
+    }
+    Write-Host ("  Supervisor   : {0}" -f $supervisorText)
 
     if ((-not $webPid) -and (-not $managedWebProcesses.Count)) {
         Write-Host "  Web          : stopped"
@@ -536,6 +558,23 @@ function Stop-ManagedProcesses {
     Write-Host ""
     Write-Host "Stop request" -ForegroundColor Cyan
     Write-Host ("  Scope        : {0}" -f ($(if ($StopWorkers) { "web + observed external workers" } else { "web only" })))
+
+    # Stop the detached supervisor first so an intentional operator stop is
+    # never mistaken for a crash that needs an immediate restart.
+    $supervisorStopPath = Join-Path $projectRoot ("runtime\web_supervisor_{0}.stop" -f $PortNumber)
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $supervisorStopPath) | Out-Null
+    "operator_stop" | Set-Content -Path $supervisorStopPath -Encoding ASCII
+    $supervisors = @(Get-WebSupervisorProcesses)
+    if ($supervisors.Count) {
+        Start-Sleep -Milliseconds 750
+        foreach ($supervisor in $supervisors) {
+            if (Get-Process -Id $supervisor.ProcessId -ErrorAction SilentlyContinue) {
+                Stop-Process -Id $supervisor.ProcessId -Force -ErrorAction SilentlyContinue
+            }
+            Write-Host ("Stopped web supervisor PID={0}" -f $supervisor.ProcessId)
+            $stopped = $true
+        }
+    }
 
     if ($webPid -and (-not (Test-IsManagedWebProcess -ProcessRecord $webProc))) {
         throw "Port $PortNumber is occupied by PID $webPid, but it does not look like the managed web process."

@@ -1,8 +1,11 @@
 """Backtest API endpoints."""
+import atexit
 import asyncio
 import io
 import itertools
 import json
+import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +47,124 @@ from strategies.quantitative.intraday_cross_section import (
 from strategies.quantitative.multi_factor_hf import MultiFactorHFStrategy
 
 router = APIRouter()
+
+
+_ACTIVE_OPTIMIZE_POOLS: Dict[int, tuple[Any, threading.Event]] = {}
+_ACTIVE_OPTIMIZE_POOLS_LOCK = threading.RLock()
+
+
+class _OptimizationCancelled(RuntimeError):
+    pass
+
+
+def _optimize_worker_initializer(parent_pid: int) -> None:
+    """Exit a spawned worker if its Uvicorn parent disappears.
+
+    ``ProcessPoolExecutor.shutdown`` handles orderly shutdown, but cannot run
+    when CPython terminates in a native extension.  A worker-local watchdog is
+    therefore required on Windows, where orphaned spawn workers otherwise keep
+    their committed memory indefinitely.
+    """
+
+    def watch_parent() -> None:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            synchronize = 0x00100000
+            infinite = 0xFFFFFFFF
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            handle = kernel32.OpenProcess(synchronize, False, int(parent_pid))
+            if not handle:
+                os._exit(70)
+            try:
+                kernel32.WaitForSingleObject(handle, infinite)
+            finally:
+                kernel32.CloseHandle(handle)
+            os._exit(70)
+
+        while os.getppid() == int(parent_pid):
+            threading.Event().wait(1.0)
+        os._exit(70)
+
+    threading.Thread(
+        target=watch_parent,
+        name=f"optimize-parent-watch-{parent_pid}",
+        daemon=True,
+    ).start()
+
+
+def _register_optimize_pool(pool: Any, cancel_event: threading.Event) -> None:
+    with _ACTIVE_OPTIMIZE_POOLS_LOCK:
+        _ACTIVE_OPTIMIZE_POOLS[id(pool)] = (pool, cancel_event)
+
+
+def _unregister_optimize_pool(pool: Any) -> None:
+    with _ACTIVE_OPTIMIZE_POOLS_LOCK:
+        _ACTIVE_OPTIMIZE_POOLS.pop(id(pool), None)
+
+
+def _stop_optimize_pool(pool: Any, *, wait: bool, terminate: bool) -> None:
+    processes = list((getattr(pool, "_processes", None) or {}).values())
+    if not terminate:
+        try:
+            pool.shutdown(wait=wait, cancel_futures=True)
+        except Exception:
+            pass
+        return
+    try:
+        pool.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+    if terminate:
+        for process in processes:
+            try:
+                if process.is_alive():
+                    process.terminate()
+            except Exception:
+                pass
+    if wait or terminate:
+        for process in processes:
+            try:
+                process.join(timeout=1.0)
+                if process.is_alive() and hasattr(process, "kill"):
+                    process.kill()
+                    process.join(timeout=1.0)
+            except Exception:
+                pass
+
+
+def shutdown_optimize_process_pools(*, wait: bool = False) -> int:
+    """Cancel and reap all optimization pools during application shutdown."""
+    with _ACTIVE_OPTIMIZE_POOLS_LOCK:
+        entries = list(_ACTIVE_OPTIMIZE_POOLS.values())
+        _ACTIVE_OPTIMIZE_POOLS.clear()
+    for pool, cancel_event in entries:
+        cancel_event.set()
+        _stop_optimize_pool(pool, wait=wait, terminate=True)
+    return len(entries)
+
+
+def _shutdown_matching_optimize_pool(cancel_event: threading.Event) -> None:
+    with _ACTIVE_OPTIMIZE_POOLS_LOCK:
+        entries = [
+            (key, pool)
+            for key, (pool, registered_event) in _ACTIVE_OPTIMIZE_POOLS.items()
+            if registered_event is cancel_event
+        ]
+        for key, _pool in entries:
+            _ACTIVE_OPTIMIZE_POOLS.pop(key, None)
+    for _key, pool in entries:
+        _stop_optimize_pool(pool, wait=False, terminate=True)
+
+
+atexit.register(shutdown_optimize_process_pools, wait=False)
 
 
 def _to_utc_iso(value: Any) -> str:
@@ -1776,6 +1897,7 @@ def _optimize_strategy_on_df(
     take_profit_pct: Optional[float] = None,
     exit_template: Optional[str] = None,
     base_params: Optional[Dict[str, Any]] = None,
+    _cancel_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     if strategy not in _BACKTEST_OPTIMIZATION_GRIDS:
         raise ValueError(f"暂不支持 {strategy} 参数优化")
@@ -1842,15 +1964,33 @@ def _optimize_strategy_on_df(
 
         # Use "spawn" everywhere — required on Windows, safe on Linux.
         ctx = _mp.get_context("spawn")
+        cancel_event = _cancel_event or threading.Event()
+        pool = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=ctx,
+            initializer=_optimize_worker_initializer,
+            initargs=(os.getpid(),),
+        )
+        _register_optimize_pool(pool, cancel_event)
         try:
-            with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
-                for res in pool.map(_run_optimize_trial, trial_args, chunksize=1):
-                    results_by_index[int(res["i"])] = res
+            for res in pool.map(_run_optimize_trial, trial_args, chunksize=1):
+                if cancel_event.is_set():
+                    raise _OptimizationCancelled("optimization cancelled")
+                results_by_index[int(res["i"])] = res
         except Exception as exc:
+            if cancel_event.is_set():
+                raise _OptimizationCancelled("optimization cancelled") from exc
             logger.warning(
                 f"Optimize pool failed ({exc}); falling back to serial execution"
             )
             results_by_index = {}
+        finally:
+            _unregister_optimize_pool(pool)
+            _stop_optimize_pool(
+                pool,
+                wait=not cancel_event.is_set(),
+                terminate=cancel_event.is_set(),
+            )
 
     # Serial mode (or pool failure): run each trial in this process.
     if not results_by_index:
@@ -1894,6 +2034,21 @@ def _optimize_strategy_on_df(
         "all_trials": all_trials_summary,
         "failures": failures[: min(5, len(failures))],
     }
+
+
+async def _optimize_strategy_async(**kwargs: Any) -> Dict[str, Any]:
+    """Run optimization off-loop and stop its process pool on cancellation."""
+    cancel_event = threading.Event()
+    try:
+        return await asyncio.to_thread(
+            _optimize_strategy_on_df,
+            **kwargs,
+            _cancel_event=cancel_event,
+        )
+    except asyncio.CancelledError:
+        cancel_event.set()
+        _shutdown_matching_optimize_pool(cancel_event)
+        raise
 
 
 def _compare_baseline_rank_key(metrics: Dict[str, Any]) -> tuple[float, float, float, float]:
@@ -4878,8 +5033,7 @@ async def compare_backtests(
                 continue
 
             try:
-                opt = await asyncio.to_thread(
-                    _optimize_strategy_on_df,
+                opt = await _optimize_strategy_async(
                     strategy=entry["strategy"],
                     df=entry["df"],
                     timeframe=timeframe,
@@ -5157,8 +5311,7 @@ async def optimize_backtest(
                 _BACKTEST_OPTIMIZE_MAX_TRIALS,
             ),
         )
-        opt_result = await asyncio.to_thread(
-            _optimize_strategy_on_df,
+        opt_result = await _optimize_strategy_async(
             strategy=strategy,
             df=df,
             timeframe=timeframe,

@@ -1,4 +1,5 @@
 """FastAPI application entry."""
+# ruff: noqa: E402
 from __future__ import annotations
 
 import asyncio
@@ -2175,45 +2176,48 @@ async def lifespan(app: FastAPI):
         await _emit_news_preview(app=app, limit=10, hours=24)
 
     logger.info("System started successfully")
-    yield
-
-    logger.info("Shutting down Crypto Trading System...")
-    supervisor: RuntimeTaskSupervisor | None = getattr(app.state, "runtime_supervisor", None)
-    if supervisor is not None:
+    try:
+        yield
+    finally:
+        logger.info("Shutting down Crypto Trading System...")
+        supervisor: RuntimeTaskSupervisor | None = getattr(app.state, "runtime_supervisor", None)
+        if supervisor is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(supervisor.stop_all(timeout_sec=6.0), timeout=15)
         with contextlib.suppress(Exception):
-            await asyncio.wait_for(supervisor.stop_all(timeout_sec=6.0), timeout=15)
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(autonomous_trading_agent.stop(), timeout=15)
+            await asyncio.wait_for(autonomous_trading_agent.stop(), timeout=15)
 
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(strategy_health_monitor.stop(), timeout=15)
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(shutdown_ops_runtime(app, standalone=False), timeout=15)
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(
-            strategy_manager.stop_all(close_positions=False, reason="service_shutdown"),
-            timeout=15,
-        )
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(execution_engine.stop(), timeout=15)
-    with contextlib.suppress(Exception):
-        position_manager.flush()
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(
-            audit_logger.drain_background_tasks(timeout=5.0, cancel_pending=True),
-            timeout=7,
-        )
-    with contextlib.suppress(Exception):
-        await asyncio.wait_for(
-            runtime_bootstrap.shutdown_shared_runtime(
-                include_news=True,
-                close_exchanges=True,
-                close_database=True,
-            ),
-            timeout=15,
-        )
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(strategy_health_monitor.stop(), timeout=15)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(shutdown_ops_runtime(app, standalone=False), timeout=15)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                strategy_manager.stop_all(close_positions=False, reason="service_shutdown"),
+                timeout=15,
+            )
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(execution_engine.stop(), timeout=15)
+        with contextlib.suppress(Exception):
+            backtest.shutdown_optimize_process_pools(wait=False)
+        with contextlib.suppress(Exception):
+            position_manager.flush()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                audit_logger.drain_background_tasks(timeout=5.0, cancel_pending=True),
+                timeout=7,
+            )
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                runtime_bootstrap.shutdown_shared_runtime(
+                    include_news=True,
+                    close_exchanges=True,
+                    close_database=True,
+                ),
+                timeout=15,
+            )
 
-    logger.info("System shutdown complete")
+        logger.info("System shutdown complete")
 
 
 app = FastAPI(
@@ -2528,6 +2532,82 @@ async def websocket_endpoint(websocket: WebSocket):
         await event_bus.unsubscribe(queue)
 
 
+def _parse_health_timestamp(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def _runtime_readiness_snapshot(app_instance: FastAPI) -> Tuple[bool, Dict[str, Any]]:
+    """Assess in-process supervisors and the freshness of critical runtime data."""
+    diagnostics = runtime_state.get_task_diagnostics()
+    expected = set(getattr(app_instance.state, "runtime_task_factories", {}).keys())
+    required_limits: Dict[str, float] = {"runtime": 30.0}
+    if "listener_watchdog" in expected:
+        required_limits["listener_watchdog"] = max(60.0, _LISTENER_WATCHDOG_INTERVAL_SEC * 5.0)
+    if "exchange_watchdog" in expected:
+        required_limits["exchange_watchdog"] = 180.0
+
+    now = datetime.now(timezone.utc)
+    task_checks: Dict[str, Any] = {}
+    ready = True
+    supervisor: RuntimeTaskSupervisor | None = getattr(app_instance.state, "runtime_supervisor", None)
+    for name, max_age_sec in required_limits.items():
+        diag = diagnostics.get(name) or {}
+        managed = supervisor.get_task(name) if supervisor is not None else None
+        heartbeat = _parse_health_timestamp(diag.get("last_heartbeat_at"))
+        heartbeat_age = (now - heartbeat).total_seconds() if heartbeat else None
+        task_alive = bool(
+            name in expected
+            and diag.get("running")
+            and managed is not None
+            and not managed.task.done()
+        )
+        fresh = heartbeat_age is not None and heartbeat_age <= max_age_sec
+        task_checks[name] = {
+            "status": "ok" if task_alive and fresh else "unhealthy",
+            "running": task_alive,
+            "heartbeat_age_sec": round(heartbeat_age, 3) if heartbeat_age is not None else None,
+            "max_heartbeat_age_sec": max_age_sec,
+            "state": diag.get("state") or "missing",
+            "restarts": int(diag.get("restarts") or 0),
+            "last_error": diag.get("last_error"),
+        }
+        if not task_alive or not fresh:
+            ready = False
+
+    market_check: Dict[str, Any] = {"status": "not_required", "mode": _MARKET_WS_MODE}
+    if _is_market_ws_stream_enabled() and _MARKET_WS_MODE in {"ui_primary", "strategy_primary"}:
+        try:
+            status = _market_ws_status_snapshot()
+            feed_healthy = bool(status.get("feed_healthy"))
+            hub_healthy = bool(status.get("ws_hub_healthy"))
+            stale_count = int(status.get("ws_stale_symbol_count") or 0)
+            market_ok = feed_healthy and hub_healthy and stale_count == 0
+            market_check = {
+                "status": "ok" if market_ok else "stale",
+                "mode": _MARKET_WS_MODE,
+                "feed_healthy": feed_healthy,
+                "hub_healthy": hub_healthy,
+                "stale_symbol_count": stale_count,
+                "last_tick_age_ms": status.get("last_tick_age_ms"),
+            }
+            if not market_ok:
+                ready = False
+        except Exception as exc:
+            ready = False
+            market_check = {"status": "error", "mode": _MARKET_WS_MODE, "error": str(exc)}
+
+    return ready, {"tasks": task_checks, "market_data": market_check}
+
+
 @app.get("/livez")
 async def livez_check():
     """Liveness probe: always returns 200 if the process is up."""
@@ -2536,7 +2616,7 @@ async def livez_check():
 
 @app.get("/readyz")
 async def readyz_check():
-    """Readiness probe: 200 only when DB ping + exchanges + strategy manager are usable."""
+    """Readiness: dependencies, critical task heartbeats, and primary market freshness."""
     from fastapi.responses import JSONResponse  # noqa: PLC0415
     checks: Dict[str, Any] = {}
     overall_ready = True
@@ -2576,6 +2656,11 @@ async def readyz_check():
         overall_ready = False
         checks["strategy_manager"] = f"error: {exc}"
 
+    runtime_ready, runtime_checks = _runtime_readiness_snapshot(app)
+    checks["runtime"] = runtime_checks
+    if not runtime_ready:
+        overall_ready = False
+
     body = {
         "status": "ready" if overall_ready else "not_ready",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -2584,6 +2669,33 @@ async def readyz_check():
     if not overall_ready:
         return JSONResponse(status_code=503, content=body)
     return body
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Small dependency-free Prometheus surface for process/task readiness."""
+    from fastapi.responses import PlainTextResponse  # noqa: PLC0415
+
+    runtime_ready, snapshot = _runtime_readiness_snapshot(app)
+    lines = [
+        "# HELP crypto_web_up Whether the web process can answer requests.",
+        "# TYPE crypto_web_up gauge",
+        "crypto_web_up 1",
+        "# HELP crypto_runtime_ready Whether critical runtime tasks and market data are ready.",
+        "# TYPE crypto_runtime_ready gauge",
+        f"crypto_runtime_ready {1 if runtime_ready else 0}",
+        "# HELP crypto_runtime_task_running Whether a managed runtime task is alive.",
+        "# TYPE crypto_runtime_task_running gauge",
+        "# HELP crypto_runtime_task_heartbeat_age_seconds Age of the last task heartbeat.",
+        "# TYPE crypto_runtime_task_heartbeat_age_seconds gauge",
+    ]
+    for name, task in (snapshot.get("tasks") or {}).items():
+        safe_name = str(name).replace('\\', '_').replace('"', '\\"')
+        lines.append(f'crypto_runtime_task_running{{task="{safe_name}"}} {1 if task.get("running") else 0}')
+        age = task.get("heartbeat_age_sec")
+        if age is not None:
+            lines.append(f'crypto_runtime_task_heartbeat_age_seconds{{task="{safe_name}"}} {float(age):.3f}')
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
 
 @app.get("/health")

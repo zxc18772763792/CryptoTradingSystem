@@ -123,8 +123,8 @@
 - [ ] [core/research/orchestrator.py:267-275](core/research/orchestrator.py) `_recover_stale_jobs_on_startup` 需要先清理 `research_job_tasks` 字典
 
 #### 4.4 数据采集与 DEX/CEX
-- [ ] [core/news/collectors/jin10.py:82](core/news/collectors/jin10.py), [newsapi.py:90-91](core/news/collectors/newsapi.py) 缺重试/backoff；NewsAPI 不读 Retry-After
-- [ ] [core/news/collectors/rss.py:94](core/news/collectors/rss.py) XML 解析考虑使用 `defusedxml` 显式禁用外部实体
+- [x] [core/news/collectors/jin10.py:82](core/news/collectors/jin10.py), [newsapi.py:90-91](core/news/collectors/newsapi.py) 缺重试/backoff；NewsAPI 不读 Retry-After（2026-07-13 复核：Jin10/NewsAPI 已有 transient status retry、Retry-After 支持，并由 `tests/test_news_collectors_resilience.py` 覆盖）
+- [x] [core/news/collectors/rss.py:94](core/news/collectors/rss.py) XML 解析考虑使用 `defusedxml` 显式禁用外部实体（2026-07-13 复核：RSS collectors 已使用 `defusedxml.ElementTree`，外部实体拒绝由 `tests/test_news_collectors_resilience.py` 覆盖）
 - [x] [core/data/news_collector.py:78-79](core/data/news_collector.py) `bullish_keywords` 含前导空格的 `" adoption"` 永远不命中（2026-06-29 已修正为 `adoption`，并由 `tests/test_news_collector_legacy_async.py` 回归覆盖）
 - [x] [core/realtime/event_bus.py:62-66](core/realtime/event_bus.py) full 队列 `get_nowait` 异常误判 stale 驱逐 active subscriber（2026-06-29 已保留活跃订阅者，并由 `tests/test_realtime_event_bus.py` 覆盖）
 

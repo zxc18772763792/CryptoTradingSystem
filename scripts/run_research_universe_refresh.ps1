@@ -18,7 +18,7 @@ param(
     # maintain_research process is older than this, it is treated as hung and
     # killed so it cannot block the pipeline (a dangling connector once wedged
     # one for ~1.6 days, silently starving every scheduled refresh).
-    [int]$MaxRefreshAgeMinutes = 30
+    [int]$MaxRefreshAgeMinutes = 45
 )
 
 $ErrorActionPreference = "Stop"
@@ -126,6 +126,15 @@ if (-not $Force) {
                 if (-not $Quiet) {
                     Write-Host ("Killed hung research refresh PID={0} (age >= {1} min); proceeding with a fresh run." -f $proc.ProcessId, $MaxRefreshAgeMinutes) -ForegroundColor Yellow
                 }
+            }
+            $killDeadline = (Get-Date).AddSeconds(10)
+            do {
+                $survivors = @(Get-RunningRefreshProcess)
+                if (-not $survivors.Count) { break }
+                Start-Sleep -Milliseconds 250
+            } while ((Get-Date) -lt $killDeadline)
+            if (@(Get-RunningRefreshProcess).Count) {
+                throw "Hung research refresh process did not terminate within 10 seconds."
             }
         } else {
             if (-not $Quiet) {

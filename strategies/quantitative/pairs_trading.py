@@ -1,3 +1,4 @@
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -71,15 +72,26 @@ class PairsTradingStrategy(StrategyBase):
         aligned = pd.concat([y, x], axis=1).dropna()
         if aligned.empty:
             return 1.0
-        yv = aligned.iloc[:, 0].values
-        xv = aligned.iloc[:, 1].values
-        xv = xv - float(np.mean(xv))
-        yv = yv - float(np.mean(yv))
-        if np.nanstd(xv) <= 1e-12:
+        pairs: List[tuple[float, float]] = []
+        for raw_y, raw_x in aligned.itertuples(index=False, name=None):
+            try:
+                y_value = float(raw_y)
+                x_value = float(raw_x)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(y_value) and math.isfinite(x_value):
+                pairs.append((y_value, x_value))
+        if len(pairs) < 2:
             return 1.0
-        xv = xv.reshape(-1, 1)
-        coef, *_ = np.linalg.lstsq(xv, yv, rcond=None)
-        return float(coef[0]) if len(coef) else 1.0
+
+        mean_y = sum(y_value for y_value, _x_value in pairs) / len(pairs)
+        mean_x = sum(x_value for _y_value, x_value in pairs) / len(pairs)
+        centered = [(y_value - mean_y, x_value - mean_x) for y_value, x_value in pairs]
+        x_ss = sum(x_value * x_value for _y_value, x_value in centered)
+        if x_ss <= 1e-12:
+            return 1.0
+        xy = sum(y_value * x_value for y_value, x_value in centered)
+        return float(xy / x_ss)
 
     def _hedge_ratio_bounds(self) -> Tuple[float, float]:
         allow_negative = bool(self.params.get("allow_negative_hedge_ratio", True))

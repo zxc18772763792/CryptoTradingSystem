@@ -4,13 +4,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import ccxt
-import pandas as pd
 import requests
 from loguru import logger
 
@@ -218,18 +218,28 @@ async def _download_symbol_timeframe(
     days: int,
     overlap_bars: int,
 ) -> Dict[str, Any]:
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     tf_sec = max(1, int(exchange.parse_timeframe(timeframe)))
     default_start = now - timedelta(days=max(1, int(days)))
+    # Re-fetch at most two days for slow candles. A blanket 48-bar overlap
+    # rewrote 48 separate daily partitions for 1d data on every refresh.
+    overlap_cap = max(3, int(math.ceil(timedelta(days=2).total_seconds() / tf_sec)))
+    effective_overlap_bars = min(max(1, int(overlap_bars)), overlap_cap)
 
-    existing = await data_storage.load_klines_from_parquet(
+    last_ts = await data_storage.get_latest_kline_timestamp(
         exchange=exchange_name,
         symbol=symbol,
         timeframe=timeframe,
     )
-    if not existing.empty:
-        last_ts = pd.to_datetime(existing.index.max()).to_pydatetime()
-        start_dt = max(default_start, last_ts - timedelta(seconds=tf_sec * max(1, int(overlap_bars))))
+    if last_ts is not None:
+        if last_ts.tzinfo is None:
+            last_ts = last_ts.replace(tzinfo=timezone.utc)
+        else:
+            last_ts = last_ts.astimezone(timezone.utc)
+        start_dt = max(
+            default_start,
+            last_ts - timedelta(seconds=tf_sec * effective_overlap_bars),
+        )
     else:
         start_dt = default_start
 
@@ -249,6 +259,7 @@ async def _download_symbol_timeframe(
             "saved_path": "",
             "start": start_dt.isoformat(),
             "end": now.isoformat(),
+            "effective_overlap_bars": effective_overlap_bars,
         }
 
     klines = [
@@ -278,6 +289,7 @@ async def _download_symbol_timeframe(
         "saved_path": saved,
         "start": start_dt.isoformat(),
         "end": now.isoformat(),
+        "effective_overlap_bars": effective_overlap_bars,
     }
 
 

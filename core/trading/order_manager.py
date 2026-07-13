@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 import math
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -66,7 +66,7 @@ class OrderManager:
     def __init__(self):
         self._orders: Dict[str, Order] = {}
         self._pending_orders: Dict[str, OrderRequest] = {}
-        self._order_callbacks: List[callable] = []
+        self._order_callbacks: List[Callable[[Order, str], Awaitable[None]]] = []
         self._order_meta: Dict[str, Dict[str, Any]] = {}
         self._paper_trading: bool = True
         self._paper_order_seq: int = 0
@@ -99,6 +99,36 @@ class OrderManager:
         except Exception:
             pass
         return fallback_mode
+
+    def _resolve_operation_mode(
+        self,
+        *,
+        order_id: Optional[str] = None,
+        trading_mode: Optional[str] = None,
+    ) -> str:
+        """Resolve query/cancel routing without relying on mutable global mode.
+
+        Persisted order metadata is authoritative for an existing order.  The
+        explicit mode is used for collection queries and for exchange orders
+        that have not yet been cached locally.
+        """
+        if order_id:
+            stored_mode = str((self._order_meta.get(order_id) or {}).get("mode") or "").strip().lower()
+            if stored_mode in {"paper", "live"}:
+                return stored_mode
+        explicit_mode = str(trading_mode or "").strip().lower()
+        if explicit_mode in {"paper", "live"}:
+            return explicit_mode
+        return "paper" if self._paper_trading else "live"
+
+    def _operation_mode_conflicts(
+        self,
+        order_id: str,
+        trading_mode: Optional[str],
+    ) -> bool:
+        requested = str(trading_mode or "").strip().lower()
+        stored = str((self._order_meta.get(order_id) or {}).get("mode") or "").strip().lower()
+        return requested in {"paper", "live"} and stored in {"paper", "live"} and requested != stored
 
     def _request_meta(self, request: OrderRequest) -> Dict[str, Any]:
         resolved_mode = self._resolve_request_mode(request)
@@ -230,7 +260,7 @@ class OrderManager:
         self._paper_trading = enabled
         logger.info(f"Paper trading mode: {enabled}")
 
-    def register_callback(self, callback: callable) -> None:
+    def register_callback(self, callback: Callable[[Order, str], Awaitable[None]]) -> None:
         self._order_callbacks.append(callback)
 
     async def _notify_callbacks(self, order: Order, event: str) -> None:
@@ -258,7 +288,13 @@ class OrderManager:
         params: Dict[str, Any],
         source: str,
     ):
-        report = risk_manager.get_risk_report()
+        request_mode = self._resolve_request_mode(request)
+        try:
+            report = risk_manager.get_risk_report(scope=request_mode)
+        except TypeError:
+            # Preserve compatibility with lightweight test/extension stubs
+            # that implement the historical zero-argument method.
+            report = risk_manager.get_risk_report()
         equity = float((report.get("equity") or {}).get("current") or 0.0)
         return await decision_engine.evaluate_order_intent(
             symbol=request.symbol,
@@ -743,7 +779,16 @@ class OrderManager:
                     await self._notify_callbacks(order, "created")
                     return order
                 except Exception as fast_err:
-                    logger.warning(f"Fast Binance futures order path failed, fallback to ccxt: {fast_err}")
+                    if self._is_ambiguous_submit_error(fast_err):
+                        logger.warning(
+                            f"Fast Binance futures order path failed ambiguously; "
+                            f"skipping ccxt fallback because exchange state is unknown: {fast_err}"
+                        )
+                        raise
+                    logger.warning(
+                        f"Fast Binance futures order path failed definitively, "
+                        f"fallback to ccxt: {fast_err}"
+                    )
 
             order = await exchange.create_order(
                 symbol=request.symbol,
@@ -841,8 +886,16 @@ class OrderManager:
         order_id: str,
         symbol: str,
         exchange: str = "binance",
+        trading_mode: Optional[str] = None,
     ) -> bool:
-        if self._paper_trading:
+        if self._operation_mode_conflicts(order_id, trading_mode):
+            logger.error(
+                "Refused cancel_order with conflicting mode: "
+                f"order_id={order_id} requested={trading_mode} "
+                f"stored={(self._order_meta.get(order_id) or {}).get('mode')}"
+            )
+            return False
+        if self._resolve_operation_mode(order_id=order_id, trading_mode=trading_mode) == "paper":
             return await self._cancel_paper_order(order_id)
 
         connector = self._resolve_cached_exchange(exchange, account_id=self._order_meta.get(order_id, {}).get("account_id"))
@@ -872,8 +925,16 @@ class OrderManager:
         order_id: str,
         symbol: str,
         exchange: str = "binance",
+        trading_mode: Optional[str] = None,
     ) -> Optional[Order]:
-        if self._paper_trading:
+        if self._operation_mode_conflicts(order_id, trading_mode):
+            logger.error(
+                "Refused get_order with conflicting mode: "
+                f"order_id={order_id} requested={trading_mode} "
+                f"stored={(self._order_meta.get(order_id) or {}).get('mode')}"
+            )
+            return None
+        if self._resolve_operation_mode(order_id=order_id, trading_mode=trading_mode) == "paper":
             return self._orders.get(order_id)
 
         connector = self._resolve_cached_exchange(exchange, account_id=self._order_meta.get(order_id, {}).get("account_id"))
@@ -893,11 +954,14 @@ class OrderManager:
         self,
         symbol: Optional[str] = None,
         exchange: Optional[str] = None,
+        trading_mode: Optional[str] = None,
     ) -> List[Order]:
-        if self._paper_trading:
+        resolved_mode = self._resolve_operation_mode(trading_mode=trading_mode)
+        if resolved_mode == "paper":
             return [
                 o for o in self._orders.values()
                 if o.status == OrderStatus.OPEN
+                and self._resolve_operation_mode(order_id=o.id) == "paper"
                 and (symbol is None or o.symbol == symbol)
                 and (exchange is None or o.exchange == exchange)
             ]
@@ -916,6 +980,7 @@ class OrderManager:
                     for row in rows:
                         if not getattr(row, "exchange", ""):
                             row.exchange = ex_name
+                        self._order_meta.setdefault(row.id, {"mode": "live", "account_id": "main"})
                     return rows
                 except Exception as ex:
                     logger.warning(f"Failed to get open orders from {ex_name}: {ex}")
@@ -946,6 +1011,7 @@ class OrderManager:
             orders = await connector.get_open_orders(symbol)
             for order in orders:
                 self._orders[order.id] = order
+                self._order_meta.setdefault(order.id, {"mode": "live", "account_id": "main"})
             return orders
         except Exception as e:
             logger.error(f"Failed to get open orders: {e}")
@@ -969,11 +1035,18 @@ class OrderManager:
         self,
         symbol: Optional[str] = None,
         exchange: str = "binance",
+        trading_mode: Optional[str] = None,
     ) -> int:
-        orders = await self.get_open_orders(symbol, exchange)
+        resolved_mode = self._resolve_operation_mode(trading_mode=trading_mode)
+        orders = await self.get_open_orders(symbol, exchange, trading_mode=resolved_mode)
         cancelled = 0
         for order in orders:
-            if await self.cancel_order(order.id, order.symbol, exchange):
+            if await self.cancel_order(
+                order.id,
+                order.symbol,
+                exchange,
+                trading_mode=resolved_mode,
+            ):
                 cancelled += 1
         return cancelled
 

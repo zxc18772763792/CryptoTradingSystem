@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from contextvars import ContextVar
 import json
 import math
 from collections import Counter
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -143,9 +144,13 @@ class ExecutionEngine:
         self._signal_queue_loop: Optional[asyncio.AbstractEventLoop] = None
         self._prime_task: Optional[asyncio.Task] = None
         self._queue_task: Optional[asyncio.Task] = None
-        self._execution_callbacks: List[callable] = []
+        self._execution_callbacks: List[Callable[[str, Any], Awaitable[None]]] = []
         self._paper_trading: bool = True
         self._default_paper_trading: bool = True
+        self._runtime_mode_context: ContextVar[Optional[str]] = ContextVar(
+            f"execution_engine_runtime_mode_{id(self)}",
+            default=None,
+        )
         self._mode_lock: Optional[asyncio.Lock] = None
         self._mode_lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._mode_lock_owner: Optional[asyncio.Task] = None
@@ -315,6 +320,9 @@ class ExecutionEngine:
         return "live" if text == "live" else "paper"
 
     def _current_trading_mode(self) -> str:
+        contextual = self._runtime_mode_context.get()
+        if contextual in {"paper", "live"}:
+            return str(contextual)
         return "paper" if self._paper_trading else "live"
 
     def _resolve_account_trading_mode(
@@ -338,6 +346,16 @@ class ExecutionEngine:
         metadata = dict(getattr(signal, "metadata", {}) or {})
         account_id = str(metadata.get("account_id") or "main")
         return self._resolve_account_trading_mode(account_id, metadata=metadata, fallback=self.get_trading_mode())
+
+    def _resolve_position_trading_mode(self, position: Any, *, fallback: Optional[str] = None) -> str:
+        metadata = getattr(position, "metadata", None)
+        if not isinstance(metadata, dict):
+            metadata = None
+        return self._resolve_account_trading_mode(
+            getattr(position, "account_id", "main"),
+            metadata=metadata,
+            fallback=fallback or self.get_trading_mode(),
+        )
 
     def _activate_runtime_mode(self, mode: str, *, reset_baseline: bool = False) -> None:
         resolved = self._normalize_trading_mode(mode)
@@ -370,16 +388,34 @@ class ExecutionEngine:
     async def _mode_guard(self, mode: str, *, reset_baseline: bool = False):
         await self._acquire_mode_lock()
         previous_mode = self._current_trading_mode()
+        resolved_mode = self._normalize_trading_mode(mode)
+        token = self._runtime_mode_context.set(resolved_mode)
         try:
-            if self._normalize_trading_mode(mode) != previous_mode:
-                self._activate_runtime_mode(mode, reset_baseline=reset_baseline)
+            # Keep the execution mode task-local.  Order routing consumes the
+            # explicit mode embedded in each request, so a per-account action
+            # must not flip the process-wide engine/order/strategy defaults.
+            if resolved_mode != previous_mode:
+                set_scope = getattr(position_manager, "set_scope", None)
+                if callable(set_scope):
+                    set_scope(resolved_mode)
+                set_account_scope = getattr(risk_manager, "set_account_scope", None)
+                if callable(set_account_scope):
+                    set_account_scope(resolved_mode, reset_baseline=reset_baseline)
             yield
         finally:
             try:
-                if self._current_trading_mode() != previous_mode:
-                    self._activate_runtime_mode(previous_mode, reset_baseline=False)
+                if resolved_mode != previous_mode:
+                    set_scope = getattr(position_manager, "set_scope", None)
+                    if callable(set_scope):
+                        set_scope(previous_mode)
+                    set_account_scope = getattr(risk_manager, "set_account_scope", None)
+                    if callable(set_account_scope):
+                        set_account_scope(previous_mode, reset_baseline=False)
             finally:
-                self._release_mode_lock()
+                try:
+                    self._runtime_mode_context.reset(token)
+                finally:
+                    self._release_mode_lock()
 
     @contextlib.asynccontextmanager
     async def mode_access_guard(self):
@@ -460,7 +496,7 @@ class ExecutionEngine:
             "action": "allow",
             "reason": "coinglass_strategy_filter_disabled",
         }
-        if not self._paper_trading:
+        if self._current_trading_mode() == "live":
             result["reason"] = "live_mode_not_filtered"
             return result
         if not bool(getattr(settings, "COINGLASS_ENABLED", False) and getattr(settings, "COINGLASS_INCLUDE_STRATEGIES", False)):
@@ -662,7 +698,7 @@ class ExecutionEngine:
         cost_details: Optional[Dict[str, Any]] = None,
         close_reason: Optional[str] = None,
     ) -> None:
-        if self._paper_trading:
+        if self._current_trading_mode() == "paper":
             return
 
         strategy = str(getattr(signal, "strategy_name", "") or "").strip() or "unknown"
@@ -827,7 +863,7 @@ class ExecutionEngine:
     def is_paper_mode(self) -> bool:
         return self._default_paper_trading
 
-    def register_callback(self, callback: callable) -> None:
+    def register_callback(self, callback: Callable[[str, Any], Awaitable[None]]) -> None:
         self._execution_callbacks.append(callback)
 
     async def _notify_callbacks(self, event: str, data: Any) -> None:
@@ -984,7 +1020,7 @@ class ExecutionEngine:
             if not connector:
                 continue
             try:
-                if (not self._paper_trading) and str(exchange_name).lower() == "binance":
+                if self._current_trading_mode() == "live" and str(exchange_name).lower() == "binance":
                     try:
                         snap = await asyncio.wait_for(
                             fetch_binance_live_wallet_snapshot_fast(account_id=account_id),
@@ -1046,7 +1082,7 @@ class ExecutionEngine:
                 float(getattr(settings, "MIN_STRATEGY_ORDER_USD", 100.0) or 100.0),
             )
             if (
-                (not self._paper_trading)
+                self._current_trading_mode() == "live"
                 and account_id is None
                 and failed_exchange_names
                 and len(scoped_connectors) > 1
@@ -1059,7 +1095,7 @@ class ExecutionEngine:
                 )
                 return self._get_cached_equity_value(account_id)
             if (
-                (not self._paper_trading)
+                self._current_trading_mode() == "live"
                 and report_eq > 100
                 and candidate < report_eq * 0.35
             ):
@@ -1079,7 +1115,7 @@ class ExecutionEngine:
                 )
                 candidate = float(cached_eq)
             # Avoid overwriting a stable cached value with transient tiny estimates.
-            if self._paper_trading and candidate < 100 and cached_eq >= 100:
+            if self._current_trading_mode() == "paper" and candidate < 100 and cached_eq >= 100:
                 candidate = float(cached_eq)
             self._set_cached_equity_value(candidate, account_id=account_id)
 
@@ -1097,7 +1133,7 @@ class ExecutionEngine:
             if publish_equity
             else 0.0
         )
-        if self._paper_trading:
+        if self._current_trading_mode() == "paper":
             return await self.get_account_equity_snapshot(force=force)
 
         now = datetime.now(timezone.utc)
@@ -1129,17 +1165,17 @@ class ExecutionEngine:
                 eq = report_eq
             elif cached_eq > 0:
                 eq = cached_eq
-        elif publish_equity and (not self._paper_trading) and report_eq > 100 and eq < report_eq * 0.35:
+        elif publish_equity and self._current_trading_mode() == "live" and report_eq > 100 and eq < report_eq * 0.35:
             eq = report_eq
 
-        if self._paper_trading and eq < 100:
+        if self._current_trading_mode() == "paper" and eq < 100:
             eq = max(eq, float(getattr(settings, "PAPER_INITIAL_EQUITY", 10000.0) or 10000.0))
 
         return float(eq)
 
     async def get_account_equity_snapshot(self, force: bool = False) -> float:
         """Public equity snapshot for dashboard/risk alignment."""
-        if not self._paper_trading:
+        if self._current_trading_mode() == "live":
             return await self._get_account_equity(force=force)
 
         if self._paper_equity_anchor < 100:
@@ -2353,7 +2389,12 @@ class ExecutionEngine:
         while asyncio.get_running_loop().time() < deadline:
             await asyncio.sleep(min(0.25, max(0.0, deadline - asyncio.get_running_loop().time())))
             try:
-                refreshed = await order_manager.get_order(str(getattr(order, "id", "")), symbol, exchange)
+                refreshed = await order_manager.get_order(
+                    str(getattr(order, "id", "")),
+                    symbol,
+                    exchange,
+                    trading_mode=self._current_trading_mode(),
+                )
             except Exception as refresh_err:
                 logger.debug(f"Close limit order refresh failed: {refresh_err}")
                 refreshed = None
@@ -2401,7 +2442,7 @@ class ExecutionEngine:
         return min_amount, decimals
 
     def _consume_paper_order_cost(self, order_id: Optional[str]) -> Dict[str, float]:
-        if not self._paper_trading:
+        if self._current_trading_mode() == "live":
             return {"fee_usd": 0.0, "slippage_cost_usd": 0.0}
         oid = str(order_id or "").strip()
         if not oid or oid in self._paper_fee_applied_orders:
@@ -2654,7 +2695,7 @@ class ExecutionEngine:
         fee_source = "paper" if fee_usd > 0 else ""
         slippage_source = "paper" if slippage_cost_usd > 0 else ""
 
-        if self._paper_trading:
+        if self._current_trading_mode() == "paper":
             slippage_bps = self._safe_nonnegative_float(cost.get("slippage_bps"), 0.0)
             return {
                 "fee_usd": fee_usd,
@@ -2793,7 +2834,7 @@ class ExecutionEngine:
             same_direction_limit_notional = position_cap_notional * same_direction_limit_ratio
             same_direction_remaining_cap = max(0.0, same_direction_limit_notional - same_direction_existing_notional)
 
-        if equity <= 0 and not self._paper_trading:
+        if equity <= 0 and self._current_trading_mode() == "live":
             return 0.0
 
         if signal.quantity is not None:
@@ -3047,10 +3088,10 @@ class ExecutionEngine:
             connector = exchange_manager.get_exchange(exchange)
             market_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").strip().lower()
         if not market_type:
-            market_type = "futures" if self._paper_trading else "spot"
+            market_type = "futures" if self._current_trading_mode() == "paper" else "spot"
 
         is_derivatives = market_type in {"future", "futures", "swap", "contract", "perp", "perpetual"}
-        default_allow_short = True if self._paper_trading else is_derivatives
+        default_allow_short = True if self._current_trading_mode() == "paper" else is_derivatives
         if strategy_type == "PairsTradingStrategy":
             default_allow_short = True
 
@@ -3218,7 +3259,7 @@ class ExecutionEngine:
         account_id: str,
         preferred_side: Optional[PositionSide] = None,
     ) -> Optional[Any]:
-        if self._paper_trading:
+        if self._current_trading_mode() == "paper":
             return None
         connector = await self._ensure_exchange_connector(exchange, account_id=account_id)
         if connector is None:
@@ -3420,7 +3461,7 @@ class ExecutionEngine:
 
     async def _reconcile_local_positions_with_exchange(self) -> None:
         """In live mode, drop stale local positions that no longer exist on exchange."""
-        if self._paper_trading:
+        if self._current_trading_mode() == "paper":
             return
         local_positions = list(position_manager.get_all_positions())
         if not local_positions:
@@ -3966,7 +4007,7 @@ class ExecutionEngine:
                 )
                 cached_eq = self._get_cached_equity_value(account_id)
                 fallback_eq = max(report_eq, cached_eq)
-                if fallback_eq <= 0 and not self._paper_trading:
+                if fallback_eq <= 0 and self._current_trading_mode() == "live":
                     self._signal_diagnostics["skipped_live_equity_unavailable"] = int(
                         self._signal_diagnostics.get("skipped_live_equity_unavailable", 0)
                     ) + 1
@@ -5385,6 +5426,7 @@ class ExecutionEngine:
         if raw_amount <= 0:
             return None
         request_params = dict(params or {})
+        active_mode = self._current_trading_mode()
         close_reason = str(request_params.get("close_reason") or "").strip()
 
         if not account_manager.is_enabled(account_id):
@@ -5471,8 +5513,8 @@ class ExecutionEngine:
             reduce_only=reduce_only,
             params=dict(
                 request_params,
-                trading_mode=mode,
-                runtime_mode=mode,
+                trading_mode=active_mode,
+                runtime_mode=active_mode,
                 leverage=float(leverage),
                 trace_id=governance_check.trace_id,
                 governance_prechecked=True,
@@ -6104,11 +6146,7 @@ class ExecutionEngine:
         positions = [
             pos
             for pos in position_manager.get_all_positions()
-            if self._resolve_account_trading_mode(
-                getattr(pos, "account_id", "main"),
-                fallback=current_mode,
-            )
-            == current_mode
+            if self._resolve_position_trading_mode(pos, fallback=current_mode) == current_mode
         ]
         if not positions:
             return
@@ -6287,7 +6325,7 @@ class ExecutionEngine:
                 logger.error(f"Signal processing error{ctx}: {e}")
 
     async def _prime_live_equity(self) -> None:
-        if self._paper_trading:
+        if self._current_trading_mode() == "paper":
             return
         try:
             await asyncio.wait_for(self._refresh_equity(), timeout=30.0)
@@ -6323,7 +6361,10 @@ class ExecutionEngine:
                 logger.warning("Execution queue task did not finish within 5s after cancel")
         self._queue_task = None
         for exchange in exchange_manager.get_connected_exchanges():
-            await order_manager.cancel_all_orders(exchange=exchange)
+            await order_manager.cancel_all_orders(
+                exchange=exchange,
+                trading_mode=self.get_trading_mode(),
+            )
         with contextlib.suppress(Exception):
             position_manager.flush()
         logger.info("Execution engine stopped")

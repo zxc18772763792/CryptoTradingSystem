@@ -2,13 +2,13 @@ param(
     [string]$TaskName = "CryptoTradingSystem_ResearchUniverseRefresh",
     [string]$EnvName = "crypto_trading",
     [string]$Exchange = "binance",
-    [string]$Timeframes = "1m,5m,15m,1h",
+    [string]$Timeframes = "1m,5m,15m,1h,4h,1d",
     [int]$Days = 90,
     [int]$OverlapBars = 48,
     [string]$SecondsSymbols = "BTC/USDT,ETH/USDT",
     [int]$SecondsDays = 1,
     [switch]$DisableIdleSeconds,
-    [int]$IntervalMinutes = 15,
+    [int]$IntervalMinutes = 60,
     [switch]$StartNow,
     [switch]$StartNowIfCreated,
     [switch]$Quiet
@@ -51,6 +51,62 @@ function Get-NextAlignedTriggerTime {
     return $candidate
 }
 
+function Register-LimitedFallbackTask {
+    param(
+        [string]$Name,
+        [string]$Executable,
+        [string]$Arguments,
+        [string]$WorkingDirectory,
+        [int]$EveryMinutes
+    )
+
+    # schtasks /Create with command-line scheduling silently installs the
+    # Windows defaults (IgnoreNew + PT72H). Import explicit XML instead so the
+    # non-elevated fallback has the same bounded self-healing policy as the
+    # ScheduledTasks-cmdlet path.
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $startBoundary = (Get-NextAlignedTriggerTime -Minutes $EveryMinutes).ToString("s")
+    $interval = "PT{0}M" -f ([Math]::Max(5, $EveryMinutes))
+    $escapedExecutable = [System.Security.SecurityElement]::Escape($Executable)
+    $escapedArguments = [System.Security.SecurityElement]::Escape($Arguments)
+    $escapedWorkingDirectory = [System.Security.SecurityElement]::Escape($WorkingDirectory)
+    $escapedSid = [System.Security.SecurityElement]::Escape($sid)
+    $xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Bounded incremental research-universe refresh.</Description></RegistrationInfo>
+  <Triggers>
+    <TimeTrigger>
+      <StartBoundary>$startBoundary</StartBoundary>
+      <Enabled>true</Enabled>
+      <Repetition><Interval>$interval</Interval><Duration>P3650D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>
+    </TimeTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>$escapedSid</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT45M</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>$escapedExecutable</Command><Arguments>$escapedArguments</Arguments><WorkingDirectory>$escapedWorkingDirectory</WorkingDirectory></Exec></Actions>
+</Task>
+"@
+    $xmlPath = Join-Path ([System.IO.Path]::GetTempPath()) ("research_refresh_task_{0}.xml" -f ([guid]::NewGuid().ToString("N")))
+    try {
+        $xml | Set-Content -Path $xmlPath -Encoding Unicode
+        $null = & schtasks /Create /F /TN $Name /XML $xmlPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "schtasks XML import failed with exit code $LASTEXITCODE"
+        }
+    } finally {
+        Remove-Item $xmlPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 $logPath = Join-Path $projectRoot "logs\research_universe_refresh.log"
 $actionArgs = @(
     "-NoProfile",
@@ -64,6 +120,7 @@ $actionArgs = @(
     "-OverlapBars", "$OverlapBars",
     "-SecondsSymbols", "`"$SecondsSymbols`"",
     "-SecondsDays", "$SecondsDays",
+    "-MaxRefreshAgeMinutes", "45",
     "-LogPath", "`"$logPath`"",
     "-Quiet"
 ) -join " "
@@ -71,54 +128,16 @@ if ($DisableIdleSeconds) {
     $actionArgs += " -DisableIdleSeconds"
 }
 
-$action = New-ScheduledTaskAction -Execute $powershellExe -Argument $actionArgs -WorkingDirectory $projectRoot
-$startupTrigger = New-ScheduledTaskTrigger -AtStartup
-$repeatTrigger = New-ScheduledTaskTrigger `
-    -Once `
-    -At (Get-NextAlignedTriggerTime -Minutes $IntervalMinutes) `
-    -RepetitionInterval (New-TimeSpan -Minutes ([Math]::Max(5, $IntervalMinutes))) `
-    -RepetitionDuration (New-TimeSpan -Days 3650)
-$settings = New-ScheduledTaskSettingsSet `
-    -StartWhenAvailable `
-    -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries `
-    -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 6)
-$principal = New-ScheduledTaskPrincipal -UserId $currentUser -LogonType Interactive -RunLevel Limited
-
 $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $created = $null -eq $existingTask
 
-$taskRegistered = $false
-$isElevatedSession = Test-IsAdministrator
-if ($isElevatedSession) {
-    try {
-        Register-ScheduledTask `
-            -TaskName $TaskName `
-            -Action $action `
-            -Trigger @($startupTrigger, $repeatTrigger) `
-            -Settings $settings `
-            -Principal $principal `
-            -Description "Incrementally refresh the default 30-symbol research universe without loading the web process." `
-            -Force | Out-Null
-        Enable-ScheduledTask -TaskName $TaskName | Out-Null
-        $taskRegistered = $true
-    } catch {
-        $fallbackCommand = "`"$fallbackBatch`" -Quiet"
-        $null = & schtasks /Create /F /TN $TaskName /SC MINUTE /MO ([Math]::Max(5, $IntervalMinutes)) /TR $fallbackCommand /RL LIMITED
-        if ($LASTEXITCODE -ne 0) {
-            throw
-        }
-        $taskRegistered = $true
-    }
-} else {
-    $fallbackCommand = "`"$fallbackBatch`" -Quiet"
-    $null = & schtasks /Create /F /TN $TaskName /SC MINUTE /MO ([Math]::Max(5, $IntervalMinutes)) /TR $fallbackCommand /RL LIMITED
-    if ($LASTEXITCODE -ne 0) {
-        throw
-    }
-    $taskRegistered = $true
-}
+# Windows' ScheduledTasks PowerShell enum does not expose the XML schema's
+# StopExisting policy.  Register the explicit XML in every privilege mode so
+# elevated and non-elevated installs cannot silently diverge back to IgnoreNew.
+Register-LimitedFallbackTask -Name $TaskName -Executable $powershellExe `
+    -Arguments $actionArgs -WorkingDirectory $projectRoot `
+    -EveryMinutes ([Math]::Max(5, $IntervalMinutes))
+$taskRegistered = $true
 
 $startedNow = $false
 if ($taskRegistered -and ($StartNow.IsPresent -or ($created -and $StartNowIfCreated.IsPresent))) {

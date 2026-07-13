@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
+import importlib
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -508,6 +509,45 @@ def test_execution_engine_time_stop_closes_template_managed_position():
 
     assert engine._execute_protective_close.await_count == 1
     assert engine._execute_protective_close.await_args.args[4] == "time_stop"
+
+
+def test_protective_orders_use_position_runtime_mode_before_account_mode(monkeypatch):
+    execution_engine_module = importlib.import_module("core.trading.execution_engine")
+    engine = ExecutionEngine()
+    engine.set_paper_trading(False, sync_runtime_state=False)
+    position_manager.open_position(
+        exchange="binance",
+        symbol="NEAR/USDT",
+        side=PositionSide.SHORT,
+        entry_price=2.017,
+        quantity=80.0,
+        strategy="bt_ma_near_15m_032320_409",
+        account_id="strategy_bt_ma_near_15m_032320_409",
+        stop_loss=2.044428571428571,
+        take_profit=1.9621428571428572,
+        metadata={"source": "strategy", "runtime_mode": "live"},
+    )
+
+    monkeypatch.setattr(
+        execution_engine_module.account_manager,
+        "get_account",
+        lambda account_id: {"account_id": account_id} if account_id == "strategy_bt_ma_near_15m_032320_409" else None,
+    )
+    monkeypatch.setattr(
+        execution_engine_module.account_manager,
+        "get_account_mode",
+        lambda account_id, default="paper": "paper",
+    )
+    engine._resolve_price = AsyncMock(return_value=1.90001845)
+    engine._execute_protective_close = AsyncMock(return_value={"reason": "take_profit"})
+
+    import asyncio
+
+    asyncio.run(engine._check_protective_orders())
+
+    assert engine._execute_protective_close.await_count == 1
+    assert engine._execute_protective_close.await_args.args[2] == "strategy_bt_ma_near_15m_032320_409"
+    assert engine._execute_protective_close.await_args.args[4] == "take_profit"
 
 
 def test_execution_engine_partial_take_profit_preserves_take_profit_when_requested():

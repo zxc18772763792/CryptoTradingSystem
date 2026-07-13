@@ -20,6 +20,15 @@ def _load_module():
     return module
 
 
+def _load_top100_module():
+    script_path = REPO_ROOT / "scripts" / "maintain_top100_data.py"
+    spec = importlib.util.spec_from_file_location("maintain_top100_data_test", script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_refresh_recent_1s_symbol_normalizes_naive_latest_timestamp(monkeypatch):
     module = _load_module()
     monkeypatch.setattr(module, "_has_recent_kline", AsyncMock(return_value=False))
@@ -117,3 +126,48 @@ def test_radar_aligned_universe_handles_empty_radar_payload(monkeypatch):
     result = asyncio.run(module._resolve_radar_aligned_universe("binance"))
 
     assert result == module.DEFAULT_RESEARCH_SYMBOLS
+
+
+def test_daily_refresh_caps_overlap_and_uses_metadata_latest(monkeypatch):
+    module = _load_top100_module()
+    latest = pd.Timestamp.now().floor("s").to_pydatetime() - pd.Timedelta(days=1)
+    monkeypatch.setattr(
+        module.data_storage,
+        "get_latest_kline_timestamp",
+        AsyncMock(return_value=latest),
+    )
+    monkeypatch.setattr(
+        module.data_storage,
+        "load_klines_from_parquet",
+        AsyncMock(side_effect=AssertionError("full history must not be loaded")),
+    )
+    captured = {}
+
+    class _Exchange:
+        @staticmethod
+        def parse_timeframe(_timeframe):
+            return 86400
+
+    def _fake_fetch(**kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(module, "_fetch_ohlcv_backfill", _fake_fetch)
+    result = asyncio.run(
+        module._download_symbol_timeframe(
+            exchange=_Exchange(),
+            exchange_name="binance",
+            symbol="ETH/USDT",
+            timeframe="1d",
+            days=90,
+            overlap_bars=48,
+        )
+    )
+
+    assert result["effective_overlap_bars"] == 3
+    requested_start = pd.Timestamp(captured["since_ms"], unit="ms").to_pydatetime()
+    assert (
+        latest - pd.Timedelta(days=3, seconds=1)
+        <= requested_start
+        <= latest - pd.Timedelta(days=3) + pd.Timedelta(seconds=1)
+    )

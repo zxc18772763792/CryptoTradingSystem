@@ -14,8 +14,14 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import settings
+from core.data.parquet_lock import parquet_partition_lock
 from core.exchanges.exchange_manager import exchange_manager
 from core.data.path_utils import canonical_symbol_dir, canonical_symbol_dirname
+
+
+PARQUET_WRITE_LOCK_TIMEOUT_SECONDS = float(
+    os.getenv("PARQUET_WRITE_LOCK_TIMEOUT_SECONDS", "30")
+)
 
 
 def _to_iso(ts: datetime) -> str:
@@ -311,18 +317,23 @@ class SecondLevelBackfillManager:
         grouped = df.groupby(df.index.date)
         for day, day_df in grouped:
             fp = parts_dir / f"{day.isoformat()}.parquet"
-            write_df = day_df.sort_index()
-            if fp.exists():
-                old = pd.read_parquet(fp)
-                old.index = pd.to_datetime(old.index)
-                before = len(old)
-                merged = pd.concat([old, write_df])
-                merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-                self._atomic_write_parquet(merged, fp)
-                count += max(0, len(merged) - before)
-            else:
-                self._atomic_write_parquet(write_df, fp)
-                count += len(write_df)
+            with parquet_partition_lock(
+                fp,
+                timeout_seconds=PARQUET_WRITE_LOCK_TIMEOUT_SECONDS,
+            ):
+                write_df = day_df.sort_index()
+                if fp.exists():
+                    old = pd.read_parquet(fp)
+                    old.index = pd.to_datetime(old.index)
+                    before = len(old)
+                    merged = pd.concat([old, write_df])
+                    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+                    if not merged.equals(old):
+                        self._atomic_write_parquet(merged, fp)
+                    count += max(0, len(merged) - before)
+                else:
+                    self._atomic_write_parquet(write_df, fp)
+                    count += len(write_df)
 
         return count
 

@@ -1,0 +1,14 @@
+name: crypto_trading
+channels:
+  - conda-forge
+dependencies:
+  # Keep the native dataframe/Parquet stack from one binary distribution on
+  # Windows.  Mixing a pip PyArrow wheel with Conda's MSVC runtime caused
+  # repeatable access violations in the long-running service.
+  - python=3.11
+  - pip
+  - pyarrow=24.0.*
+  - numpy=1.26.*
+  - pandas=2.3.*
+  - pip:
+      - -r requirements.txt

@@ -1027,6 +1027,59 @@ def test_livez_and_health_are_lightweight_liveness_aliases():
     assert asyncio.run(web_main.health_check())["status"] == "healthy"
 
 
+def test_runtime_readiness_requires_fresh_critical_task_heartbeats(monkeypatch):
+    class _Task:
+        @staticmethod
+        def done():
+            return False
+
+    managed = SimpleNamespace(task=_Task())
+    supervisor = SimpleNamespace(get_task=lambda name: managed)
+    fake_app = FastAPI()
+    fake_app.state.runtime_task_factories = {"runtime": {}}
+    fake_app.state.runtime_supervisor = supervisor
+    now = web_main.datetime.now(web_main.timezone.utc).isoformat()
+    monkeypatch.setattr(
+        web_main.runtime_state,
+        "get_task_diagnostics",
+        lambda: {"runtime": {"running": True, "state": "running", "last_heartbeat_at": now}},
+    )
+    monkeypatch.setattr(web_main, "_is_market_ws_stream_enabled", lambda: False)
+
+    ready, checks = web_main._runtime_readiness_snapshot(fake_app)
+
+    assert ready is True
+    assert checks["tasks"]["runtime"]["status"] == "ok"
+
+
+def test_runtime_readiness_rejects_stale_runtime_task(monkeypatch):
+    class _Task:
+        @staticmethod
+        def done():
+            return False
+
+    fake_app = FastAPI()
+    fake_app.state.runtime_task_factories = {"runtime": {}}
+    fake_app.state.runtime_supervisor = SimpleNamespace(get_task=lambda name: SimpleNamespace(task=_Task()))
+    monkeypatch.setattr(
+        web_main.runtime_state,
+        "get_task_diagnostics",
+        lambda: {
+            "runtime": {
+                "running": True,
+                "state": "running",
+                "last_heartbeat_at": "2000-01-01T00:00:00+00:00",
+            }
+        },
+    )
+    monkeypatch.setattr(web_main, "_is_market_ws_stream_enabled", lambda: False)
+
+    ready, checks = web_main._runtime_readiness_snapshot(fake_app)
+
+    assert ready is False
+    assert checks["tasks"]["runtime"]["status"] == "unhealthy"
+
+
 def test_guarded_startup_syncs_main_account_back_to_paper(monkeypatch):
     calls = []
 

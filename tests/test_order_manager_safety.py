@@ -159,6 +159,41 @@ def test_ambiguous_timeout_holds_client_order_id_and_blocks_blind_retry(monkeypa
     assert manager.get_last_error().startswith("duplicate client_order_id")
 
 
+def test_binance_fast_path_ambiguous_error_skips_ccxt_fallback(monkeypatch):
+    """A Binance raw submit timeout must not be converted into a ccxt retry."""
+    fallback_exchange = _FakeExchange()
+    manager = _make_real_manager(monkeypatch, fallback_exchange)
+    monkeypatch.setattr(manager, "_sync_binance_futures_leverage", AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        order_manager_module,
+        "binance_signed_request",
+        AsyncMock(side_effect=asyncio.TimeoutError("raw submit timed out")),
+    )
+
+    request = OrderRequest(
+        symbol="BTC/USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        amount=0.01,
+        price=50_000.0,
+        exchange="binance",
+        strategy="strat",
+        params={"market_type": "future"},
+    )
+
+    first = asyncio.run(manager._create_real_order(request))
+    assert first is None
+    assert fallback_exchange.calls == []
+    coid = request.params["newClientOrderId"]
+    assert manager._is_client_order_id_active(coid) is True
+    assert "raw submit timed out" in manager.get_last_error()
+
+    second = asyncio.run(manager._create_real_order(request))
+    assert second is None
+    assert fallback_exchange.calls == []
+    assert manager.get_last_error().startswith("duplicate client_order_id")
+
+
 def test_definitive_rejection_releases_client_order_id_and_allows_retry(monkeypatch):
     """A definitive pre-execution rejection (order never executed) releases the
     clientOrderId so an honest retry is allowed."""

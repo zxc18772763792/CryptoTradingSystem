@@ -227,3 +227,21 @@ Validation:
 Operational note:
 
 - The live Web process was left running and was not manually restarted. The change takes effect after a controlled reload/restart of the live service.
+
+## 2026-07-08 Follow-up: Binance Fast-Path Submit Ambiguity and Manual Order Mode
+
+Implemented behavior:
+
+- Binance futures raw `POST /fapi/v1/order` ambiguous failures now skip the ccxt fallback. Timeout/network-style failures keep the generated `clientOrderId` reserved and surface as unknown exchange state instead of being converted into an ordinary fallback failure.
+- Added a regression test that verifies a fast-path timeout does not call `exchange.create_order`, keeps the `clientOrderId` active, and blocks a blind retry.
+- Fixed `_execute_manual_order_single_in_active_mode` to write the active engine trading mode into `OrderRequest.params`. This removes the `NameError: name 'mode' is not defined` failure hit by manual-order and protective-level tests.
+
+Validation:
+
+- First full pytest run reproduced the pre-existing manual-order `NameError` failure: `8 failed, 2077 passed, 1 skipped in 396.06s`.
+- After the fixes, full pytest passed: `2085 passed, 1 skipped in 499.61s`.
+- `F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe -m pytest tests/test_order_manager_safety.py -q` passed: `15 passed in 5.82s`.
+- `F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe -m pytest tests/test_account_scoped_live_paths.py tests/test_trading_order_connectivity.py -q` passed: `10 passed in 3.91s`.
+- `F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe -m pytest tests/test_execution_engine_fill_accounting.py tests/test_execution_engine_live_trade_review.py tests/test_execution_engine_protective_levels.py -q` passed: `36 passed in 32.47s`.
+- `F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe -m compileall -q config core web strategies prediction_markets tests` passed.
+- `git diff --check` passed with only existing CRLF conversion warnings.
