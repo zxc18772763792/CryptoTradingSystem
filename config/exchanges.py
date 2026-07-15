@@ -32,7 +32,11 @@ class ExchangeConfig:
     api_secret: str = ""
     passphrase: Optional[str] = None  # OKX需要
     sandbox: bool = False  # 测试网模式
-    rate_limit: int = 1200  # 请求限制（毫秒）
+    # ccxt 语义: 每个请求单位之间的间隔毫秒数 (binance 官方默认 50ms).
+    # 历史事故: 这里曾是 1200 —— 把"每分钟 1200 权重"误填进了毫秒字段,
+    # 节流器因此比正确值慢 24 倍, 稳态流量即可让 ccxt 队列无限积压
+    # (health check/K线拉取排队 15s+ 超时, 交易所被 watchdog 误判不健康).
+    rate_limit: int = 50  # 请求间隔（毫秒, ccxt rateLimit 语义）
     timeout: int = 30000  # 超时时间（毫秒）
     enable_rate_limit: bool = True
     default_type: str = "spot"  # spot, future, margin
@@ -55,7 +59,7 @@ EXCHANGE_CONFIGS: Dict[str, ExchangeConfig] = {
         name="binance",
         exchange_type=ExchangeType.CEX,
         default_type="spot",
-        rate_limit=1200,
+        rate_limit=50,
         supported_symbols=[
             "BTC/USDT", "ETH/USDT", "BNB/USDT",
             "SOL/USDT", "XRP/USDT", "ADA/USDT",
@@ -67,7 +71,7 @@ EXCHANGE_CONFIGS: Dict[str, ExchangeConfig] = {
         name="okx",
         exchange_type=ExchangeType.CEX,
         default_type="spot",
-        rate_limit=1000,
+        rate_limit=110,
         supported_symbols=[
             "BTC/USDT", "ETH/USDT", "SOL/USDT",
             "XRP/USDT", "DOGE/USDT", "ADA/USDT",
@@ -88,7 +92,7 @@ EXCHANGE_CONFIGS: Dict[str, ExchangeConfig] = {
         name="bybit",
         exchange_type=ExchangeType.CEX,
         default_type="spot",
-        rate_limit=1200,
+        rate_limit=50,
         supported_symbols=[
             "BTC/USDT", "ETH/USDT", "SOL/USDT",
             "XRP/USDT", "ADA/USDT", "DOGE/USDT"
