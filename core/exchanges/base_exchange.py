@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Optional, Any, AsyncGenerator, List
+from typing import Optional, Any, AsyncGenerator, Dict, List
 import asyncio
 import time
 from loguru import logger
@@ -120,6 +120,8 @@ class Position:
 class BaseExchange(ABC):
     """交易所基类"""
 
+    _ERROR_LOG_REPEAT_WINDOW_SEC = 300.0
+
     def __init__(self, config: ExchangeConfig):
         self.config = config
         self.exchange_type = config.exchange_type
@@ -128,6 +130,8 @@ class BaseExchange(ABC):
         self._client: Any = None
         self._throttle_until = 0.0
         self._throttle_failures = 0
+        # (operation|message) -> last ERROR-level log time; see _handle_error.
+        self._error_log_last_at: Dict[str, float] = {}
 
     @abstractmethod
     async def connect(self) -> bool:
@@ -258,10 +262,10 @@ class BaseExchange(ABC):
                     await self.get_ticker("BTC/USDT")
                     return True
                 except Exception as e:
-                    logger.error(f"Health check failed for {self.name}: {e}")
+                    logger.error(f"Health check failed for {self.name}: {type(e).__name__}: {e}")
                     return False
             except Exception as e:
-                logger.error(f"Health check failed for {self.name}: {e}")
+                logger.error(f"Health check failed for {self.name}: {type(e).__name__}: {e}")
                 return False
 
         try:
@@ -277,7 +281,7 @@ class BaseExchange(ABC):
             await self.get_ticker("BTC/USDT")
             return True
         except Exception as e:
-            logger.error(f"Health check failed for {self.name}: {e}")
+            logger.error(f"Health check failed for {self.name}: {type(e).__name__}: {e}")
             return False
 
     @staticmethod
@@ -371,5 +375,24 @@ class BaseExchange(ABC):
             raise error
         if self._is_transient_connection_error(error):
             self._connected = False
-        logger.error(f"[{self.name}] {operation} failed: {error}")
+        # Throttle identical error lines: a permanently-failing call site (e.g.
+        # gate "Request IP not in whitelist" on every balances poll) otherwise
+        # floods the log with one ERROR per poll around the clock. Same
+        # (operation, message) repeats within the window log at DEBUG instead.
+        # Pure logging change — the exception always propagates unchanged.
+        now = time.monotonic()
+        signature = f"{operation}|{str(error)[:120]}"
+        last_at = self._error_log_last_at.get(signature, 0.0)
+        if (now - last_at) >= self._ERROR_LOG_REPEAT_WINDOW_SEC:
+            self._error_log_last_at[signature] = now
+            if len(self._error_log_last_at) > 64:
+                cutoff = now - self._ERROR_LOG_REPEAT_WINDOW_SEC
+                self._error_log_last_at = {
+                    key: value
+                    for key, value in self._error_log_last_at.items()
+                    if value >= cutoff
+                }
+            logger.error(f"[{self.name}] {operation} failed: {error}")
+        else:
+            logger.debug(f"[{self.name}] {operation} failed (repeat suppressed): {error}")
         raise error
