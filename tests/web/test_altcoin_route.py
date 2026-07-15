@@ -1790,12 +1790,12 @@ def test_altcoin_detail_degrades_when_onchain_hangs(monkeypatch):
     assert payload["selected_row"]["symbol"] == "AAA/USDT"
 
 
-def test_altcoin_watchlist_reports_retired_symbols(monkeypatch):
+def test_altcoin_watchlist_reports_retired_and_unlisted_symbols(monkeypatch):
     app = FastAPI()
     app.include_router(altcoin_api.router, prefix="/api/altcoin")
     client = TestClient(app)
 
-    monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", lambda: ["ORDI/USDT", "PEPE/USDT"])
+    monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", lambda: ["ORDI/USDT", "PEPE/USDT", "DEADCOIN/USDT"])
     monkeypatch.setattr(
         altcoin_api,
         "_research_retired_filter",
@@ -1805,13 +1805,24 @@ def test_altcoin_watchlist_reports_retired_symbols(monkeypatch):
         ),
     )
 
+    async def fake_live_map(*, exchange, symbols):
+        # PEPE listed with a real price; ORDI listed; DEADCOIN absent entirely.
+        return {
+            "ORDI/USDT": {"current_price": 12.5},
+            "PEPE/USDT": {"current_price": 0.00001},
+        }
+
+    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_live_map)
+
     response = client.get("/api/altcoin/radar/watchlist")
     assert response.status_code == 200
     payload = response.json()
     # User entries are never silently removed -- only flagged.
-    assert payload["symbols"] == ["ORDI/USDT", "PEPE/USDT"]
+    assert payload["symbols"] == ["ORDI/USDT", "PEPE/USDT", "DEADCOIN/USDT"]
     assert payload["retired_symbols"] == ["ORDI/USDT"]
     assert payload["retired_count"] == 1
+    assert payload["unlisted_symbols"] == ["DEADCOIN/USDT"]
+    assert payload["unlisted_count"] == 1
 
 
 def test_warm_default_scan_cache_uses_default_combo(monkeypatch):

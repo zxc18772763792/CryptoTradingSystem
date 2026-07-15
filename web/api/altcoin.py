@@ -2288,11 +2288,39 @@ async def get_altcoin_radar_watchlist():
         )
     except Exception:
         retired_symbols = []
+    # Coverage data only marks research-universe symbols, so also check the
+    # exchange's live tickers (TTL-cached; multiplier-aware, e.g. 1000PEPE):
+    # a watchlist entry with no spot AND no futures ticker is delisted.
+    unlisted_symbols: List[str] = []
+    try:
+        live_map = await asyncio.wait_for(
+            _load_exchange_public_market_snapshots(
+                exchange=DEFAULT_EXCHANGE,
+                symbols=list(symbols),
+            ),
+            timeout=8.0,
+        )
+        normalized_watch = _normalize_symbols(symbols)
+        unlisted_symbols = [
+            symbol
+            for symbol in normalized_watch
+            if symbol not in live_map
+            or _safe_float(
+                (live_map.get(symbol) or {}).get("current_price")
+                or (live_map.get(symbol) or {}).get("last_price"),
+                0.0,
+            )
+            <= 0
+        ]
+    except Exception:
+        unlisted_symbols = []
     return {
         "symbols": symbols,
         "count": len(symbols),
         "retired_symbols": retired_symbols,
         "retired_count": len(retired_symbols),
+        "unlisted_symbols": unlisted_symbols,
+        "unlisted_count": len(unlisted_symbols),
         "meta": universe_meta(symbols, "watchlist"),
         "ts": _utcnow().isoformat(),
     }
