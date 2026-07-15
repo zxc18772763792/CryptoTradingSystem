@@ -2162,6 +2162,24 @@ async def lifespan(app: FastAPI):
         "Managed background tasks started: "
         + ", ".join(sorted(app.state.runtime_task_factories.keys()))
     )
+
+    async def _warm_altcoin_radar_scan_cache() -> None:
+        # One-shot warmer: the first default-combo radar scan after a restart
+        # pays the factor-library cold compute (~60s+), which exceeds the
+        # frontend's request budget — the radar page's first load then fails.
+        # Wait for feeds/exchange to settle, then compute it once in the
+        # background so page loads always hit the cache.
+        await asyncio.sleep(90)
+        try:
+            from web.api.altcoin import warm_default_scan_cache  # noqa: PLC0415
+            await warm_default_scan_cache()
+            logger.info("altcoin radar default scan cache warmed")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"altcoin radar scan warmup skipped: {exc}")
+
+    app.state.altcoin_radar_warmup_task = asyncio.create_task(_warm_altcoin_radar_scan_cache())
     if bool(getattr(settings, "AI_AUTONOMOUS_AGENT_AUTO_START", False)):
         with contextlib.suppress(Exception):
             await autonomous_trading_agent.update_runtime_config(enabled=True)

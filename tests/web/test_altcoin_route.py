@@ -252,6 +252,34 @@ def test_altcoin_scan_route_sorts_and_limits(monkeypatch):
     assert payload["rows"][0]["rank"] == 1
 
 
+def test_altcoin_scan_route_dedupes_symbol_formats_and_tags(monkeypatch):
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+    scan_payload = _scan_payload()
+    duplicate = dict(scan_payload["rows"][0])
+    duplicate["symbol"] = "AAAUSDT"
+    duplicate["tags"] = ["布局吸筹", "布局吸筹"]
+    scan_payload["rows"].append(duplicate)
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        assert kwargs["symbols"] == ["AAA/USDT", "BBB/USDT"]
+        return scan_payload
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+
+    response = client.get(
+        "/api/altcoin/radar/scan?sort_by=priority&limit=30&symbols=AAAUSDT,AAA-USDT,BBB/USDT"
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {row["symbol"] for row in payload["rows"]} == {"AAA/USDT", "BBB/USDT"}
+    by_symbol = {row["symbol"]: row for row in payload["rows"]}
+    assert by_symbol["AAA/USDT"]["tags"] == ["布局吸筹"]
+    assert payload["scan_meta"]["row_count_before_limit"] == 2
+
+
 def test_altcoin_radar_research_proposal_endpoint(monkeypatch):
     from core.ai.proposal_schemas import ResearchProposal
     from core.research import orchestrator as orchestrator_module
@@ -1696,3 +1724,107 @@ def test_altcoin_radar_watchlist_routes(monkeypatch):
     resp_delete = client.delete("/api/altcoin/radar/watchlist?symbol=WIF%2FUSDT", headers=_ops_headers())
     assert resp_delete.status_code == 200
     assert "WIF/USDT" not in resp_delete.json()["symbols"]
+
+
+def test_altcoin_detail_unknown_symbol_fast_404(monkeypatch):
+    """Regression: a symbol outside the universe used to run the FULL onchain
+    pipeline (~25s) and return 200 with an empty detail. It must 404 fast and
+    never touch the external sources."""
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+    external_calls = {}
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        return _scan_payload()
+
+    async def fake_get_onchain_overview(**kwargs):
+        external_calls["onchain"] = True
+        return {}
+
+    async def fake_live_chain(**kwargs):
+        external_calls["live_chain"] = True
+        return ({}, {})
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
+    monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_live_chain)
+
+    response = client.get("/api/altcoin/radar/detail?symbol=NOPE/USDT")
+    assert response.status_code == 404
+    assert "NOPE/USDT" in response.json()["detail"]
+    assert external_calls == {}, "unknown symbol must not trigger external sources"
+
+
+def test_altcoin_detail_degrades_when_onchain_hangs(monkeypatch):
+    """Regression: an unbounded onchain call hung the whole detail endpoint
+    past the frontend's 60s budget. With the per-source budget the endpoint
+    returns quickly with a warning and partial data."""
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        return _scan_payload()
+
+    async def hanging_onchain(**kwargs):
+        await asyncio.sleep(5)
+        return {"never": "returned"}
+
+    async def fake_live_chain(**kwargs):
+        return ({}, {})
+
+    monkeypatch.setattr(altcoin_api, "DETAIL_ONCHAIN_TIMEOUT_SEC", 0.2)
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api, "get_onchain_overview", hanging_onchain)
+    monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_live_chain)
+
+    started = time.monotonic()
+    response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&symbols=AAA/USDT")
+    elapsed = time.monotonic() - started
+
+    assert response.status_code == 200
+    assert elapsed < 3.0, "bounded detail must not wait for the hanging source"
+    payload = response.json()
+    assert any("timed out" in str(w) for w in payload.get("warnings") or []), payload.get("warnings")
+    assert payload["selected_row"]["symbol"] == "AAA/USDT"
+
+
+def test_altcoin_watchlist_reports_retired_symbols(monkeypatch):
+    app = FastAPI()
+    app.include_router(altcoin_api.router, prefix="/api/altcoin")
+    client = TestClient(app)
+
+    monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", lambda: ["ORDI/USDT", "PEPE/USDT"])
+    monkeypatch.setattr(
+        altcoin_api,
+        "_research_retired_filter",
+        lambda exchange, timeframe, requested, exclude: (
+            [s for s in requested if s != "ORDI/USDT"],
+            ["ORDI/USDT"],
+        ),
+    )
+
+    response = client.get("/api/altcoin/radar/watchlist")
+    assert response.status_code == 200
+    payload = response.json()
+    # User entries are never silently removed -- only flagged.
+    assert payload["symbols"] == ["ORDI/USDT", "PEPE/USDT"]
+    assert payload["retired_symbols"] == ["ORDI/USDT"]
+    assert payload["retired_count"] == 1
+
+
+def test_warm_default_scan_cache_uses_default_combo(monkeypatch):
+    captured = {}
+
+    async def fake_get_altcoin_scan_snapshot(**kwargs):
+        captured.update(kwargs)
+        return {"rows": []}
+
+    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    asyncio.run(altcoin_api.warm_default_scan_cache())
+
+    assert captured["exchange"] == altcoin_api.DEFAULT_EXCHANGE
+    assert captured["timeframe"] == altcoin_api.DEFAULT_TIMEFRAME
+    assert captured["mode"] == "combined"
+    assert captured["refresh"] is False

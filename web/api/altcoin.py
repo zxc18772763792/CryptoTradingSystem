@@ -42,6 +42,7 @@ from core.research.altcoin_radar_events import get_all_recent_events, get_recent
 from core.research.altcoin_radar_universe import (
     add_watchlist_symbol,
     get_watchlist_symbols,
+    normalize_altcoin_pair,
     remove_watchlist_symbol,
     resolve_universe_scope,
     universe_meta,
@@ -61,6 +62,11 @@ router = APIRouter()
 
 DEFAULT_EXCHANGE = "binance"
 DEFAULT_TIMEFRAME = "4h"
+# Budgets for the radar-detail external sources (onchain overview / live chain
+# context). Production incident: an unbounded chain call hung the whole detail
+# endpoint past the frontend's 60s budget, so the drawer never opened.
+DETAIL_ONCHAIN_TIMEOUT_SEC = 15.0
+DETAIL_LIVE_CHAIN_TIMEOUT_SEC = 10.0
 DEFAULT_LIMIT = 30
 DEFAULT_SORT = "priority"
 MAX_UNIVERSE_SIZE = 30
@@ -166,7 +172,7 @@ def _normalize_symbols(symbols: Iterable[str]) -> List[str]:
     normalized: List[str] = []
     seen = set()
     for symbol in symbols:
-        text = str(symbol or "").strip().upper()
+        text = normalize_altcoin_pair(symbol)
         if not text or text in seen:
             continue
         seen.add(text)
@@ -1630,7 +1636,26 @@ def _build_scan_response(
     normalized_sort = _normalize_sort(sort_by)
     all_rows = list(scan_payload.get("rows") or [])
     filtered_by_mode = _filter_rows_by_mode(all_rows, mode)
-    rows = sort_rows(filtered_by_mode, sort_by=normalized_sort)
+    sorted_rows = sort_rows(filtered_by_mode, sort_by=normalized_sort)
+    rows: List[Dict[str, Any]] = []
+    seen_symbols: set[str] = set()
+    for raw_row in sorted_rows:
+        row = dict(raw_row or {})
+        symbol = normalize_altcoin_pair(row.get("symbol"))
+        if not symbol or symbol in seen_symbols:
+            continue
+        row["symbol"] = symbol
+        row["tags"] = list(
+            dict.fromkeys(
+                str(tag).strip()
+                for tag in (row.get("tags") or [])
+                if str(tag).strip()
+            )
+        )
+        seen_symbols.add(symbol)
+        rows.append(row)
+    for rank, row in enumerate(rows, start=1):
+        row["rank"] = rank
     cap = MAX_EXPANDED_SIZE if len(all_rows) > MAX_UNIVERSE_SIZE else MAX_UNIVERSE_SIZE
     limited_rows = rows[: max(1, min(int(limit or DEFAULT_LIMIT), cap))]
     summarized = summarize_rows(
@@ -1823,6 +1848,27 @@ async def scan_altcoin_radar(
     return _build_scan_response(scan_payload=scan_payload, sort_by=sort_by, limit=limit, mode=mode)
 
 
+async def warm_default_scan_cache() -> Dict[str, Any]:
+    """Pre-compute the default-parameter radar scan once (startup warmer).
+
+    The first scan after a restart pays the full factor-library cold compute
+    (observed ~63s), which exceeds the frontend's 60s budget — so the radar
+    page's first load after every service restart failed with a timeout.
+    Warming the default combo in the background right after startup means the
+    page always lands on a cache hit (~40ms).
+    """
+    return await get_altcoin_scan_snapshot(
+        exchange=DEFAULT_EXCHANGE,
+        timeframe=DEFAULT_TIMEFRAME,
+        symbols=[],
+        exclude_retired=True,
+        refresh=False,
+        mode="combined",
+        view="",
+        universe_scope="research",
+    )
+
+
 @router.get("/radar/events")
 async def get_altcoin_radar_events(
     symbol: Optional[str] = None,
@@ -1890,23 +1936,58 @@ async def get_altcoin_radar_detail(
         ),
         None,
     )
+    # A symbol that is neither in the scan result nor explicitly requested via
+    # ``symbols`` is simply unknown — fail fast instead of spending ~25s running
+    # the full onchain/community pipeline only to return an empty detail.
+    if selected_row is None and normalized_symbol not in set(
+        _normalize_symbols(list(scan_payload.get("symbols_used") or []) + normalized_symbols)
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail=f"symbol {normalized_symbol} is not in the current radar universe",
+        )
     fast_watchlist_focus = bool(watchlist_focus) and normalized_symbols == [normalized_symbol]
+    detail_warnings: List[str] = []
+
+    async def _bounded_detail_source(coro: Any, *, timeout: float, label: str, fallback: Any) -> Any:
+        # External chain/community sources have hung well past 60s in
+        # production, timing out the whole detail endpoint (the drawer never
+        # opened). Bound each source and degrade with a warning instead.
+        try:
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            detail_warnings.append(f"{label} timed out after {timeout:.0f}s; showing partial detail")
+            return fallback
+        except Exception as exc:
+            detail_warnings.append(f"{label} unavailable: {type(exc).__name__}")
+            return fallback
+
     onchain_context: Dict[str, Any] = {}
     live_community_snapshot: Dict[str, Any] = {}
     live_whale_snapshot: Dict[str, Any] = {}
     if not fast_watchlist_focus:
         need_chain_fallback = _needs_detail_chain_fallback(selected_row)
-        onchain_task = get_onchain_overview(
-            symbol=normalized_symbol,
-            exchange=normalized_exchange,
-            whale_threshold_btc=10.0,
-            chain="auto",
-            refresh=refresh,
-            hours=4,
+        onchain_task = _bounded_detail_source(
+            get_onchain_overview(
+                symbol=normalized_symbol,
+                exchange=normalized_exchange,
+                whale_threshold_btc=10.0,
+                chain="auto",
+                refresh=refresh,
+                hours=4,
+            ),
+            timeout=DETAIL_ONCHAIN_TIMEOUT_SEC,
+            label="onchain overview",
+            fallback={},
         )
-        live_chain_task = _load_detail_live_chain_context(
-            exchange=normalized_exchange,
-            symbol=normalized_symbol,
+        live_chain_task = _bounded_detail_source(
+            _load_detail_live_chain_context(
+                exchange=normalized_exchange,
+                symbol=normalized_symbol,
+            ),
+            timeout=DETAIL_LIVE_CHAIN_TIMEOUT_SEC,
+            label="live chain context",
+            fallback=({}, {}),
         ) if need_chain_fallback else asyncio.sleep(0, result=({}, {}))
         onchain_context, live_chain_context = await asyncio.gather(onchain_task, live_chain_task)
         live_community_snapshot, live_whale_snapshot = live_chain_context
@@ -1947,6 +2028,8 @@ async def get_altcoin_radar_detail(
         "cache": scan_payload.get("cache") or {},
         "watchlist_focus": fast_watchlist_focus,
     }
+    if detail_warnings:
+        detail["warnings"] = list(detail.get("warnings") or []) + detail_warnings
     return detail
 
 
@@ -2191,9 +2274,25 @@ async def delete_altcoin_alert_preset(
 @router.get("/radar/watchlist")
 async def get_altcoin_radar_watchlist():
     symbols = get_watchlist_symbols()
+    # Flag entries the coverage data marks retired-like (delisted/inactive) —
+    # the watchlist accumulated 2024-era meme coins that permanently show as
+    # degraded rows in watchlist-scope scans. Surfacing the flag lets the UI
+    # (and the user) prune them; we never silently delete user entries.
+    retired_symbols: List[str] = []
+    try:
+        _, retired_symbols = _research_retired_filter(
+            DEFAULT_EXCHANGE,
+            DEFAULT_TIMEFRAME,
+            list(symbols),
+            True,
+        )
+    except Exception:
+        retired_symbols = []
     return {
         "symbols": symbols,
         "count": len(symbols),
+        "retired_symbols": retired_symbols,
+        "retired_count": len(retired_symbols),
         "meta": universe_meta(symbols, "watchlist"),
         "ts": _utcnow().isoformat(),
     }
