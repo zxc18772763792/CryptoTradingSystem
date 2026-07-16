@@ -4,7 +4,7 @@ param(
     [int]$Port = 8000,
     [bool]$OpenBrowser = $true,
     [int]$HealthWaitSec = 20,
-    [bool]$AllowPersistedLiveMode = $false,
+    [bool]$AllowPersistedLiveMode = $true,
     [bool]$StartAutonomousAgent = $false,
     [bool]$StartNewsWorker = $false,
     [bool]$StartNewsLlmWorker = $false,
@@ -301,13 +301,8 @@ function Ensure-ResearchUniverseRefreshTask {
     }
 }
 
-function Start-WebSupervisor {
-    param([string]$PythonExecutable)
-
-    if ($DisableSupervisorBootstrap.IsPresent) { return }
-    $supervisorScript = Join-Path $PSScriptRoot "scripts\supervise_web.ps1"
-    if (-not (Test-Path $supervisorScript)) { throw "Web supervisor script not found: $supervisorScript" }
-    $existing = @(
+function Get-RunningWebSupervisors {
+    return @(
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
             Where-Object {
                 $name = [string]$_.Name
@@ -318,12 +313,63 @@ function Start-WebSupervisor {
                 $cmd -match ("(?i)-Port\s+{0}(?:\s|$)" -f [int]$Port)
             }
     )
+}
+
+function Start-WebSupervisor {
+    param([string]$PythonExecutable)
+
+    if ($DisableSupervisorBootstrap.IsPresent) { return }
+    $supervisorScript = Join-Path $PSScriptRoot "scripts\supervise_web.ps1"
+    if (-not (Test-Path $supervisorScript)) { throw "Web supervisor script not found: $supervisorScript" }
+    $existing = @(Get-RunningWebSupervisors)
     if ($existing.Count) {
         Write-Host ("Web supervisor already running (PID={0})." -f (($existing | Select-Object -ExpandProperty ProcessId) -join ", "))
         return
     }
     $stopPath = Join-Path $PSScriptRoot ("runtime\web_supervisor_{0}.stop" -f $Port)
     Remove-Item $stopPath -Force -ErrorAction SilentlyContinue
+
+    # Prefer launching through Task Scheduler: a supervisor spawned with
+    # Start-Process stays inside the launching console's kill-on-close job
+    # object and dies with the host app (2026-07-16: an app auto-update took
+    # down web + workers + supervisor at once, leaving nothing to restart).
+    $ensureScript = Join-Path $PSScriptRoot "scripts\ensure_web_supervisor_task.ps1"
+    if (Test-Path $ensureScript) {
+        try {
+            $ensureParams = @{
+                ProjectRoot = $PSScriptRoot
+                PythonExecutable = $PythonExecutable
+                EnvName = $EnvName
+                BindHost = $BindHost
+                Port = $Port
+                HealthWaitSec = $HealthWaitSec
+                AllowPersistedLiveMode = [bool]$AllowPersistedLiveMode
+                StartAutonomousAgent = [bool]$StartAutonomousAgent
+                StartNewsWorker = [bool]$StartNewsWorker
+                StartNewsLlmWorker = [bool]$StartNewsLlmWorker
+                StartPmWorker = [bool]$StartPmWorker
+                EnableAnalyticsHistory = [bool]$EnableAnalyticsHistory
+                StartNow = $true
+                Quiet = $true
+            }
+            $null = & $ensureScript @ensureParams
+            $deadline = (Get-Date).AddSeconds(12)
+            while ((Get-Date) -lt $deadline) {
+                $spawned = @(Get-RunningWebSupervisors)
+                if ($spawned.Count) {
+                    Write-Host ("Started web supervisor via scheduled task (PID={0})." -f (($spawned | Select-Object -ExpandProperty ProcessId) -join ", "))
+                    Write-Host "Web supervisor log: $(Join-Path $PSScriptRoot 'logs\web_supervisor.log')"
+                    return
+                }
+                Start-Sleep -Milliseconds 500
+            }
+            Write-Host "Supervisor task started but no supervisor process appeared within 12s." -ForegroundColor Yellow
+        } catch {
+            Write-Host "Supervisor scheduled-task launch failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        Write-Host "Falling back to a session-bound supervisor; it will not survive this console closing." -ForegroundColor Yellow
+    }
+
     $args = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $supervisorScript,
         "-ProjectRoot", $PSScriptRoot, "-PythonExecutable", $PythonExecutable,
@@ -397,6 +443,17 @@ $managedTradingMode = if ($AllowPersistedLiveMode) { "live" } else { "paper" }
 $managedLiveRestore = if ($AllowPersistedLiveMode) { "1" } else { "0" }
 Set-Item -Path Env:TRADING_MODE -Value $managedTradingMode
 Set-Item -Path Env:ALLOW_PERSISTED_LIVE_MODE_START -Value $managedLiveRestore
+if ($AllowPersistedLiveMode) {
+    Set-Item -Path Env:MARKET_WS_ENABLED -Value "1"
+    Set-Item -Path Env:MARKET_WS_MODE -Value "strategy_primary"
+    Set-Item -Path Env:MARKET_WS_FORCE_REST -Value "0"
+    Set-Item -Path Env:MARKET_WS_FAIL_CLOSED_FOR_LIVE -Value "1"
+    Set-Item -Path Env:MARKET_WS_QUALITY_GUARD_ENABLED -Value "1"
+    Set-Item -Path Env:MARKET_WS_SYMBOL_MAX_AGE_SEC -Value "60"
+} else {
+    Set-Item -Path Env:MARKET_WS_ENABLED -Value "0"
+    Set-Item -Path Env:MARKET_WS_MODE -Value "off"
+}
 Set-EffectiveWorkerEnvFlags `
     -NewsWorker $StartNewsWorker `
     -NewsLlmWorker $StartNewsLlmWorker `
@@ -418,9 +475,9 @@ if ($pidOnPort) {
             Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' to opt into analytics history collectors." -ForegroundColor Yellow
         }
         if ($AllowPersistedLiveMode) {
-            Write-Host "Managed start explicitly allows TRADING_MODE=live and persisted live-mode restore." -ForegroundColor Yellow
+            Write-Host "Managed start defaults to LIVE with MARKET_WS_MODE=strategy_primary and fail-closed quality guards." -ForegroundColor Yellow
         } else {
-            Write-Host "Managed start defaults to TRADING_MODE=paper and blocks persisted live-mode restore." -ForegroundColor Yellow
+            Write-Host "Managed start was explicitly forced to paper mode with market WS disabled." -ForegroundColor Yellow
         }
         if ($requestedExternalWorkerLabels.Count) {
             Write-Host "Worker mix was not changed because the web service is already running." -ForegroundColor Yellow
@@ -458,9 +515,9 @@ if (-not $EnableAnalyticsHistory) {
     Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' when you want analytics history collectors." -ForegroundColor Yellow
 }
 if ($AllowPersistedLiveMode) {
-    Write-Host "Managed start explicitly allows TRADING_MODE=live and persisted live-mode restore." -ForegroundColor Yellow
+    Write-Host "Managed start defaults to LIVE with MARKET_WS_MODE=strategy_primary and fail-closed quality guards." -ForegroundColor Yellow
 } else {
-    Write-Host "Managed start defaults to TRADING_MODE=paper and blocks persisted live-mode restore." -ForegroundColor Yellow
+    Write-Host "Managed start was explicitly forced to paper mode with market WS disabled." -ForegroundColor Yellow
 }
 
 $startupStamp = Get-Date -Format "yyyyMMdd_HHmmss"

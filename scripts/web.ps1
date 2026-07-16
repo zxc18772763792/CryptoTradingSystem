@@ -8,6 +8,7 @@ param(
     [double]$MaxWsAgeMs = 10000,
     [switch]$OpenBrowser,
     [switch]$AllowPersistedLiveMode,
+    [switch]$PaperMode,
     [switch]$ConfirmLive,
     [switch]$ResetNewsLlmFailover,
     [switch]$SkipPrecheck,
@@ -313,6 +314,16 @@ function Get-ResearchUniverseTaskSummary {
     }
 }
 
+function Get-WebSupervisorTaskSummary {
+    param([int]$PortNumber)
+    try {
+        $task = Get-ScheduledTask -TaskName ("CryptoTradingSystem_WebSupervisor_{0}" -f $PortNumber) -ErrorAction Stop
+        return [string]$task.State
+    } catch {
+        return "not registered"
+    }
+}
+
 function Show-Help {
     Write-Host ""
     Write-Host "CryptoTradingSystem web control" -ForegroundColor Cyan
@@ -334,6 +345,7 @@ function Show-Help {
     Write-Host ""
     Write-Host "Common start variants:"
     Write-Host "  .\web.bat start -OpenBrowser"
+    Write-Host "  .\web.bat start -PaperMode"
     Write-Host "  .\web.bat start -StartAutonomousAgent"
     Write-Host "  .\web.bat start -NoNewsWorkers"
     Write-Host "  .\web.bat start -NoNewsLlmWorker"
@@ -345,8 +357,8 @@ function Show-Help {
     Write-Host ""
     Write-Host "Managed default profile:"
     Write-Host "  - '.\web.bat start' launches web + news worker + news LLM worker."
-    Write-Host "  - Managed start defaults to TRADING_MODE=paper and blocks persisted live-mode restore."
-    Write-Host "  - Pass -AllowPersistedLiveMode only when intentionally restoring live mode."
+    Write-Host "  - Managed start defaults to LIVE + MARKET_WS_MODE=strategy_primary."
+    Write-Host "  - Pass -PaperMode for an explicit paper/offline-WS startup."
     Write-Host "  - Managed start ignores .env START_* worker flags and uses command-line flags."
     Write-Host "  - Analytics history stays off unless you pass -EnableAnalyticsHistory."
     Write-Host "  - PM worker remains opt-in via -StartPmWorker."
@@ -391,7 +403,7 @@ function Show-Status {
     Write-Host ("  Project root : {0}" -f $projectRoot)
     Write-Host ("  Port         : {0}" -f $PortNumber)
     Write-Host "  Start policy : default web + news engine (analytics-history disabled)"
-    Write-Host "  Live restore : default blocks persisted live restore; -AllowPersistedLiveMode opts in"
+    Write-Host "  Live restore : default enabled with WS strategy_primary; -PaperMode opts out"
     Write-Host "  Worker start : news workers auto-start by default; PM worker stays opt-in"
     $analyticsEnvValue = if ($envValues.ContainsKey("ANALYTICS_HISTORY_ENABLED")) { [string]$envValues["ANALYTICS_HISTORY_ENABLED"] } else { $null }
     $runtimeAnalyticsKnown = $false
@@ -412,7 +424,7 @@ function Show-Status {
     } else {
         "not observed"
     }
-    Write-Host ("  Supervisor   : {0}" -f $supervisorText)
+    Write-Host ("  Supervisor   : {0} [task {1}]" -f $supervisorText, (Get-WebSupervisorTaskSummary -PortNumber $PortNumber))
 
     if ((-not $webPid) -and (-not $managedWebProcesses.Count)) {
         Write-Host "  Web          : stopped"
@@ -659,13 +671,18 @@ switch ($Action) {
             $effectiveStartNewsLlmWorker = $true
         }
 
+        $effectiveAllowPersistedLiveMode = -not $PaperMode.IsPresent
+        if ($AllowPersistedLiveMode.IsPresent) {
+            $effectiveAllowPersistedLiveMode = $true
+        }
+
         & $startScript `
             -EnvName $EnvName `
             -BindHost $BindHost `
             -Port $Port `
             -HealthWaitSec $HealthWaitSec `
             -OpenBrowser:$OpenBrowser.IsPresent `
-            -AllowPersistedLiveMode:$AllowPersistedLiveMode.IsPresent `
+            -AllowPersistedLiveMode:$effectiveAllowPersistedLiveMode `
             -StartAutonomousAgent:$StartAutonomousAgent.IsPresent `
             -StartNewsWorker:$effectiveStartNewsWorker `
             -StartNewsLlmWorker:$effectiveStartNewsLlmWorker `
