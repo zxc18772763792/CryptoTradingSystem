@@ -349,9 +349,18 @@ COINGLASS_DATASET_MANIFESTS: Dict[str, CoinglassDatasetManifest] = {
         routes=(
             CoinglassRouteSpec(
                 api_version="v4",
+                path="/v4/api/futures/v2/taker-buy-sell-volume/history",
+                required_params=("symbol", "exchange", "interval"),
+                default_params={"exchange": "Binance", "interval": "h1"},
+            ),
+            CoinglassRouteSpec(
+                api_version="v4",
+                # Pre-rename alias; upstream still serves it but the current
+                # api-spec only lists the /v2/ path above.
                 path="/v4/api/futures/taker-buy-sell-volume/history",
                 required_params=("symbol", "exchange", "interval"),
                 default_params={"exchange": "Binance", "interval": "h1"},
+                fallback=True,
             ),
         ),
     ),

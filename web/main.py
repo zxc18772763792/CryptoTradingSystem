@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import os
 import time
@@ -11,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -1636,13 +1638,14 @@ async def _kaiko_worker(stop_event: asyncio.Event) -> None:
 async def _coinglass_worker(stop_event: asyncio.Event) -> None:
     """Refresh CoinGlass premium cache in the background (no-op when disabled).
 
-    Each refresh round can fire >30 requests (3 symbols × ~10 datasets), which
-    saturates COINGLASS_RATE_LIMIT_PER_MIN=30 in a single shot. At INTERVAL=180s
-    that meant a 429 every cycle (576/day in production logs). Stretching to
-    600s lets the minute-budget recover between cycles and stops the steady
-    rate-limit alarms.
+    The keystore Pro plan allows 10 req/min and COINGLASS_RATE_LIMIT_PER_MIN
+    matches it, so each round is stopped by the local budget guard after
+    ~8 requests (2 are reserved for manual/UI calls) instead of hitting
+    upstream 429s. A full 3-symbol sweep needs several rounds; 180s rounds
+    average ~2.7 req/min, well inside the plan, while keeping dataset
+    rotation reasonably fresh.
     """
-    INTERVAL = 600
+    INTERVAL = 180
     await asyncio.sleep(360)  # stagger: 6 min after startup
     while not stop_event.is_set():
         try:
@@ -2430,30 +2433,49 @@ async def get_market_data_status():
     return _market_ws_status_snapshot(include_symbols=True)
 
 
-_WS_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-
-
-def _ws_client_ip(websocket: WebSocket) -> str:
+def _normalize_ws_origin(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
     try:
-        host = (websocket.client.host if websocket.client else "") or ""
+        parsed = urlparse(text)
     except Exception:
-        host = ""
-    text = str(host).strip().lower().strip("[]")
-    if text.startswith("::ffff:"):
-        text = text.split("::ffff:", 1)[1]
-    return text
+        return ""
+    scheme = str(parsed.scheme or "").lower()
+    host = str(parsed.hostname or "").lower()
+    if scheme not in {"http", "https"} or not host or parsed.username or parsed.password:
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        return ""
+    host_text = f"[{host}]" if ":" in host else host
+    default_port = 443 if scheme == "https" else 80
+    port_text = f":{port}" if port is not None and port != default_port else ""
+    return f"{scheme}://{host_text}{port_text}"
+
+
+def _ws_origin_is_allowed(websocket: WebSocket) -> bool:
+    origin = _normalize_ws_origin(str(websocket.headers.get("origin") or ""))
+    if not origin:
+        return False
+    allowed = {_normalize_ws_origin(item) for item in _allowed_origins}
+    allowed.discard("")
+    return origin in allowed
 
 
 def _ws_is_authorized(websocket: WebSocket) -> bool:
     """Authorize a WebSocket before accepting.
 
-    Allow when EITHER:
+    The browser Origin must be present in the configured CORS allowlist, and
+    the request must bear EITHER:
       - the request bears a valid local-UI session cookie (`cts_local_ui_session`), OR
       - the request includes a valid Ops token (header `X-Ops-Token` or `Authorization: Bearer ...`)
-
-    Loopback requests without any credentials are also allowed (legacy local-only UX),
-    but non-loopback requests without credentials are rejected.
     """
+    if not _ws_origin_is_allowed(websocket):
+        return False
     try:
         if _has_valid_local_ui_session(websocket):
             return True
@@ -2470,13 +2492,11 @@ def _ws_is_authorized(websocket: WebSocket) -> bool:
         bearer = ""
         if auth_header.lower().startswith("bearer "):
             bearer = auth_header[7:].strip()
-        if header_token and header_token == expected:
+        expected_bytes = expected.encode("utf-8")
+        if header_token and hmac.compare_digest(header_token.encode("utf-8"), expected_bytes):
             return True
-        if bearer and bearer == expected:
+        if bearer and hmac.compare_digest(bearer.encode("utf-8"), expected_bytes):
             return True
-    # Loopback fallback: preserve existing local UI experience
-    if _ws_client_ip(websocket) in _WS_LOOPBACK_HOSTS:
-        return True
     return False
 
 
