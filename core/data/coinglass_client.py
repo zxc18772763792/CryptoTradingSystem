@@ -218,6 +218,15 @@ def _coinglass_root_url() -> str:
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
 
 
+def _coinglass_spec_root_url() -> str:
+    # The /api/v1/modules/ catalog is served by the keystore www host only;
+    # the proxy.keystore.com.cn data host returns 404 for it.
+    configured = str(getattr(settings, "COINGLASS_SPEC_ROOT_URL", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    return _coinglass_root_url()
+
+
 def coinglass_api_key() -> str:
     key = str(getattr(settings, "COINGLASS_API_KEY", "") or "").strip()
     if key:
@@ -1780,7 +1789,7 @@ class CoinglassClient:
             )
         headers = {"X-Api-Key": coinglass_api_key()}
         base_url = (
-            _coinglass_root_url()
+            _coinglass_spec_root_url()
             if path.startswith("/api/v1/modules/")
             else _coinglass_base_url()
         )

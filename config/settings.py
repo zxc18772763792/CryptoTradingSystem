@@ -58,9 +58,13 @@ class Settings(BaseSettings):
     BYBIT_API_KEY: str = ""
     BYBIT_API_SECRET: str = ""
     COINGLASS_ENABLED: bool = False
-    COINGLASS_BASE_URL: str = "https://www.keystore.com.cn/api/v1/proxy/coinglass"
+    COINGLASS_BASE_URL: str = "https://proxy.keystore.com.cn/api/v1/proxy/coinglass"
+    # The keystore module catalog (api-spec discovery) lives on the www host
+    # only; the proxy host 404s it.
+    COINGLASS_SPEC_ROOT_URL: str = "https://www.keystore.com.cn"
     COINGLASS_API_KEY: str = ""
-    COINGLASS_RATE_LIMIT_PER_MIN: int = 30
+    # keystore Pro plan allows 10 req/min; the local limiter must not exceed it.
+    COINGLASS_RATE_LIMIT_PER_MIN: int = 10
     COINGLASS_DAILY_BUDGET: int = 50000
     COINGLASS_MONTHLY_BUDGET: int = 500000
     COINGLASS_INCLUDE_AI: bool = True
@@ -103,8 +107,8 @@ class Settings(BaseSettings):
     HTTPS_PROXY: Optional[str] = None
 
     # Trading
-    TRADING_MODE: str = "paper"  # paper/live
-    ALLOW_PERSISTED_LIVE_MODE_START: bool = False
+    TRADING_MODE: str = "live"  # paper/live
+    ALLOW_PERSISTED_LIVE_MODE_START: bool = True
     MAX_POSITION_SIZE: float = 0.1
     MAX_DAILY_LOSS: float = 0.02
     MAX_OPEN_POSITIONS: int = 100
@@ -196,14 +200,14 @@ class Settings(BaseSettings):
     # Real-time market-data WebSocket feed (ccxt.pro). When enabled, ticker
     # updates are pushed over a persistent socket instead of polled via REST;
     # the REST fan-out becomes an automatic fallback while the socket is down.
-    MARKET_WS_ENABLED: bool = False
-    MARKET_WS_MODE: str = "off"  # off/shadow/ui_primary/strategy_primary
+    MARKET_WS_ENABLED: bool = True
+    MARKET_WS_MODE: str = "strategy_primary"  # off/shadow/ui_primary/strategy_primary
     MARKET_WS_FORCE_REST: bool = False
     MARKET_WS_EXCHANGES: str = "binance"  # comma-separated; blank = all connected
     MARKET_WS_WATCH_TIMEOUT_SEC: float = 25.0
     MARKET_WS_HEALTH_MAX_AGE_SEC: float = 15.0
     MARKET_WS_SYMBOL_LIMIT: int = 16
-    MARKET_WS_SYMBOL_MAX_AGE_SEC: float = 10.0
+    MARKET_WS_SYMBOL_MAX_AGE_SEC: float = 60.0
     MARKET_WS_RECONNECT_MIN_SEC: float = 1.0
     MARKET_WS_RECONNECT_MAX_SEC: float = 30.0
     MARKET_WS_REST_RECONCILE_SEC: float = 30.0
@@ -211,7 +215,7 @@ class Settings(BaseSettings):
     MARKET_WS_FAIL_CLOSED_FOR_LIVE: bool = True
     MARKET_WS_MARK_PRICE_ENABLED: bool = False
     # Auto-degrade WS->REST on sustained quality loss in ui_primary/strategy_primary.
-    MARKET_WS_QUALITY_GUARD_ENABLED: bool = False
+    MARKET_WS_QUALITY_GUARD_ENABLED: bool = True
     # When True, a parquet index that looks local-stamped (runs ahead of real
     # UTC) raises instead of being silently shifted — use to flush out any
     # remaining non-UTC kline writer in CI / debugging.
