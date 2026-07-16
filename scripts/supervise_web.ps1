@@ -37,7 +37,11 @@ New-Item -ItemType Directory -Force -Path $runtimeDir,$logDir | Out-Null
 function Write-SupervisorLog {
     param([string]$Message, [string]$Level = "INFO")
     $line = "[{0}] [{1}] {2}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Level, $Message
-    $line | Add-Content -Path $logPath -Encoding UTF8
+    try {
+        $line | Add-Content -Path $logPath -Encoding UTF8 -ErrorAction Stop
+    } catch {
+        [Console]::Error.WriteLine($line)
+    }
 }
 
 function Write-SupervisorState {
@@ -50,9 +54,13 @@ function Write-SupervisorState {
         port = $Port
         updated_at = (Get-Date).ToUniversalTime().ToString("o")
     }
-    $tempPath = "$statePath.$PID.tmp"
-    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $tempPath -Encoding UTF8
-    Move-Item -Path $tempPath -Destination $statePath -Force
+    try {
+        $tempPath = "$statePath.$PID.tmp"
+        $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $tempPath -Encoding UTF8 -ErrorAction Stop
+        Move-Item -Path $tempPath -Destination $statePath -Force -ErrorAction Stop
+    } catch {
+        Write-SupervisorLog "Failed to persist supervisor state: $($_.Exception.Message)" "WARN"
+    }
 }
 
 function Get-MatchingPythonProcesses {
@@ -99,6 +107,13 @@ function Test-WebResponsive {
 $restartTimes = @()
 $consecutiveFailures = 0
 $livenessFailures = 0
+# Win32_Process enumeration can transiently miss live processes (observed
+# 2026-07-16 21:12/21:14 under post-restart load: live workers invisible for
+# one probe, so spares were spawned). Require two consecutive misses before
+# treating anything as dead, and never restart web while /livez answers.
+$MissingConfirmations = 2
+$webMissingStreak = 0
+$workerMissingStreaks = @{}
 function Reserve-Restart {
     param([string]$Component)
     $now = Get-Date
@@ -106,7 +121,7 @@ function Reserve-Restart {
     $script:restartTimes = @($script:restartTimes | Where-Object { $_ -ge $cutoff })
     if ($script:restartTimes.Count -ge [Math]::Max(1, $MaxRestarts)) {
         Write-SupervisorLog "Restart budget exhausted for $Component ($($script:restartTimes.Count) restarts in $RestartWindowMinutes minutes)." "ERROR"
-        Write-SupervisorState "restart_budget_exhausted" $Component "manual intervention required"
+        Write-SupervisorState "restart_budget_exhausted" $Component "cooling down before retry"
         return $false
     }
     $script:restartTimes += $now
@@ -144,17 +159,43 @@ function Invoke-WebRestart {
     $stdout = Join-Path $logDir ("web_restart_{0}.out.log" -f $restartStamp)
     $stderr = Join-Path $logDir ("web_restart_{0}.err.log" -f $restartStamp)
     $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $ProjectRoot `
-        -RedirectStandardOutput $stdout -RedirectStandardError $stderr -Wait -PassThru
+        -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    # PowerShell's Start-Process -Wait waits for the entire descendant tree on
+    # Windows. The startup wrapper intentionally leaves Uvicorn running, so
+    # -Wait would block this supervisor forever after a successful restart.
+    $wrapperTimeoutMs = 1000 * [Math]::Max(30, $HealthWaitSec + 30)
+    if (-not $proc.WaitForExit($wrapperTimeoutMs)) {
+        Write-SupervisorLog "Web restart wrapper timed out after $wrapperTimeoutMs ms." "ERROR"
+        return 124
+    }
     return [int]$proc.ExitCode
 }
 
 function Start-MissingWorker {
     param([string]$Label, [string]$Module)
-    if ((Get-MatchingPythonProcesses -CommandToken $Module).Count) {
+    $running = @(Get-MatchingPythonProcesses -CommandToken $Module)
+    if ($running.Count -gt 1) {
+        $keep = $running | Sort-Object CreationDate | Select-Object -First 1
+        foreach ($extra in @($running | Where-Object { [int]$_.ProcessId -ne [int]$keep.ProcessId })) {
+            Stop-Process -Id $extra.ProcessId -Force -ErrorAction SilentlyContinue
+            Write-SupervisorLog "Stopped duplicate $Label PID=$($extra.ProcessId); kept oldest PID=$($keep.ProcessId)." "WARN"
+        }
+        $script:workerMissingStreaks[$Label] = 0
         return $true
     }
+    if ($running.Count -eq 1) {
+        $script:workerMissingStreaks[$Label] = 0
+        return $true
+    }
+    $streak = [int]$script:workerMissingStreaks[$Label] + 1
+    $script:workerMissingStreaks[$Label] = $streak
+    if ($streak -lt $MissingConfirmations) {
+        Write-SupervisorLog "$Label not observed ($streak/$MissingConfirmations); confirming before restart." "WARN"
+        return $true
+    }
+    $script:workerMissingStreaks[$Label] = 0
     if (-not (Reserve-Restart -Component $Label)) {
-        return $false
+        return $true
     }
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $stdout = Join-Path $logDir ("{0}_{1}.out.log" -f ($Label -replace "[^a-zA-Z0-9]", "_"), $stamp)
@@ -180,9 +221,25 @@ try {
     Write-SupervisorState "running" "web" "monitoring"
 
     while (-not (Test-Path $stopPath)) {
+        try {
         if (-not (Test-WebRunning)) {
+            if (Test-WebResponsive) {
+                $webMissingStreak = 0
+                Write-SupervisorLog "Process enumeration missed web but /livez responded; skipping restart." "WARN"
+                Start-Sleep -Seconds ([Math]::Max(2, $MonitorIntervalSec))
+                continue
+            }
+            $webMissingStreak++
+            if ($webMissingStreak -lt $MissingConfirmations) {
+                Write-SupervisorLog "Web process not observed ($webMissingStreak/$MissingConfirmations); confirming before restart." "WARN"
+                Start-Sleep -Seconds ([Math]::Max(2, $MonitorIntervalSec))
+                continue
+            }
+            $webMissingStreak = 0
             if (-not (Reserve-Restart -Component "web")) {
-                break
+                $cooldownSec = [Math]::Max(5, [Math]::Min(60, $RestartWindowMinutes * 60))
+                Start-Sleep -Seconds $cooldownSec
+                continue
             }
             $delay = [Math]::Min([Math]::Pow(2, $consecutiveFailures), [Math]::Max(1, $MaxBackoffSec))
             Write-SupervisorLog "Web process missing; restarting after $delay second(s)." "WARN"
@@ -207,6 +264,7 @@ try {
             }
         } else {
             $consecutiveFailures = 0
+            $webMissingStreak = 0
             if (Test-WebResponsive) {
                 $livenessFailures = 0
             } else {
@@ -232,12 +290,21 @@ try {
                 if (-not (Start-MissingWorker "pm_worker" "prediction_markets.polymarket.worker")) { break }
             }
         }
+        } catch {
+            $consecutiveFailures++
+            Write-SupervisorLog "Supervisor iteration failed but monitoring will continue: $($_.Exception.Message)" "ERROR"
+            Write-SupervisorState "iteration_failed" "supervisor" $_.Exception.Message
+        }
         Start-Sleep -Seconds ([Math]::Max(2, $MonitorIntervalSec))
     }
     if (Test-Path $stopPath) {
         Write-SupervisorLog "Stop signal observed; supervisor exiting."
         Write-SupervisorState "stopped" "supervisor" "stop signal"
     }
+} catch {
+    Write-SupervisorLog "Supervisor fatal error: $($_.Exception.Message)" "ERROR"
+    Write-SupervisorState "fatal_error" "supervisor" $_.Exception.Message
+    throw
 } finally {
     Remove-Item $pidPath -Force -ErrorAction SilentlyContinue
     Remove-Item $stopPath -Force -ErrorAction SilentlyContinue
