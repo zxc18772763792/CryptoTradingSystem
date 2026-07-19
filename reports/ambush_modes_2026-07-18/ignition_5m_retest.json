@@ -1,0 +1,2123 @@
+{
+ "generated_at": "2026-07-19T09:00:59.765386+00:00",
+ "params": {
+  "mcap_min_usd": 5000000.0,
+  "mcap_max_usd": 300000000.0,
+  "oi_mcap_min": 0.05,
+  "volume_z_min": 4.0,
+  "volume_z_window": 720,
+  "ret_1h_min": 0.06,
+  "breakout_bars": 168,
+  "oi_jump_bars": 4,
+  "oi_jump_min": 0.05,
+  "max_runup_48h": 0.8,
+  "cooldown_bars": 24
+ },
+ "signals": 115,
+ "missing_5m_windows": 0,
+ "fast_lag_5min": {
+  "n": 115,
+  "win_rate": 0.3217,
+  "avg_ret": -0.0039,
+  "median_ret": -0.0357,
+  "best": 0.2478,
+  "worst": -0.0819,
+  "profit_factor": 0.899,
+  "exit_reasons": {
+   "time_stop": 2,
+   "trailing_stop": 66,
+   "stop_loss": 36,
+   "take_profit": 11
+  }
+ },
+ "slow_lag_60min": {
+  "n": 115,
+  "win_rate": 0.3391,
+  "avg_ret": -0.0021,
+  "median_ret": -0.0347,
+  "best": 0.2478,
+  "worst": -0.0819,
+  "profit_factor": 0.947,
+  "exit_reasons": {
+   "time_stop": 3,
+   "trailing_stop": 67,
+   "stop_loss": 36,
+   "take_profit": 9
+  }
+ },
+ "note": "同一 5m 数据源对比执行滞后；成本 5bps 费用+10bps 滑点每边；未计资金费（±0.03%/2d 量级）。",
+ "fast_trades": [
+  {
+   "base": "ACT",
+   "signal": "2025-09-17 02:00:00",
+   "entry_time": "2025-09-17 03:00:00",
+   "exit_time": "2025-09-19 03:05:00",
+   "ret_pct": -0.044365960464405774,
+   "exit_reason": "time_stop",
+   "hold_hours": 48.08
+  },
+  {
+   "base": "ACT",
+   "signal": "2026-06-19 13:00:00",
+   "entry_time": "2026-06-19 14:00:00",
+   "exit_time": "2026-06-19 16:25:00",
+   "ret_pct": 0.0036678627111365056,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.42
+  },
+  {
+   "base": "ACT",
+   "signal": "2026-06-28 04:00:00",
+   "entry_time": "2026-06-28 05:00:00",
+   "exit_time": "2026-06-28 05:30:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.5
+  },
+  {
+   "base": "AIA",
+   "signal": "2026-03-19 14:00:00",
+   "entry_time": "2026-03-19 15:00:00",
+   "exit_time": "2026-03-19 17:40:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 2.67
+  },
+  {
+   "base": "AIA",
+   "signal": "2026-03-29 18:00:00",
+   "entry_time": "2026-03-29 19:00:00",
+   "exit_time": "2026-03-30 00:55:00",
+   "ret_pct": -0.0683710282965505,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.92
+  },
+  {
+   "base": "AIA",
+   "signal": "2026-05-17 02:00:00",
+   "entry_time": "2026-05-17 03:00:00",
+   "exit_time": "2026-05-17 05:00:00",
+   "ret_pct": 0.018947591675340436,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.0
+  },
+  {
+   "base": "AKE",
+   "signal": "2026-02-24 19:00:00",
+   "entry_time": "2026-02-24 20:00:00",
+   "exit_time": "2026-02-24 23:35:00",
+   "ret_pct": 0.044895391471798995,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.58
+  },
+  {
+   "base": "AKE",
+   "signal": "2026-04-09 17:00:00",
+   "entry_time": "2026-04-09 18:00:00",
+   "exit_time": "2026-04-09 22:35:00",
+   "ret_pct": 0.13684387935823994,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 4.58
+  },
+  {
+   "base": "AKE",
+   "signal": "2026-07-03 07:00:00",
+   "entry_time": "2026-07-03 08:00:00",
+   "exit_time": "2026-07-03 13:05:00",
+   "ret_pct": 0.039480939397240955,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.08
+  },
+  {
+   "base": "AKE",
+   "signal": "2026-07-17 08:00:00",
+   "entry_time": "2026-07-17 09:00:00",
+   "exit_time": "2026-07-17 10:15:00",
+   "ret_pct": -0.030536377525085867,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.25
+  },
+  {
+   "base": "ALLO",
+   "signal": "2026-02-20 15:00:00",
+   "entry_time": "2026-02-20 16:00:00",
+   "exit_time": "2026-02-20 18:50:00",
+   "ret_pct": 0.03238675322095863,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.83
+  },
+  {
+   "base": "ALLO",
+   "signal": "2026-05-28 16:00:00",
+   "entry_time": "2026-05-28 17:00:00",
+   "exit_time": "2026-05-28 18:50:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 1.83
+  },
+  {
+   "base": "ALLO",
+   "signal": "2026-07-13 17:00:00",
+   "entry_time": "2026-07-13 18:00:00",
+   "exit_time": "2026-07-13 20:50:00",
+   "ret_pct": 0.0084023244307877,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.83
+  },
+  {
+   "base": "AVAAI",
+   "signal": "2026-02-02 11:00:00",
+   "entry_time": "2026-02-02 12:00:00",
+   "exit_time": "2026-02-02 12:45:00",
+   "ret_pct": 0.03417757242757247,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.75
+  },
+  {
+   "base": "BANK",
+   "signal": "2025-10-18 03:00:00",
+   "entry_time": "2025-10-18 04:00:00",
+   "exit_time": "2025-10-18 05:15:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.25
+  },
+  {
+   "base": "BANK",
+   "signal": "2026-04-01 17:00:00",
+   "entry_time": "2026-04-01 18:00:00",
+   "exit_time": "2026-04-01 21:00:00",
+   "ret_pct": 0.0688977737064379,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.0
+  },
+  {
+   "base": "BILL",
+   "signal": "2026-07-12 15:00:00",
+   "entry_time": "2026-07-12 16:00:00",
+   "exit_time": "2026-07-12 22:45:00",
+   "ret_pct": -0.041280023927440235,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 6.75
+  },
+  {
+   "base": "BOME",
+   "signal": "2026-04-19 15:00:00",
+   "entry_time": "2026-04-19 16:00:00",
+   "exit_time": "2026-04-19 16:05:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.08
+  },
+  {
+   "base": "BULLA",
+   "signal": "2025-08-09 01:00:00",
+   "entry_time": "2025-08-09 02:00:00",
+   "exit_time": "2025-08-09 08:40:00",
+   "ret_pct": -0.019336101768054337,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 6.67
+  },
+  {
+   "base": "CHILLGUY",
+   "signal": "2026-04-08 13:00:00",
+   "entry_time": "2026-04-08 14:00:00",
+   "exit_time": "2026-04-09 00:45:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 10.75
+  },
+  {
+   "base": "CHILLGUY",
+   "signal": "2026-04-10 04:00:00",
+   "entry_time": "2026-04-10 05:00:00",
+   "exit_time": "2026-04-10 06:00:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.0
+  },
+  {
+   "base": "COAI",
+   "signal": "2026-04-14 03:00:00",
+   "entry_time": "2026-04-14 04:00:00",
+   "exit_time": "2026-04-14 04:45:00",
+   "ret_pct": 0.1329700438169975,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.75
+  },
+  {
+   "base": "COAI",
+   "signal": "2026-06-12 10:00:00",
+   "entry_time": "2026-06-12 11:00:00",
+   "exit_time": "2026-06-12 15:15:00",
+   "ret_pct": -0.00999018555774489,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 4.25
+  },
+  {
+   "base": "DODOX",
+   "signal": "2026-07-15 00:00:00",
+   "entry_time": "2026-07-15 01:00:00",
+   "exit_time": "2026-07-15 01:35:00",
+   "ret_pct": -0.07063566817797584,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "EDGE",
+   "signal": "2026-04-03 17:00:00",
+   "entry_time": "2026-04-03 18:00:00",
+   "exit_time": "2026-04-03 19:10:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.17
+  },
+  {
+   "base": "EDGE",
+   "signal": "2026-07-07 00:00:00",
+   "entry_time": "2026-07-07 01:00:00",
+   "exit_time": "2026-07-07 16:35:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 15.58
+  },
+  {
+   "base": "EDGE",
+   "signal": "2026-07-08 04:00:00",
+   "entry_time": "2026-07-08 05:00:00",
+   "exit_time": "2026-07-08 07:00:00",
+   "ret_pct": -0.018532828898056186,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.0
+  },
+  {
+   "base": "ESPORTS",
+   "signal": "2026-03-26 14:00:00",
+   "entry_time": "2026-03-26 15:00:00",
+   "exit_time": "2026-03-27 04:05:00",
+   "ret_pct": -0.07283878823180667,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 13.08
+  },
+  {
+   "base": "ESPORTS",
+   "signal": "2026-05-12 11:00:00",
+   "entry_time": "2026-05-12 12:00:00",
+   "exit_time": "2026-05-12 17:55:00",
+   "ret_pct": -0.016660601935456598,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.92
+  },
+  {
+   "base": "ESPORTS",
+   "signal": "2026-05-20 09:00:00",
+   "entry_time": "2026-05-20 10:00:00",
+   "exit_time": "2026-05-20 12:25:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 2.42
+  },
+  {
+   "base": "EVAA",
+   "signal": "2026-01-06 01:00:00",
+   "entry_time": "2026-01-06 02:00:00",
+   "exit_time": "2026-01-06 02:35:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "GENIUS",
+   "signal": "2026-05-22 13:00:00",
+   "entry_time": "2026-05-22 14:00:00",
+   "exit_time": "2026-05-22 18:05:00",
+   "ret_pct": 0.0010242533542551566,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 4.08
+  },
+  {
+   "base": "GOAT",
+   "signal": "2025-12-07 00:00:00",
+   "entry_time": "2025-12-07 01:00:00",
+   "exit_time": "2025-12-07 08:10:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 7.17
+  },
+  {
+   "base": "GOAT",
+   "signal": "2026-03-30 08:00:00",
+   "entry_time": "2026-03-30 09:00:00",
+   "exit_time": "2026-04-01 09:05:00",
+   "ret_pct": -0.0592308686574089,
+   "exit_reason": "time_stop",
+   "hold_hours": 48.08
+  },
+  {
+   "base": "GWEI",
+   "signal": "2026-02-27 23:00:00",
+   "entry_time": "2026-02-28 00:00:00",
+   "exit_time": "2026-02-28 02:50:00",
+   "ret_pct": 0.007140170959793469,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.83
+  },
+  {
+   "base": "GWEI",
+   "signal": "2026-04-11 11:00:00",
+   "entry_time": "2026-04-11 12:00:00",
+   "exit_time": "2026-04-12 12:50:00",
+   "ret_pct": 0.020669437504334476,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 24.83
+  },
+  {
+   "base": "GWEI",
+   "signal": "2026-04-18 12:00:00",
+   "entry_time": "2026-04-18 13:00:00",
+   "exit_time": "2026-04-18 14:20:00",
+   "ret_pct": 0.01763772092500393,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.33
+  },
+  {
+   "base": "GWEI",
+   "signal": "2026-06-29 09:00:00",
+   "entry_time": "2026-06-29 10:00:00",
+   "exit_time": "2026-06-29 10:15:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.25
+  },
+  {
+   "base": "HEI",
+   "signal": "2026-05-29 11:00:00",
+   "entry_time": "2026-05-29 12:00:00",
+   "exit_time": "2026-05-29 13:05:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "HOME",
+   "signal": "2026-06-04 22:00:00",
+   "entry_time": "2026-06-04 23:00:00",
+   "exit_time": "2026-06-05 02:45:00",
+   "ret_pct": -0.030517481154588855,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.75
+  },
+  {
+   "base": "HOME",
+   "signal": "2026-07-15 22:00:00",
+   "entry_time": "2026-07-15 23:00:00",
+   "exit_time": "2026-07-16 00:30:00",
+   "ret_pct": -0.038940031995976065,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.5
+  },
+  {
+   "base": "IDOL",
+   "signal": "2026-05-13 19:00:00",
+   "entry_time": "2026-05-13 20:00:00",
+   "exit_time": "2026-05-14 11:30:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 15.5
+  },
+  {
+   "base": "JTO",
+   "signal": "2026-05-07 15:00:00",
+   "entry_time": "2026-05-07 16:00:00",
+   "exit_time": "2026-05-07 17:05:00",
+   "ret_pct": 0.2477499999999998,
+   "exit_reason": "take_profit",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "KAITO",
+   "signal": "2025-09-09 00:00:00",
+   "entry_time": "2025-09-09 01:00:00",
+   "exit_time": "2025-09-09 02:15:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 1.25
+  },
+  {
+   "base": "KAITO",
+   "signal": "2025-09-28 03:00:00",
+   "entry_time": "2025-09-28 04:00:00",
+   "exit_time": "2025-09-29 00:15:00",
+   "ret_pct": 0.023609920466274414,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 20.25
+  },
+  {
+   "base": "KOMA",
+   "signal": "2025-10-08 03:00:00",
+   "entry_time": "2025-10-08 04:00:00",
+   "exit_time": "2025-10-08 04:20:00",
+   "ret_pct": 0.030420081283593636,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.33
+  },
+  {
+   "base": "LAB",
+   "signal": "2026-04-07 19:00:00",
+   "entry_time": "2026-04-07 20:00:00",
+   "exit_time": "2026-04-08 02:45:00",
+   "ret_pct": -0.009249108224892999,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 6.75
+  },
+  {
+   "base": "LAB",
+   "signal": "2026-04-12 18:00:00",
+   "entry_time": "2026-04-12 19:00:00",
+   "exit_time": "2026-04-12 20:00:00",
+   "ret_pct": -0.039446086213882126,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.0
+  },
+  {
+   "base": "LAB",
+   "signal": "2026-04-24 01:00:00",
+   "entry_time": "2026-04-24 02:00:00",
+   "exit_time": "2026-04-24 05:30:00",
+   "ret_pct": 0.039262668927164124,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.5
+  },
+  {
+   "base": "LUMIA",
+   "signal": "2026-04-27 14:00:00",
+   "entry_time": "2026-04-27 15:00:00",
+   "exit_time": "2026-04-27 22:55:00",
+   "ret_pct": -0.04329055376288504,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 7.92
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-03-04 09:00:00",
+   "entry_time": "2026-03-04 10:00:00",
+   "exit_time": "2026-03-04 13:20:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 3.33
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-04-09 12:00:00",
+   "entry_time": "2026-04-09 13:00:00",
+   "exit_time": "2026-04-09 20:55:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 7.92
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-06-03 12:00:00",
+   "entry_time": "2026-06-03 13:00:00",
+   "exit_time": "2026-06-04 05:10:00",
+   "ret_pct": 0.09145797788761689,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 16.17
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-06-10 10:00:00",
+   "entry_time": "2026-06-10 11:00:00",
+   "exit_time": "2026-06-10 19:20:00",
+   "ret_pct": 0.0568580035681695,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 8.33
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-06-26 13:00:00",
+   "entry_time": "2026-06-26 14:00:00",
+   "exit_time": "2026-06-26 16:20:00",
+   "ret_pct": -0.026443709649105474,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.33
+  },
+  {
+   "base": "MOODENG",
+   "signal": "2025-09-13 01:00:00",
+   "entry_time": "2025-09-13 02:00:00",
+   "exit_time": "2025-09-13 13:05:00",
+   "ret_pct": 0.01624162814130703,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 11.08
+  },
+  {
+   "base": "MOODENG",
+   "signal": "2025-12-07 00:00:00",
+   "entry_time": "2025-12-07 01:00:00",
+   "exit_time": "2025-12-07 01:05:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.08
+  },
+  {
+   "base": "MYX",
+   "signal": "2026-04-14 02:00:00",
+   "entry_time": "2026-04-14 03:00:00",
+   "exit_time": "2026-04-14 03:05:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.08
+  },
+  {
+   "base": "MYX",
+   "signal": "2026-05-23 14:00:00",
+   "entry_time": "2026-05-23 15:00:00",
+   "exit_time": "2026-05-24 10:15:00",
+   "ret_pct": -0.007779700375525555,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 19.25
+  },
+  {
+   "base": "ORDI",
+   "signal": "2025-11-08 00:00:00",
+   "entry_time": "2025-11-08 01:00:00",
+   "exit_time": "2025-11-08 03:30:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 2.5
+  },
+  {
+   "base": "ORDI",
+   "signal": "2026-04-15 16:00:00",
+   "entry_time": "2026-04-15 17:00:00",
+   "exit_time": "2026-04-16 02:30:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 9.5
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2025-09-06 01:00:00",
+   "entry_time": "2025-09-06 02:00:00",
+   "exit_time": "2025-09-06 03:25:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.42
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2025-10-19 01:00:00",
+   "entry_time": "2025-10-19 02:00:00",
+   "exit_time": "2025-10-19 02:25:00",
+   "ret_pct": -0.0819200000000001,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.42
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2026-01-28 03:00:00",
+   "entry_time": "2026-01-28 04:00:00",
+   "exit_time": "2026-01-28 04:20:00",
+   "ret_pct": -0.03566893568911211,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.33
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2026-02-08 13:00:00",
+   "entry_time": "2026-02-08 14:00:00",
+   "exit_time": "2026-02-08 17:15:00",
+   "ret_pct": 0.24775000000000025,
+   "exit_reason": "take_profit",
+   "hold_hours": 3.25
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2026-02-10 12:00:00",
+   "entry_time": "2026-02-10 13:00:00",
+   "exit_time": "2026-02-10 15:35:00",
+   "ret_pct": -0.0419667703730735,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.58
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2026-06-08 07:00:00",
+   "entry_time": "2026-06-08 08:00:00",
+   "exit_time": "2026-06-08 08:55:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.92
+  },
+  {
+   "base": "RAVE",
+   "signal": "2026-02-19 15:00:00",
+   "entry_time": "2026-02-19 16:00:00",
+   "exit_time": "2026-02-19 17:00:00",
+   "ret_pct": -0.032510893750032244,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.0
+  },
+  {
+   "base": "RAVE",
+   "signal": "2026-02-21 18:00:00",
+   "entry_time": "2026-02-21 19:00:00",
+   "exit_time": "2026-02-22 02:20:00",
+   "ret_pct": -0.03918921605854542,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 7.33
+  },
+  {
+   "base": "RAVE",
+   "signal": "2026-04-09 15:00:00",
+   "entry_time": "2026-04-09 16:00:00",
+   "exit_time": "2026-04-09 18:45:00",
+   "ret_pct": 0.09176244622941965,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.75
+  },
+  {
+   "base": "RAVE",
+   "signal": "2026-06-27 16:00:00",
+   "entry_time": "2026-06-27 17:00:00",
+   "exit_time": "2026-06-27 17:15:00",
+   "ret_pct": -0.045047439629335995,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.25
+  },
+  {
+   "base": "SENT",
+   "signal": "2026-01-30 00:00:00",
+   "entry_time": "2026-01-30 01:00:00",
+   "exit_time": "2026-01-30 01:35:00",
+   "ret_pct": -0.02407414302212707,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "SENT",
+   "signal": "2026-06-09 16:00:00",
+   "entry_time": "2026-06-09 17:00:00",
+   "exit_time": "2026-06-09 23:00:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 6.0
+  },
+  {
+   "base": "SENT",
+   "signal": "2026-07-09 16:00:00",
+   "entry_time": "2026-07-09 17:00:00",
+   "exit_time": "2026-07-10 00:45:00",
+   "ret_pct": -0.061105167039264274,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 7.75
+  },
+  {
+   "base": "SIREN",
+   "signal": "2025-08-08 02:00:00",
+   "entry_time": "2025-08-08 03:00:00",
+   "exit_time": "2025-08-08 03:20:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.33
+  },
+  {
+   "base": "SIREN",
+   "signal": "2025-08-10 00:00:00",
+   "entry_time": "2025-08-10 01:00:00",
+   "exit_time": "2025-08-10 01:10:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.17
+  },
+  {
+   "base": "SIREN",
+   "signal": "2026-02-16 06:00:00",
+   "entry_time": "2026-02-16 07:00:00",
+   "exit_time": "2026-02-16 07:55:00",
+   "ret_pct": 0.06926370099981816,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.92
+  },
+  {
+   "base": "SKYAI",
+   "signal": "2026-04-04 08:00:00",
+   "entry_time": "2026-04-04 09:00:00",
+   "exit_time": "2026-04-04 10:40:00",
+   "ret_pct": -0.0819200000000001,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.67
+  },
+  {
+   "base": "SKYAI",
+   "signal": "2026-04-11 10:00:00",
+   "entry_time": "2026-04-11 11:00:00",
+   "exit_time": "2026-04-11 11:10:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.17
+  },
+  {
+   "base": "SKYAI",
+   "signal": "2026-04-16 17:00:00",
+   "entry_time": "2026-04-16 18:00:00",
+   "exit_time": "2026-04-16 19:20:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.33
+  },
+  {
+   "base": "SKYAI",
+   "signal": "2026-04-29 10:00:00",
+   "entry_time": "2026-04-29 11:00:00",
+   "exit_time": "2026-04-29 12:05:00",
+   "ret_pct": -0.011743667713612904,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "SLX",
+   "signal": "2026-06-24 05:00:00",
+   "entry_time": "2026-06-24 06:00:00",
+   "exit_time": "2026-06-24 12:05:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 6.08
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-04-02 20:00:00",
+   "entry_time": "2026-04-02 21:00:00",
+   "exit_time": "2026-04-02 21:45:00",
+   "ret_pct": -0.025870012948401633,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.75
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-14 04:00:00",
+   "entry_time": "2026-06-14 05:00:00",
+   "exit_time": "2026-06-14 07:00:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 2.0
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-17 17:00:00",
+   "entry_time": "2026-06-17 18:00:00",
+   "exit_time": "2026-06-17 19:45:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 1.75
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-20 10:00:00",
+   "entry_time": "2026-06-20 11:00:00",
+   "exit_time": "2026-06-20 12:20:00",
+   "ret_pct": -0.06834692001748988,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.33
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-22 01:00:00",
+   "entry_time": "2026-06-22 02:00:00",
+   "exit_time": "2026-06-22 02:35:00",
+   "ret_pct": -0.04173101267014412,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-25 12:00:00",
+   "entry_time": "2026-06-25 13:00:00",
+   "exit_time": "2026-06-25 13:15:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.25
+  },
+  {
+   "base": "T",
+   "signal": "2026-07-11 12:00:00",
+   "entry_time": "2026-07-11 13:00:00",
+   "exit_time": "2026-07-11 16:45:00",
+   "ret_pct": -0.009411602168774236,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.75
+  },
+  {
+   "base": "TAC",
+   "signal": "2026-04-22 11:00:00",
+   "entry_time": "2026-04-22 12:00:00",
+   "exit_time": "2026-04-22 13:05:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "TAC",
+   "signal": "2026-04-30 16:00:00",
+   "entry_time": "2026-04-30 17:00:00",
+   "exit_time": "2026-04-30 17:25:00",
+   "ret_pct": -0.04019218895246124,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.42
+  },
+  {
+   "base": "TAC",
+   "signal": "2026-05-03 13:00:00",
+   "entry_time": "2026-05-03 14:00:00",
+   "exit_time": "2026-05-03 14:10:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.17
+  },
+  {
+   "base": "TRADOOR",
+   "signal": "2026-04-12 15:00:00",
+   "entry_time": "2026-04-12 16:00:00",
+   "exit_time": "2026-04-12 18:05:00",
+   "ret_pct": -0.010203587770955536,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.08
+  },
+  {
+   "base": "TRADOOR",
+   "signal": "2026-06-13 22:00:00",
+   "entry_time": "2026-06-13 23:00:00",
+   "exit_time": "2026-06-14 00:50:00",
+   "ret_pct": -0.008785034726629837,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.83
+  },
+  {
+   "base": "TRADOOR",
+   "signal": "2026-06-15 08:00:00",
+   "entry_time": "2026-06-15 09:00:00",
+   "exit_time": "2026-06-15 09:30:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.5
+  },
+  {
+   "base": "TREE",
+   "signal": "2025-10-21 00:00:00",
+   "entry_time": "2025-10-21 01:00:00",
+   "exit_time": "2025-10-21 02:15:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.25
+  },
+  {
+   "base": "TREE",
+   "signal": "2026-04-14 07:00:00",
+   "entry_time": "2026-04-14 08:00:00",
+   "exit_time": "2026-04-15 00:55:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 16.92
+  },
+  {
+   "base": "TST",
+   "signal": "2025-09-17 00:00:00",
+   "entry_time": "2025-09-17 01:00:00",
+   "exit_time": "2025-09-17 01:30:00",
+   "ret_pct": -0.0422649290717072,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.5
+  },
+  {
+   "base": "TST",
+   "signal": "2026-04-16 20:00:00",
+   "entry_time": "2026-04-16 21:00:00",
+   "exit_time": "2026-04-16 21:20:00",
+   "ret_pct": -0.029915978076207606,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.33
+  },
+  {
+   "base": "TST",
+   "signal": "2026-05-04 04:00:00",
+   "entry_time": "2026-05-04 05:00:00",
+   "exit_time": "2026-05-04 06:05:00",
+   "ret_pct": -0.02337082812475455,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "UB",
+   "signal": "2026-04-22 16:00:00",
+   "entry_time": "2026-04-22 17:00:00",
+   "exit_time": "2026-04-22 17:35:00",
+   "ret_pct": 0.04590353596282182,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "UB",
+   "signal": "2026-05-01 12:00:00",
+   "entry_time": "2026-05-01 13:00:00",
+   "exit_time": "2026-05-01 15:20:00",
+   "ret_pct": 0.10207565618001568,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.33
+  },
+  {
+   "base": "US",
+   "signal": "2026-05-10 21:00:00",
+   "entry_time": "2026-05-10 22:00:00",
+   "exit_time": "2026-05-10 23:05:00",
+   "ret_pct": -0.01818498892411935,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "US",
+   "signal": "2026-07-03 06:00:00",
+   "entry_time": "2026-07-03 07:00:00",
+   "exit_time": "2026-07-03 11:55:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 4.92
+  },
+  {
+   "base": "US",
+   "signal": "2026-07-09 17:00:00",
+   "entry_time": "2026-07-09 18:00:00",
+   "exit_time": "2026-07-09 21:30:00",
+   "ret_pct": -0.016741171565403445,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.5
+  },
+  {
+   "base": "VANRY",
+   "signal": "2026-03-17 16:00:00",
+   "entry_time": "2026-03-17 17:00:00",
+   "exit_time": "2026-03-17 20:05:00",
+   "ret_pct": -0.050489036347523,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.08
+  },
+  {
+   "base": "VANRY",
+   "signal": "2026-07-04 18:00:00",
+   "entry_time": "2026-07-04 19:00:00",
+   "exit_time": "2026-07-04 19:55:00",
+   "ret_pct": -0.042868450654194534,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.92
+  },
+  {
+   "base": "VELVET",
+   "signal": "2025-08-07 00:00:00",
+   "entry_time": "2025-08-07 01:00:00",
+   "exit_time": "2025-08-07 02:15:00",
+   "ret_pct": 0.03275180881699813,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.25
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-02-24 13:00:00",
+   "entry_time": "2026-02-24 14:00:00",
+   "exit_time": "2026-02-24 14:10:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.17
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-04-23 05:00:00",
+   "entry_time": "2026-04-23 06:00:00",
+   "exit_time": "2026-04-23 07:45:00",
+   "ret_pct": -0.05126330923366784,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.75
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-06-05 18:00:00",
+   "entry_time": "2026-06-05 19:00:00",
+   "exit_time": "2026-06-06 11:15:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 16.25
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-06-08 09:00:00",
+   "entry_time": "2026-06-08 10:00:00",
+   "exit_time": "2026-06-08 12:20:00",
+   "ret_pct": 0.07968280979934483,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.33
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-06-10 16:00:00",
+   "entry_time": "2026-06-10 17:00:00",
+   "exit_time": "2026-06-10 17:50:00",
+   "ret_pct": -0.05041020517943595,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.83
+  },
+  {
+   "base": "WIF",
+   "signal": "2026-05-06 05:00:00",
+   "entry_time": "2026-05-06 06:00:00",
+   "exit_time": "2026-05-06 10:45:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 4.75
+  },
+  {
+   "base": "XPL",
+   "signal": "2026-04-02 20:00:00",
+   "entry_time": "2026-04-02 21:00:00",
+   "exit_time": "2026-04-02 21:10:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.17
+  }
+ ],
+ "slow_trades": [
+  {
+   "base": "ACT",
+   "signal": "2025-09-17 02:00:00",
+   "entry_time": "2025-09-17 03:55:00",
+   "exit_time": "2025-09-19 03:05:00",
+   "ret_pct": -0.02058287910496437,
+   "exit_reason": "time_stop",
+   "hold_hours": 47.17
+  },
+  {
+   "base": "ACT",
+   "signal": "2026-06-19 13:00:00",
+   "entry_time": "2026-06-19 14:55:00",
+   "exit_time": "2026-06-19 16:25:00",
+   "ret_pct": 0.0055616758359454685,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.5
+  },
+  {
+   "base": "ACT",
+   "signal": "2026-06-28 04:00:00",
+   "entry_time": "2026-06-28 05:55:00",
+   "exit_time": "2026-06-28 07:50:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.92
+  },
+  {
+   "base": "AIA",
+   "signal": "2026-03-19 14:00:00",
+   "entry_time": "2026-03-19 15:55:00",
+   "exit_time": "2026-03-19 17:40:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.75
+  },
+  {
+   "base": "AIA",
+   "signal": "2026-03-29 18:00:00",
+   "entry_time": "2026-03-29 19:55:00",
+   "exit_time": "2026-03-30 01:00:00",
+   "ret_pct": -0.07112533788026665,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.08
+  },
+  {
+   "base": "AIA",
+   "signal": "2026-05-17 02:00:00",
+   "entry_time": "2026-05-17 03:55:00",
+   "exit_time": "2026-05-17 05:00:00",
+   "ret_pct": -0.005717353491195508,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "AKE",
+   "signal": "2026-02-24 19:00:00",
+   "entry_time": "2026-02-24 20:55:00",
+   "exit_time": "2026-02-24 23:35:00",
+   "ret_pct": 0.04163424771219859,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.67
+  },
+  {
+   "base": "AKE",
+   "signal": "2026-04-09 17:00:00",
+   "entry_time": "2026-04-09 18:55:00",
+   "exit_time": "2026-04-09 22:35:00",
+   "ret_pct": 0.09060808576338786,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.67
+  },
+  {
+   "base": "AKE",
+   "signal": "2026-07-03 07:00:00",
+   "entry_time": "2026-07-03 08:55:00",
+   "exit_time": "2026-07-03 13:05:00",
+   "ret_pct": 0.05309152865354683,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 4.17
+  },
+  {
+   "base": "AKE",
+   "signal": "2026-07-17 08:00:00",
+   "entry_time": "2026-07-17 09:55:00",
+   "exit_time": "2026-07-17 14:40:00",
+   "ret_pct": 0.058498905405388935,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 4.75
+  },
+  {
+   "base": "ALLO",
+   "signal": "2026-02-20 15:00:00",
+   "entry_time": "2026-02-20 16:55:00",
+   "exit_time": "2026-02-20 18:50:00",
+   "ret_pct": -0.009904995297957075,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.92
+  },
+  {
+   "base": "ALLO",
+   "signal": "2026-05-28 16:00:00",
+   "entry_time": "2026-05-28 17:55:00",
+   "exit_time": "2026-05-28 21:40:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 3.75
+  },
+  {
+   "base": "ALLO",
+   "signal": "2026-07-13 17:00:00",
+   "entry_time": "2026-07-13 18:55:00",
+   "exit_time": "2026-07-13 20:50:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.92
+  },
+  {
+   "base": "AVAAI",
+   "signal": "2026-02-02 11:00:00",
+   "entry_time": "2026-02-02 12:55:00",
+   "exit_time": "2026-02-02 13:00:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.08
+  },
+  {
+   "base": "BANK",
+   "signal": "2025-10-18 03:00:00",
+   "entry_time": "2025-10-18 04:55:00",
+   "exit_time": "2025-10-18 05:15:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.33
+  },
+  {
+   "base": "BANK",
+   "signal": "2026-04-01 17:00:00",
+   "entry_time": "2026-04-01 18:55:00",
+   "exit_time": "2026-04-01 21:00:00",
+   "ret_pct": 0.09157763434721955,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.08
+  },
+  {
+   "base": "BILL",
+   "signal": "2026-07-12 15:00:00",
+   "entry_time": "2026-07-12 16:55:00",
+   "exit_time": "2026-07-12 22:45:00",
+   "ret_pct": -0.029468085760393392,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.83
+  },
+  {
+   "base": "BOME",
+   "signal": "2026-04-19 15:00:00",
+   "entry_time": "2026-04-19 16:55:00",
+   "exit_time": "2026-04-19 22:15:00",
+   "ret_pct": -0.031517149236609976,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.33
+  },
+  {
+   "base": "BULLA",
+   "signal": "2025-08-09 01:00:00",
+   "entry_time": "2025-08-09 02:55:00",
+   "exit_time": "2025-08-09 08:40:00",
+   "ret_pct": -0.03780628585477519,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.75
+  },
+  {
+   "base": "CHILLGUY",
+   "signal": "2026-04-08 13:00:00",
+   "entry_time": "2026-04-08 14:55:00",
+   "exit_time": "2026-04-09 00:45:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 9.83
+  },
+  {
+   "base": "CHILLGUY",
+   "signal": "2026-04-10 04:00:00",
+   "entry_time": "2026-04-10 05:55:00",
+   "exit_time": "2026-04-10 06:00:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.08
+  },
+  {
+   "base": "COAI",
+   "signal": "2026-04-14 03:00:00",
+   "entry_time": "2026-04-14 04:55:00",
+   "exit_time": "2026-04-14 05:20:00",
+   "ret_pct": 0.07121741076927013,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.42
+  },
+  {
+   "base": "COAI",
+   "signal": "2026-06-12 10:00:00",
+   "entry_time": "2026-06-12 11:55:00",
+   "exit_time": "2026-06-12 15:15:00",
+   "ret_pct": -0.01809187163201753,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.33
+  },
+  {
+   "base": "DODOX",
+   "signal": "2026-07-15 00:00:00",
+   "entry_time": "2026-07-15 01:55:00",
+   "exit_time": "2026-07-15 06:50:00",
+   "ret_pct": -0.021130686799967324,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 4.92
+  },
+  {
+   "base": "EDGE",
+   "signal": "2026-04-03 17:00:00",
+   "entry_time": "2026-04-03 18:55:00",
+   "exit_time": "2026-04-04 00:50:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 5.92
+  },
+  {
+   "base": "EDGE",
+   "signal": "2026-07-07 00:00:00",
+   "entry_time": "2026-07-07 01:55:00",
+   "exit_time": "2026-07-07 16:30:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 14.58
+  },
+  {
+   "base": "EDGE",
+   "signal": "2026-07-08 04:00:00",
+   "entry_time": "2026-07-08 05:55:00",
+   "exit_time": "2026-07-08 07:00:00",
+   "ret_pct": -0.07228351463228999,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "ESPORTS",
+   "signal": "2026-03-26 14:00:00",
+   "entry_time": "2026-03-26 15:55:00",
+   "exit_time": "2026-03-27 04:05:00",
+   "ret_pct": -0.05260806168732168,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 12.17
+  },
+  {
+   "base": "ESPORTS",
+   "signal": "2026-05-12 11:00:00",
+   "entry_time": "2026-05-12 12:55:00",
+   "exit_time": "2026-05-12 17:55:00",
+   "ret_pct": 0.012773251033128097,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.0
+  },
+  {
+   "base": "ESPORTS",
+   "signal": "2026-05-20 09:00:00",
+   "entry_time": "2026-05-20 10:55:00",
+   "exit_time": "2026-05-20 12:15:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.33
+  },
+  {
+   "base": "EVAA",
+   "signal": "2026-01-06 01:00:00",
+   "entry_time": "2026-01-06 02:55:00",
+   "exit_time": "2026-01-06 23:10:00",
+   "ret_pct": -0.06539515458055767,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 20.25
+  },
+  {
+   "base": "GENIUS",
+   "signal": "2026-05-22 13:00:00",
+   "entry_time": "2026-05-22 14:55:00",
+   "exit_time": "2026-05-22 18:05:00",
+   "ret_pct": -0.03570159286279795,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.17
+  },
+  {
+   "base": "GOAT",
+   "signal": "2025-12-07 00:00:00",
+   "entry_time": "2025-12-07 01:55:00",
+   "exit_time": "2025-12-07 13:20:00",
+   "ret_pct": -0.06215655950465637,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 11.42
+  },
+  {
+   "base": "GOAT",
+   "signal": "2026-03-30 08:00:00",
+   "entry_time": "2026-03-30 09:55:00",
+   "exit_time": "2026-04-01 09:05:00",
+   "ret_pct": -0.05474625374625386,
+   "exit_reason": "time_stop",
+   "hold_hours": 47.17
+  },
+  {
+   "base": "GWEI",
+   "signal": "2026-02-27 23:00:00",
+   "entry_time": "2026-02-28 00:55:00",
+   "exit_time": "2026-02-28 02:50:00",
+   "ret_pct": 0.024535666192042505,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.92
+  },
+  {
+   "base": "GWEI",
+   "signal": "2026-04-11 11:00:00",
+   "entry_time": "2026-04-11 12:55:00",
+   "exit_time": "2026-04-12 12:50:00",
+   "ret_pct": -0.034915180029905124,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 23.92
+  },
+  {
+   "base": "GWEI",
+   "signal": "2026-04-18 12:00:00",
+   "entry_time": "2026-04-18 13:55:00",
+   "exit_time": "2026-04-18 14:20:00",
+   "ret_pct": -0.003653601996689403,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.42
+  },
+  {
+   "base": "GWEI",
+   "signal": "2026-06-29 09:00:00",
+   "entry_time": "2026-06-29 10:55:00",
+   "exit_time": "2026-06-29 11:30:00",
+   "ret_pct": -0.03605370931741558,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "HEI",
+   "signal": "2026-05-29 11:00:00",
+   "entry_time": "2026-05-29 12:55:00",
+   "exit_time": "2026-05-29 13:30:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "HOME",
+   "signal": "2026-06-04 22:00:00",
+   "entry_time": "2026-06-04 23:55:00",
+   "exit_time": "2026-06-05 02:45:00",
+   "ret_pct": -0.06989126344772223,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.83
+  },
+  {
+   "base": "HOME",
+   "signal": "2026-07-15 22:00:00",
+   "entry_time": "2026-07-15 23:55:00",
+   "exit_time": "2026-07-16 00:30:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "IDOL",
+   "signal": "2026-05-13 19:00:00",
+   "entry_time": "2026-05-13 20:55:00",
+   "exit_time": "2026-05-14 11:30:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 14.58
+  },
+  {
+   "base": "JTO",
+   "signal": "2026-05-07 15:00:00",
+   "entry_time": "2026-05-07 16:55:00",
+   "exit_time": "2026-05-07 20:25:00",
+   "ret_pct": 0.009604092754456617,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.5
+  },
+  {
+   "base": "KAITO",
+   "signal": "2025-09-09 00:00:00",
+   "entry_time": "2025-09-09 01:55:00",
+   "exit_time": "2025-09-09 03:40:00",
+   "ret_pct": 0.013438897880504341,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.75
+  },
+  {
+   "base": "KAITO",
+   "signal": "2025-09-28 03:00:00",
+   "entry_time": "2025-09-28 04:55:00",
+   "exit_time": "2025-09-29 00:15:00",
+   "ret_pct": 0.03287262880256725,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 19.33
+  },
+  {
+   "base": "KOMA",
+   "signal": "2025-10-08 03:00:00",
+   "entry_time": "2025-10-08 04:55:00",
+   "exit_time": "2025-10-08 05:25:00",
+   "ret_pct": -0.06163177056717484,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.5
+  },
+  {
+   "base": "LAB",
+   "signal": "2026-04-07 19:00:00",
+   "entry_time": "2026-04-07 20:55:00",
+   "exit_time": "2026-04-08 02:45:00",
+   "ret_pct": -0.03465128474713197,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.83
+  },
+  {
+   "base": "LAB",
+   "signal": "2026-04-12 18:00:00",
+   "entry_time": "2026-04-12 19:55:00",
+   "exit_time": "2026-04-12 20:20:00",
+   "ret_pct": -0.08191999999999977,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.42
+  },
+  {
+   "base": "LAB",
+   "signal": "2026-04-24 01:00:00",
+   "entry_time": "2026-04-24 02:55:00",
+   "exit_time": "2026-04-24 05:30:00",
+   "ret_pct": 0.013797841913294584,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.58
+  },
+  {
+   "base": "LUMIA",
+   "signal": "2026-04-27 14:00:00",
+   "entry_time": "2026-04-27 15:55:00",
+   "exit_time": "2026-04-27 22:55:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 7.0
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-03-04 09:00:00",
+   "entry_time": "2026-03-04 10:55:00",
+   "exit_time": "2026-03-04 13:20:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 2.42
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-04-09 12:00:00",
+   "entry_time": "2026-04-09 13:55:00",
+   "exit_time": "2026-04-09 21:30:00",
+   "ret_pct": 0.2354212167164752,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 7.58
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-06-03 12:00:00",
+   "entry_time": "2026-06-03 13:55:00",
+   "exit_time": "2026-06-04 05:10:00",
+   "ret_pct": 0.07614366877366996,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 15.25
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-06-10 10:00:00",
+   "entry_time": "2026-06-10 11:55:00",
+   "exit_time": "2026-06-10 19:20:00",
+   "ret_pct": -0.023239164218163633,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 7.42
+  },
+  {
+   "base": "MAGMA",
+   "signal": "2026-06-26 13:00:00",
+   "entry_time": "2026-06-26 14:55:00",
+   "exit_time": "2026-06-26 16:20:00",
+   "ret_pct": -0.0451743732541624,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.42
+  },
+  {
+   "base": "MOODENG",
+   "signal": "2025-09-13 01:00:00",
+   "entry_time": "2025-09-13 02:55:00",
+   "exit_time": "2025-09-13 13:05:00",
+   "ret_pct": 0.02296565125504635,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 10.17
+  },
+  {
+   "base": "MOODENG",
+   "signal": "2025-12-07 00:00:00",
+   "entry_time": "2025-12-07 01:55:00",
+   "exit_time": "2025-12-07 04:10:00",
+   "ret_pct": -0.06486324846815295,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.25
+  },
+  {
+   "base": "MYX",
+   "signal": "2026-04-14 02:00:00",
+   "entry_time": "2026-04-14 03:55:00",
+   "exit_time": "2026-04-14 04:35:00",
+   "ret_pct": 0.2477499999999998,
+   "exit_reason": "take_profit",
+   "hold_hours": 0.67
+  },
+  {
+   "base": "MYX",
+   "signal": "2026-05-23 14:00:00",
+   "entry_time": "2026-05-23 15:55:00",
+   "exit_time": "2026-05-24 10:15:00",
+   "ret_pct": 0.014870156044828664,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 18.33
+  },
+  {
+   "base": "ORDI",
+   "signal": "2025-11-08 00:00:00",
+   "entry_time": "2025-11-08 01:55:00",
+   "exit_time": "2025-11-08 03:50:00",
+   "ret_pct": 0.06702387317163316,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.92
+  },
+  {
+   "base": "ORDI",
+   "signal": "2026-04-15 16:00:00",
+   "entry_time": "2026-04-15 17:55:00",
+   "exit_time": "2026-04-16 02:30:00",
+   "ret_pct": 0.2477499999999998,
+   "exit_reason": "take_profit",
+   "hold_hours": 8.58
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2025-09-06 01:00:00",
+   "entry_time": "2025-09-06 02:55:00",
+   "exit_time": "2025-09-06 03:20:00",
+   "ret_pct": -0.0819200000000001,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.42
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2025-10-19 01:00:00",
+   "entry_time": "2025-10-19 02:55:00",
+   "exit_time": "2025-10-19 03:00:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.08
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2026-01-28 03:00:00",
+   "entry_time": "2026-01-28 04:55:00",
+   "exit_time": "2026-01-28 11:15:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 6.33
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2026-02-08 13:00:00",
+   "entry_time": "2026-02-08 14:55:00",
+   "exit_time": "2026-02-08 17:20:00",
+   "ret_pct": 0.09856292015537915,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.42
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2026-02-10 12:00:00",
+   "entry_time": "2026-02-10 13:55:00",
+   "exit_time": "2026-02-10 15:35:00",
+   "ret_pct": -0.021453230979546767,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.67
+  },
+  {
+   "base": "PIPPIN",
+   "signal": "2026-06-08 07:00:00",
+   "entry_time": "2026-06-08 08:55:00",
+   "exit_time": "2026-06-08 16:10:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 7.25
+  },
+  {
+   "base": "RAVE",
+   "signal": "2026-02-19 15:00:00",
+   "entry_time": "2026-02-19 16:55:00",
+   "exit_time": "2026-02-20 14:50:00",
+   "ret_pct": 0.1071946453328213,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 21.92
+  },
+  {
+   "base": "RAVE",
+   "signal": "2026-02-21 18:00:00",
+   "entry_time": "2026-02-21 19:55:00",
+   "exit_time": "2026-02-22 01:50:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 5.92
+  },
+  {
+   "base": "RAVE",
+   "signal": "2026-04-09 15:00:00",
+   "entry_time": "2026-04-09 16:55:00",
+   "exit_time": "2026-04-09 18:45:00",
+   "ret_pct": 0.04179858375442935,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.83
+  },
+  {
+   "base": "RAVE",
+   "signal": "2026-06-27 16:00:00",
+   "entry_time": "2026-06-27 17:55:00",
+   "exit_time": "2026-06-27 22:00:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 4.08
+  },
+  {
+   "base": "SENT",
+   "signal": "2026-01-30 00:00:00",
+   "entry_time": "2026-01-30 01:55:00",
+   "exit_time": "2026-01-30 04:30:00",
+   "ret_pct": -0.05636490314936715,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.58
+  },
+  {
+   "base": "SENT",
+   "signal": "2026-06-09 16:00:00",
+   "entry_time": "2026-06-09 17:55:00",
+   "exit_time": "2026-06-09 23:00:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 5.08
+  },
+  {
+   "base": "SENT",
+   "signal": "2026-07-09 16:00:00",
+   "entry_time": "2026-07-09 17:55:00",
+   "exit_time": "2026-07-10 00:45:00",
+   "ret_pct": -0.049656332067004594,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 6.83
+  },
+  {
+   "base": "SIREN",
+   "signal": "2025-08-08 02:00:00",
+   "entry_time": "2025-08-08 03:55:00",
+   "exit_time": "2025-08-08 14:05:00",
+   "ret_pct": 0.09025187269398038,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 10.17
+  },
+  {
+   "base": "SIREN",
+   "signal": "2025-08-10 00:00:00",
+   "entry_time": "2025-08-10 01:55:00",
+   "exit_time": "2025-08-10 02:05:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.17
+  },
+  {
+   "base": "SIREN",
+   "signal": "2026-02-16 06:00:00",
+   "entry_time": "2026-02-16 07:55:00",
+   "exit_time": "2026-02-16 08:05:00",
+   "ret_pct": -0.06890144586809532,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.17
+  },
+  {
+   "base": "SKYAI",
+   "signal": "2026-04-04 08:00:00",
+   "entry_time": "2026-04-04 09:55:00",
+   "exit_time": "2026-04-04 10:40:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.75
+  },
+  {
+   "base": "SKYAI",
+   "signal": "2026-04-11 10:00:00",
+   "entry_time": "2026-04-11 11:55:00",
+   "exit_time": "2026-04-11 13:05:00",
+   "ret_pct": 0.05281756174859631,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.17
+  },
+  {
+   "base": "SKYAI",
+   "signal": "2026-04-16 17:00:00",
+   "entry_time": "2026-04-16 18:55:00",
+   "exit_time": "2026-04-16 19:35:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.67
+  },
+  {
+   "base": "SKYAI",
+   "signal": "2026-04-29 10:00:00",
+   "entry_time": "2026-04-29 11:55:00",
+   "exit_time": "2026-04-29 12:20:00",
+   "ret_pct": -0.0819200000000001,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.42
+  },
+  {
+   "base": "SLX",
+   "signal": "2026-06-24 05:00:00",
+   "entry_time": "2026-06-24 06:55:00",
+   "exit_time": "2026-06-24 12:05:00",
+   "ret_pct": -0.013135325270176357,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 5.17
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-04-02 20:00:00",
+   "entry_time": "2026-04-02 21:55:00",
+   "exit_time": "2026-04-03 01:15:00",
+   "ret_pct": 0.07556889570606395,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.33
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-14 04:00:00",
+   "entry_time": "2026-06-14 05:55:00",
+   "exit_time": "2026-06-14 07:00:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.08
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-17 17:00:00",
+   "entry_time": "2026-06-17 18:55:00",
+   "exit_time": "2026-06-17 19:50:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 0.92
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-20 10:00:00",
+   "entry_time": "2026-06-20 11:55:00",
+   "exit_time": "2026-06-20 12:35:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.67
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-22 01:00:00",
+   "entry_time": "2026-06-22 02:55:00",
+   "exit_time": "2026-06-22 07:20:00",
+   "ret_pct": 0.10010999779557561,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 4.42
+  },
+  {
+   "base": "SYN",
+   "signal": "2026-06-25 12:00:00",
+   "entry_time": "2026-06-25 13:55:00",
+   "exit_time": "2026-06-25 14:00:00",
+   "ret_pct": -0.022496404591799246,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.08
+  },
+  {
+   "base": "T",
+   "signal": "2026-07-11 12:00:00",
+   "entry_time": "2026-07-11 13:55:00",
+   "exit_time": "2026-07-11 16:45:00",
+   "ret_pct": -0.0351268389558127,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.83
+  },
+  {
+   "base": "TAC",
+   "signal": "2026-04-22 11:00:00",
+   "entry_time": "2026-04-22 12:55:00",
+   "exit_time": "2026-04-22 13:05:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.17
+  },
+  {
+   "base": "TAC",
+   "signal": "2026-04-30 16:00:00",
+   "entry_time": "2026-04-30 17:55:00",
+   "exit_time": "2026-05-01 05:25:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 11.5
+  },
+  {
+   "base": "TAC",
+   "signal": "2026-05-03 13:00:00",
+   "entry_time": "2026-05-03 14:55:00",
+   "exit_time": "2026-05-03 15:30:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.58
+  },
+  {
+   "base": "TRADOOR",
+   "signal": "2026-04-12 15:00:00",
+   "entry_time": "2026-04-12 16:55:00",
+   "exit_time": "2026-04-12 18:05:00",
+   "ret_pct": -0.02609180172801273,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.17
+  },
+  {
+   "base": "TRADOOR",
+   "signal": "2026-06-13 22:00:00",
+   "entry_time": "2026-06-13 23:55:00",
+   "exit_time": "2026-06-14 00:50:00",
+   "ret_pct": -0.029727276821538973,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.92
+  },
+  {
+   "base": "TRADOOR",
+   "signal": "2026-06-15 08:00:00",
+   "entry_time": "2026-06-15 09:55:00",
+   "exit_time": "2026-06-15 10:20:00",
+   "ret_pct": -0.0819200000000001,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.42
+  },
+  {
+   "base": "TREE",
+   "signal": "2025-10-21 00:00:00",
+   "entry_time": "2025-10-21 01:55:00",
+   "exit_time": "2025-10-21 02:35:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.67
+  },
+  {
+   "base": "TREE",
+   "signal": "2026-04-14 07:00:00",
+   "entry_time": "2026-04-14 08:55:00",
+   "exit_time": "2026-04-16 08:05:00",
+   "ret_pct": -0.04509627228515767,
+   "exit_reason": "time_stop",
+   "hold_hours": 47.17
+  },
+  {
+   "base": "TST",
+   "signal": "2025-09-17 00:00:00",
+   "entry_time": "2025-09-17 01:55:00",
+   "exit_time": "2025-09-17 02:15:00",
+   "ret_pct": 0.05215727750510368,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.33
+  },
+  {
+   "base": "TST",
+   "signal": "2026-04-16 20:00:00",
+   "entry_time": "2026-04-16 21:55:00",
+   "exit_time": "2026-04-17 01:45:00",
+   "ret_pct": 0.15081215925856795,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 3.83
+  },
+  {
+   "base": "TST",
+   "signal": "2026-05-04 04:00:00",
+   "entry_time": "2026-05-04 05:55:00",
+   "exit_time": "2026-05-04 09:40:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 3.75
+  },
+  {
+   "base": "UB",
+   "signal": "2026-04-22 16:00:00",
+   "entry_time": "2026-04-22 17:55:00",
+   "exit_time": "2026-04-22 18:35:00",
+   "ret_pct": 0.0798012117090664,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.67
+  },
+  {
+   "base": "UB",
+   "signal": "2026-05-01 12:00:00",
+   "entry_time": "2026-05-01 13:55:00",
+   "exit_time": "2026-05-01 15:20:00",
+   "ret_pct": 0.07506736047457718,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.42
+  },
+  {
+   "base": "US",
+   "signal": "2026-05-10 21:00:00",
+   "entry_time": "2026-05-10 22:55:00",
+   "exit_time": "2026-05-11 00:10:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 1.25
+  },
+  {
+   "base": "US",
+   "signal": "2026-07-03 06:00:00",
+   "entry_time": "2026-07-03 07:55:00",
+   "exit_time": "2026-07-03 11:55:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 4.0
+  },
+  {
+   "base": "US",
+   "signal": "2026-07-09 17:00:00",
+   "entry_time": "2026-07-09 18:55:00",
+   "exit_time": "2026-07-09 21:20:00",
+   "ret_pct": -0.08191999999999999,
+   "exit_reason": "stop_loss",
+   "hold_hours": 2.42
+  },
+  {
+   "base": "VANRY",
+   "signal": "2026-03-17 16:00:00",
+   "entry_time": "2026-03-17 17:55:00",
+   "exit_time": "2026-03-17 20:05:00",
+   "ret_pct": -0.016863111394477714,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 2.17
+  },
+  {
+   "base": "VANRY",
+   "signal": "2026-07-04 18:00:00",
+   "entry_time": "2026-07-04 19:55:00",
+   "exit_time": "2026-07-04 21:35:00",
+   "ret_pct": -0.06126065576341355,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.67
+  },
+  {
+   "base": "VELVET",
+   "signal": "2025-08-07 00:00:00",
+   "entry_time": "2025-08-07 01:55:00",
+   "exit_time": "2025-08-07 02:15:00",
+   "ret_pct": -0.08191999999999988,
+   "exit_reason": "stop_loss",
+   "hold_hours": 0.33
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-02-24 13:00:00",
+   "entry_time": "2026-02-24 14:55:00",
+   "exit_time": "2026-02-25 07:50:00",
+   "ret_pct": -0.013552119582915467,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 16.92
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-04-23 05:00:00",
+   "entry_time": "2026-04-23 06:55:00",
+   "exit_time": "2026-04-23 07:45:00",
+   "ret_pct": -0.03866910177729521,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 0.83
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-06-05 18:00:00",
+   "entry_time": "2026-06-05 19:55:00",
+   "exit_time": "2026-06-06 11:15:00",
+   "ret_pct": 0.24775000000000003,
+   "exit_reason": "take_profit",
+   "hold_hours": 15.33
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-06-08 09:00:00",
+   "entry_time": "2026-06-08 10:55:00",
+   "exit_time": "2026-06-08 12:20:00",
+   "ret_pct": -0.0071626537347325705,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.42
+  },
+  {
+   "base": "VELVET",
+   "signal": "2026-06-10 16:00:00",
+   "entry_time": "2026-06-10 17:55:00",
+   "exit_time": "2026-06-10 19:10:00",
+   "ret_pct": 0.12250984652110641,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 1.25
+  },
+  {
+   "base": "WIF",
+   "signal": "2026-05-06 05:00:00",
+   "entry_time": "2026-05-06 06:55:00",
+   "exit_time": "2026-05-06 15:00:00",
+   "ret_pct": -0.0819200000000001,
+   "exit_reason": "stop_loss",
+   "hold_hours": 8.08
+  },
+  {
+   "base": "XPL",
+   "signal": "2026-04-02 20:00:00",
+   "entry_time": "2026-04-02 21:55:00",
+   "exit_time": "2026-04-03 15:45:00",
+   "ret_pct": -0.031402674248828144,
+   "exit_reason": "trailing_stop",
+   "hold_hours": 17.83
+  }
+ ]
+}
