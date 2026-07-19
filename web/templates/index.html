@@ -2607,6 +2607,42 @@
                             </div>
                         </div>
 
+                        <div class="card altcoin-radar-table-card" id="pump-watchlist-card">
+                            <div class="research-lab-header">
+                                <div>
+                                    <h3>周度伏击名单（模型）</h3>
+                                    <div class="research-control-notes">拉盘前兆模型的横截面 Top 15：验证过的是相对命中率提升（~2.7×），仅作观察名单，不是交易信号；纪律见回测报告第 9 节。</div>
+                                </div>
+                                <div class="inline-actions">
+                                    <span id="pump-watchlist-note" class="altcoin-radar-inline-note">加载中...</span>
+                                    <button class="btn btn-sm" id="btn-pump-watchlist-refresh" title="重新生成需要抓取全宇宙数据，约 15 分钟">重新生成</button>
+                                </div>
+                            </div>
+                            <div class="table-container altcoin-radar-table-scroll">
+                                <table class="altcoin-radar-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>币种</th>
+                                            <th>评分</th>
+                                            <th>主驱动</th>
+                                            <th>市值</th>
+                                            <th>OI/市值</th>
+                                            <th>30日波动</th>
+                                            <th>30日涨幅</th>
+                                            <th>7日费率</th>
+                                            <th>惯犯</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="pump-watchlist-body">
+                                        <tr>
+                                            <td colspan="10" class="altcoin-radar-empty">等待名单数据...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
                         <div class="card altcoin-radar-table-card">
                             <div class="research-lab-header">
                                 <div>

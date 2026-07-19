@@ -1544,15 +1544,19 @@ def build_altcoin_rows(
     # Preliminary sort by layout_score for temp ranks; final rank assigned in sort_rows
     temp_sorted = sorted(rows, key=lambda r: _to_float(r.get("layout_score"), 0.0), reverse=True)
     temp_ranked_rows: List[Dict[str, Any]] = []
+    # Rank/ignition history is score-regime specific: keep each timeframe's
+    # snapshots separate so alternating 15m/4h scans don't manufacture phantom
+    # ignition cross-ups or rank jumps (which feed real Feishu alert rules).
+    history_context = str(timeframe or "").strip().lower()
     for temp_rank, row in enumerate(temp_sorted, start=1):
         sym = str(row.get("symbol") or "").strip().upper()
-        history = get_rank_history(sym)
+        history = get_rank_history(sym, context=history_context)
         prev_snapshot = history[-1] if history else {}
         prev_rank = int(_to_float(prev_snapshot.get("rank"), 0.0)) if prev_snapshot else 0
         prev_ignition_score = _to_float(prev_snapshot.get("ignition_score"), 0.0) if prev_snapshot else 0.0
 
         row["rank"] = temp_rank
-        rjs = compute_rank_jump_score(sym, temp_rank)
+        rjs = compute_rank_jump_score(sym, temp_rank, context=history_context)
         row["rank_jump_score"] = round(rjs, 4)
         row["event_flags"] = []
         row["recent_events"] = []
@@ -1595,7 +1599,7 @@ def build_altcoin_rows(
         temp_ranked_rows.append(row)
 
     # Update rank history cache after this scan
-    bulk_update_ranks(temp_ranked_rows)
+    bulk_update_ranks(temp_ranked_rows, context=history_context)
 
     return rows
 

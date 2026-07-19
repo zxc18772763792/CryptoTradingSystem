@@ -8,6 +8,11 @@ from strategies.quantitative.fama_factor_arbitrage import FamaFactorArbitrageStr
 from strategies.quantitative.multi_factor_hf import MultiFactorHFStrategy
 from strategies.quantitative.liquidation_oi_crowding import LiquidationOICrowdingStrategy
 from strategies.quantitative.altcoin_downtrend_bounce_short import AltcoinDowntrendBounceShortStrategy
+from strategies.quantitative.oi_mcap_ambush import (
+    AccumulationAmbushStrategy,
+    IgnitionFastFollowStrategy,
+    SqueezeFuelStrategy,
+)
 from strategies.quantitative.intraday_cross_section import (
     BodyVolumeCorr24hStrategy,
     BreakCountBalance24hStrategy,
@@ -45,6 +50,9 @@ __all__ = [
     "MultiFactorHFStrategy",
     "LiquidationOICrowdingStrategy",
     "AltcoinDowntrendBounceShortStrategy",
+    "AccumulationAmbushStrategy",
+    "SqueezeFuelStrategy",
+    "IgnitionFastFollowStrategy",
     "ResidualMom48hStrategy",
     "Ret24hReversalStrategy",
     "RelRet24hReversalStrategy",

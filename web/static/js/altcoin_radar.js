@@ -2225,6 +2225,139 @@
     }
   }
 
+  const PUMP_DRIVER_LABELS = {
+    log_mcap: '小市值',
+    oi_mcap: 'OI/市值',
+    oi_chg_7d: 'OI 7日增',
+    oi_chg_30d: 'OI 30日增',
+    funding_7d: '费率偏正',
+    ret_7d: '7日动量',
+    ret_30d: '30日动量',
+    dd_from_ath: '近高点',
+    vola_30d: '高波动',
+    vol_trend: '量能抬升',
+    vol_pctile_90d: '量能高分位',
+    range_20d: '宽振幅',
+    age_days: '上市新',
+    pumped_before_120d: '近期惯犯',
+    pumped_ever: '历史惯犯',
+    log_vol30: '流动性',
+  };
+
+  function fmtPumpMcap(value) {
+    const numeric = toNumber(value, 0);
+    if (numeric <= 0) return '--';
+    if (numeric >= 1e9) return `$${(numeric / 1e9).toFixed(2)}B`;
+    return `$${(numeric / 1e6).toFixed(1)}M`;
+  }
+
+  function setPumpWatchlistNote(text, tone = 'neutral') {
+    const note = q('pump-watchlist-note');
+    if (!note) return;
+    note.textContent = text;
+    note.dataset.tone = tone;
+  }
+
+  function renderPumpWatchlist(payload) {
+    const body = q('pump-watchlist-body');
+    if (!body) return;
+    if (!payload || payload.available === false) {
+      const reason = payload && payload.reason === 'not_generated'
+        ? '名单尚未生成 — 点右上「重新生成」或运行 scripts/generate_pump_watchlist.py'
+        : `名单不可用（${escapeHtml(String((payload && payload.reason) || 'unknown'))}）`;
+      body.innerHTML = `<tr><td colspan="10" class="altcoin-radar-empty">${reason}</td></tr>`;
+      setPumpWatchlistNote('未生成', 'warn');
+      return;
+    }
+    const data = payload.data || {};
+    const rows = Array.isArray(data.top) ? data.top : [];
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="10" class="altcoin-radar-empty">名单为空</td></tr>';
+      setPumpWatchlistNote('名单为空', 'warn');
+      return;
+    }
+    body.innerHTML = rows
+      .map((row) => {
+        const drivers = (Array.isArray(row.drivers) ? row.drivers : [])
+          .map((key) => PUMP_DRIVER_LABELS[key] || key)
+          .join(' · ');
+        const funding = toNumber(row.funding_7d, 0);
+        return [
+          '<tr>',
+          `<td>${toNumber(row.rank, 0)}</td>`,
+          `<td><strong>${escapeHtml(String(row.base || ''))}</strong></td>`,
+          `<td>${toNumber(row.score, 0).toFixed(3)}</td>`,
+          `<td>${escapeHtml(drivers || '--')}</td>`,
+          `<td>${fmtPumpMcap(row.mcap_usd)}</td>`,
+          `<td>${(toNumber(row.oi_mcap, 0) * 100).toFixed(1)}%</td>`,
+          `<td>${(toNumber(row.vola_30d, 0) * 100).toFixed(1)}%</td>`,
+          `<td>${(toNumber(row.ret_30d, 0) * 100).toFixed(0)}%</td>`,
+          `<td>${(funding * 100).toFixed(3)}%</td>`,
+          `<td>${row.pumped_before_120d ? '是' : '否'}</td>`,
+          '</tr>',
+        ].join('');
+      })
+      .join('');
+    const generated = data.generated_at ? fmtDateTime(data.generated_at) : '--';
+    const ageText = payload.age_days != null ? `${Number(payload.age_days).toFixed(1)} 天前` : '';
+    if (payload.refresh && payload.refresh.running) {
+      setPumpWatchlistNote('后台生成中（约 15 分钟）...', 'info');
+    } else if (payload.stale) {
+      setPumpWatchlistNote(`已过期：${generated}（${ageText}），建议重新生成`, 'warn');
+    } else {
+      setPumpWatchlistNote(`生成于 ${generated}（${ageText}）`, 'neutral');
+    }
+  }
+
+  async function loadPumpWatchlist() {
+    const apiFetch = requireApi();
+    if (!apiFetch) return;
+    try {
+      const resp = await apiFetch('/altcoin/radar/pump-watchlist', { timeoutMs: 20000 });
+      state.pumpWatchlist = resp;
+      renderPumpWatchlist(resp);
+      if (resp && resp.refresh && resp.refresh.running) {
+        schedulePumpWatchlistPoll();
+      }
+    } catch (error) {
+      setPumpWatchlistNote(`加载失败：${error?.message || error}`, 'warn');
+    }
+  }
+
+  function schedulePumpWatchlistPoll() {
+    if (state.pumpWatchlistPollTimer) window.clearTimeout(state.pumpWatchlistPollTimer);
+    state.pumpWatchlistPollCount = (state.pumpWatchlistPollCount || 0) + 1;
+    if (state.pumpWatchlistPollCount > 25) return;
+    state.pumpWatchlistPollTimer = window.setTimeout(() => {
+      loadPumpWatchlist().catch(() => {});
+    }, 60000);
+  }
+
+  async function triggerPumpWatchlistRefresh() {
+    const apiFetch = requireApi();
+    if (!apiFetch) return;
+    const button = q('btn-pump-watchlist-refresh');
+    if (button) button.disabled = true;
+    try {
+      const resp = await apiFetch('/altcoin/radar/pump-watchlist/refresh', {
+        method: 'POST',
+        timeoutMs: 20000,
+      });
+      if (resp && resp.success) {
+        state.pumpWatchlistPollCount = 0;
+        setPumpWatchlistNote('后台生成已启动（约 15 分钟），完成后自动刷新', 'info');
+        schedulePumpWatchlistPoll();
+      } else {
+        setPumpWatchlistNote(resp && resp.reason === 'already_running' ? '已在生成中，请稍候' : '启动失败', 'warn');
+        schedulePumpWatchlistPoll();
+      }
+    } catch (error) {
+      setPumpWatchlistNote(`刷新失败：${error?.message || error}`, 'warn');
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
   function bindAltcoinRadarPage() {
     if (state.bound) return;
     state.bound = true;
@@ -2233,12 +2366,19 @@
     syncRadarModeButtons();
     renderUniverseManager();
     updateInspectorButtonState(null);
+    const pumpRefreshButton = q('btn-pump-watchlist-refresh');
+    if (pumpRefreshButton) {
+      pumpRefreshButton.addEventListener('click', () => {
+        triggerPumpWatchlistRefresh().catch(() => {});
+      });
+    }
     refreshOperatingModeBanner({ force: true }).catch(() => {});
   }
 
   async function loadAltcoinRadarTabData(force = false) {
     bindAltcoinRadarPage();
     refreshOperatingModeBanner({ force }).catch(() => {});
+    loadPumpWatchlist().catch(() => {});
     const universePromise = loadUniverseOptions(force).catch((error) => {
       console.warn('loadAltcoinRadarTabData universe bootstrap failed', error?.message || error);
     });
