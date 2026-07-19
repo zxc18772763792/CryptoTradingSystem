@@ -5,9 +5,11 @@ import asyncio
 import copy
 import hashlib
 import json
+import sys
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
@@ -428,6 +430,7 @@ async def _refresh_altcoin_scan_cache(
         payload_to_store.pop("cache", None)
         if _should_cache_scan_payload(stored_payload):
             _ALTCOIN_SCAN_CACHE[cache_key] = {"stored_at": stored_at, "payload": payload_to_store}
+            _evict_altcoin_scan_cache()
         else:
             _ALTCOIN_SCAN_CACHE.pop(cache_key, None)
             stored_payload["warnings"] = list(
@@ -490,10 +493,28 @@ def _ensure_altcoin_scan_refresh_task(
 
 
 def _clear_altcoin_scan_cache() -> None:
-    for task in list(_ALTCOIN_SCAN_REFRESH_TASKS.values()):
-        if task and not task.done():
-            task.cancel()
+    # Do NOT cancel in-flight refresh tasks: requests awaiting them via
+    # asyncio.shield would surface CancelledError as user-visible 500s (shield
+    # only protects against caller cancellation, not inner-task cancellation).
+    # Detaching them from the registry is enough — they finish, write a stale
+    # cache entry keyed by the old universe hash, and eviction reclaims it.
     _ALTCOIN_SCAN_REFRESH_TASKS.clear()
+    _ALTCOIN_SCAN_CACHE.clear()
+
+
+_ALTCOIN_SCAN_CACHE_MAX_ENTRIES = 48
+
+
+def _evict_altcoin_scan_cache() -> None:
+    # Cache keys include the universe hash, so key churn (watchlist edits,
+    # symbol-set tweaks) grows the dict unboundedly on a long-lived process.
+    if len(_ALTCOIN_SCAN_CACHE) <= _ALTCOIN_SCAN_CACHE_MAX_ENTRIES:
+        return
+    oldest_first = sorted(
+        _ALTCOIN_SCAN_CACHE.items(), key=lambda kv: float((kv[1] or {}).get("stored_at", 0.0))
+    )
+    for key, _ in oldest_first[: len(_ALTCOIN_SCAN_CACHE) - _ALTCOIN_SCAN_CACHE_MAX_ENTRIES]:
+        _ALTCOIN_SCAN_CACHE.pop(key, None)
     _ALTCOIN_SCAN_CACHE.clear()
 
 
@@ -606,10 +627,18 @@ async def _load_latest_snapshot_map(
     normalized = _normalize_symbols(symbols)
     if not normalized:
         return []
+    # Bound the scan: without a cutoff this pulls EVERY historical snapshot row
+    # for the universe on each radar scan (tables grow forever on a live box).
+    # Older-than-7d snapshots are far past every freshness horizon anyway.
+    cutoff = _utcnow().replace(tzinfo=None) - pd.Timedelta(days=7)
     async with async_session_maker() as session:
         result = await session.execute(
             select(model)
-            .where(model.exchange == exchange, model.symbol.in_(normalized))
+            .where(
+                model.exchange == exchange,
+                model.symbol.in_(normalized),
+                model.timestamp >= cutoff,
+            )
             .order_by(model.symbol.asc(), model.timestamp.desc())
         )
         rows = result.scalars().all()
@@ -657,12 +686,14 @@ async def _load_latest_derivatives_snapshot_map(symbols: Sequence[str]) -> Dict[
         if base_symbol:
             lookup_keys.add(base_symbol)
 
+    cutoff = _utcnow().replace(tzinfo=None) - pd.Timedelta(days=7)
     async with async_session_maker() as session:
         result = await session.execute(
             select(AnalyticsDerivativesSnapshot)
             .where(
                 AnalyticsDerivativesSnapshot.exchange == "aggregate",
                 AnalyticsDerivativesSnapshot.symbol.in_(sorted(lookup_keys)),
+                AnalyticsDerivativesSnapshot.timestamp >= cutoff,
             )
             .order_by(AnalyticsDerivativesSnapshot.timestamp.desc())
         )
@@ -1066,15 +1097,24 @@ async def _resolve_universe(
     universe_scope: str = "research",
 ) -> Tuple[List[str], List[str], List[str], List[str]]:
     scope = _normalize_universe_scope(universe_scope)
-    cap = MAX_EXPANDED_SIZE if scope == "expanded" else MAX_UNIVERSE_SIZE
+    # Watchlist scope must be able to hold the whole user watchlist (80+
+    # entries): capping it at MAX_UNIVERSE_SIZE silently dropped everything
+    # past the first 30, so tail entries were never scanned in watchlist view.
+    cap = MAX_EXPANDED_SIZE if scope in {"expanded", "watchlist"} else MAX_UNIVERSE_SIZE
 
     explicit_requested = _normalize_symbols(symbols)
     requested = list(explicit_requested)
     fallback_warning = ""
+    truncation_warning = ""
 
-    # For watchlist scope: always merge watchlist symbols
+    # Watchlist scope without explicit symbols scans the stored watchlist.
     if scope == "watchlist" and not requested:
-        requested = get_watchlist_symbols()[:cap]
+        watchlist_symbols = get_watchlist_symbols()
+        requested = watchlist_symbols[:cap]
+        if len(watchlist_symbols) > cap:
+            truncation_warning = (
+                f"Watchlist 共 {len(watchlist_symbols)} 个，超出扫描上限 {cap}，只扫描前 {cap} 个。"
+            )
     elif scope == "expanded" and not requested:
         # Load research + watchlist
         research_symbols = await get_research_symbols(exchange=exchange, include_major=False)
@@ -1111,6 +1151,8 @@ async def _resolve_universe(
         elif scope == "expanded":
             fallback_warning = "当前扩展扫描候选不可用，已回退到 research universe 默认币池。"
     warnings: List[str] = []
+    if truncation_warning:
+        warnings.append(truncation_warning)
     if fallback_warning:
         warnings.append(fallback_warning)
     return requested[:cap], filtered, excluded_retired, warnings
@@ -1566,9 +1608,7 @@ async def get_altcoin_scan_snapshot(
         if refresh:
             return await asyncio.shield(refresh_task)
         background_warning = (
-            "Altcoin radar refresh started in background; serving previous snapshot."
-            if refresh
-            else "Altcoin radar cache expired; background refresh in progress, serving previous snapshot."
+            "Altcoin radar cache expired; background refresh in progress, serving previous snapshot."
         )
         return _build_cached_scan_payload(
             cached_entry=cached_entry,
@@ -2324,6 +2364,86 @@ async def get_altcoin_radar_watchlist():
         "meta": universe_meta(symbols, "watchlist"),
         "ts": _utcnow().isoformat(),
     }
+
+
+# --- Pump-precursor weekly watchlist (model-ranked, research-only) -----------
+_PUMP_WATCHLIST_DIR = Path(__file__).resolve().parents[2] / "data" / "research" / "pump_watchlist"
+_PUMP_WATCHLIST_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "generate_pump_watchlist.py"
+_PUMP_WATCHLIST_STALE_DAYS = 8.0
+_pump_refresh_state: Dict[str, Any] = {"running": False, "started_at": None, "finished_at": None, "returncode": None, "error": None}
+_pump_refresh_lock = asyncio.Lock()
+
+
+@router.get("/radar/pump-watchlist")
+async def get_pump_precursor_watchlist():
+    path = _PUMP_WATCHLIST_DIR / "latest.json"
+    if not path.exists():
+        return {
+            "available": False,
+            "reason": "not_generated",
+            "hint": "python scripts/generate_pump_watchlist.py",
+            "refresh": dict(_pump_refresh_state),
+            "ts": _utcnow().isoformat(),
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "available": False,
+            "reason": f"unreadable:{str(exc)[:80]}",
+            "refresh": dict(_pump_refresh_state),
+            "ts": _utcnow().isoformat(),
+        }
+    age_days: Optional[float] = None
+    try:
+        generated = datetime.fromisoformat(str(payload.get("generated_at")))
+        if generated.tzinfo is None:
+            generated = generated.replace(tzinfo=timezone.utc)
+        age_days = (_utcnow() - generated).total_seconds() / 86400.0
+    except Exception:
+        age_days = None
+    return {
+        "available": True,
+        "stale": bool(age_days is not None and age_days > _PUMP_WATCHLIST_STALE_DAYS),
+        "age_days": None if age_days is None else round(age_days, 2),
+        "refresh": dict(_pump_refresh_state),
+        "data": payload,
+        "ts": _utcnow().isoformat(),
+    }
+
+
+async def _run_pump_watchlist_refresh() -> None:
+    _pump_refresh_state.update(
+        {"running": True, "started_at": _utcnow().isoformat(), "finished_at": None, "returncode": None, "error": None}
+    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(_PUMP_WATCHLIST_SCRIPT),
+            cwd=str(_PUMP_WATCHLIST_SCRIPT.parents[1]),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        returncode = await process.wait()
+        _pump_refresh_state.update({"returncode": int(returncode)})
+        if returncode != 0:
+            _pump_refresh_state.update({"error": f"exit_{returncode}"})
+    except Exception as exc:  # noqa: BLE001
+        _pump_refresh_state.update({"error": str(exc)[:160]})
+    finally:
+        _pump_refresh_state.update({"running": False, "finished_at": _utcnow().isoformat()})
+
+
+@router.post(
+    "/radar/pump-watchlist/refresh",
+    dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))],
+)
+async def refresh_pump_precursor_watchlist():
+    async with _pump_refresh_lock:
+        if _pump_refresh_state.get("running"):
+            return {"success": False, "reason": "already_running", "refresh": dict(_pump_refresh_state)}
+        asyncio.create_task(_run_pump_watchlist_refresh())
+        return {"success": True, "reason": "started", "refresh": dict(_pump_refresh_state)}
 
 
 @router.post("/radar/watchlist", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])

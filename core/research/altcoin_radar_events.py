@@ -54,16 +54,30 @@ def _f(v: Any, default: float = 0.0) -> float:
 
 # ── rank-history management ────────────────────────────────────────────────
 
+def _history_key(symbol: str, context: str = "") -> str:
+    key = str(symbol or "").strip().upper()
+    if not key:
+        return ""
+    ctx = str(context or "").strip().lower()
+    # Context isolates score regimes: 15m ignition scores written by one view
+    # must not become the 4h view's "previous" value, or ignition cross-up /
+    # rank-jump events (and the Feishu alerts built on them) fire on phantom
+    # cross-context deltas.
+    return f"{ctx}|{key}" if ctx else key
+
+
 def update_rank_snapshot(
     symbol: str,
     rank: int,
     scores: Optional[Dict[str, float]] = None,
+    *,
+    context: str = "",
 ) -> None:
     """Record current rank + key scores for a symbol.
 
     Call this once per scan cycle for each row returned by build_altcoin_rows.
     """
-    key = str(symbol or "").strip().upper()
+    key = _history_key(symbol, context)
     if not key:
         return
     entry: Dict[str, Any] = {
@@ -81,14 +95,14 @@ def update_rank_snapshot(
             _rank_history[key] = history[-MAX_HISTORY_PER_SYMBOL:]
 
 
-def get_rank_history(symbol: str) -> List[Dict[str, Any]]:
+def get_rank_history(symbol: str, *, context: str = "") -> List[Dict[str, Any]]:
     """Return full rank history for a symbol (newest last)."""
-    key = str(symbol or "").strip().upper()
+    key = _history_key(symbol, context)
     with _lock:
         return list(_rank_history.get(key, []))
 
 
-def bulk_update_ranks(rows: Sequence[Dict[str, Any]]) -> None:
+def bulk_update_ranks(rows: Sequence[Dict[str, Any]], *, context: str = "") -> None:
     """Update rank history for all rows returned by a scan.
 
     rows: list of row dicts from build_altcoin_rows (with 'symbol', 'rank',
@@ -107,6 +121,7 @@ def bulk_update_ranks(rows: Sequence[Dict[str, Any]]) -> None:
                 "alert_score": _f(row.get("alert_score")),
                 "crowding_late_score": _f(row.get("crowding_late_score")),
             },
+            context=context,
         )
 
 
@@ -119,13 +134,14 @@ def compute_rank_jump_score(
     top_n: int = 15,
     lookback_sec: float = 900.0,   # 15 minutes
     min_jump: int = 3,
+    context: str = "",
 ) -> float:
     """Return a [0, 1] score reflecting how dramatically rank improved recently.
 
     High score = entered top_n AND jumped ≥ min_jump positions in lookback_sec.
     """
     key = str(symbol or "").strip().upper()
-    history = get_rank_history(key)
+    history = get_rank_history(key, context=context)
     if not history:
         return 0.0
 
