@@ -9,4 +9,7 @@ if not exist logs mkdir logs
 echo [%date% %time%] pump watchlist weekly run start >> logs\pump_watchlist_weekly.log
 "%PYEXE%" -u scripts\generate_pump_watchlist.py >> logs\pump_watchlist_weekly.log 2>&1
 echo [%date% %time%] pump watchlist weekly run exit %errorlevel% >> logs\pump_watchlist_weekly.log
+echo [%date% %time%] onchain feature snapshot start >> logs\pump_watchlist_weekly.log
+"%PYEXE%" -u scripts\snapshot_onchain_features.py >> logs\pump_watchlist_weekly.log 2>&1
+echo [%date% %time%] onchain feature snapshot exit %errorlevel% >> logs\pump_watchlist_weekly.log
 endlocal
