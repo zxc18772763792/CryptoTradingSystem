@@ -2265,14 +2265,14 @@
       const reason = payload && payload.reason === 'not_generated'
         ? '名单尚未生成 — 点右上「重新生成」或运行 scripts/generate_pump_watchlist.py'
         : `名单不可用（${escapeHtml(String((payload && payload.reason) || 'unknown'))}）`;
-      body.innerHTML = `<tr><td colspan="10" class="altcoin-radar-empty">${reason}</td></tr>`;
+      body.innerHTML = `<tr><td colspan="12" class="altcoin-radar-empty">${reason}</td></tr>`;
       setPumpWatchlistNote('未生成', 'warn');
       return;
     }
     const data = payload.data || {};
     const rows = Array.isArray(data.top) ? data.top : [];
     if (!rows.length) {
-      body.innerHTML = '<tr><td colspan="10" class="altcoin-radar-empty">名单为空</td></tr>';
+      body.innerHTML = '<tr><td colspan="12" class="altcoin-radar-empty">名单为空</td></tr>';
       setPumpWatchlistNote('名单为空', 'warn');
       return;
     }
@@ -2282,6 +2282,14 @@
           .map((key) => PUMP_DRIVER_LABELS[key] || key)
           .join(' · ');
         const funding = toNumber(row.funding_7d, 0);
+        const top10 = row.top10_holder_pct;
+        const top10Cell = top10 == null
+          ? '--'
+          : `${toNumber(top10, 0).toFixed(0)}%`;
+        const unlockPct = row.unlock_next_30d_pct;
+        const unlockCell = unlockPct == null
+          ? '—'
+          : `${(toNumber(unlockPct, 0) * 100).toFixed(1)}%`;
         return [
           '<tr>',
           `<td>${toNumber(row.rank, 0)}</td>`,
@@ -2294,6 +2302,8 @@
           `<td>${(toNumber(row.ret_30d, 0) * 100).toFixed(0)}%</td>`,
           `<td>${(funding * 100).toFixed(3)}%</td>`,
           `<td>${row.pumped_before_120d ? '是' : '否'}</td>`,
+          `<td>${top10Cell}</td>`,
+          `<td>${unlockCell}</td>`,
           '</tr>',
         ].join('');
       })

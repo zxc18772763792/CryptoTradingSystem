@@ -61,6 +61,21 @@ COINGLASS_PACE_SEC = 6.8
 BINANCE_PACE_SEC = 0.25
 
 
+_ONCHAIN_DIR = PROJECT_ROOT / "data" / "research" / "onchain"
+
+
+def _load_onchain_snapshot(kind: str) -> Dict[str, Dict[str, Any]]:
+    """Read the latest holder/unlock snapshot (context columns; may be absent)."""
+    path = _ONCHAIN_DIR / kind / "latest.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    return dict(payload.get("rows") or {})
+
+
 def _get_json(url: str, params: Optional[Dict[str, Any]] = None, *, retries: int = 4) -> Any:
     last: Optional[Exception] = None
     for attempt in range(retries):
@@ -220,8 +235,15 @@ async def main() -> None:
     scored = score_universe(feature_rows, model)
     logger.info(f"scored {len(scored)} symbols, skipped {len(skipped)}")
 
+    # On-chain display columns (context only, not scored): holder concentration
+    # from the weekly GeckoTerminal snapshot + unlock proximity from DefiLlama.
+    holder_rows = _load_onchain_snapshot("holder_snapshots")
+    unlock_rows = _load_onchain_snapshot("unlocks")
+
     entries = []
     for rank, (base, row) in enumerate(scored.head(args.top).iterrows(), start=1):
+        holder = holder_rows.get(base) or {}
+        unlock = unlock_rows.get(base) or {}
         entries.append(
             {
                 "rank": rank,
@@ -236,6 +258,9 @@ async def main() -> None:
                 "funding_7d": round(float(row["funding_7d"]), 6),
                 "dd_from_ath": round(float(row["dd_from_ath"]), 4),
                 "pumped_before_120d": bool(row["pumped_before_120d"] > 0),
+                "top10_holder_pct": holder.get("top10_pct"),
+                "unlock_next_30d_pct": unlock.get("unlock_next_30d_pct_mcap"),
+                "days_to_next_unlock": unlock.get("days_to_next_unlock"),
             }
         )
 
