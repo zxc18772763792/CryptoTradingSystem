@@ -1,0 +1,141 @@
+{
+ "_meta": {
+  "analyzable_rows": 2213,
+  "base_pump100_rate": 0.0429,
+  "with_real_schedule": 910,
+  "full_float_rows": 1303,
+  "oos_split": "2026-03-18",
+  "unique_bases": 58
+ },
+ "F1_big_unlock_suppresses": {
+  "claim": "coins with >=5% mcap unlocking in next 30d pump less often",
+  "with_big_unlock": {
+   "n": 158,
+   "pump_rate": 0.019,
+   "pumps": 3,
+   "fwd_mean": 0.1713,
+   "fwd_median": 0.1003
+  },
+  "without": {
+   "n": 2055,
+   "pump_rate": 0.0448,
+   "pumps": 92,
+   "fwd_mean": 0.2597,
+   "fwd_median": 0.1156
+  },
+  "is": {
+   "big": {
+    "n": 99,
+    "pump_rate": 0.0,
+    "pumps": 0,
+    "fwd_mean": 0.1182,
+    "fwd_median": 0.0755
+   },
+   "small": {
+    "n": 1425,
+    "pump_rate": 0.0463,
+    "pumps": 66,
+    "fwd_mean": 0.2486,
+    "fwd_median": 0.1045
+   }
+  },
+  "oos": {
+   "big": {
+    "n": 59,
+    "pump_rate": 0.0508,
+    "pumps": 3,
+    "fwd_mean": 0.2604,
+    "fwd_median": 0.186
+   },
+   "small": {
+    "n": 630,
+    "pump_rate": 0.0413,
+    "pumps": 26,
+    "fwd_mean": 0.2849,
+    "fwd_median": 0.1607
+   }
+  }
+ },
+ "F2_post_unlock": {
+  "claim": "coins that just unlocked >=5% mcap pump less often forward",
+  "recently_unlocked": {
+   "n": 150,
+   "pump_rate": 0.02,
+   "pumps": 3,
+   "fwd_mean": 0.1798,
+   "fwd_median": 0.1039
+  },
+  "not": {
+   "n": 2063,
+   "pump_rate": 0.0446,
+   "pumps": 92,
+   "fwd_mean": 0.2588,
+   "fwd_median": 0.1155
+  }
+ },
+ "F3_quintile_shape": {
+  "claim": "pump rate declines monotonically with unlock overhang",
+  "by_quintile": {
+   "0": {
+    "n": 443,
+    "pump_rate": 0.0429,
+    "pumps": 19,
+    "fwd_mean": 0.2104,
+    "fwd_median": 0.1157
+   },
+   "1": {
+    "n": 442,
+    "pump_rate": 0.0,
+    "pumps": 0,
+    "fwd_mean": 0.142,
+    "fwd_median": 0.1077
+   },
+   "2": {
+    "n": 443,
+    "pump_rate": 0.1196,
+    "pumps": 53,
+    "fwd_mean": 0.4962,
+    "fwd_median": 0.115
+   },
+   "3": {
+    "n": 442,
+    "pump_rate": 0.0317,
+    "pumps": 14,
+    "fwd_mean": 0.2216,
+    "fwd_median": 0.1253
+   },
+   "4": {
+    "n": 443,
+    "pump_rate": 0.0203,
+    "pumps": 9,
+    "fwd_mean": 0.1966,
+    "fwd_median": 0.1178
+   }
+  }
+ },
+ "F4_gate_effect": {
+  "claim": "vetoing big-unlock coins raises residual pool pump rate",
+  "full_pool": {
+   "n": 2213,
+   "pump_rate": 0.0429,
+   "pumps": 95,
+   "fwd_mean": 0.2534,
+   "fwd_median": 0.1151
+  },
+  "after_veto": {
+   "n": 2055,
+   "pump_rate": 0.0448,
+   "pumps": 92,
+   "fwd_mean": 0.2597,
+   "fwd_median": 0.1156
+  },
+  "removed_rows": 158,
+  "removed_pumps": 3
+ },
+ "F5_confounds": {
+  "claim": "unlock overhang is confounded with market cap",
+  "corr_unlock_vs_logmcap": 0.083,
+  "big_unlock_median_logmcap": 8.665,
+  "small_unlock_median_logmcap": 8.357
+ }
+}
