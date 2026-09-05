@@ -18499,3 +18499,325 @@ body.app-page #news .news-card-queue .news-scroll-fill {
         padding-inline: 11px;
     }
 }
+
+/* =====================================================================
+   ALTCOIN RADAR CONSISTENCY PATCH
+   Keep this workspace on the same shell, card rhythm and responsive
+   columns as the trading console. Radar-specific styling only changes
+   its content components; it must not change the application chrome.
+   ===================================================================== */
+body.app-page:has(#altcoin-radar.active) .app-shell {
+    width: min(100%, var(--ui-content-max));
+    max-width: none;
+    padding: 24px var(--ui-gutter) 40px;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-page-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 380px);
+    gap: 18px;
+    align-items: center;
+    margin: 0 0 var(--ui-section-gap);
+    padding: 18px;
+    border: 1px solid var(--card-border);
+    border-radius: var(--ui-card-radius);
+    background: var(--card-bg);
+    box-shadow: 0 10px 24px rgba(var(--shadow-rgb), 0.2);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-kicker {
+    min-height: 24px;
+    margin-bottom: 8px;
+    padding: 0 9px;
+    border: 1px solid rgba(var(--accent-rgb), 0.28);
+    border-radius: 999px;
+    background: rgba(var(--accent-rgb), 0.1);
+    color: var(--accent-soft);
+    font-size: 11px;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-page-head h2 {
+    margin: 0;
+    color: var(--text-bright);
+    font-size: 20px;
+    line-height: 1.25;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-page-head p {
+    margin: 7px 0 0;
+    color: var(--text-sub);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-page-note {
+    justify-self: stretch;
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg);
+    color: var(--text-sub);
+    font-size: 11px;
+    line-height: 1.45;
+    text-align: left;
+}
+
+body.app-page #altcoin-radar #altcoin-radar-operating-mode-banner {
+    margin: 0 0 var(--ui-section-gap) !important;
+    padding: 10px 12px !important;
+    border: 1px solid var(--border-subtle) !important;
+    border-radius: var(--ui-control-radius) !important;
+    background: var(--panel-bg) !important;
+    color: var(--text-sub) !important;
+    font-size: 11px !important;
+    line-height: 1.45 !important;
+}
+
+body.app-page #altcoin-radar .ui-operating-mode-banner-content {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+}
+
+body.app-page #altcoin-radar .ui-operating-mode-banner-content strong {
+    color: var(--text-bright);
+    font-size: 12px;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-workspace {
+    display: grid;
+    grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+    grid-template-areas:
+        "controls main"
+        "controls inspector";
+    gap: var(--ui-section-gap);
+    align-items: start;
+    height: auto;
+    min-height: 0;
+}
+
+body.app-page #altcoin-radar .research-sidebar {
+    grid-area: controls;
+    display: grid;
+    gap: var(--ui-section-gap);
+    align-content: start;
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    overflow: visible;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-center {
+    grid-area: main;
+    display: grid;
+    grid-template-rows: auto;
+    gap: var(--ui-section-gap);
+    height: auto;
+    min-width: 0;
+    min-height: 0;
+    overflow: visible;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-inspector-rail {
+    grid-area: inspector;
+    position: static;
+    height: auto;
+    max-height: none;
+    min-width: 0;
+    min-height: 0;
+    overflow: visible;
+}
+
+body.app-page #altcoin-radar .research-sticky {
+    position: static;
+    top: auto;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-control-card,
+body.app-page #altcoin-radar .altcoin-radar-summary-card,
+body.app-page #altcoin-radar .altcoin-radar-meta-card,
+body.app-page #altcoin-radar .altcoin-radar-table-card,
+body.app-page #altcoin-radar .altcoin-radar-inspector-card {
+    min-width: 0;
+    border: 1px solid var(--card-border);
+    border-radius: var(--ui-card-radius);
+    background: var(--card-bg);
+    box-shadow: 0 10px 24px rgba(var(--shadow-rgb), 0.2);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-control-card {
+    height: auto;
+    padding: 18px;
+    overflow: visible;
+}
+
+body.app-page #altcoin-radar .card h3 {
+    margin-bottom: 13px;
+    padding-bottom: 9px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-bright);
+    font-size: 15px;
+    line-height: 1.3;
+}
+
+body.app-page #altcoin-radar .card h3::before {
+    width: 4px;
+    height: 15px;
+    margin-right: 8px;
+    border-radius: 3px;
+}
+
+body.app-page #altcoin-radar .research-control-notes {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: rgba(var(--shadow-rgb), 0.72);
+    color: var(--text-sub);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+body.app-page #altcoin-radar .research-config-section {
+    border-color: var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg-deep);
+}
+
+body.app-page #altcoin-radar select,
+body.app-page #altcoin-radar input[type="text"] {
+    min-height: var(--ui-control-height);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg-deep);
+    color: var(--text-main);
+    font-size: 12px;
+}
+
+body.app-page #altcoin-radar .altcoin-mode-btn {
+    min-height: var(--ui-control-height);
+    border-color: var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg);
+    color: var(--text-sub);
+}
+
+body.app-page #altcoin-radar .altcoin-mode-btn.active {
+    border-color: var(--border-strong);
+    background: var(--surface-raised);
+    color: var(--text-bright);
+    box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-summary-card,
+body.app-page #altcoin-radar .altcoin-radar-meta-card,
+body.app-page #altcoin-radar .altcoin-radar-table-card,
+body.app-page #altcoin-radar .altcoin-radar-inspector-card {
+    padding: 18px;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-summary-metric {
+    min-height: 72px;
+    padding: 10px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--surface-raised);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-table-card {
+    min-height: 0;
+    overflow: hidden;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-table-scroll {
+    min-height: 220px;
+    max-height: 520px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg-deep);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-table th {
+    background: var(--surface-raised);
+    color: var(--text-sub);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-table td {
+    color: var(--text-soft);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-table tbody tr:nth-child(even) {
+    background: rgba(var(--accent-rgb), 0.025);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-table tbody tr:hover {
+    background: rgba(var(--accent-rgb), 0.06);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-table tbody tr.is-selected {
+    background: rgba(var(--warning-rgb), 0.1);
+    box-shadow: inset 3px 0 0 var(--warning);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-inspector-card {
+    min-height: 0;
+    max-height: none;
+    overflow: hidden;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-detail-panel {
+    border-color: var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg-deep);
+}
+
+body.app-page #altcoin-radar #altcoin-radar-output {
+    border-color: var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+}
+
+@media (min-width: 1501px) {
+    body.app-page #altcoin-radar .altcoin-radar-workspace {
+        grid-template-columns: minmax(300px, 340px) minmax(620px, 1fr) minmax(360px, 430px);
+        grid-template-areas: "controls main inspector";
+    }
+
+    body.app-page #altcoin-radar .altcoin-radar-inspector-rail {
+        position: sticky;
+        top: 74px;
+        max-height: calc(100vh - 98px);
+        overflow: visible;
+    }
+
+    body.app-page #altcoin-radar .altcoin-radar-inspector-card {
+        max-height: calc(100vh - 98px);
+    }
+}
+
+@media (max-width: 900px) {
+    body.app-page #altcoin-radar .altcoin-radar-page-head {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    body.app-page #altcoin-radar .altcoin-radar-workspace {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas:
+            "controls"
+            "main"
+            "inspector";
+    }
+}
+
+@media (max-width: 560px) {
+    body.app-page #altcoin-radar .altcoin-radar-page-head,
+    body.app-page #altcoin-radar .altcoin-radar-control-card,
+    body.app-page #altcoin-radar .altcoin-radar-summary-card,
+    body.app-page #altcoin-radar .altcoin-radar-meta-card,
+    body.app-page #altcoin-radar .altcoin-radar-table-card,
+    body.app-page #altcoin-radar .altcoin-radar-inspector-card {
+        padding: 13px;
+        border-radius: 10px;
+    }
+}

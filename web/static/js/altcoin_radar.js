@@ -742,7 +742,7 @@
     if (!banner) {
       banner = document.createElement('div');
       banner.id = 'altcoin-radar-operating-mode-banner';
-      banner.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid rgba(94,200,255,.24);background:rgba(94,200,255,.08);border-radius:8px;color:#d8e7ff;font-size:12px;';
+      banner.className = 'ui-operating-mode-banner';
       root.insertBefore(banner, workspace);
     }
     if (errorText) {
@@ -756,7 +756,7 @@
     const coinglass = snapshot.coinglass || {};
     const provider = agent.provider || snapshot.ai_live_decision?.provider || '--';
     banner.innerHTML = `
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <div class="ui-operating-mode-banner-content">
         <strong>Operating Mode</strong>
         <span>trading=${escapeHtml(snapshot.trading_mode || '--')}</span>
         <span>agent=${escapeHtml(agent.mode || '--')}</span>
@@ -1310,7 +1310,7 @@
       badgeEl.textContent = rows.length ? String(rows.length) : '';
     }
     if (!rows.length) {
-      timelineEl.innerHTML = '<span class="text-muted" style="font-size:12px">暂无近期事件</span>';
+      timelineEl.innerHTML = '<span class="text-muted u-note">暂无近期事件</span>';
       return;
     }
     const eventTypeLabel = (t) => ({
@@ -1564,7 +1564,7 @@
       return cachedTimeline;
     }
     const requestSeq = ++state.eventSeq;
-    timelineEl.innerHTML = '<span class="text-muted" style="font-size:12px">加载中...</span>';
+    timelineEl.innerHTML = '<span class="text-muted u-note">加载中...</span>';
     try {
       const apiFetch = requireApi();
       const resp = await apiFetch(`/altcoin/radar/events?symbol=${encodeURIComponent(normalized)}&limit=10&max_age_sec=3600`, {
@@ -1579,7 +1579,7 @@
       return events;
     } catch (_) {
       if (requestSeq === state.eventSeq && normalized === String(state.selectedSymbol || '').trim().toUpperCase()) {
-        timelineEl.innerHTML = '<span class="text-muted" style="font-size:12px">事件加载失败</span>';
+        timelineEl.innerHTML = '<span class="text-muted u-note">事件加载失败</span>';
         if (badgeEl) badgeEl.style.display = 'none';
       }
       return [];
