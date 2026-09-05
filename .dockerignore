@@ -31,7 +31,11 @@ data/
 logs/
 output/
 reports/
-models/
+# Keep generated model runs out of the build context, but ship the validated
+# canonical inference artifact used by the default ML strategy.
+models/*
+!models/ml_signal_xgb.json
+!models/ml_signal_xgb.manifest.json
 tmp/
 MagicMock/
 

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+# Route modules intentionally resolve shared dependencies through this module's
+# namespace during router construction (for example, ``ops_api.FPath``).
+# Ruff cannot see those cross-module attribute reads.
+# ruff: noqa: F401
+
 import asyncio
 import json
 import os
@@ -10,7 +15,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path as FPath, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from config.strategy_registry import get_backtest_optimization_grid
 from config.settings import settings
@@ -22,7 +27,7 @@ from core.exchanges import exchange_manager
 from core.news.service.api import IngestRequest, load_service_config, run_ingest_pull_now
 from core.news.service.worker import process_llm_batch, run_pull_cycle
 from core.news.storage import db as news_db
-from core.governance.rbac import GovernanceIdentity
+from core.governance.rbac import API_USER_ROLES, GovernanceIdentity
 from core.governance.schemas import RiskConfigPayload
 from core.governance.service import (
     approve_risk_change,
@@ -323,10 +328,18 @@ class GovernanceAuditQuery(BaseModel):
 
 
 class GovernanceApiUserUpsertRequest(BaseModel):
-    name: str
-    role: str
-    api_key: str
+    name: str = Field(min_length=1, max_length=120)
+    role: str = Field(min_length=1, max_length=40)
+    api_key: str = Field(min_length=32, max_length=512)
     is_active: bool = True
+
+    @field_validator("role")
+    @classmethod
+    def _validate_role(cls, value: str) -> str:
+        normalized = str(value or "").strip().upper()
+        if normalized not in API_USER_ROLES:
+            raise ValueError("invalid API user role")
+        return normalized
 
 
 def _now_utc() -> datetime:

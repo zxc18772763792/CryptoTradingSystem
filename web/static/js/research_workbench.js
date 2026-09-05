@@ -11,6 +11,7 @@
     retryTimers: {},
     autoRefreshTimer: null,
     _countdownTimer: null,
+    configObserver: null,
     overviewRefreshPromise: null,
     lastOverviewRefreshAt: 0,
   };
@@ -247,6 +248,16 @@
       const text = String(value || '').trim();
       return `<option value="${escSafe(text)}"${selectedSet.has(text) ? ' selected' : ''}>${escSafe(text)}</option>`;
     }).join('');
+  }
+
+  function renderWorkflowChrome(profile = getProfile()) {
+    const universeCount = Array.isArray(profile?.universe_symbols) ? profile.universe_symbols.length : 0;
+    const universeSummary = q('research-universe-summary');
+    const workflowContext = q('research-workflow-context');
+    if (universeSummary) universeSummary.textContent = `币池 ${universeCount} 个`;
+    if (workflowContext) {
+      workflowContext.textContent = `${String(profile?.exchange || 'binance').toUpperCase()} · ${profile?.primary_symbol || 'BTC/USDT'} · ${profile?.timeframe || '5m'} · ${universeCount}币`;
+    }
   }
 
   function setDebug(title, payload) {
@@ -543,7 +554,9 @@
   }
 
   function renderStatusCards() {
-    const profile = state.profile || getProfile();
+    const profile = getProfile();
+    state.profile = profile;
+    renderWorkflowChrome(profile);
     const configEl = q('research-config-snapshot');
     const dataEl = q('research-data-snapshot');
     const moduleEl = q('research-module-snapshot');
@@ -562,11 +575,11 @@
     const whaleCount = Number(state.modules?.onchain?.payload?.onchain?.whale_activity?.count || 0);
 
     setStatusItemValue(configEl,
-      `${escSafe(profile.exchange)} / ${escSafe(profile.primary_symbol)} / ${escSafe(profile.timeframe)}<div style="color:#7a8fa6;font-size:11px;margin-top:2px;">lookback ${profile.lookback} · 币池 ${profile.universe_symbols.length}</div>`
+      `${escSafe(profile.exchange)} / ${escSafe(profile.primary_symbol)} / ${escSafe(profile.timeframe)}<div style="color:var(--text-sub);font-size:11px;margin-top:2px;">lookback ${profile.lookback} · 币池 ${profile.universe_symbols.length}</div>`
     );
     setStatusItemValue(dataEl,
-      `<span style="color:#20bf78;">✔ ${okCount}</span> <span style="color:#f59e0b;">⚡ ${degradedCount}</span> <span style="color:#e05260;">✘ ${errorCount}</span>`
-      + `<div style="color:#7a8fa6;font-size:11px;margin-top:2px;">新闻事件 ${newsEvents} · 巨鲸 ${whaleCount}</div>`
+      `<span style="color:var(--positive);">✔ ${okCount}</span> <span style="color:var(--warning);">⚡ ${degradedCount}</span> <span style="color:var(--negative);">✘ ${errorCount}</span>`
+      + `<div style="color:var(--text-sub);font-size:11px;margin-top:2px;">新闻事件 ${newsEvents} · 巨鲸 ${whaleCount}</div>`
     );
 
     // Per-module colored chips with last-updated time
@@ -589,7 +602,7 @@
       const actionText = state.recommendations?.action_items?.[0]?.label
         || state.recommendations?.next_actions?.[0]
         || '查看研究建议';
-      nextHtml = `${escSafe(conclusion)}<div style="color:#7a8fa6;font-size:11px;margin-top:4px;">动作 ${escSafe(actionText)}</div>`;
+      nextHtml = `${escSafe(conclusion)}<div style="color:var(--text-sub);font-size:11px;margin-top:4px;">动作 ${escSafe(actionText)}</div>`;
     } else if (state.overview) nextHtml = '刷新研究建议';
     else if (errorCount > 0) nextHtml = '先修复失败模块，再看综合结论';
     setStatusItemValue(nextEl, nextHtml);
@@ -601,10 +614,10 @@
         const remMs = (state.lastOverviewRefreshAt + WORKBENCH_AUTO_REFRESH_MS) - Date.now();
         const remMin = Math.ceil(remMs / 60000);
         badgeEl.textContent = remMs > 0 ? `${remMin}分后自动刷新` : '即将刷新';
-        badgeEl.style.display = '';
       } else {
-        badgeEl.style.display = 'none';
+        badgeEl.textContent = '运行总览后启用 30 分钟自动刷新';
       }
+      badgeEl.style.display = '';
     }
   }
 
@@ -618,7 +631,7 @@
   const OVERVIEW_CARD_KEYS = ['market_state', 'sentiment', 'factors', 'cross_asset', 'onchain', 'discipline'];
 
   function _overviewSubLine(text) {
-    return `<div style="font-size:11px;color:#7a8fa6;margin-top:2px;">${escSafe(text)}</div>`;
+    return `<div style="font-size:11px;color:var(--text-sub);margin-top:2px;">${escSafe(text)}</div>`;
   }
 
   function renderOverview() {
@@ -860,7 +873,7 @@
       if ((brief.preferred_strategy_families || []).length) notes.push(`优先策略：${brief.preferred_strategy_families.join(' / ')}`);
       if ((brief.risk_notes || []).length) notes.push(`风险：${brief.risk_notes.slice(0, 2).join('；')}`);
       plannerNotesEl.innerHTML = notes.length
-        ? `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">已从研究总览填入：${escSafe(notes.join(' · '))}</div>`
+        ? `<div style="font-size:11px;color:var(--accent-soft);margin-bottom:3px;">已从研究总览填入：${escSafe(notes.join(' · '))}</div>`
         : '';
     }
 
@@ -1050,7 +1063,7 @@
           <span class="status-badge ${behavior.overtrading_warning ? 'warning' : 'connected'}">${behavior.overtrading_warning ? '警告' : '正常'}</span>
         </div>
         <p>冲动占比 ${(Number(behavior.impulsive_ratio || 0) * 100).toFixed(2)}%</p>
-        <p style="font-size:11px;color:#8fa6c0;">${escSafe(warnings.join('；') || '暂无明显纪律风险。')}</p>
+        <p style="font-size:11px;color:var(--text-sub);">${escSafe(warnings.join('；') || '暂无明显纪律风险。')}</p>
       </div>
     `);
 
@@ -1835,14 +1848,16 @@
     });
   }
 
-  function startWorkbenchAutoRefresh() {
+  function stopWorkbenchAutoRefresh() {
     if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
+    if (state._countdownTimer) clearInterval(state._countdownTimer);
+    state.autoRefreshTimer = null;
+    state._countdownTimer = null;
+  }
+
+  function startWorkbenchAutoRefresh() {
+    stopWorkbenchAutoRefresh();
     if (typeof document !== 'undefined' && document.hidden) {
-      state.autoRefreshTimer = null;
-      if (state._countdownTimer) {
-        clearInterval(state._countdownTimer);
-        state._countdownTimer = null;
-      }
       return;
     }
     state.autoRefreshTimer = setInterval(() => {
@@ -1858,10 +1873,7 @@
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
-        if (state.autoRefreshTimer) clearInterval(state.autoRefreshTimer);
-        if (state._countdownTimer) clearInterval(state._countdownTimer);
-        state.autoRefreshTimer = null;
-        state._countdownTimer = null;
+        stopWorkbenchAutoRefresh();
       } else if (state.initialized) {
         startWorkbenchAutoRefresh();
         maybeAutoRefreshWorkbench(false);
@@ -1945,14 +1957,14 @@
     const days = Number(q('regime-calendar-days')?.value || 7);
     const exchange = profile.exchange || 'binance';
     const symbol = profile.primary_symbol || 'BTC/USDT';
-    grid.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">加载中...</div>';
+    grid.innerHTML = '<div style="color:var(--text-faint);font-size:12px;">加载中...</div>';
     try {
       const data = await apiResearch(
         `/regime-calendar?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&days=${days}`
       );
       const calendar = Array.isArray(data?.calendar) ? data.calendar : [];
       if (!calendar.length) {
-        grid.innerHTML = '<div style="color:#6b7fa0;font-size:12px;">暂无历史快照数据（需先运行市场状态分析采集数据）</div>';
+        grid.innerHTML = '<div style="color:var(--text-faint);font-size:12px;">暂无历史快照数据（需先运行市场状态分析采集数据）</div>';
         return;
       }
       grid.innerHTML = calendar.map((item) => {
@@ -1966,7 +1978,7 @@
         </div>`;
       }).join('');
     } catch (err) {
-      grid.innerHTML = `<div style="color:#e05260;font-size:12px;">加载失败: ${escSafe(String(err?.message || err))}</div>`;
+      grid.innerHTML = `<div style="color:var(--negative);font-size:12px;">加载失败: ${escSafe(String(err?.message || err))}</div>`;
     }
   }
 
@@ -2017,6 +2029,33 @@
     }
   }
 
+  function bindResearchNavigation() {
+    const nav = q('research-section-nav');
+    if (!nav || nav.dataset.bound === '1') return;
+    nav.dataset.bound = '1';
+    nav.addEventListener('click', (event) => {
+      const link = event.target.closest('[data-research-jump]');
+      if (!link || !nav.contains(link)) return;
+      nav.querySelectorAll('[data-research-jump]').forEach((item) => {
+        if (item === link) item.setAttribute('aria-current', 'true');
+        else item.removeAttribute('aria-current');
+      });
+    });
+  }
+
+  function watchProgrammaticConfigChanges() {
+    if (state.configObserver || typeof MutationObserver === 'undefined') return;
+    const selects = [q('research-symbol'), q('research-symbols')].filter(Boolean);
+    if (!selects.length) return;
+    state.configObserver = new MutationObserver(() => {
+      state.profile = getProfile();
+      renderStatusCards();
+    });
+    selects.forEach((select) => {
+      state.configObserver.observe(select, { childList: true, subtree: true });
+    });
+  }
+
   function patchGlobals() {
     window.workbenchState = state;
     window.renderResearchStatusCards = renderStatusCards;
@@ -2033,6 +2072,8 @@
     bindWorkbenchButtons();
     bindLegacyButtons();
     bindConfigWatchers();
+    bindResearchNavigation();
+    watchProgrammaticConfigChanges();
     applyWorkbenchDefaults();
     startWorkbenchAutoRefresh();
     state.profile = getProfile();

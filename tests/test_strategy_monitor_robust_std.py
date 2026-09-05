@@ -19,3 +19,24 @@ def test_stateful_cusum_monitor_uses_robust_scale_after_outlier():
 
     assert any(status["triggered"] for status in statuses)
     assert max(status["std_pct"] for status in statuses) < 1.0
+
+
+def test_stateful_cusum_monitor_suppresses_immediate_retrigger_during_cooldown():
+    monitor = CUSUMMonitor(
+        strategy_name="cooldown",
+        h=1.0,
+        k=0.0,
+        min_bars=2,
+        cooldown_bars=3,
+    )
+
+    first = monitor.update(-0.001)
+    second = monitor.update(-0.001)
+    third = monitor.update(-0.001)
+
+    assert first["triggered"] is False
+    assert second["triggered"] is True
+    assert second["cooldown_bars_remaining"] == 3
+    assert third["triggered"] is False
+    assert third["trigger_count"] == 1
+    assert third["cooldown_bars_remaining"] == 2

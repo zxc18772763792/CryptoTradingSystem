@@ -464,6 +464,9 @@ def test_market_state_surfaces_stale_calendar_warning(monkeypatch):
         module, "_load_preferred_coinglass_overview", AsyncMock(return_value={})
     )
     monkeypatch.setattr(
+        module, "_load_macro_snapshot_payload", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
         module, "get_analytics_history_status", AsyncMock(return_value={})
     )
     monkeypatch.setattr(
@@ -565,6 +568,9 @@ def test_market_state_surfaces_stale_news_warning(monkeypatch):
     )
     monkeypatch.setattr(
         module, "_load_preferred_coinglass_overview", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        module, "_load_macro_snapshot_payload", AsyncMock(return_value={})
     )
     monkeypatch.setattr(
         module, "get_analytics_history_status", AsyncMock(return_value={})
@@ -794,6 +800,9 @@ def test_market_state_surfaces_stale_risk_micro_and_community_warnings(monkeypat
     )
     monkeypatch.setattr(
         module, "_load_preferred_coinglass_overview", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        module, "_load_macro_snapshot_payload", AsyncMock(return_value={})
     )
     monkeypatch.setattr(
         module, "get_analytics_history_status", AsyncMock(return_value={})

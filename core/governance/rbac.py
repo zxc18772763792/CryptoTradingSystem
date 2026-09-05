@@ -101,6 +101,11 @@ ROLE_PERMISSIONS: Dict[str, Set[str]] = {
     "SYSTEM": {"*"},
 }
 
+# API users may only be assigned roles defined by the application's RBAC
+# policy.  Keeping the allowlist beside the permission table prevents request
+# schemas and service-layer checks from drifting apart.
+API_USER_ROLES = frozenset(ROLE_PERMISSIONS)
+
 
 @dataclass
 class GovernanceIdentity:

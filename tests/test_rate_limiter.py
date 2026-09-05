@@ -42,6 +42,23 @@ def test_rate_limiter_singleton():
     assert limiter1 is limiter2
 
 
+def test_conflicting_singleton_reinit_warns_and_keeps_original(monkeypatch):
+    limiter = _reset_rate_limiter(rate_per_minute=60, burst=10)
+    warnings = []
+    monkeypatch.setattr(
+        rate_limiter_module.logger,
+        "warning",
+        lambda message: warnings.append(str(message)),
+    )
+
+    same_limiter = RateLimiter(rate_per_minute=120, burst=20)
+
+    assert same_limiter is limiter
+    assert limiter.rate_per_minute == 60
+    assert limiter.burst == 10
+    assert any("ignoring conflicting re-init" in message for message in warnings)
+
+
 def test_acquire_token():
     async def _run():
         limiter = _reset_rate_limiter(rate_per_minute=60, burst=10)

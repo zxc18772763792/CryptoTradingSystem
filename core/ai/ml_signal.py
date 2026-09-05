@@ -80,6 +80,7 @@ class MLSignalModel:
         self._model_path = str(model_path)
         self._threshold = max(0.5, min(1.0, float(threshold)))
         self._model: Optional[Any] = None
+        self._model_backend = ""
         self._feature_names: List[str] = list(FEATURE_COLS)
         self._manifest: Dict[str, Any] = {}
 
@@ -105,18 +106,51 @@ class MLSignalModel:
         try:
             manifest = self._load_manifest()
             self._validate_manifest(manifest)
-            model = xgb.XGBClassifier()
-            model.load_model(self._model_path)
+            model: Any
+            backend = "classifier"
+            classifier_error: Optional[Exception] = None
+            try:
+                model = xgb.XGBClassifier()
+                model.load_model(self._model_path)
+            except Exception as exc:
+                classifier_error = exc
+                booster_class = getattr(xgb, "Booster", None)
+                if booster_class is None:
+                    raise
+                # XGBoost 2.1's sklearn wrapper is incompatible with newer
+                # sklearn tag validation (for example sklearn 1.9 raises
+                # ``_estimator_type undefined`` while loading).  The artifact
+                # itself is a native XGBoost model, so load it through Booster
+                # without changing or retraining the model binary.
+                model = booster_class()
+                model.load_model(self._model_path)
+                backend = "booster"
+                logger.warning(
+                    "MLSignalModel: sklearn wrapper load failed; using native "
+                    f"Booster compatibility path: {classifier_error}"
+                )
             self._model = model
+            self._model_backend = backend
             self._manifest = dict(manifest)
             # prefer feature names stored in the model
-            if hasattr(model, "feature_names_in_") and model.feature_names_in_ is not None:
-                self._feature_names = list(model.feature_names_in_)
+            model_feature_names: Optional[List[str]] = None
+            if backend == "booster":
+                raw_feature_names = getattr(model, "feature_names", None)
+                if raw_feature_names:
+                    model_feature_names = [str(name) for name in raw_feature_names]
             else:
-                self._feature_names = list(manifest.get("feature_columns") or FEATURE_COLS)
+                try:
+                    raw_feature_names = model.feature_names_in_
+                    if raw_feature_names is not None:
+                        model_feature_names = [str(name) for name in raw_feature_names]
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    model_feature_names = None
+            self._feature_names = model_feature_names or list(
+                manifest.get("feature_columns") or FEATURE_COLS
+            )
             logger.info(
                 f"MLSignalModel loaded: path={self._model_path}, "
-                f"features={len(self._feature_names)}"
+                f"features={len(self._feature_names)}, backend={backend}"
             )
         except Exception as exc:
             logger.warning(f"MLSignalModel: failed to load model: {exc}")
@@ -139,9 +173,25 @@ class MLSignalModel:
 
         try:
             row = self._align_features(features)
-            proba = self._model.predict_proba(row)
-            # class 1 = price goes up (LONG)
-            long_prob = float(proba[0][1]) if proba.shape[1] > 1 else float(proba[0][0])
+            if self._model_backend == "booster":
+                import xgboost as xgb  # noqa: PLC0415
+
+                matrix = xgb.DMatrix(row, feature_names=list(self._feature_names))
+                raw_probability = np.asarray(self._model.predict(matrix), dtype=float).reshape(-1)
+                if raw_probability.size != 1:
+                    raise ValueError(
+                        f"expected one booster probability, received {raw_probability.size}"
+                    )
+                long_prob = float(raw_probability[0])
+            else:
+                proba = self._model.predict_proba(row)
+                # class 1 = price goes up (LONG)
+                long_prob = (
+                    float(proba[0][1]) if proba.shape[1] > 1 else float(proba[0][0])
+                )
+            if not np.isfinite(long_prob):
+                raise ValueError("model returned a non-finite probability")
+            long_prob = max(0.0, min(1.0, long_prob))
             short_prob = 1.0 - long_prob
 
             if long_prob >= self._threshold:
@@ -152,11 +202,22 @@ class MLSignalModel:
                 direction, confidence = "FLAT", max(long_prob, short_prob)
 
             importances: Dict[str, float] = {}
-            if hasattr(self._model, "feature_importances_"):
-                for name, score in zip(
-                    self._feature_names, self._model.feature_importances_
-                ):
-                    importances[str(name)] = round(float(score), 6)
+            if self._model_backend == "booster":
+                raw_scores = self._model.get_score(importance_type="gain")
+                total = sum(max(0.0, float(score)) for score in raw_scores.values())
+                if total > 0:
+                    importances = {
+                        str(name): round(max(0.0, float(score)) / total, 6)
+                        for name, score in raw_scores.items()
+                    }
+            else:
+                try:
+                    raw_importances = self._model.feature_importances_
+                except (AttributeError, RuntimeError, TypeError, ValueError):
+                    raw_importances = None
+                if raw_importances is not None:
+                    for name, score in zip(self._feature_names, raw_importances):
+                        importances[str(name)] = round(float(score), 6)
 
             return MLSignalResult(
                 symbol=symbol,

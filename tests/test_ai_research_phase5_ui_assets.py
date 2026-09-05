@@ -228,3 +228,18 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "appearance: none" in style_css
     assert "color-scheme: dark" in style_css
     assert '[data-tone="warn"]' in style_css
+
+
+def test_ai_research_job_polling_stops_with_workspace_polling():
+    ai_js = _read("web/static/js/ai_research.js")
+
+    assert "const JOB_POLL_MAX_ATTEMPTS = 1200;" in ai_js
+    assert "pollAttempts: 0" in ai_js
+    assert "reason: 'job-status-max-attempts'" in ai_js
+    assert "function stopAllJobPolling()" in ai_js
+
+    stop_polling_section = ai_js.split("function stopPolling()", 1)[1].split(
+        "function isAiAgentActive()",
+        1,
+    )[0]
+    assert "stopAllJobPolling();" in stop_polling_section

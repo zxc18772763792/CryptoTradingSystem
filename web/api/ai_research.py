@@ -55,7 +55,9 @@ from core.research.orchestrator import (
 )
 
 
-router = APIRouter()
+router = APIRouter(
+    dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))]
+)
 # Market-data parquet/live indexes are tz-naive UTC (data_storage coerces to UTC
 # then drops tzinfo). Naive bar timestamps must therefore be interpreted as UTC —
 # localizing them as an Asia/Shanghai wall clock shifts each bar ~8h earlier and

@@ -99,6 +99,9 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "altcoin-radar-related-list" in radar_js
     assert "altcoin-radar-universe" in radar_js
     assert "function normalizeWatchlistSymbolInput(symbol)" in radar_js
+    assert "function dedupeRowsBySymbol(rows)" in radar_js
+    assert "applyClientFilters(dedupeRowsBySymbol(rows))" in radar_js
+    assert "text = `${text}/USDT`;" in radar_js
     assert "function buildSelectionPlaceholder(symbol)" in radar_js
     assert "function shouldKeepSelectedSymbol(rows, symbol)" in radar_js
     assert "function focusWatchlistSymbol(symbol)" in radar_js

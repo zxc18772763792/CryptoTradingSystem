@@ -5,12 +5,12 @@ from typing import Final
 
 
 ASSET_VERSIONS: Final[dict[str, int]] = {
-    "css/style.css": 114,
-    "js/app.js": 142,
+    "css/style.css": 117,
+    "js/app.js": 143,
     "js/altcoin_radar.js": 26,
-    "js/research_workbench.js": 10,
-    "js/ai_research.js": 50,
-    "js/ai_research_diagnostics.js": 5,
+    "js/research_workbench.js": 12,
+    "js/ai_research.js": 51,
+    "js/ai_research_diagnostics.js": 6,
     "js/ai_research_runtime.js": 8,
     "js/ai_research_agent.js": 14,
     "js/news_tab_runtime.js": 20,

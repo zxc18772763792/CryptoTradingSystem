@@ -51,6 +51,11 @@ def _patch_public_market_sources(
 ):
     monkeypatch.setattr(
         module,
+        "_load_macro_snapshot_payload",
+        AsyncMock(return_value={}),
+    )
+    monkeypatch.setattr(
+        module,
         "_load_public_fear_greed_snapshot",
         AsyncMock(return_value=dict(fear_greed or {})),
     )

@@ -5,6 +5,7 @@
   const SIGNAL_INTERVAL_MS  = 30000;
   const REFRESH_INTERVAL_MS = 60000;
   const JOB_POLL_MS         = 3000;
+  const JOB_POLL_MAX_ATTEMPTS = 1200;
   const PREMIUM_SOURCE_LABEL = '高级数据源';
   const DEFAULT_SIGNAL_SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT'];
   const AGENT_STATUS_API = '/ai/autonomous-agent/status';
@@ -763,7 +764,7 @@
       if (toArray(brief.preferred_strategy_families).length) notes.push(`优先策略：${toArray(brief.preferred_strategy_families).join(' / ')}`);
       if (toArray(brief.risk_notes).length) notes.push(`风险提示：${toArray(brief.risk_notes).slice(0, 2).join('；')}`);
       const sourceLabel = source === 'fallback' ? '当前市场快照' : '研究工作台';
-      plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">已按${esc(sourceLabel)}自动生成研究目标${notes.length ? ` · ${esc(notes.join(' · '))}` : ''}</div>`;
+      plannerNotesEl.innerHTML = `<div style="font-size:11px;color:var(--accent-soft);margin-bottom:3px;">已按${esc(sourceLabel)}自动生成研究目标${notes.length ? ` · ${esc(notes.join(' · '))}` : ''}</div>`;
     }
 
     const marketHintEl = document.getElementById('ai-market-context-hint');
@@ -1811,7 +1812,7 @@
   function renderStrategyDraftSummary(drafts, limit = 3) {
     const rows = toArray(drafts).slice(0, limit);
     if (!rows.length) {
-      return '<div style="font-size:12px;color:#6b7fa0;">暂无 AI 策略草案</div>';
+      return '<div style="font-size:12px;color:var(--text-faint);">暂无 AI 策略草案</div>';
     }
     return rows.map((draft, index) => {
       const features = toArray(draft?.features).slice(0, 4).join(' / ') || '--';
@@ -1829,26 +1830,26 @@
       const params = draft?.params && Object.keys(draft.params).length
         ? Object.entries(draft.params).slice(0, 3).map(([k, v]) => `${k}=${String(v)}`).join('  ')
         : '--';
-      return `<div style="padding:8px 10px;background:#141f2f;border-radius:6px;margin-bottom:8px;">
+      return `<div style="padding:8px 10px;background:var(--card-bg);border-radius:6px;margin-bottom:8px;">
         <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:4px;">
-          <span style="font-size:12px;font-weight:700;color:#c2d0e8;">${esc(draft?.name || `Draft ${index + 1}`)}</span>
-          <span style="font-size:10px;color:#7e92b2;">${esc(researchModeText(draft?.mode))}</span>
+          <span style="font-size:12px;font-weight:700;color:var(--accent-soft);">${esc(draft?.name || `Draft ${index + 1}`)}</span>
+          <span style="font-size:10px;color:var(--text-faint);">${esc(researchModeText(draft?.mode))}</span>
         </div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px;">
           <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:${statusMeta.bg};color:${statusMeta.fg};border:1px solid ${statusMeta.border};">${esc(statusMeta.label)}</span>
-          <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#1a2436;color:#9fb1c9;border:1px solid #32475f;">${esc(generationText)}</span>
-          ${Number.isFinite(heuristic) && heuristic > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#1d2b3d;color:#c2d0e8;border:1px solid #32475f;">H ${esc(fmtNum(heuristic, 1))}</span>` : ''}
-          ${Number.isFinite(novelty) && novelty > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#10263a;color:#7dd3fc;border:1px solid #294d69;">N ${(novelty * 100).toFixed(0)}%</span>` : ''}
+          <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:var(--border-subtle);color:var(--text-sub);border:1px solid var(--border-strong);">${esc(generationText)}</span>
+          ${Number.isFinite(heuristic) && heuristic > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:var(--border-subtle);color:var(--accent-soft);border:1px solid var(--border-strong);">H ${esc(fmtNum(heuristic, 1))}</span>` : ''}
+          ${Number.isFinite(novelty) && novelty > 0 ? `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:var(--panel-bg-deep);color:var(--accent-soft);border:1px solid var(--border-strong);">N ${(novelty * 100).toFixed(0)}%</span>` : ''}
         </div>
-        ${mutationNotes !== '--' ? `<div style="font-size:10px;color:#7dd3fc;margin-bottom:4px;">Mutation: ${esc(mutationNotes)}</div>` : ''}
-        ${critique !== '--' ? `<div style="font-size:10px;color:#f0b429;margin-bottom:4px;">Critique: ${esc(critique)}</div>` : ''}
-        <div style="font-size:11px;color:#9fb1c9;margin-bottom:4px;">模板种子：${esc(templateHint || '--')}</div>
-        <div style="font-size:11px;color:#b7c7e2;line-height:1.55;">${esc(draft?.thesis || draft?.rationale || '--')}</div>
-        <div style="font-size:10px;color:#7e92b2;margin-top:6px;">特征：${esc(features)}</div>
-        <div style="font-size:10px;color:#7e92b2;margin-top:3px;">入场：${esc(entry)}</div>
-        <div style="font-size:10px;color:#7e92b2;margin-top:3px;">出场：${esc(exit)}</div>
-        <div style="font-size:10px;color:#7e92b2;margin-top:3px;">风控：${esc(risk)}</div>
-        <div style="font-size:10px;color:#7e92b2;margin-top:3px;font-family:monospace;">参数：${esc(params)}</div>
+        ${mutationNotes !== '--' ? `<div style="font-size:10px;color:var(--accent-soft);margin-bottom:4px;">Mutation: ${esc(mutationNotes)}</div>` : ''}
+        ${critique !== '--' ? `<div style="font-size:10px;color:var(--warning);margin-bottom:4px;">Critique: ${esc(critique)}</div>` : ''}
+        <div style="font-size:11px;color:var(--text-sub);margin-bottom:4px;">模板种子：${esc(templateHint || '--')}</div>
+        <div style="font-size:11px;color:var(--accent-soft);line-height:1.55;">${esc(draft?.thesis || draft?.rationale || '--')}</div>
+        <div style="font-size:10px;color:var(--text-faint);margin-top:6px;">特征：${esc(features)}</div>
+        <div style="font-size:10px;color:var(--text-faint);margin-top:3px;">入场：${esc(entry)}</div>
+        <div style="font-size:10px;color:var(--text-faint);margin-top:3px;">出场：${esc(exit)}</div>
+        <div style="font-size:10px;color:var(--text-faint);margin-top:3px;">风控：${esc(risk)}</div>
+        <div style="font-size:10px;color:var(--text-faint);margin-top:3px;font-family:monospace;">参数：${esc(params)}</div>
       </div>`;
     }).join('');
   }
@@ -1873,7 +1874,7 @@
   function renderResearchLineage(lineage) {
     const data = lineage && typeof lineage === 'object' ? lineage : null;
     if (!data) {
-      return '<div style="font-size:12px;color:#6b7fa0;">暂无 lineage 信息</div>';
+      return '<div style="font-size:12px;color:var(--text-faint);">暂无 lineage 信息</div>';
     }
     const lineageId = String(data?.lineage_id || '').trim();
     const parentProposalId = String(data?.parent_proposal_id || '').trim();
@@ -1882,9 +1883,9 @@
     const generation = Number(data?.generation);
     const generationText = Number.isFinite(generation) ? String(Math.max(0, Math.round(generation))) : '--';
     if (!lineageId && !parentProposalId && !parentCandidateId && mutationNotes === '--') {
-      return '<div style="font-size:12px;color:#6b7fa0;">暂无 lineage 信息</div>';
+      return '<div style="font-size:12px;color:var(--text-faint);">暂无 lineage 信息</div>';
     }
-    return `<div style="font-size:12px;color:#b7c7e2;background:#141f2f;border-radius:6px;padding:8px;line-height:1.6;">
+    return `<div style="font-size:12px;color:var(--accent-soft);background:var(--card-bg);border-radius:6px;padding:8px;line-height:1.6;">
       <div>Lineage ID：${esc(lineageId || '--')}</div>
       <div style="margin-top:3px;">父方案：${esc(parentProposalId || '--')}</div>
       <div style="margin-top:3px;">父候选：${esc(parentCandidateId || '--')}</div>
@@ -1896,7 +1897,7 @@
   function renderSearchLoopSummary(summary, drafts = []) {
     const info = summary && typeof summary === 'object' ? summary : null;
     if (!info) {
-      return '<div style="font-size:12px;color:#6b7fa0;">暂无搜索循环信息</div>';
+      return '<div style="font-size:12px;color:var(--text-faint);">暂无搜索循环信息</div>';
     }
     const evaluations = toArray(info?.draft_evaluations);
     const evaluated = Number(info?.evaluated_drafts || 0);
@@ -1934,55 +1935,55 @@
         const novelty = Number(row?.novelty_score);
         const mutation = joinText(toArray(row?.mutation_notes).slice(0, 1));
         const critique = joinText(toArray(row?.critique).slice(0, 1));
-        return `<div style="padding:6px 8px;background:#141f2f;border-radius:6px;margin-top:6px;">
+        return `<div style="padding:6px 8px;background:var(--card-bg);border-radius:6px;margin-top:6px;">
           <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;">
-            <span style="font-size:11px;font-weight:700;color:#c2d0e8;">${esc(row?.name || row?.draft_id || '--')}</span>
-            <span style="font-size:10px;color:#f0b429;">${esc(row?.rejection_reason || '已淘汰')}</span>
+            <span style="font-size:11px;font-weight:700;color:var(--accent-soft);">${esc(row?.name || row?.draft_id || '--')}</span>
+            <span style="font-size:10px;color:var(--warning);">${esc(row?.rejection_reason || '已淘汰')}</span>
           </div>
-          <div style="font-size:10px;color:#7e92b2;margin-top:3px;">
+          <div style="font-size:10px;color:var(--text-faint);margin-top:3px;">
             ${esc(String(row?.draft_id || '--'))} · G${Math.max(0, Math.round(Number(row?.generation || 0) || 0))}
             ${Number.isFinite(heuristic) && heuristic > 0 ? ` · H ${esc(fmtNum(heuristic, 1))}` : ''}
             ${Number.isFinite(novelty) && novelty >= 0 ? ` · N ${(novelty * 100).toFixed(0)}%` : ''}
           </div>
-          ${mutation !== '--' ? `<div style="font-size:10px;color:#7dd3fc;margin-top:3px;">变体说明：${esc(mutation)}</div>` : ''}
-          ${critique !== '--' ? `<div style="font-size:10px;color:#f0b429;margin-top:3px;">评审意见：${esc(critique)}</div>` : ''}
+          ${mutation !== '--' ? `<div style="font-size:10px;color:var(--accent-soft);margin-top:3px;">变体说明：${esc(mutation)}</div>` : ''}
+          ${critique !== '--' ? `<div style="font-size:10px;color:var(--warning);margin-top:3px;">评审意见：${esc(critique)}</div>` : ''}
         </div>`;
       }).join('');
 
     const statusText = info?.loop_enabled ? '启用' : '关闭';
     const statusColor = info?.loop_enabled ? '#20bf78' : '#7e92b2';
-    return `<div style="background:#141f2f;border-radius:6px;padding:8px;">
+    return `<div style="background:var(--card-bg);border-radius:6px;padding:8px;">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px;">
-        <div style="font-size:12px;color:#c2d0e8;font-weight:700;">搜索循环</div>
+        <div style="font-size:12px;color:var(--accent-soft);font-weight:700;">搜索循环</div>
         <span style="font-size:10px;padding:1px 6px;border-radius:999px;background:${info?.loop_enabled ? '#143224' : '#1a2436'};color:${statusColor};border:1px solid ${info?.loop_enabled ? '#245b42' : '#32475f'};">${statusText}</span>
       </div>
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
-        <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-          <div style="font-size:10px;color:#6b7fa0;">已评估</div>
-          <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${evaluated}</div>
+        <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+          <div style="font-size:10px;color:var(--text-faint);">已评估</div>
+          <div style="font-size:13px;font-weight:700;color:var(--accent-soft);">${evaluated}</div>
         </div>
-        <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-          <div style="font-size:10px;color:#6b7fa0;">已采纳</div>
-          <div style="font-size:13px;font-weight:700;color:#20bf78;">${accepted}</div>
+        <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+          <div style="font-size:10px;color:var(--text-faint);">已采纳</div>
+          <div style="font-size:13px;font-weight:700;color:var(--positive);">${accepted}</div>
         </div>
-        <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-          <div style="font-size:10px;color:#6b7fa0;">已淘汰</div>
-          <div style="font-size:13px;font-weight:700;color:#f0b429;">${rejected}</div>
+        <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+          <div style="font-size:10px;color:var(--text-faint);">已淘汰</div>
+          <div style="font-size:13px;font-weight:700;color:var(--warning);">${rejected}</div>
         </div>
-        <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-          <div style="font-size:10px;color:#6b7fa0;">挑战方案</div>
-          <div style="font-size:13px;font-weight:700;color:#7dd3fc;">${challengers.length}</div>
+        <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+          <div style="font-size:10px;color:var(--text-faint);">挑战方案</div>
+          <div style="font-size:13px;font-weight:700;color:var(--accent-soft);">${challengers.length}</div>
         </div>
       </div>
-      <div style="font-size:12px;color:#b7c7e2;line-height:1.6;margin-top:8px;">
-        <div>主力方案：<span style="color:#20bf78;font-weight:700;">${esc(championLabel)}</span>${championId ? `<span style="color:#7e92b2;"> (${esc(championId)})</span>` : ''}</div>
-        ${notes !== '--' ? `<div style="margin-top:4px;color:#7e92b2;">备注：${esc(notes)}</div>` : ''}
+      <div style="font-size:12px;color:var(--accent-soft);line-height:1.6;margin-top:8px;">
+        <div>主力方案：<span style="color:var(--positive);font-weight:700;">${esc(championLabel)}</span>${championId ? `<span style="color:var(--text-faint);"> (${esc(championId)})</span>` : ''}</div>
+        ${notes !== '--' ? `<div style="margin-top:4px;color:var(--text-faint);">备注：${esc(notes)}</div>` : ''}
       </div>
       ${reasonEntries.length ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:8px;">
-        ${reasonEntries.map(([reason, count]) => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:#35210f;color:#f0b429;border:1px solid #6c431b;">${esc(reason)} x${esc(String(count))}</span>`).join('')}
+        ${reasonEntries.map(([reason, count]) => `<span style="font-size:10px;padding:1px 6px;border-radius:999px;background:var(--warning-deep);color:var(--warning);border:1px solid var(--warning-deep);">${esc(reason)} x${esc(String(count))}</span>`).join('')}
       </div>` : ''}
       ${rejectedPreview ? `<div style="margin-top:8px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:2px;">已淘汰草案</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:2px;">已淘汰草案</div>
         ${rejectedPreview}
       </div>` : ''}
     </div>`;
@@ -2009,41 +2010,41 @@
 
     return `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">自主研究上下文</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">自主研究上下文</div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px;">
-          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">研究模式</div>
-            <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${esc(researchModeText(researchMode))}</div>
+          <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">研究模式</div>
+            <div style="font-size:13px;font-weight:700;color:var(--accent-soft);">${esc(researchModeText(researchMode))}</div>
           </div>
-          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">草案数量</div>
-            <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${strategyDrafts.length}</div>
+          <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">草案数量</div>
+            <div style="font-size:13px;font-weight:700;color:var(--accent-soft);">${strategyDrafts.length}</div>
           </div>
-          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">搜索预算</div>
-            <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${esc(String(searchBudget?.max_backtest_runs || '--'))}</div>
+          <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">搜索预算</div>
+            <div style="font-size:13px;font-weight:700;color:var(--accent-soft);">${esc(String(searchBudget?.max_backtest_runs || '--'))}</div>
           </div>
         </div>
-        <div style="font-size:12px;color:#b7c7e2;background:#141f2f;border-radius:6px;padding:8px;line-height:1.7;">
-          <div style="color:#9fb1c9;margin-bottom:4px;">核心假设</div>
+        <div style="font-size:12px;color:var(--accent-soft);background:var(--card-bg);border-radius:6px;padding:8px;line-height:1.7;">
+          <div style="color:var(--text-sub);margin-bottom:4px;">核心假设</div>
           <div>${esc(hypothesis || '--')}</div>
-          <div style="margin-top:6px;color:#9fb1c9;">预算分配</div>
+          <div style="margin-top:6px;color:var(--text-sub);">预算分配</div>
           <div>${esc(formatAutonomyBudget(searchBudget))}</div>
-          ${budgetNotes !== '--' ? `<div style="margin-top:4px;color:#7e92b2;">预算备注：${esc(budgetNotes)}</div>` : ''}
-          ${experimentPlan !== '--' ? `<div style="margin-top:6px;color:#9fb1c9;">实验计划：<span style="color:#b7c7e2;">${esc(experimentPlan)}</span></div>` : ''}
-          ${evidenceRefs !== '--' ? `<div style="margin-top:4px;color:#9fb1c9;">证据引用：<span style="color:#b7c7e2;">${esc(evidenceRefs)}</span></div>` : ''}
-          ${uncertainty ? `<div style="margin-top:4px;color:#9fb1c9;">不确定性：<span style="color:#b7c7e2;">${esc(uncertainty)}</span></div>` : ''}
+          ${budgetNotes !== '--' ? `<div style="margin-top:4px;color:var(--text-faint);">预算备注：${esc(budgetNotes)}</div>` : ''}
+          ${experimentPlan !== '--' ? `<div style="margin-top:6px;color:var(--text-sub);">实验计划：<span style="color:var(--accent-soft);">${esc(experimentPlan)}</span></div>` : ''}
+          ${evidenceRefs !== '--' ? `<div style="margin-top:4px;color:var(--text-sub);">证据引用：<span style="color:var(--accent-soft);">${esc(evidenceRefs)}</span></div>` : ''}
+          ${uncertainty ? `<div style="margin-top:4px;color:var(--text-sub);">不确定性：<span style="color:var(--accent-soft);">${esc(uncertainty)}</span></div>` : ''}
         </div>
         <div style="margin-top:8px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">策略草案</div>
+          <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">策略草案</div>
           ${renderStrategyDraftSummary(strategyDrafts, 4)}
           <div style="margin-top:8px;">
-            <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">搜索循环</div>
+            <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">搜索循环</div>
             ${renderSearchLoopSummary(searchSummary, strategyDrafts)}
           </div>
         </div>
         <div style="margin-top:8px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">研究谱系</div>
+          <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">研究谱系</div>
           ${renderResearchLineage(lineage)}
         </div>
       </div>`;
@@ -2805,7 +2806,7 @@
       : '查看详情 / 进入第 4 步注册部分';
     return `<div class="ai-detail-placeholder">
       <div style="font-size:36px;opacity:.3;">馃搳</div>
-      <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
+      <div style="margin-top:10px;color:var(--text-faint);font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
     </div>`;
     */
     const summary = proposal
@@ -2822,7 +2823,7 @@
       : '查看详细分析与第 4 步注册/部署';
     return `<div class="ai-detail-placeholder">
       <div style="font-size:36px;opacity:.3;">📊</div>
-      <div style="margin-top:10px;color:#6b7fa0;font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
+      <div style="margin-top:10px;color:var(--text-faint);font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
     </div>`;
   }
 
@@ -2910,7 +2911,7 @@
     if (!visibleProposals.length) {
       updateClearQueueButton([]);
       updateExitRunningQueueButton([]);
-      box.innerHTML = '<div style="color:#6b7fa0;font-size:12px;padding:8px 0;">暂无研究任务</div>';
+      box.innerHTML = '<div style="color:var(--text-faint);font-size:12px;padding:8px 0;">暂无研究任务</div>';
       normalizeDomText(box);
       emitWorkbenchState('proposal-list');
       return;
@@ -2931,17 +2932,17 @@
       const newsSummary = `新闻 ${meta.newsCount}`;
       const macroSummary = meta.fundingAvailable ? '宏观 已启用' : '宏观 未启用';
       const virtualSummary = virtual
-        ? '<span style="color:#f0b429;">候选回填</span><span>只读</span>'
+        ? '<span style="color:var(--warning);">候选回填</span><span>只读</span>'
         : '';
       return `<div class="proposal-compact-item${sel}" data-proposal-id="${esc(pid)}" data-proposal-status="${esc(st)}" data-action="select-proposal">
         <div class="pci-dot ${dotCls}" title="${esc(statusText(st))}"></div>
         <div style="min-width:0;flex:1;">
           <div class="pci-name" title="${esc(name)}">${esc(name)}</div>
-          <div style="font-size:11px;color:#7e92b2;display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;">
+          <div style="font-size:11px;color:var(--text-faint);display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;">
             <span>${esc(statusText(st))}</span>
             <span>${esc(timeLabel)}</span>
           </div>
-          <div style="font-size:11px;color:#8ea3c2;display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;">
+          <div style="font-size:11px;color:var(--text-sub);display:flex;gap:8px;flex-wrap:wrap;margin-top:2px;">
             ${virtualSummary}
             <span>${esc(aiSummary)}</span>
             <span>${esc(autonomySummary)}</span>
@@ -2951,10 +2952,10 @@
         </div>
         <div class="pci-actions">
           ${running
-            ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f0b429;" data-action="cancel-proposal" data-proposal-id="${esc(pid)}" title="取消运行">停</button>`
+            ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:var(--warning);" data-action="cancel-proposal" data-proposal-id="${esc(pid)}" title="取消运行">停</button>`
             : ''}
-          ${retirable ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#f59e0b;" data-action="retire-proposal" data-proposal-id="${esc(pid)}" title="退役">退</button>` : ''}
-          ${virtual ? '' : `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:#e05260;" data-action="delete-proposal" data-proposal-id="${esc(pid)}" title="删除">删</button>`}
+          ${retirable ? `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:var(--warning);" data-action="retire-proposal" data-proposal-id="${esc(pid)}" title="退役">退</button>` : ''}
+          ${virtual ? '' : `<button class="btn btn-sm" style="padding:1px 6px;font-size:11px;color:var(--negative);" data-action="delete-proposal" data-proposal-id="${esc(pid)}" title="删除">删</button>`}
         </div>
       </div>`;
     }).join('');
@@ -3153,22 +3154,22 @@
     const gateRows = gates.map(g => {
       const status = String(g?.status || 'pass');
       const color = status === 'block' ? '#e05260' : status === 'downgrade' ? '#f59e0b' : status === 'shadow' || status === 'degraded' ? '#7e92b2' : '#20bf78';
-      return `<div style="display:grid;grid-template-columns:110px 1fr;gap:8px;padding:5px 0;border-top:1px solid #22324a;">
+      return `<div style="display:grid;grid-template-columns:110px 1fr;gap:8px;padding:5px 0;border-top:1px solid var(--card-border);">
         <div style="font-size:11px;color:${color};font-weight:700;">${esc(traceStatusText(status))}</div>
         <div>
-          <div style="font-size:12px;color:#c2d0e8;">${esc(traceLabelText(g?.label || g?.code || ''))}</div>
-          <div style="font-size:11px;color:#7e92b2;">${esc(traceReasonText(g?.reason || ''))}</div>
+          <div style="font-size:12px;color:var(--accent-soft);">${esc(traceLabelText(g?.label || g?.code || ''))}</div>
+          <div style="font-size:11px;color:var(--text-faint);">${esc(traceReasonText(g?.reason || ''))}</div>
         </div>
       </div>`;
     }).join('');
-    return `<div class="decision-trace-panel" style="margin-bottom:14px;padding:10px;background:#101a29;border:1px solid #263a56;border-radius:6px;">
+    return `<div class="decision-trace-panel" style="margin-bottom:14px;padding:10px;background:var(--panel-bg-deep);border:1px solid var(--border-strong);border-radius:6px;">
       <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:6px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;">${esc(traceLabelText(title))}</div>
-        <div style="font-size:11px;color:#f59e0b;">关键门槛：${esc(traceLabelText(rootLabel))}</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;">${esc(traceLabelText(title))}</div>
+        <div style="font-size:11px;color:var(--warning);">关键门槛：${esc(traceLabelText(rootLabel))}</div>
       </div>
       <details>
-        <summary style="font-size:12px;color:#7e92b2;cursor:pointer;">检查链路（${gates.length} 项）</summary>
-        <div style="margin-top:6px;">${gateRows || '<div style="font-size:12px;color:#6b7fa0;">暂无检查记录。</div>'}</div>
+        <summary style="font-size:12px;color:var(--text-faint);cursor:pointer;">检查链路（${gates.length} 项）</summary>
+        <div style="margin-top:6px;">${gateRows || '<div style="font-size:12px;color:var(--text-faint);">暂无检查记录。</div>'}</div>
       </details>
     </div>`;
   }
@@ -3199,7 +3200,7 @@
     const lineColor = up ? '#20bf78' : '#e05260';
     const bgTop = up ? 'rgba(32,191,120,.16)' : 'rgba(224,82,96,.16)';
     const bgBottom = 'rgba(18,30,46,.2)';
-    return `<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:120px;display:block;background:#111b2a;border:1px solid rgba(255,255,255,.06);border-radius:6px;">
+    return `<svg viewBox="0 0 ${width} ${height}" style="width:100%;height:120px;display:block;background:var(--card-bg);border:1px solid rgba(255,255,255,.06);border-radius:6px;">
       <defs>
         <linearGradient id="ai-eq-fill" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="${bgTop}" />
@@ -3214,16 +3215,16 @@
   function renderLifecycleRows(rows, emptyText = '暂无生命周期记录') {
     const items = toArray(rows).slice(0, 8);
     if (!items.length) {
-      return `<div style="font-size:12px;color:#6b7fa0;">${esc(emptyText)}</div>`;
+      return `<div style="font-size:12px;color:var(--text-faint);">${esc(emptyText)}</div>`;
     }
     return `<div style="display:flex;flex-direction:column;gap:6px;">
       ${items.map(item => `
-        <div style="font-size:12px;color:#b7c7e2;padding:6px 8px;background:#141f2f;border-radius:6px;">
+        <div style="font-size:12px;color:var(--accent-soft);padding:6px 8px;background:var(--card-bg);border-radius:6px;">
           <div style="display:flex;justify-content:space-between;gap:8px;">
             <span>${esc(String(item?.from_state || 'new'))} → ${esc(String(item?.to_state || '--'))}</span>
-            <span style="color:#7e92b2;">${esc(fmtTs(item?.ts))}</span>
+            <span style="color:var(--text-faint);">${esc(fmtTs(item?.ts))}</span>
           </div>
-          <div style="color:#7e92b2;margin-top:2px;">${esc(String(item?.actor || 'system'))} · ${esc(String(item?.reason || ''))}</div>
+          <div style="color:var(--text-faint);margin-top:2px;">${esc(String(item?.actor || 'system'))} · ${esc(String(item?.reason || ''))}</div>
         </div>
       `).join('')}
     </div>`;
@@ -3232,16 +3233,16 @@
   function renderRunRows(rows, emptyText = '暂无实验运行记录') {
     const items = toArray(rows).slice(0, 6);
     if (!items.length) {
-      return `<div style="font-size:12px;color:#6b7fa0;">${esc(emptyText)}</div>`;
+      return `<div style="font-size:12px;color:var(--text-faint);">${esc(emptyText)}</div>`;
     }
     return `<div style="display:flex;flex-direction:column;gap:6px;">
       ${items.map(item => `
-        <div style="font-size:12px;color:#b7c7e2;padding:6px 8px;background:#141f2f;border-radius:6px;">
+        <div style="font-size:12px;color:var(--accent-soft);padding:6px 8px;background:var(--card-bg);border-radius:6px;">
           <div style="display:flex;justify-content:space-between;gap:8px;">
             <span>${esc(String(item?.status || '--'))}</span>
-            <span style="color:#7e92b2;">${esc(fmtTs(item?.finished_at || item?.started_at || item?.created_at))}</span>
+            <span style="color:var(--text-faint);">${esc(fmtTs(item?.finished_at || item?.started_at || item?.created_at))}</span>
           </div>
-          <div style="color:#7e92b2;margin-top:2px;">运行 ID：${esc(String(item?.run_id || '--'))}</div>
+          <div style="color:var(--text-faint);margin-top:2px;">运行 ID：${esc(String(item?.run_id || '--'))}</div>
         </div>
       `).join('')}
     </div>`;
@@ -3375,7 +3376,7 @@
     const wr = top.win_rate != null ? Number(top.win_rate) : null;
     const sr = top.sharpe_ratio != null ? Number(top.sharpe_ratio) : null;
     const retStr = ret != null ? `<strong style="color:${ret >= 0 ? '#20bf78' : '#e05260'}">${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%</strong>` : '<strong>--</strong>';
-    const ddStr = dd != null ? `<strong style="color:#e05260">${dd.toFixed(1)}%</strong>` : '<strong>--</strong>';
+    const ddStr = dd != null ? `<strong style="color:var(--negative)">${dd.toFixed(1)}%</strong>` : '<strong>--</strong>';
     const wrStr = wr != null ? `<strong>${wr.toFixed(0)}%</strong>` : '<strong>--</strong>';
     const srStr = sr != null ? `<strong>${sr.toFixed(2)}</strong>` : '<strong>--</strong>';
     const vs = cand?.validation_summary || {};
@@ -3398,7 +3399,7 @@
       : '';
     const optMethod = (cand?.metadata && cand.metadata.opt_method) || '';
     const optBadge = optMethod
-      ? `<span class="cand-badge" style="background:#1a3a5a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;">${optMethod === 'scipy_lhs' ? '贝叶斯' : '网格'}</span>`
+      ? `<span class="cand-badge" style="background:var(--border-subtle);color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;">${optMethod === 'scipy_lhs' ? '贝叶斯' : '网格'}</span>`
       : '';
     const corrFiltered = cand?.metadata?.correlation_filtered;
     const corrWith = cand?.metadata?.correlated_with || '';
@@ -3406,7 +3407,7 @@
     const corrIsCross = cand?.metadata?.correlation_is_cross_batch;
     const corrLabel = corrIsCross ? '跨批相关' : '相关';
     const corrBadge = corrFiltered
-      ? `<span class="cand-badge" style="background:#7a3a2a;color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="与 ${esc(corrWith)}${corrIsCross ? '（已运行策略）' : ''} 高度相关 ρ=${corrVal}">${corrLabel}</span>`
+      ? `<span class="cand-badge" style="background:var(--negative-deep);color:#fff;padding:2px 5px;border-radius:3px;font-size:10px;margin-left:2px;" title="与 ${esc(corrWith)}${corrIsCross ? '（已运行策略）' : ''} 高度相关 ρ=${corrVal}">${corrLabel}</span>`
       : '';
     const trials = cand?.metadata?.best?.optimization_trials;
     const paramsBadge = trials > 0
@@ -3442,12 +3443,12 @@
       : '';
     const hiddenDuplicates = Number(cand?.metadata?.hidden_duplicates_count || 0);
     const enrichmentBadges = [
-      `<span class="cand-category-badge" style="background:#1d2b3d;color:#9fb1c9;border:1px solid #32475f;">新闻 ${enrichment.newsCount}</span>`,
+      `<span class="cand-category-badge" style="background:var(--border-subtle);color:var(--text-sub);border:1px solid var(--border-strong);">新闻 ${enrichment.newsCount}</span>`,
       enrichment.fundingAvailable
-        ? '<span class="cand-category-badge" style="background:#143224;color:#20bf78;border:1px solid #245b42;">宏观 已启用</span>'
-        : '<span class="cand-category-badge" style="background:#2a2330;color:#9a8bb3;border:1px solid #4d4259;">宏观 未启用</span>',
+        ? '<span class="cand-category-badge" style="background:var(--positive-deep);color:var(--positive);border:1px solid var(--positive-deep);">宏观 已启用</span>'
+        : '<span class="cand-category-badge" style="background:var(--border-subtle);color:var(--text-sub);border:1px solid var(--neutral);">宏观 未启用</span>',
       hiddenDuplicates > 0
-        ? `<span class="cand-category-badge" style="background:#3d2b14;color:#f0b429;border:1px solid #6f5321;">去重隐藏 ${hiddenDuplicates}</span>`
+        ? `<span class="cand-category-badge" style="background:var(--warning-deep);color:var(--warning);border:1px solid var(--warning-deep);">去重隐藏 ${hiddenDuplicates}</span>`
         : '',
     ].filter(Boolean).join('');
     const aiCardStyle = getStrategyFamily(cand) === 'traditional'
@@ -3466,7 +3467,7 @@
           </label>
         </div>
       </div>
-      <div style="font-size:12px;color:#7e92b2;margin-bottom:5px;">
+      <div style="font-size:12px;color:var(--text-faint);margin-bottom:5px;">
         ${esc(sym)} / ${esc(tf)} / ${esc(statusText(status))}
       </div>
       <div class="cand-score-bar">
@@ -3479,7 +3480,7 @@
         <div class="cand-metric-item">夏普 ${srStr}</div>
       </div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${enrichmentBadges}</div>
-      <div style="font-size:11px;color:#7e92b2;margin-top:4px;">回放模式：${esc(enrichment.mode)}</div>
+      <div style="font-size:11px;color:var(--text-faint);margin-top:4px;">回放模式：${esc(enrichment.mode)}</div>
       ${oosBadge || wfBadge || paramsBadge || dsrBadge || optBadge || corrBadge ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${oosBadge}${wfBadge}${paramsBadge}${dsrBadge}${optBadge}${corrBadge}</div>` : ''}
       ${signalBadge}
       ${_renderValidationPipeline(vs)}
@@ -3496,7 +3497,7 @@
     const panel = document.getElementById('ai-detail-panel');
     const keepContent = !!options.keepContent;
     if (panel && !(keepContent && panel.dataset.candidateId === String(candidateId))) {
-      panel.innerHTML = '<div style="padding:20px;color:#7e92b2;font-size:13px;">加载中...</div>';
+      panel.innerHTML = '<div style="padding:20px;color:var(--text-faint);font-size:13px;">加载中...</div>';
     }
     const resp  = await aiApi(`/candidates/${encodeURIComponent(candidateId)}`, { timeoutMs: 20000 });
     if (requestSeq !== state.candidateDetailReqSeq) return;
@@ -3580,11 +3581,11 @@
     const bestParamsKeys = Object.keys(bestParams);
     const bestParamsHtml = bestParamsKeys.length
       ? `<div style="margin-bottom:14px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">最佳参数 (Best Params)</div>
-          <div style="font-size:12px;color:#c2d0e8;background:#1a2436;border-radius:4px;padding:8px;font-family:monospace;">
-            ${bestParamsKeys.map(k => `<span style="color:#a78bfa">${esc(k)}</span>=<span style="color:#20bf78">${esc(String(bestParams[k]))}</span>`).join('  ')}
+          <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">最佳参数 (Best Params)</div>
+          <div style="font-size:12px;color:var(--accent-soft);background:var(--border-subtle);border-radius:4px;padding:8px;font-family:monospace;">
+            ${bestParamsKeys.map(k => `<span style="color:#a78bfa">${esc(k)}</span>=<span style="color:var(--positive)">${esc(String(bestParams[k]))}</span>`).join('  ')}
           </div>
-          ${(cand?.metadata?.best?.optimization_trials > 0) ? `<div style="font-size:11px;color:#6b7fa0;margin-top:3px;">共试验 ${cand.metadata.best.optimization_trials} 组参数组合</div>` : ''}
+          ${(cand?.metadata?.best?.optimization_trials > 0) ? `<div style="font-size:11px;color:var(--text-faint);margin-top:3px;">共试验 ${cand.metadata.best.optimization_trials} 组参数组合</div>` : ''}
         </div>`
       : '';
 
@@ -3598,34 +3599,34 @@
     const wfConsist = vs?.wf_consistency != null ? `${(Number(vs.wf_consistency)*100).toFixed(0)}% folds+` : '--';
     const validationHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;margin-bottom:6px;">样本内 / 样本外 / 滚动验证</div>
-        <div style="font-size:11px;color:#7e92b2;margin-bottom:6px;">有效夏普来源：${esc(sharpeSourceText(vs?.effective_sharpe_source || (vs?.oos_score != null ? 'oos' : 'in_sample')))}</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;margin-bottom:6px;">样本内 / 样本外 / 滚动验证</div>
+        <div style="font-size:11px;color:var(--text-faint);margin-bottom:6px;">有效夏普来源：${esc(sharpeSourceText(vs?.effective_sharpe_source || (vs?.oos_score != null ? 'oos' : 'in_sample')))}</div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;">
-          <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">IS\u590f\u666e</div>
-            <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${isScore}</div>
+          <div style="text-align:center;padding:6px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">IS\u590f\u666e</div>
+            <div style="font-size:14px;font-weight:700;color:var(--accent-soft);">${isScore}</div>
           </div>
-          <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">OOS\u590f\u666e</div>
+          <div style="text-align:center;padding:6px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">OOS\u590f\u666e</div>
             <div style="font-size:14px;font-weight:700;color:${oosClr};">${oosScore}</div>
           </div>
-          <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">WF\u7a33\u5b9a\u6027</div>
-            <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${wfStab}</div>
+          <div style="text-align:center;padding:6px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">WF\u7a33\u5b9a\u6027</div>
+            <div style="font-size:14px;font-weight:700;color:var(--accent-soft);">${wfStab}</div>
           </div>
-          <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">\u9c81\u68d2\u6027\u5206</div>
-            <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${robustness}</div>
+          <div style="text-align:center;padding:6px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">\u9c81\u68d2\u6027\u5206</div>
+            <div style="font-size:14px;font-weight:700;color:var(--accent-soft);">${robustness}</div>
           </div>
         </div>
         <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin-top:6px;">
-          <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">DSR \u5206\u6570</div>
-            <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${dsrVal}</div>
+          <div style="text-align:center;padding:6px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">DSR \u5206\u6570</div>
+            <div style="font-size:14px;font-weight:700;color:var(--accent-soft);">${dsrVal}</div>
           </div>
-          <div style="text-align:center;padding:6px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">WF \u4e00\u81f4\u6027</div>
-            <div style="font-size:14px;font-weight:700;color:#c2d0e8;">${wfConsist}</div>
+          <div style="text-align:center;padding:6px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">WF \u4e00\u81f4\u6027</div>
+            <div style="font-size:14px;font-weight:700;color:var(--accent-soft);">${wfConsist}</div>
           </div>
         </div>
       </div>`;
@@ -3634,16 +3635,16 @@
     const equityCurve = normalizeNumberSeries(cand?.metadata?.best?.equity_curve_sample || []);
     const equityCurveHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u8d44\u91d1\u66f2\u7ebf\u6837\u672c</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u8d44\u91d1\u66f2\u7ebf\u6837\u672c</div>
         ${equityCurve.length >= 2
           ? renderSparklineSvg(equityCurve)
-          : '<div style="font-size:12px;color:#6b7fa0;">\u6682\u65e0\u8d44\u91d1\u66f2\u7ebf\u6837\u672c\u3002</div>'}
+          : '<div style="font-size:12px;color:var(--text-faint);">\u6682\u65e0\u8d44\u91d1\u66f2\u7ebf\u6837\u672c\u3002</div>'}
       </div>`;
 
     const artifactsHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u7814\u7a76\u4ea7\u7269</div>
-        <div style="font-size:12px;color:#b7c7e2;background:#141f2f;border-radius:6px;padding:8px;">
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u7814\u7a76\u4ea7\u7269</div>
+        <div style="font-size:12px;color:var(--accent-soft);background:var(--card-bg);border-radius:6px;padding:8px;">
           <div>CSV \u6587\u4ef6\uff1a${esc(String(cand?.metadata?.csv_path || '--'))}</div>
           <div style="margin-top:4px;">Markdown \u62a5\u544a\uff1a${esc(String(cand?.metadata?.markdown_path || '--'))}</div>
         </div>
@@ -3651,28 +3652,28 @@
 
     const enrichmentHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u7814\u7a76\u589e\u5f3a</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u7814\u7a76\u589e\u5f3a</div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;">
-          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">\u51b3\u7b56\u5f15\u64ce</div>
+          <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">\u51b3\u7b56\u5f15\u64ce</div>
             <div style="font-size:13px;font-weight:700;color:${familyMeta.color};">${esc(familyMeta.label)}</div>
           </div>
-          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">\u65b0\u95fb\u4e8b\u4ef6</div>
-            <div style="font-size:13px;font-weight:700;color:#c2d0e8;">${enrichment.newsCount}</div>
+          <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">\u65b0\u95fb\u4e8b\u4ef6</div>
+            <div style="font-size:13px;font-weight:700;color:var(--accent-soft);">${enrichment.newsCount}</div>
           </div>
-          <div style="text-align:center;padding:8px;background:#1a2436;border-radius:4px;">
-            <div style="font-size:10px;color:#6b7fa0;">\u5b8f\u89c2\u5f00\u5173</div>
+          <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
+            <div style="font-size:10px;color:var(--text-faint);">\u5b8f\u89c2\u5f00\u5173</div>
             <div style="font-size:13px;font-weight:700;color:${enrichment.fundingAvailable ? '#20bf78' : '#9a8bb3'};">${enrichment.fundingAvailable ? '\u5df2\u542f\u7528' : '\u672a\u542f\u7528'}</div>
           </div>
         </div>
-        <div style="font-size:11px;color:#7e92b2;margin-top:6px;">\u6570\u636e\u6a21\u5f0f\uff1a${esc(enrichment.mode)}</div>
+        <div style="font-size:11px;color:var(--text-faint);margin-top:6px;">\u6570\u636e\u6a21\u5f0f\uff1a${esc(enrichment.mode)}</div>
       </div>`;
 
     const experimentHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u5b9e\u9a8c\u8bb0\u5f55</div>
-        <div style="font-size:12px;color:#b7c7e2;background:#141f2f;border-radius:6px;padding:8px;margin-bottom:6px;">
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u5b9e\u9a8c\u8bb0\u5f55</div>
+        <div style="font-size:12px;color:var(--accent-soft);background:var(--card-bg);border-radius:6px;padding:8px;margin-bottom:6px;">
           <div>\u8fd0\u884c ID\uff1a${esc(String(experimentId || '--'))}</div>
           <div style="margin-top:4px;">\u72b6\u6001\uff1a${esc(String(experimentInfo?.status || '--'))}</div>
         </div>
@@ -3681,11 +3682,11 @@
 
     const lifecycleHtml = `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u5019\u9009\u751f\u547d\u5468\u671f</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u5019\u9009\u751f\u547d\u5468\u671f</div>
         ${renderLifecycleRows(candidateLifecycle, '\u6682\u65e0\u5019\u9009\u751f\u547d\u5468\u671f\u8bb0\u5f55')}
       </div>
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u65b9\u6848\u751f\u547d\u5468\u671f</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u65b9\u6848\u751f\u547d\u5468\u671f</div>
         ${renderLifecycleRows(proposalLifecycle, '\u6682\u65e0\u65b9\u6848\u751f\u547d\u5468\u671f\u8bb0\u5f55')}
       </div>`;
     const paramSensitivityHtml = `
@@ -3699,10 +3700,10 @@
     const liveActivateHtml = canActivateLiveCandidate(cand)
       ? `<div style="margin-top:8px;">
           <button class="btn btn-sm" id="btn-activate-live" data-default-label="${esc(liveActivateLabel)}"
-            style="font-size:12px;width:100%;color:#f0b429;border-color:#f0b429;">
+            style="font-size:12px;width:100%;color:var(--warning);border-color:var(--warning);">
             ${esc(liveActivateLabel)}
           </button>
-          <div style="font-size:10px;color:#6b7fa0;margin-top:3px;">
+          <div style="font-size:10px;color:var(--text-faint);margin-top:3px;">
             \u5c06\u5148\u5207\u6362\u7cfb\u7edf\u5230 live \u6a21\u5f0f\u5e76\u8981\u6c42\u8f93\u5165\u786e\u8ba4\u6587\u672c\uff0c\u786e\u8ba4\u540e\u624d\u4f1a\u771f\u6b63\u542f\u52a8\u8be5\u5019\u9009\u7684\u5b9e\u76d8\u8fd0\u884c\u3002
           </div>
          </div>`
@@ -3711,26 +3712,26 @@
     panel.innerHTML = `
       <div style="margin-bottom:14px;">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">
-          <span style="font-size:15px;font-weight:700;color:#c2d0e8;">${esc(cand?.strategy || '--')}</span>
+          <span style="font-size:15px;font-weight:700;color:var(--accent-soft);">${esc(cand?.strategy || '--')}</span>
           <span class="cand-category-badge" style="background:${familyMeta.accent};color:${familyMeta.color};border:1px solid ${familyMeta.color}44;">${esc(familyMeta.label)}</span>
           ${searchRoleMeta ? `<span class="cand-category-badge" style="background:${searchRoleMeta.bg};color:${searchRoleMeta.fg};border:1px solid ${searchRoleMeta.border};">${esc(searchRoleMeta.label)}</span>` : ''}
           <span class="cand-score-badge ${color}" style="font-size:13px;">${score.toFixed(0)} \u5206</span>
         </div>
-        <div style="font-size:12px;color:#7e92b2;">
+        <div style="font-size:12px;color:var(--text-faint);">
           ${esc(cand?.symbol || '--')} / ${esc(cand?.timeframe || '--')} / ${esc(statusText(cand?.status))}
         </div>
-        ${searchRoleMeta && championStrategy ? `<div style="font-size:11px;color:#7e92b2;margin-top:4px;">搜索角色：${esc(searchRoleMeta.label)}${cand?.metadata?.search_role === 'challenger' ? ` · 对照 champion ${esc(championStrategy)}` : ''}</div>` : ''}
+        ${searchRoleMeta && championStrategy ? `<div style="font-size:11px;color:var(--text-faint);margin-top:4px;">搜索角色：${esc(searchRoleMeta.label)}${cand?.metadata?.search_role === 'challenger' ? ` · 对照 champion ${esc(championStrategy)}` : ''}</div>` : ''}
         ${renderLifecycleStepper(cand?.status)}
       </div>
 
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">\u7efc\u5408\u8bc4\u5206</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">\u7efc\u5408\u8bc4\u5206</div>
         ${scoreBar('\u8fb9\u9645\u4f18\u52bf', vs?.edge_score)}
         ${scoreBar('\u98ce\u9669\u63a7\u5236', vs?.risk_score)}
         ${scoreBar('\u4fe1\u53f7\u7a33\u5b9a\u6027', vs?.stability_score)}
         ${scoreBar('\u6267\u884c\u6548\u7387', vs?.efficiency_score)}
         ${scoreBar('\u7efc\u5408\u90e8\u7f72', vs?.deployment_score)}
-        ${vs?.reasons?.length ? `<div style="font-size:11px;color:#6b7fa0;margin-top:6px;">\u8bf4\u660e\uff1a${esc(joinText(vs.reasons))}</div>` : ''}
+        ${vs?.reasons?.length ? `<div style="font-size:11px;color:var(--text-faint);margin-top:6px;">\u8bf4\u660e\uff1a${esc(joinText(vs.reasons))}</div>` : ''}
       </div>
 
       ${autonomyHtml}
@@ -3744,15 +3745,15 @@
       ${lifecycleHtml}
       ${paramSensitivityHtml}
       ${cand?.metadata?.correlation_filtered ? `
-      <div style="margin-bottom:12px;padding:8px 10px;background:#3a1a0a;border:1px solid #8b4513;border-radius:6px;font-size:12px;color:#e09060;">
+      <div style="margin-bottom:12px;padding:8px 10px;background:var(--warning-deep);border:1px solid var(--warning-deep);border-radius:6px;font-size:12px;color:var(--warning);">
         \u26a0 \u8be5\u5019\u9009\u4e0e <strong>${esc(cand.metadata.correlated_with || '')}</strong> ${cand.metadata.correlation_is_cross_batch ? '\uff08\u5df2\u8fd0\u884c\u7b56\u7565\uff09' : ''}\u9ad8\u5ea6\u76f8\u5173
         (\u03c1 = ${(cand.metadata.correlation_value || 0).toFixed(2)})\uff0c\u5df2\u5728\u751f\u6210\u9636\u6bb5\u8fc7\u6ee4\uff0c\u907f\u514d\u91cd\u590d\u90e8\u7f72\u3002
       </div>` : ''}
 
       ${cand?.metadata?.llm_rationale ? `
-      <div style="margin-bottom:14px;padding:10px 12px;background:#0f1e2e;border:1px solid #1e3a5a;border-radius:6px;">
-        <div style="font-size:10px;color:#5b8fc4;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\ud83e\udd16 AI \u89e3\u91ca</div>
-        <div style="font-size:12px;color:#b0c4de;line-height:1.6;">${esc(cand.metadata.llm_rationale)}</div>
+      <div style="margin-bottom:14px;padding:10px 12px;background:var(--panel-bg-deep);border:1px solid var(--border-subtle);border-radius:6px;">
+        <div style="font-size:10px;color:var(--accent);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\ud83e\udd16 AI \u89e3\u91ca</div>
+        <div style="font-size:12px;color:var(--accent-soft);line-height:1.6;">${esc(cand.metadata.llm_rationale)}</div>
       </div>` : ''}
 
       ${(function(){
@@ -3764,14 +3765,14 @@
         const statusHtml = cs
           ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
               <span style="font-size:12px;font-weight:700;color:${triggered ? '#e05260' : '#20bf78'};">${triggered ? '\u26a0 \u5df2\u89e6\u53d1\u8870\u51cf' : '\u2713 \u8fd0\u884c\u6b63\u5e38'}</span>
-              <span style="font-size:11px;color:#6b7fa0;">${nBars} \u6839K\u7ebf</span>
+              <span style="font-size:11px;color:var(--text-faint);">${nBars} \u6839K\u7ebf</span>
             </div>
-            <div style="font-size:11px;color:#7e92b2;">${esc(msg)}</div>
-            ${checkedAt ? `<div style="font-size:10px;color:#4a5f7a;margin-top:3px;">\u68c0\u6d4b\u65f6\u95f4 ${checkedAt}</div>` : ''}`
-          : `<div style="font-size:12px;color:#5b7a9a;">\u5c1a\u672a\u68c0\u6d4b\u3002\u70b9\u51fb\u6309\u94ae\u5bf9\u5df2\u6ce8\u518c\u7b56\u7565\u6267\u884c CUSUM \u8870\u51cf\u5206\u6790\u3002</div>`;
+            <div style="font-size:11px;color:var(--text-faint);">${esc(msg)}</div>
+            ${checkedAt ? `<div style="font-size:10px;color:var(--neutral);margin-top:3px;">\u68c0\u6d4b\u65f6\u95f4 ${checkedAt}</div>` : ''}`
+          : `<div style="font-size:12px;color:var(--text-faint);">\u5c1a\u672a\u68c0\u6d4b\u3002\u70b9\u51fb\u6309\u94ae\u5bf9\u5df2\u6ce8\u518c\u7b56\u7565\u6267\u884c CUSUM \u8870\u51cf\u5206\u6790\u3002</div>`;
         return `<div style="margin-bottom:14px;">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-            <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">\u7b56\u7565\u8870\u51cf\u68c0\u6d4b (CUSUM)</div>
+            <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;">\u7b56\u7565\u8870\u51cf\u68c0\u6d4b (CUSUM)</div>
             <button class="btn btn-sm" id="btn-decay-check" style="font-size:11px;padding:2px 8px;">\u68c0\u67e5\u8870\u51cf</button>
           </div>
           ${statusHtml}
@@ -3780,18 +3781,18 @@
 
       <div style="margin-bottom:14px;">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
-          <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;">\u5b9e\u76d8/\u7eb8\u76d8\u6027\u80fd\u5386\u53f2</div>
+          <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;">\u5b9e\u76d8/\u7eb8\u76d8\u6027\u80fd\u5386\u53f2</div>
           <button class="btn btn-sm" id="btn-load-perf-history" style="font-size:11px;padding:2px 8px;" data-candidate-id="${esc(candidateId)}">\u52a0\u8f7d</button>
         </div>
-        <div id="perf-history-panel" style="font-size:12px;color:#6b7fa0;">\u70b9\u51fb\u52a0\u8f7d\u67e5\u770b\u7b56\u7565\u8fd0\u884c\u6027\u80fd\u5feb\u7167</div>
+        <div id="perf-history-panel" style="font-size:12px;color:var(--text-faint);">\u70b9\u51fb\u52a0\u8f7d\u67e5\u770b\u7b56\u7565\u8fd0\u884c\u6027\u80fd\u5feb\u7167</div>
       </div>
 
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">Top \u56de\u6d4b\u7ed3\u679c</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:8px;">Top \u56de\u6d4b\u7ed3\u679c</div>
         <div style="overflow-x:auto;">
           <table class="data-table" style="font-size:12px;">
             <thead><tr><th>#</th><th>\u7b56\u7565</th><th>\u5468\u671f</th><th>\u5e74\u5316</th><th>\u590f\u666e</th><th>\u56de\u64a4</th></tr></thead>
-            <tbody>${topRows || '<tr><td colspan="6" style="color:#6b7fa0;">\u6682\u65e0\u6570\u636e</td></tr>'}</tbody>
+            <tbody>${topRows || '<tr><td colspan="6" style="color:var(--text-faint);">\u6682\u65e0\u6570\u636e</td></tr>'}</tbody>
           </table>
         </div>
       </div>
@@ -3799,33 +3800,33 @@
       ${(function(){
         if (!governanceEnabled() || !cand?.metadata?.promotion_pending_human_gate) return '';
         const recTarget = esc(cand?.metadata?.recommended_runtime_target || decision || 'paper');
-        return `<div style="margin-bottom:14px;padding:10px 12px;background:#1a0f00;border:2px solid #f59e0b;border-radius:6px;">
-          <div style="font-size:11px;color:#f59e0b;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u23f3 \u5f85\u4eba\u5de5\u5ba1\u6279</div>
-          <div style="font-size:12px;color:#c2d0e8;margin-bottom:8px;">
-            AI\u63a8\u8350\u76ee\u6807\uff1a<strong style="color:#f59e0b;">${recTarget}</strong>
+        return `<div style="margin-bottom:14px;padding:10px 12px;background:var(--warning-deep);border:2px solid var(--warning);border-radius:6px;">
+          <div style="font-size:11px;color:var(--warning);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">\u23f3 \u5f85\u4eba\u5de5\u5ba1\u6279</div>
+          <div style="font-size:12px;color:var(--accent-soft);margin-bottom:8px;">
+            AI\u63a8\u8350\u76ee\u6807\uff1a<strong style="color:var(--warning);">${recTarget}</strong>
           </div>
           <div class="form-group" style="margin-bottom:8px;">
-            <label style="font-size:11px;color:#9fb1c9;">\u8fd0\u884c\u76ee\u6807</label>
+            <label style="font-size:11px;color:var(--text-sub);">\u8fd0\u884c\u76ee\u6807</label>
             <select id="approval-target-select" style="width:100%;font-size:12px;">
               <option value="paper" ${recTarget === 'paper' ? 'selected' : ''}>\u7eb8\u76d8 (paper)</option>
               <option value="live_candidate" ${recTarget === 'live_candidate' ? 'selected' : ''}>\u5b9e\u76d8\u5019\u9009 (live_candidate)</option>
             </select>
           </div>
           <div class="form-group" style="margin-bottom:8px;">
-            <label style="font-size:11px;color:#9fb1c9;">\u5ba1\u6279\u5907\u6ce8</label>
+            <label style="font-size:11px;color:var(--text-sub);">\u5ba1\u6279\u5907\u6ce8</label>
             <input type="text" id="approval-notes-input" placeholder="\u5ba1\u6279\u5907\u6ce8\uff08\u53ef\u9009\uff09" style="width:100%;font-size:12px;">
           </div>
           <div style="display:flex;gap:8px;">
-            <button id="btn-human-approve" class="btn" style="flex:1;font-size:12px;color:#20bf78;border-color:#20bf78;">\u2713 \u6279\u51c6</button>
-            <button id="btn-human-reject" class="btn" style="flex:1;font-size:12px;color:#e05260;border-color:#e05260;">\u2717 \u62d2\u7edd</button>
+            <button id="btn-human-approve" class="btn" style="flex:1;font-size:12px;color:var(--positive);border-color:var(--positive);">\u2713 \u6279\u51c6</button>
+            <button id="btn-human-reject" class="btn" style="flex:1;font-size:12px;color:var(--negative);border-color:var(--negative);">\u2717 \u62d2\u7edd</button>
           </div>
         </div>`;
       })()}
 
       <div style="margin-bottom:16px;">
-        <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">AI \u5efa\u8bae</div>
-        <div style="font-size:13px;color:#c2d0e8;margin-bottom:3px;">${esc(promotionText(decision))}</div>
-        ${promo?.reason ? `<div style="font-size:12px;color:#7e92b2;">${esc(promo.reason)}</div>` : ''}
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">AI \u5efa\u8bae</div>
+        <div style="font-size:13px;color:var(--accent-soft);margin-bottom:3px;">${esc(promotionText(decision))}</div>
+        ${promo?.reason ? `<div style="font-size:12px;color:var(--text-faint);">${esc(promo.reason)}</div>` : ''}
       </div>
 
       ${showRegisterButton
@@ -3834,27 +3835,27 @@
               4) 注册纸盘 →
             </button>
             <button class="btn btn-sm" data-action="open-register" data-register-mode="live_candidate" data-candidate-id="${esc(candidateId)}"
-              style="width:100%;padding:10px;font-size:14px;border-radius:8px;color:#f0b429;border-color:#f0b429;">
+              style="width:100%;padding:10px;font-size:14px;border-radius:8px;color:var(--warning);border-color:var(--warning);">
               4) 注册实盘候选 →
             </button>
-            <div style="grid-column:1 / -1;font-size:11px;color:#7e92b2;">
+            <div style="grid-column:1 / -1;font-size:11px;color:var(--text-faint);">
               纸盘会直接启动模拟运行；实盘候选仅进入待激活链路，后续仍需人工确认与实盘激活。
             </div>
           </div>`
         : (governanceGateHint
-          ? `<div style="font-size:12px;color:#f0b429;background:#2b1f06;border:1px solid #5c4310;border-radius:6px;padding:8px 10px;">
+          ? `<div style="font-size:12px;color:var(--warning);background:var(--warning-deep);border:1px solid var(--warning-deep);border-radius:6px;padding:8px 10px;">
               \u6cbb\u7406\u6a21\u5f0f\u5df2\u5f00\u542f\uff1a\u8bf7\u4f7f\u7528\u4e0a\u65b9\u201c\u5f85\u4eba\u5de5\u5ba1\u6279\u201d\u8fdb\u884c\u6279\u51c6/\u62d2\u7edd\u3002
             </div>`
           : '')}
 
       <div style="margin-bottom:14px;">
-        <button class="btn btn-sm" id="btn-autonomy-handoff" style="font-size:12px;width:100%;margin-bottom:8px;color:#5ec8ff;border-color:#2a6f97;">
+        <button class="btn btn-sm" id="btn-autonomy-handoff" style="font-size:12px;width:100%;margin-bottom:8px;color:var(--accent-soft);border-color:var(--steel-deep);">
           发送到自治观察
         </button>
         <button class="btn btn-sm" id="btn-order-preview" style="font-size:12px;width:100%;">
           \u751f\u6210\u8ba2\u5355\u9884\u89c8
         </button>
-        <div id="ai-order-preview-result" style="display:none;margin-top:10px;padding:12px;background:#0d1a2a;border:1px solid #1e3a5a;border-radius:8px;"></div>
+        <div id="ai-order-preview-result" style="display:none;margin-top:10px;padding:12px;background:var(--panel-bg-deep);border:1px solid var(--border-subtle);border-radius:8px;"></div>
       </div>
       ${canActivateLiveCandidate(cand)
           ? (() => { /*
@@ -3863,10 +3864,10 @@
             : '升级为实盘运行 →';
           return `<div style="margin-top:8px;">
             <button class="btn btn-sm" id="btn-activate-live" data-default-label="${esc(activateLabel)}"
-              style="font-size:12px;width:100%;color:#f0b429;border-color:#f0b429;">
+              style="font-size:12px;width:100%;color:var(--warning);border-color:var(--warning);">
               ${esc(activateLabel)}
             </button>
-            <div style="font-size:10px;color:#6b7fa0;margin-top:3px;">
+            <div style="font-size:10px;color:var(--text-faint);margin-top:3px;">
               将先切换系统到 live 模式并要求输入确认文本，确认后才会真正启动候选的实盘运行。
             </div>
            </div>`;
@@ -4070,7 +4071,7 @@
                   }).join('')}</tbody>
                 </table>
               </div>
-              <div style="font-size:10px;color:#4a5f7a;margin-top:4px;">共 ${snaps.length} 条快照，显示最近 10 条</div>
+              <div style="font-size:10px;color:var(--neutral);margin-top:4px;">共 ${snaps.length} 条快照，显示最近 10 条</div>
             `;
             perfPanel.innerHTML = perfHtml;
             state.perfHistoryCache[String(candidateId)] = { kind: 'html', content: perfHtml };
@@ -4280,7 +4281,7 @@
     const body  = document.getElementById('ai-register-body');
     if (!modal || !body) return;
     modal.style.display = 'flex';
-    body.innerHTML = '<div style="padding:20px;color:#7e92b2;">加载中...</div>';
+    body.innerHTML = '<div style="padding:20px;color:var(--text-faint);">加载中...</div>';
 
     let resp;
     try {
@@ -4330,7 +4331,7 @@
         <div class="form-group"><label>交易对</label><input readonly value="${esc(sym || '--')}"></div>
         <div class="form-group"><label>时间框</label><input readonly value="${esc(tf || '--')}"></div>
       </div>
-      <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin:10px 0 4px;">回测表现</div>
+      <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin:10px 0 4px;">回测表现</div>
       <div class="ai-register-metrics-grid">
         ${metricBox('年化收益', ret != null ? `${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%` : '--', ret != null && ret >= 0 ? 'positive' : 'negative')}
         ${metricBox('最大回撤', dd != null ? `${dd.toFixed(1)}%` : '--', 'negative')}
@@ -4343,7 +4344,7 @@
           <label><input type="radio" name="reg-mode" value="paper" ${decision === 'paper' || !['live_candidate'].includes(decision) ? 'checked' : ''}> 纸盘（推荐，低风险模拟）</label>
           <label><input type="radio" name="reg-mode" value="live_candidate" ${decision === 'live_candidate' ? 'checked' : ''}> 实盘候选（待人工确认）</label>
         </div>
-        <div id="reg-mode-hint" style="margin-top:10px;font-size:12px;color:#7e92b2;"></div>
+        <div id="reg-mode-hint" style="margin-top:10px;font-size:12px;color:var(--text-faint);"></div>
       </div>
       <div class="form-group">
         <label>部署仓位（%）</label>
@@ -4611,13 +4612,13 @@ ${confirmHint}`,
       const color    = scoreColor(score);
       return `<div class="approval-item" style="padding:8px 6px;border-bottom:1px solid rgba(255,255,255,.05);font-size:12px;">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;">
-          <span style="color:#c2d0e8;font-weight:600;">${strategy}</span>
+          <span style="color:var(--accent-soft);font-weight:600;">${strategy}</span>
           <span class="cand-score-badge ${color}" style="font-size:11px;">${score.toFixed(0)}</span>
         </div>
-        <div style="color:#9fb1c9;margin-bottom:5px;">推荐目标：<strong>${target}</strong></div>
+        <div style="color:var(--text-sub);margin-bottom:5px;">推荐目标：<strong>${target}</strong></div>
         ${_renderApprovalMeta(cand)}
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
-          <button class="btn btn-sm" style="font-size:11px;color:#20bf78;border-color:#20bf78;"
+          <button class="btn btn-sm" style="font-size:11px;color:var(--positive);border-color:var(--positive);"
             data-action="view-candidate" data-candidate-id="${cid}">第 4 步处理</button>
         </div>
       </div>`;
@@ -4680,9 +4681,9 @@ ${confirmHint}`,
         if (plannerNotesEl && result.llm_research_output.hypothesis) {
           const existing = plannerNotesEl.innerHTML;
           const draftSummary = draftCount > 0
-            ? `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">OpenAI 草案：${draftCount} 个，生成提案时将优先进入开放式草案研究。</div>`
-            : '<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">本轮只生成了研究假设与实验计划，尚未返回可执行草案。</div>';
-          plannerNotesEl.innerHTML = `<div style="font-size:11px;color:#20bf78;margin-bottom:3px;">AI假设：${esc(result.llm_research_output.hypothesis)}</div>${draftSummary}` + existing;
+            ? `<div style="font-size:11px;color:var(--accent-soft);margin-bottom:3px;">OpenAI 草案：${draftCount} 个，生成提案时将优先进入开放式草案研究。</div>`
+            : '<div style="font-size:11px;color:var(--text-sub);margin-bottom:3px;">本轮只生成了研究假设与实验计划，尚未返回可执行草案。</div>';
+          plannerNotesEl.innerHTML = `<div style="font-size:11px;color:var(--positive);margin-bottom:3px;">AI假设：${esc(result.llm_research_output.hypothesis)}</div>${draftSummary}` + existing;
         }
         updatePlannerModeHint();
         notify(draftCount > 0 ? `研究思路已生成，并附带 ${draftCount} 个 AI 草案。` : '研究思路已生成，假设已写入规划区。');
@@ -5037,11 +5038,11 @@ ${confirmHint}`,
     if (plannerNotesEl) {
       let html = '';
       if (plannerNotes.length) {
-        html += `<div style="font-size:11px;color:#9fb1c9;margin-bottom:3px;">规划说明：${plannerNotes.map(n => esc(n)).join(' · ')}</div>`;
+        html += `<div style="font-size:11px;color:var(--text-sub);margin-bottom:3px;">规划说明：${plannerNotes.map(n => esc(n)).join(' · ')}</div>`;
       }
-      html += `<div style="font-size:11px;color:#7dd3fc;margin-bottom:3px;">研究方式：${esc(researchModeText(plannerConstraints.research_mode))} · 模板上限 ${esc(String(plannerConstraints.max_templates))} · 草案预算 ${esc(String(plannerConstraints.max_strategy_drafts))} · 回测预算 ${esc(String(plannerConstraints.max_backtest_runs))}</div>`;
+      html += `<div style="font-size:11px;color:var(--accent-soft);margin-bottom:3px;">研究方式：${esc(researchModeText(plannerConstraints.research_mode))} · 模板上限 ${esc(String(plannerConstraints.max_templates))} · 草案预算 ${esc(String(plannerConstraints.max_strategy_drafts))} · 回测预算 ${esc(String(plannerConstraints.max_backtest_runs))}</div>`;
       if (filteredTpls.length) {
-        html += `<div style="font-size:11px;color:#f59e0b;margin-top:3px;">过滤模板：${filteredTpls.length}，${filteredTpls.slice(0,5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
+        html += `<div style="font-size:11px;color:var(--warning);margin-top:3px;">过滤模板：${filteredTpls.length}，${filteredTpls.slice(0,5).map(t => esc(t)).join(', ')}${filteredTpls.length > 5 ? '...' : ''}</div>`;
       }
       plannerNotesEl.innerHTML = html;
     }
@@ -5435,7 +5436,7 @@ ${confirmHint}`,
     const detailsEl = document.getElementById('ai-data-readiness-details');
     if (summaryEl) summaryEl.textContent = '数据诊断模块初始化中，请稍后重试。';
     if (detailsEl) {
-      detailsEl.innerHTML = '<div style="padding:8px;background:#141f2f;border-radius:6px;">当前先跳过首屏数据诊断，避免与实时信号面板重复占用重接口。稍后再次打开研究页，或手动点击“刷新诊断”即可获取完整诊断。</div>';
+      detailsEl.innerHTML = '<div style="padding:8px;background:var(--card-bg);border-radius:6px;">当前先跳过首屏数据诊断，避免与实时信号面板重复占用重接口。稍后再次打开研究页，或手动点击“刷新诊断”即可获取完整诊断。</div>';
     }
     return {
       premium_data_status: premiumResult,
@@ -5506,7 +5507,12 @@ ${confirmHint}`,
   function startJobPolling(proposalId, jobId) {
     stopJobPolling(proposalId);
     if (!state.jobPollingConfigs) state.jobPollingConfigs = {};
-    state.jobPollingConfigs[proposalId] = { jobId, attempts: 0 };
+    state.jobPollingConfigs[proposalId] = {
+      jobId,
+      attempts: 0,
+      pollAttempts: 0,
+      maxAttempts: JOB_POLL_MAX_ATTEMPTS,
+    };
     state.jobPollingTimers[proposalId] = setInterval(
       () => pollJobStatus(proposalId, jobId).catch(err => console.debug('pollJobStatus failed:', err)),
       JOB_POLL_MS,
@@ -5519,7 +5525,24 @@ ${confirmHint}`,
     if (state.jobPollingConfigs) delete state.jobPollingConfigs[proposalId];
   }
 
+  function stopAllJobPolling() {
+    Object.keys(state.jobPollingTimers || {}).forEach(stopJobPolling);
+    Object.keys(state.jobPollingConfigs || {}).forEach((proposalId) => {
+      delete state.jobPollingConfigs[proposalId];
+    });
+  }
+
   async function pollJobStatus(proposalId, _jobId) {
+    const cfg = state.jobPollingConfigs?.[proposalId] || {};
+    cfg.jobId = cfg.jobId || _jobId;
+    cfg.maxAttempts = Number(cfg.maxAttempts || JOB_POLL_MAX_ATTEMPTS);
+    cfg.pollAttempts = Number(cfg.pollAttempts || 0) + 1;
+    state.jobPollingConfigs[proposalId] = cfg;
+    if (cfg.pollAttempts >= cfg.maxAttempts) {
+      stopJobPolling(proposalId);
+      syncPollingState({ immediate: false, reason: 'job-status-max-attempts' });
+      return;
+    }
     let data = null;
     try {
       data = await aiApi(`/proposals/${encodeURIComponent(proposalId)}/job-status`, { timeoutMs: 8000 });
@@ -5530,8 +5553,6 @@ ${confirmHint}`,
         await loadProposals();
         syncPollingState({ immediate: false, reason: 'job-status-404' });
       } else {
-        const cfg = state.jobPollingConfigs?.[proposalId] || {};
-        cfg.jobId = cfg.jobId || _jobId;
         cfg.attempts = Number(cfg.attempts || 0) + 1;
         state.jobPollingConfigs[proposalId] = cfg;
         if (cfg.attempts >= 20) {
@@ -6183,6 +6204,7 @@ ${confirmHint}`,
     state.liveDecisionActivityRetryTimer = null;
     state.signalKickoffTimer = null;
     state.liveSignalKickoffTimer = null;
+    stopAllJobPolling();
   }
 
   function isAiAgentActive() {
@@ -6310,11 +6332,11 @@ ${confirmHint}`,
       state.workQueueLoadedAt = Date.now();
       panel.removeAttribute('data-refresh-error');
       const items = Array.isArray(data?.items) ? data.items.slice(0, 6) : [];
-      panel.innerHTML = `<div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">工作队列</div>
-        ${items.length ? items.map(item => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid #1e2d44;">
+      panel.innerHTML = `<div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">工作队列</div>
+        ${items.length ? items.map(item => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid var(--border-subtle);">
           <span>${esc(item.type || '--')} · ${esc(item.title || item.id || '--')}</span>
-          <span style="color:#7e92b2;">${esc(item.next_action || '--')}</span>
-        </div>`).join('') : '<div style="color:#6b7fa0;">暂无排队任务。</div>'}`;
+          <span style="color:var(--text-faint);">${esc(item.next_action || '--')}</span>
+        </div>`).join('') : '<div style="color:var(--text-faint);">暂无排队任务。</div>'}`;
       return data;
     })()
       .catch((err) => {
@@ -6366,7 +6388,6 @@ ${confirmHint}`,
   }
   window.addEventListener('beforeunload', () => {
     stopPolling();
-    Object.values(state.jobPollingTimers).forEach(t => clearInterval(t));
   });
 
   /* Phase A: live signal panel */
@@ -6516,12 +6537,12 @@ ${confirmHint}`,
     const noMarketData = Number(sig.market_data_rows || 0) <= 0;
     const isStale = !!sig.market_data_stale;
     const blockedBadge = sig.blocked_by_risk
-      ? `<span class="live-sig-badge" style="background:#7f1d1d;color:#fca5a5;" title="${esc(sig.risk_reason)}">风控</span>` : '';
+      ? `<span class="live-sig-badge" style="background:var(--negative-deep);color:var(--negative-soft);" title="${esc(sig.risk_reason)}">风控</span>` : '';
     const approvalBadge = (sig.requires_approval && !sig.blocked_by_risk && !noMarketData && ['LONG', 'SHORT'].includes(signalDir))
-      ? '<span class="live-sig-badge" style="background:#78350f;color:#fcd34d;">待审</span>' : '';
+      ? '<span class="live-sig-badge" style="background:var(--warning-deep);color:var(--warning);">待审</span>' : '';
     const dataBadge = noMarketData
-      ? '<span class="live-sig-badge" style="background:#243447;color:#9fb1c9;">缺数据</span>'
-      : (isStale ? '<span class="live-sig-badge" style="background:#2a2330;color:#c4b5fd;">数据旧</span>' : '');
+      ? '<span class="live-sig-badge" style="background:var(--card-border);color:var(--text-sub);">缺数据</span>'
+      : (isStale ? '<span class="live-sig-badge" style="background:var(--border-subtle);color:#c4b5fd;">数据旧</span>' : '');
     let footerNote = noMarketData
       ? '最近可用 K 线为空，当前仅展示空信号回退。'
       : (sig.market_data_last_bar_at
@@ -6555,10 +6576,10 @@ ${confirmHint}`,
            + `<span style="color:${mlOffline ? '#6b7fa0' : liveSignalDirColor(c.direction)};font-size:10px">${mlOffline ? '•' : liveSignalDirIcon(c.direction || 'FLAT')}</span>`
            + `<span style="font-size:10px;min-width:26px;text-align:right;${mlOffline ? 'opacity:.45' : ''}">${mlOffline ? '--' : liveSignalPct(c.confidence)}</span>`;
     }).join('')}
-    <span style="font-size:10px;color:#6b7fa0;margin-left:4px">合计</span>
+    <span style="font-size:10px;color:var(--text-faint);margin-left:4px">合计</span>
     <span style="font-size:11px;font-weight:600">${liveSignalPct(sig.confidence)}</span>
   </div>
-  ${footerNote ? `<div style="margin-top:6px;font-size:10px;color:#7e92b2;">${esc(footerNote)}</div>` : ''}
+  ${footerNote ? `<div style="margin-top:6px;font-size:10px;color:var(--text-faint);">${esc(footerNote)}</div>` : ''}
 </div>`;
   }
 
@@ -6586,7 +6607,7 @@ ${confirmHint}`,
     const resolvedSection = section || { title: '--', empty_text: '暂无数据', items: [] };
     const itemCount = Array.isArray(resolvedSection?.items) ? resolvedSection.items.length : 0;
     const mlNote = (itemCount > 0 && !mlLoaded)
-      ? '<div style="font-size:10px;color:#78350f;background:#451a03;border-radius:4px;padding:2px 6px;margin-bottom:4px;">ML 组件未激活，当前信号仅使用 LLM + Factor。</div>'
+      ? '<div style="font-size:10px;color:var(--warning-deep);background:var(--warning-deep);border-radius:4px;padding:2px 6px;margin-bottom:4px;">ML 组件未激活，当前信号仅使用 LLM + Factor。</div>'
       : '';
 
     el.innerHTML = mlNote + renderLiveSignalSection(resolvedSection, mlLoaded);
@@ -6645,9 +6666,9 @@ ${confirmHint}`,
       const pct = v => (v * 100).toFixed(1) + '%';
       const comp = r.components || {};
       const blockedHtml = r.blocked_by_risk
-        ? `<div style="color:#f87171;margin-top:8px;font-size:12px;">⚠ 风控拦截：${esc(r.risk_reason || '')}</div>` : '';
+        ? `<div style="color:var(--negative-soft);margin-top:8px;font-size:12px;">⚠ 风控拦截：${esc(r.risk_reason || '')}</div>` : '';
       const approvalHtml = (r.requires_approval && !r.blocked_by_risk)
-        ? `<div style="color:#fcd34d;margin-top:8px;font-size:12px;">⚠ 置信度不足（${pct(r.confidence)}），建议人工确认</div>` : '';
+        ? `<div style="color:var(--warning);margin-top:8px;font-size:12px;">⚠ 置信度不足（${pct(r.confidence)}），建议人工确认</div>` : '';
 
       const html = `
 <div style="font-size:13px;line-height:1.6;">
@@ -6655,26 +6676,26 @@ ${confirmHint}`,
     ${dirIcon(r.direction)} ${dirLabel} &nbsp; <span style="font-size:13px;font-weight:500;">置信度 ${pct(r.confidence)}</span>
   </div>
   <table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:10px;">
-    <tr><td style="color:#7e92b2;padding:2px 0;">标的</td><td style="font-weight:600;">${esc(r.symbol)}</td></tr>
-    <tr><td style="color:#7e92b2;padding:2px 0;">建议仓位</td><td>${r.size_usdt.toLocaleString()} USDT（${pct(r.allocation_pct)}）</td></tr>
-    <tr><td style="color:#7e92b2;padding:2px 0;">止损</td><td>${pct(r.stop_loss_pct)}</td></tr>
-    <tr><td style="color:#7e92b2;padding:2px 0;">止盈</td><td>${pct(r.take_profit_pct)}</td></tr>
+    <tr><td style="color:var(--text-faint);padding:2px 0;">标的</td><td style="font-weight:600;">${esc(r.symbol)}</td></tr>
+    <tr><td style="color:var(--text-faint);padding:2px 0;">建议仓位</td><td>${r.size_usdt.toLocaleString()} USDT（${pct(r.allocation_pct)}）</td></tr>
+    <tr><td style="color:var(--text-faint);padding:2px 0;">止损</td><td>${pct(r.stop_loss_pct)}</td></tr>
+    <tr><td style="color:var(--text-faint);padding:2px 0;">止盈</td><td>${pct(r.take_profit_pct)}</td></tr>
   </table>
-  <div style="font-size:11px;color:#9fb1c9;font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">信号分解</div>
+  <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">信号分解</div>
   <div style="display:flex;gap:6px;margin-bottom:8px;">
     ${['llm', 'ml', 'factor'].map(k => {
       const c = comp[k] || {};
       const dc = c.direction === 'LONG' ? '#4ade80' : c.direction === 'SHORT' ? '#f87171' : '#94a3b8';
       const dirText = { LONG: '看多', SHORT: '看空', FLAT: '观望' }[c.direction] || (c.direction || '观望');
-      return `<div style="flex:1;background:#0a1520;border:1px solid #1e3a5a;border-radius:6px;padding:6px 8px;font-size:11px;">
+      return `<div style="flex:1;background:var(--panel-bg-deep);border:1px solid var(--border-subtle);border-radius:6px;padding:6px 8px;font-size:11px;">
         <div style="font-weight:700;text-transform:uppercase;margin-bottom:3px;">${k}</div>
         <div style="color:${dc};font-size:13px;">${dirIcon(c.direction || 'FLAT')} ${dirText}</div>
-        <div style="color:#7e92b2;">${pct(c.confidence || 0)}</div>
+        <div style="color:var(--text-faint);">${pct(c.confidence || 0)}</div>
       </div>`;
     }).join('')}
   </div>
   ${blockedHtml}${approvalHtml}
-  <div style="font-size:10px;color:#4a5f7a;margin-top:8px;font-style:italic;">${esc(r.note)}</div>
+  <div style="font-size:10px;color:var(--neutral);margin-top:8px;font-style:italic;">${esc(r.note)}</div>
 </div>`;
 
       if (resultEl) {

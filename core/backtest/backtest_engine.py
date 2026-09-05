@@ -577,7 +577,10 @@ class BacktestEngine:
                 fee=fee,
                 slippage_cost=slippage_cost,
                 funding_pnl=0.0,
-                net_pnl=-(fee + slippage_cost),
+                # Slippage is already embedded in ``exec_price`` and will flow
+                # through gross PnL when the position closes. Keep it as an
+                # analytical attribution field, not a second cash debit.
+                net_pnl=-fee,
                 notional=notional,
                 execution_role=str(signal.metadata.get("execution_role") if isinstance(signal.metadata, dict) else self.config.default_execution_role),
                 trade_stage="open",
@@ -661,7 +664,8 @@ class BacktestEngine:
                 fee=fee,
                 slippage_cost=slippage_cost,
                 funding_pnl=0.0,
-                net_pnl=-(fee + slippage_cost),
+                # The adverse entry price is the economic slippage debit.
+                net_pnl=-fee,
                 notional=notional,
                 execution_role=str(signal.metadata.get("execution_role") if isinstance(signal.metadata, dict) else self.config.default_execution_role),
                 trade_stage="open",
@@ -701,7 +705,11 @@ class BacktestEngine:
         fee_rate = self._fee_rate(signal)
         fee = notional * fee_rate
         slippage_cost = abs(exec_price - current_price) * quantity
-        net_pnl = gross_pnl + accrued_funding - fee - slippage_cost
+        # ``gross_pnl`` is computed from adverse entry/exit execution prices,
+        # so it already contains both legs' slippage. ``slippage_cost`` remains
+        # reportable attribution only; subtracting it again double-charges the
+        # simulated account.
+        net_pnl = gross_pnl + accrued_funding - fee
         signal_metadata = self._signal_metadata(signal)
         resolved_exit_reason = str(
             exit_reason

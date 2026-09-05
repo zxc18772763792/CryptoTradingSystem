@@ -2822,11 +2822,11 @@ return`<tr>
 <td>${esc(fmtDateTime(row?.timestamp))}</td>
 <td><div class="live-review-strategy" title="${esc(strategy)}">${esc(strategy)}</div><span class="live-review-count-tag">#${Number.isFinite(strategyCount)?strategyCount:'--'}</span></td>
 <td>${esc(String(row?.exchange||'-').toUpperCase())} ${esc(String(row?.symbol||'--'))}</td>
-<td>${signalTag}<div style="margin-top:4px;color:#9fb1c9;">${esc(side||'--')}</div></td>
+<td>${signalTag}<div style="margin-top:4px;color:var(--text-sub);">${esc(side||'--')}</div></td>
 <td>${fmtNum(row?.quantity,6)} @ ${fmtNum(row?.fill_price,4)}</td>
 <td>${Number.isFinite(notional)?fmt(notional):'--'}</td>
 <td class="${pnlClass}">${Number.isFinite(pnl)?fmt(pnl):'--'}</td>
-<td><div>${Number.isFinite(feeUsd)?`fee ${fmt(feeUsd)}`:'fee --'}</div><div style="color:#9fb1c9;">slip ${Number.isFinite(slippageUsd)?fmt(slippageUsd):'--'}</div></td>
+<td><div>${Number.isFinite(feeUsd)?`fee ${fmt(feeUsd)}`:'fee --'}</div><div style="color:var(--text-sub);">slip ${Number.isFinite(slippageUsd)?fmt(slippageUsd):'--'}</div></td>
 <td>${orderId?`<span title="${esc(orderId)}">${esc(orderId.slice(0,18))}${orderId.length>18?'...':''}</span>`:'--'}</td>
 </tr>`;
 }).join('');
@@ -2922,7 +2922,7 @@ try{
   loadPositions().catch(()=>{});
 }
 }
-async function loadPositions(){return runRequestSingleFlight('positions',async()=>{try{const resp=await api('/trading/positions',{timeoutMs:TRADING_POSITIONS_TIMEOUT_MS});state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:#2f4f7f;">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);const t=document.getElementById('positions-tbody');if(t)t.innerHTML=`<tr><td colspan="6">持仓加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
+async function loadPositions(){return runRequestSingleFlight('positions',async()=>{try{const resp=await api('/trading/positions',{timeoutMs:TRADING_POSITIONS_TIMEOUT_MS});state.positions=resp.positions||[];const t=document.getElementById('positions-tbody');if(!t)return;if(!state.positions.length){t.innerHTML='<tr><td colspan="6">暂无持仓</td></tr>';return;}t.innerHTML=state.positions.map(p=>{const source=(p?.metadata?.source||'local');const key=positionCloseKey(p);const busy=!!state.closingPositions[key];const sideText=p.side==='long'?'多':p.side==='short'?'空':(p.side||'-');const sourceTag=source==='exchange_live'?'<span class="status-badge" style="margin-left:6px;background:var(--neutral);">实盘同步</span>':'';const accountId=String(p.account_id||'');return `<tr><td>${p.exchange||'-'} ${p.symbol}${sourceTag}</td><td>${sideText}</td><td>${Number(p.entry_price||0).toFixed(2)}</td><td>${Number(p.current_price||0).toFixed(2)}</td><td class="${Number(p.unrealized_pnl||0)>=0?'positive':'negative'}">${fmt(p.unrealized_pnl||0)}</td><td><button class="btn btn-danger btn-sm" ${busy?'disabled':''} onclick="closePositionFromRow(this)" data-exchange="${esc(p.exchange||'')}" data-symbol="${esc(p.symbol||'')}" data-side="${esc(p.side||'')}" data-account-id="${esc(accountId)}" data-source="${esc(source)}" data-quantity="${Number(p.quantity||0)}">${busy?'平仓中...':'一键平仓'}</button></td></tr>`;}).join('');}catch(e){console.error(e);const t=document.getElementById('positions-tbody');if(t)t.innerHTML=`<tr><td colspan="6">持仓加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function loadOrders(){return runRequestSingleFlight('orders',async()=>{try{
 state.orders=(await api('/trading/orders?include_history=true&limit=200',{timeoutMs:TRADING_ORDERS_TIMEOUT_MS})).orders||[];
 const summaryOrderEl=document.getElementById('open-orders');
@@ -2959,7 +2959,7 @@ const protectMemo=[
 ].filter(Boolean).join(' / ');
 const memo=[reason,costMemo,protectMemo].filter(Boolean).join(' | ');
 const statusCell=`${mapSide(o.side)}/${mapOrderStatus(o.status)}${reason?`<div class="order-reject-reason">${reason}</div>`:''}`;
-return `<tr><td>${esc(o.exchange||'-')} ${esc(o.symbol||'')}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${o.status==='open'?`<button class="btn btn-danger btn-sm" onclick="cancelOrder(${jsArg(o.id)},${jsArg(o.symbol)},${jsArg(o.exchange||'binance')})">撤销</button>`:'<span style="color:#8b949e">--</span>'}</td><td>${memo||'--'}</td></tr>`;
+return `<tr><td>${esc(o.exchange||'-')} ${esc(o.symbol||'')}</td><td>${sourceBadge}</td><td>${esc(o.account_id||'main')}</td><td>${statusCell}</td><td>${Number(o.price||0).toFixed(2)}</td><td>${Number(o.amount||0)}</td><td>${o.status==='open'?`<button class="btn btn-danger btn-sm" onclick="cancelOrder(${jsArg(o.id)},${jsArg(o.symbol)},${jsArg(o.exchange||'binance')})">撤销</button>`:'<span style="color:var(--text-sub)">--</span>'}</td><td>${memo||'--'}</td></tr>`;
 }).join('');
 }catch(e){console.error(e);const t=document.getElementById('orders-tbody');if(t)t.innerHTML=`<tr><td colspan="8">订单加载失败：${esc(e.message||'未知错误')}</td></tr>`;}});}
 async function loadOpenOrders(){return runRequestSingleFlight('openOrders',async()=>{try{
@@ -3053,7 +3053,7 @@ const libraryRows=availableTypes.map(s=>{
   const m=getStrategyMeta(s);
   const groupLabel=(catalog.byValue?.[s]?.groupLabel)||mapStrategyCatToBacktestGroup(row.category||m.cat);
   const desc=String(row.usage||m.desc||s);
-  const card=`<div class="strategy-card" onclick="registerStrategy(${jsArg(s)})"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(s)}</h4><span class="status-badge">${esc(row.category||m.cat)}</span></div><p>${esc(desc)}</p><p style="font-size:11px;color:#8fa6c0;">点击卡片注册到策略池（模拟盘）</p></div>`;
+  const card=`<div class="strategy-card" onclick="registerStrategy(${jsArg(s)})"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(s)}</h4><span class="status-badge">${esc(row.category||m.cat)}</span></div><p>${esc(desc)}</p><p style="font-size:11px;color:var(--text-sub);">点击卡片注册到策略池（模拟盘）</p></div>`;
   return {strategy:s,groupLabel,card};
 });
 if(!libraryRows.length){pool.innerHTML='<div class="list-item">暂无可用策略</div>';}
@@ -3336,12 +3336,12 @@ const registered=Number(d.registered_count||0),runningCount=Number(d.running_cou
 meta.innerHTML=`<span>已注册 ${registered} | 运行中 ${runningCount} | 空闲 ${idle}</span><span>暂停 ${paused} / 停止 ${stopped}</span>`;
 }
 if(a){
-const staleTip=stale.length?`<div class="list-item"><span style="color:#ffb15f;">运行异常: ${stale.map(x=>x.strategy).join(', ')}</span><span>建议检查数据/连接</span></div>`:'';
+const staleTip=stale.length?`<div class="list-item"><span style="color:var(--warning-soft);">运行异常: ${stale.map(x=>x.strategy).join(', ')}</span><span>建议检查数据/连接</span></div>`:'';
 a.innerHTML=(running.map(s=>{const p=perf[s.name]||{},rt=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),vv=Number(p.variance),up=fmtDurationSec(rt.uptime_seconds||0);const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const varTxt=Number.isFinite(vv)?vv.toExponential(2):'--';const acct=esc(rt.account_id||s.account_id||'main');const modeTxt=rt.isolated_account?'独立':'共享';return `<div class="list-item"><span>${s.name} (${s.strategy_type}) | 收益率 ${rpTxt} | 回撤 ${ddTxt} | 方差 ${varTxt} | 运行 ${up} | ${modeTxt}:${acct} ${s.last_run_at?`· ${fmtTime(s.last_run_at)}`:''}</span><span class="status-badge connected">运行中</span></div>`;}).join('')||'<div class="list-item">暂无运行中策略</div>')+staleTip;
 }
 if(r)r.innerHTML=signals.length?signals.map(s=>`<div class="list-item"><span>${s.strategy} | ${s.symbol} | ${s.signal_type.toUpperCase()}</span><span>${fmtTime(s.timestamp)}</span></div>`).join(''):`<div class="list-item"><span>${running.length?`实时刷新中（${d.refresh_hint_seconds||5}秒）暂无新信号，可能是策略条件未触发`:'暂无近期信号'}</span><span>${fmtTime(new Date())}</span></div>`;
 if(rt){
-rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?fmtDateTime(s.last_run_at):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=getStrategyMeta(stype);const desc=meta.desc||s.description||stype;const cat=meta.cat||'';return`<tr><td>${s.name}</td><td style="font-size:12px;color:#9fb1c9;max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?fmtDateTime(lu):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无运行中策略数据</td></tr>';
+rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?fmtDateTime(s.last_run_at):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=getStrategyMeta(stype);const desc=meta.desc||s.description||stype;const cat=meta.cat||'';return`<tr><td>${s.name}</td><td style="font-size:12px;color:var(--text-sub);max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?fmtDateTime(lu):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无运行中策略数据</td></tr>';
 }
 renderStrategyHealthAlerts(d,state.strategyHealth);
 renderStrategyConsolePanel();
@@ -3369,8 +3369,8 @@ box.innerHTML=`<div class="list-item"><span>状态</span><span class="status-bad
 state.lastHealthAlertKey='';
 return;
 }
-const staleRows=stale.slice(0,6).map(x=>{const lag=(x&&x.lag_seconds!==undefined&&x.lag_seconds!==null)?`${x.lag_seconds}s`:'--';return `<div class="list-item"><span>${x.strategy||'未知策略'} (${x.timeframe||'-'})</span><span style="color:#ffb15f;">延迟 ${lag}</span></div>`;}).join('');
-box.innerHTML=`<div class="list-item"><span>状态</span><span class="status-badge" style="background:rgba(255,177,95,.15);color:#ffb15f;border-color:rgba(255,177,95,.35);">告警</span></div><div class="list-item"><span>异常策略数</span><span>${staleCount}</span></div>${staleRows||''}<div class="list-item"><span>最近告警</span><span>${lastAlert?fmtTime(lastAlert):'--'}</span></div>${lastErr?`<div class="list-item"><span>监控错误</span><span style="color:#ff9b9b;">${esc(lastErr)}</span></div>`:''}`;
+const staleRows=stale.slice(0,6).map(x=>{const lag=(x&&x.lag_seconds!==undefined&&x.lag_seconds!==null)?`${x.lag_seconds}s`:'--';return `<div class="list-item"><span>${x.strategy||'未知策略'} (${x.timeframe||'-'})</span><span style="color:var(--warning-soft);">延迟 ${lag}</span></div>`;}).join('');
+box.innerHTML=`<div class="list-item"><span>状态</span><span class="status-badge" style="background:rgba(255,177,95,.15);color:var(--warning-soft);border-color:rgba(255,177,95,.35);">告警</span></div><div class="list-item"><span>异常策略数</span><span>${staleCount}</span></div>${staleRows||''}<div class="list-item"><span>最近告警</span><span>${lastAlert?fmtTime(lastAlert):'--'}</span></div>${lastErr?`<div class="list-item"><span>监控错误</span><span style="color:var(--negative-soft);">${esc(lastErr)}</span></div>`:''}`;
 const alertKey=`${staleCount}|${stale.map(x=>x.strategy).join(',')}`;
 if(alertKey!==state.lastHealthAlertKey){state.lastHealthAlertKey=alertKey;notify(`【策略健康告警】异常策略 ${staleCount} 个`,true);}
 }
@@ -3668,10 +3668,10 @@ function renderKlineChart(preserveRange=true){
 const c=document.getElementById('candlestick-chart');
 if(!c)return;
 const bars=marketDataState.bars||[];
-if(!bars.length){c.innerHTML='<p class="kline-chart-placeholder" style="color:#8b949e;text-align:center;padding:50px;">暂无数据，系统会自动后台补数后重试。</p>';return;}
-if(typeof Plotly==='undefined'){c.innerHTML='<p class="kline-chart-placeholder" style="color:#8b949e;text-align:center;padding:50px;">图表库未加载，K线图暂不可用。</p>';return;}
+if(!bars.length){c.innerHTML='<p class="kline-chart-placeholder" style="color:var(--text-sub);text-align:center;padding:50px;">暂无数据，系统会自动后台补数后重试。</p>';return;}
+if(typeof Plotly==='undefined'){c.innerHTML='<p class="kline-chart-placeholder" style="color:var(--text-sub);text-align:center;padding:50px;">图表库未加载，K线图暂不可用。</p>';return;}
 const rows=bars.map(d=>({timestamp:klineToMs(d.timestamp),open:+d.open,high:+d.high,low:+d.low,close:+d.close,volume:+d.volume||0})).filter(d=>Number.isFinite(d.timestamp)&&Number.isFinite(d.open)&&Number.isFinite(d.high)&&Number.isFinite(d.low)&&Number.isFinite(d.close));
-if(!rows.length){c.innerHTML='<p class="kline-chart-placeholder" style="color:#8b949e;text-align:center;padding:50px;">时间数据异常，无法渲染K线。</p>';return;}
+if(!rows.length){c.innerHTML='<p class="kline-chart-placeholder" style="color:var(--text-sub);text-align:center;padding:50px;">时间数据异常，无法渲染K线。</p>';return;}
 const chartKey=`${marketDataState.exchange}|${marketDataState.symbol}|${marketDataState.timeframe}`;
 const chartChanged=marketDataState.lastChartKey!==chartKey;
 if(chartChanged){
@@ -3699,7 +3699,7 @@ marketDataState.chartBound=false;
 marketDataState.lastRange=null;
 if(!c)return;
 try{if(typeof Plotly!=='undefined')Plotly.purge(c);}catch{}
-c.innerHTML=`<p class="kline-chart-placeholder" style="color:#8b949e;text-align:center;padding:50px;">${esc(message)}</p>`;
+c.innerHTML=`<p class="kline-chart-placeholder" style="color:var(--text-sub);text-align:center;padding:50px;">${esc(message)}</p>`;
 }
 async function loadMoreLeftByViewport(){
 if(marketDataState.isLoadingLeft||marketDataState.isLoading)return;
@@ -5139,7 +5139,7 @@ ${isPairsMode?`<div style="display:grid;grid-template-columns:repeat(auto-fit,mi
 <div class="stat-box"><div class="stat-label">初始资金</div><div class="stat-value">$${Number(r.initial_capital||0).toLocaleString()}</div></div>
 <div class="stat-box"><div class="stat-label">净收益率</div><div class="stat-value" style="color:${c}">${Number(r.total_return||0).toFixed(2)}%</div></div>
 <div class="stat-box"><div class="stat-label">毛收益率</div><div class="stat-value">${Number(r.gross_total_return||0).toFixed(2)}%</div></div>
-<div class="stat-box"><div class="stat-label">成本拖累</div><div class="stat-value" style="color:#f59f3a">${Number(r.cost_drag_return_pct||0).toFixed(2)}%</div></div>
+<div class="stat-box"><div class="stat-label">成本拖累</div><div class="stat-value" style="color:var(--warning)">${Number(r.cost_drag_return_pct||0).toFixed(2)}%</div></div>
 </div>
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;">
 <div class="stat-box"><div class="stat-label">估算成本</div><div class="stat-value">$${Number(r.estimated_trade_cost_usd||0).toFixed(2)}</div></div>
@@ -5159,7 +5159,7 @@ ${isPairsMode?`<div style="display:grid;grid-template-columns:repeat(auto-fit,mi
 <div class="stat-box"><div class="stat-label">默认模板</div><div class="stat-value">${esc(backtestExitTemplateLabel(r?.default_exit_template||DEFAULT_BACKTEST_EXIT_TEMPLATE))}</div></div>
 <div class="stat-box"><div class="stat-label">模板切换</div><div class="stat-value">${Array.isArray(r?.available_exit_templates)?r.available_exit_templates.length:BACKTEST_EXIT_TEMPLATE_OPTIONS.length} 个可选</div></div>
 </div>
-${(()=>{const slPct=Number(r.stop_loss_pct),tpPct=Number(r.take_profit_pct),exits=Number(r.forced_protective_exits||0),trades=Number(r.total_trades||0);if(r.use_stop_take&&exits===0&&trades>0){return`<div class="list-item" style="margin-top:8px;padding:8px 12px;background:rgba(255,177,95,.1);border:1px solid rgba(255,177,95,.3);border-radius:8px;color:#ffb15f;font-size:12px;">提示：固定止盈止损叠加已启用，但本次回测中未触发任何固定百分比强制平仓（止损${Number.isFinite(slPct)?(slPct*100).toFixed(1):'--'}% / 止盈${Number.isFinite(tpPct)?(tpPct*100).toFixed(1):'--'}%）。统一退出模板仍在独立生效；若你想验证固定比例叠加效果，可继续调整这两个阈值。</div>`;}return'';})()}
+${(()=>{const slPct=Number(r.stop_loss_pct),tpPct=Number(r.take_profit_pct),exits=Number(r.forced_protective_exits||0),trades=Number(r.total_trades||0);if(r.use_stop_take&&exits===0&&trades>0){return`<div class="list-item" style="margin-top:8px;padding:8px 12px;background:rgba(255,177,95,.1);border:1px solid rgba(255,177,95,.3);border-radius:8px;color:var(--warning-soft);font-size:12px;">提示：固定止盈止损叠加已启用，但本次回测中未触发任何固定百分比强制平仓（止损${Number.isFinite(slPct)?(slPct*100).toFixed(1):'--'}% / 止盈${Number.isFinite(tpPct)?(tpPct*100).toFixed(1):'--'}%）。统一退出模板仍在独立生效；若你想验证固定比例叠加效果，可继续调整这两个阈值。</div>`;}return'';})()}
 ${renderRangeLockIndicatorHtml(r,true)}`;
 const ec=document.getElementById('backtest-equity-chart');
 if(ec&&r.series?.length){
@@ -5468,7 +5468,7 @@ return {locked:true,status:'已锁定',text:`已锁定（请求 ${reqStart||'-'}
 }
 function renderRangeLockIndicatorHtml(data, fallbackFromForm=true){
 const s=getBacktestRangeLockState(data,fallbackFromForm);
-return `<div class="list-item range-lock-row"><span>区间锁定</span><span class="status-badge ${s.className==='ok'?'connected':''}" ${s.className==='warn'?'style="background:rgba(255,177,95,.14);color:#ffb15f;border-color:rgba(255,177,95,.35);"':''}>${esc(s.status)}</span><span class="range-lock-text">${esc(s.text)}</span></div>`;
+return `<div class="list-item range-lock-row"><span>区间锁定</span><span class="status-badge ${s.className==='ok'?'connected':''}" ${s.className==='warn'?'style="background:rgba(255,177,95,.14);color:var(--warning-soft);border-color:rgba(255,177,95,.35);"':''}>${esc(s.status)}</span><span class="range-lock-text">${esc(s.text)}</span></div>`;
 }
 function getBacktestProtectionConfig(){
 const enabled=!!document.getElementById('backtest-use-stop-take')?.checked;
@@ -5549,9 +5549,9 @@ if(toggle)toggle.addEventListener('change',apply);
 apply();
 }
 function getBacktestExtraPanel(){return document.getElementById('backtest-extra-output');}
-function renderBacktestExtraLoading(title='处理中',detail=''){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>请稍候...</span></div>${detail?`<div class="list-item"><span>执行提示</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(detail)}</span></div>`:''}`;}
-function renderBacktestExtraStatus(title='已完成',detail='',statusText='完成'){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>${esc(statusText)}</span></div>${detail?`<div class="list-item"><span>执行提示</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(detail)}</span></div>`:''}`;}
-function renderBacktestExtraError(err){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>操作失败</span><span style="color:#ff8b8b">${esc(err?.message||String(err||'未知错误'))}</span></div>`;}
+function renderBacktestExtraLoading(title='处理中',detail=''){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>请稍候...</span></div>${detail?`<div class="list-item"><span>执行提示</span><span style="color:var(--text-sub);white-space:normal;word-break:break-word;text-align:right;">${esc(detail)}</span></div>`:''}`;}
+function renderBacktestExtraStatus(title='已完成',detail='',statusText='完成'){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>${esc(title)}</span><span>${esc(statusText)}</span></div>${detail?`<div class="list-item"><span>执行提示</span><span style="color:var(--text-sub);white-space:normal;word-break:break-word;text-align:right;">${esc(detail)}</span></div>`:''}`;}
+function renderBacktestExtraError(err){const out=getBacktestExtraPanel();if(!out)return;out.innerHTML=`<div class="list-item"><span>操作失败</span><span style="color:var(--negative-soft)">${esc(err?.message||String(err||'未知错误'))}</span></div>`;}
 function renderBacktestRawBlock(data,label='原始JSON'){
 return `<details><summary>${esc(label)}</summary><pre>${esc(JSON.stringify(data,null,2))}</pre></details>`;
 }
@@ -5673,11 +5673,11 @@ const compareOptSummary=isMlCompare
 backtestUIState.lastCompare={...(data||{}), ranked:[...ranked]};
 out.innerHTML=`
 <div class="list-item"><span>${isMlCompare?'ML 模型对比':'多策略对比'}（${esc(data.symbol||'-')} / ${esc(data.timeframe||'-')}）</span><span>成功 ${okRows.length} / 总计 ${rows.length}</span></div>
-${compareRequestMeta.autoWindowApplied?`<div class="list-item"><span>自动区间</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(compareRequestMeta.note||'已自动锁定近期区间')}</span></div>`:''}
+${compareRequestMeta.autoWindowApplied?`<div class="list-item"><span>自动区间</span><span style="color:var(--text-sub);white-space:normal;word-break:break-word;text-align:right;">${esc(compareRequestMeta.note||'已自动锁定近期区间')}</span></div>`:''}
 ${renderRangeLockIndicatorHtml(data,false)}
 <div class="list-item"><span>实际回测区间 / 样本</span><span>${compareRangeText} | ${compareDataSummary}</span></div>
 <div class="list-item"><span>退出模板 / 预优化</span><span>${esc(backtestExitTemplateLabel(exitTemplateName))} | ${esc(compareExecutionSummary)}</span></div>
-${compareBudgetNote?`<div class="list-item"><span>预算提示</span><span style="color:#9fb1c9;white-space:normal;word-break:break-word;text-align:right;">${esc(compareBudgetNote)}</span></div>`:''}
+${compareBudgetNote?`<div class="list-item"><span>预算提示</span><span style="color:var(--text-sub);white-space:normal;word-break:break-word;text-align:right;">${esc(compareBudgetNote)}</span></div>`:''}
 <div class="backtest-subgrid">
   <div class="stat-box"><div class="stat-label">${isMlCompare?'最佳收益模型':'最佳收益策略'}</div><div class="stat-value">${esc(backtestCompareEntryTitle(best))}</div><div class="stat-label">${best?`${btPct(best.total_return)} / 夏普 ${btNum(best.sharpe_ratio)}`:'--'}</div></div>
   <div class="stat-box"><div class="stat-label">均衡推荐（收益-回撤）</div><div class="stat-value">${esc(backtestCompareEntryTitle(bestBalanced))}</div><div class="stat-label">${bestBalanced?`${btPct(bestBalanced.total_return)} / 回撤 ${btPct(bestBalanced.max_drawdown)}`:'--'}</div></div>
@@ -5689,7 +5689,7 @@ ${compareBudgetNote?`<div class="list-item"><span>预算提示</span><span style
 <div class="inline-actions" style="margin-top:10px;">
   <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-register-best">${isMlCompare?'注册收益第一模型（新实例）':'注册收益第一策略（新实例）'}</button>
   <button type="button" class="btn btn-primary btn-sm" id="btn-backtest-register-top3">${isMlCompare?'注册前3模型（新实例）':'注册前3策略（新实例）'}</button>
-  <span style="font-size:12px;color:#9fb1c9;">新实例选项：资金占比 ${regCfg.allocation.toFixed(2)}${regCfg.autoStart?' | 自动启动':''}${regCfg.suffix?` | 后缀 ${regCfg.suffix}`:''}</span>
+  <span style="font-size:12px;color:var(--text-sub);">新实例选项：资金占比 ${regCfg.allocation.toFixed(2)}${regCfg.autoStart?' | 自动启动':''}${regCfg.suffix?` | 后缀 ${regCfg.suffix}`:''}</span>
 </div>
 <div class="section-title">${isMlCompare?'模型排行榜（按收益率排序，点击行可在上方预览该模型区间回测）':'策略排行榜（按收益率排序，点击行可在上方预览该策略区间回测）'}</div>
 <div class="backtest-table-wrap">
@@ -5801,8 +5801,8 @@ const optimizeViewMeta=((meta)=>{
   };
 })(strategyMeta);
 const familyBadge=`<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:${optimizeViewMeta.familyBg};border:1px solid ${optimizeViewMeta.familyColor}44;color:${optimizeViewMeta.familyColor};font-size:12px;font-weight:700;">${esc(optimizeViewMeta.familyLabel)}</span>`;
-const dataBadge=`<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:#1d2b3d;border:1px solid #32475f;color:#9fb1c9;font-size:12px;font-weight:700;">${esc(optimizeViewMeta.dataMode)}</span>`;
-const newsBadge=`<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:#162535;border:1px solid #35506d;color:#9fc3ea;font-size:12px;font-weight:700;">News ${newsCount}</span>`;
+const dataBadge=`<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:var(--border-subtle);border:1px solid var(--border-strong);color:var(--text-sub);font-size:12px;font-weight:700;">${esc(optimizeViewMeta.dataMode)}</span>`;
+const newsBadge=`<span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:var(--card-bg);border:1px solid var(--neutral);color:var(--accent-soft);font-size:12px;font-weight:700;">News ${newsCount}</span>`;
 out.innerHTML=`
 <div class="list-item"><span>参数优化（${esc(data?.strategy||'-')} / ${esc(data?.symbol||'-')} / ${esc(data?.timeframe||'-')}） ${familyBadge} ${dataBadge} ${newsBadge}</span><span>试验 ${Number(data?.trials||top.length||0)} 次</span></div>
 ${renderRangeLockIndicatorHtml(data,false)}
@@ -5818,7 +5818,7 @@ ${renderRangeLockIndicatorHtml(data,false)}
 <div class="inline-actions" style="margin-top:10px;">
   <button type="button" class="btn btn-primary btn-sm" id="btn-apply-opt-best">一键回填最佳参数到策略参数编辑</button>
   <button type="button" class="btn btn-primary btn-sm" id="btn-register-opt-best" onclick="registerOptimizeBestAsNewStrategyInstance()">按最佳参数注册新实例</button>
-  <span style="font-size:12px;color:#9fb1c9;">回填仅填前端编辑面板；注册选项：${regCfg.allocation.toFixed(2)}${regCfg.autoStart?' / 自动启动':''}${regCfg.suffix?` / ${regCfg.suffix}`:''}</span>
+  <span style="font-size:12px;color:var(--text-sub);">回填仅填前端编辑面板；注册选项：${regCfg.allocation.toFixed(2)}${regCfg.autoStart?' / 自动启动':''}${regCfg.suffix?` / ${regCfg.suffix}`:''}</span>
 </div>
 <div class="section-title">Top 参数组合</div>
 <div class="backtest-table-wrap">
@@ -5832,12 +5832,12 @@ const tradePoints=entrySignals+exitSignals;
 const zeroTradeReason=String(t?.metrics?.zero_trade_reason||'').trim();
 const tradePointText=tradePoints>0?`${tradePoints} (${entrySignals}/${exitSignals})`:'0';
 const zeroTradeHtml=zeroTradeReason
-  ? `<span title="${esc(zeroTradeReason)}" style="color:#f0b429;">${esc(zeroTradeReason.length>20?`${zeroTradeReason.slice(0,20)}...`:zeroTradeReason)}</span>`
-  : '<span style="color:#6b7fa0;">--</span>';
+  ? `<span title="${esc(zeroTradeReason)}" style="color:var(--warning);">${esc(zeroTradeReason.length>20?`${zeroTradeReason.slice(0,20)}...`:zeroTradeReason)}</span>`
+  : '<span style="color:var(--text-faint);">--</span>';
 return `<tr class="bt-optimize-row ${Number(backtestUIState?.lastOptimizePreviewRank??-1)===i?'active-preview':''}" data-rank-index="${i}" onclick="previewOptimizeTrialByRank(${i})" style="cursor:pointer;">
 <td>${i+1}</td>
 <td><span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:${optimizeViewMeta.familyBg};border:1px solid ${optimizeViewMeta.familyColor}44;color:${optimizeViewMeta.familyColor};font-size:11px;font-weight:700;">${esc(optimizeViewMeta.familyLabel)}</span></td>
-<td><span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:#1d2b3d;border:1px solid #32475f;color:#9fb1c9;font-size:11px;font-weight:700;">${esc(optimizeViewMeta.dataMode)}</span></td>
+<td><span style="display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:var(--border-subtle);border:1px solid var(--border-strong);color:var(--text-sub);font-size:11px;font-weight:700;">${esc(optimizeViewMeta.dataMode)}</span></td>
 <td>${btNum(t.score)}</td>
 <td class="${Number(t?.metrics?.total_return||0)>=0?'positive':'negative'}">${btPct(t?.metrics?.total_return)}</td>
 <td>${btNum(t?.metrics?.sharpe_ratio)}</td>
@@ -7810,7 +7810,7 @@ if(summary){
 summary.innerHTML=`<div class="list-item"><span>综合情绪 / 置信度</span><span>${stance} (${composite.toFixed(3)}) / ${confidence.toFixed(2)}</span></div><div class="list-item"><span>新闻事件(24h)</span><span>结构化 ${newsEvents} | 当前流 ${newsFeedCount} | 原始 ${newsRawCount}</span></div><div class="list-item"><span>资金费率 / 基差</span><span>${fundingAvailable?(funding*100).toFixed(4)+'%':'--'} / ${basisAvailable?basisPct.toFixed(4)+'%':'--'}</span></div><div class="list-item"><span>Fear & Greed / Breadth</span><span>${fearGreedAvailable?Math.round(fearGreedValue):'--'} / ${globalBreadthAvailable&&Number.isFinite(Number(marketCapChangePct))?Number(marketCapChangePct).toFixed(2)+'%':'--'}</span></div><div class="list-item"><span>点差 / 主动流</span><span>${spreadAvailable?spreadBps.toFixed(3)+' bps':'--'} / ${flowAvailable?imbalance.toFixed(4):'--'}</span></div><div class="list-item"><span>巨鲸 / 公告 / 安全</span><span>${whaleCount} / ${annCount} / ${securityAlertCount}</span></div><div class="list-item"><span>风控提示</span><span>${esc(caution.join('；')||(validMetrics.length?'无明显异常':'数据不足，建议稍后重试'))}</span></div>`;
 }
 if(grid){
-grid.innerHTML=metrics.map(m=>{const hasScore=hasFiniteScore(m.score);const positive=hasScore&&Number(m.score)>=0;const badgeText=!hasScore?'缺失':positive?'正向':'负向';const badgeClass=!hasScore?'warning':positive?'connected':'';return `<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(m.name)}</h4><span class="status-badge ${badgeClass}">${badgeText}</span></div><p>标准化分数：${hasScore?Number(m.score).toFixed(3):'--'}</p><p>原始值：${esc(String(m.fmt))}</p><p style="font-size:11px;color:#8fa6c0;">${esc(m.hint||'')}</p></div>`;}).join('');
+grid.innerHTML=metrics.map(m=>{const hasScore=hasFiniteScore(m.score);const positive=hasScore&&Number(m.score)>=0;const badgeText=!hasScore?'缺失':positive?'正向':'负向';const badgeClass=!hasScore?'warning':positive?'connected':'';return `<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(m.name)}</h4><span class="status-badge ${badgeClass}">${badgeText}</span></div><p>标准化分数：${hasScore?Number(m.score).toFixed(3):'--'}</p><p>原始值：${esc(String(m.fmt))}</p><p style="font-size:11px;color:var(--text-sub);">${esc(m.hint||'')}</p></div>`;}).join('');
 }
 renderMarketSentimentChart(validMetrics);
 renderResearchConclusionCard();
@@ -8665,7 +8665,7 @@ summary.innerHTML=`
 <div class="list-item"><span>异常模块</span><span>${entries.filter(([,v])=>v?.ok===false).map(([k])=>analyticsModuleNameZh(k)).join('、')||'无'}</span></div>`;
 }
 if(grid){
-grid.innerHTML=entries.length?entries.map(([name,payload])=>`<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(analyticsModuleNameZh(name))}</h4><span class="status-badge ${payload?.ok===false?'':'connected'}">${payload?.ok===false?'异常':'正常'}</span></div><p>${esc(moduleBrief(name,payload))}</p><p style="font-size:11px;color:#8fa6c0;">耗时 ${Number(payload?.latency_ms||0).toFixed(1)} ms</p></div>`).join(''):'<div class="list-item">暂无分析模块</div>';
+grid.innerHTML=entries.length?entries.map(([name,payload])=>`<div class="strategy-card"><div class="list-item" style="padding:0 0 6px 0;border-bottom:none;"><h4>${esc(analyticsModuleNameZh(name))}</h4><span class="status-badge ${payload?.ok===false?'':'connected'}">${payload?.ok===false?'异常':'正常'}</span></div><p>${esc(moduleBrief(name,payload))}</p><p style="font-size:11px;color:var(--text-sub);">耗时 ${Number(payload?.latency_ms||0).toFixed(1)} ms</p></div>`).join(''):'<div class="list-item">暂无分析模块</div>';
 }
 const perf=(modules.performance||{}).data||{},risk=(modules.risk_dashboard||{}).data||{},calendar=(modules.calendar||{}).data||{},micro=(modules.microstructure||{}).data||{},equity=(modules.equity_rebalance||{}).data||{},community=(modules.community||{}).data||{};
 out.textContent=JSON.stringify({

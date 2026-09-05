@@ -43,6 +43,47 @@ def test_risk_manager_restores_trade_history_from_persisted_scope(tmp_path, monk
     assert len(restored.get_trade_history(limit=10)) == 1
 
 
+def test_risk_manager_restores_same_day_live_halt_and_baseline(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(risk_module.settings, "TRADING_MODE", "live", raising=False)
+
+    manager = risk_module.RiskManager(use_persisted_overlay=False)
+    manager._day_start_equity = 1000.0
+    manager._current_equity = 975.0
+    manager._last_equity = 975.0
+    manager._daily_realized_pnl = -25.0
+    manager._trading_halted = True
+    manager._halt_reason = "daily loss circuit breaker"
+    manager._persist_trade_history("live")
+
+    restored = risk_module.RiskManager(use_persisted_overlay=False)
+    report = restored.get_risk_report()
+
+    assert restored.get_risk_metrics().trading_halted is True
+    assert report["halt_reason"] == "daily loss circuit breaker"
+    assert report["equity"]["day_start"] == 1000.0
+    assert report["equity"]["current"] == 975.0
+    assert report["equity"]["daily_realized_pnl_usd"] == -25.0
+
+
+def test_risk_manager_persisted_halt_is_cleared_for_a_new_day(tmp_path, monkeypatch):
+    monkeypatch.setattr(risk_module.settings, "CACHE_PATH", tmp_path, raising=False)
+    monkeypatch.setattr(risk_module.settings, "TRADING_MODE", "live", raising=False)
+
+    manager = risk_module.RiskManager(use_persisted_overlay=False)
+    manager._daily_start = manager._daily_start - risk_module.timedelta(days=1)
+    manager._day_start_equity = 1000.0
+    manager._current_equity = 975.0
+    manager._trading_halted = True
+    manager._halt_reason = "yesterday halt"
+    manager._persist_trade_history("live")
+
+    restored = risk_module.RiskManager(use_persisted_overlay=False)
+
+    assert restored.get_risk_metrics().trading_halted is False
+    assert restored.get_risk_report()["halt_reason"] == ""
+
+
 def test_risk_manager_record_trade_is_thread_safe(tmp_path, monkeypatch):
     monkeypatch.setattr(risk_module.settings, "CACHE_PATH", tmp_path, raising=False)
     monkeypatch.setattr(risk_module.settings, "TRADING_MODE", "paper", raising=False)

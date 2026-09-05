@@ -22,6 +22,7 @@ from core.exchanges.base_exchange import (
     OrderType,
     OrderStatus,
 )
+from core.exchanges.order_parsing import resolve_ccxt_order_fill_price
 
 _BALANCE_SPOT_TIMEOUT_SEC = 6.0  # was 4.0 — give each wallet fetch room for proxy latency (~1.3-2s/call) before it fails-fast and gets skipped
 _FUNDING_FETCH_TIMEOUT_SEC = 4.0  # was 2.8 — the sapi funding-asset endpoint is the slow one
@@ -725,7 +726,7 @@ class BinanceConnector(BaseExchange):
             symbol=ccxt_order.get("symbol", ""),
             side=OrderSide(ccxt_order.get("side", "buy")),
             type=OrderType(ccxt_order.get("type", "limit")),
-            price=float(ccxt_order.get("price", 0) or 0),
+            price=resolve_ccxt_order_fill_price(ccxt_order),
             amount=float(ccxt_order.get("amount", 0) or 0),
             filled=float(ccxt_order.get("filled", 0) or 0),
             remaining=float(ccxt_order.get("remaining", 0) or 0),

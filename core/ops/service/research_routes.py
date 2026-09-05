@@ -5,17 +5,20 @@ import json
 import secrets
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from core.audit.ops_audit import ops_audit_scope
 from core.ops.service import api as ops_api
-from core.ops.service.auth import get_request_auth
+from core.ops.service.auth import get_request_auth, require_ops_permissions_dependency
 
 
 router = APIRouter()
 
 
-@router.post("/research/run")
+@router.post(
+    "/research/run",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def research_run(request: Request, payload: ops_api.ResearchRunRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()

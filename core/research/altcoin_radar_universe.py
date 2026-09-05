@@ -12,6 +12,7 @@ and this module merges / deduplicates them according to scope.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -132,6 +133,36 @@ _WATCHLIST_SYMBOL_ALIASES: Dict[str, str] = {
     "RNDR/USDT": "RENDER/USDT",
     "MATIC/USDT": "POL/USDT",
 }
+_WATCHLIST_BASE_ALIASES: Dict[str, str] = {
+    "RNDR": "RENDER",
+    "MATIC": "POL",
+}
+
+
+def normalize_altcoin_pair(symbol: object) -> str:
+    """Return one canonical ``BASE/USDT`` key for radar symbols.
+
+    Inputs arrive as forms such as ``TAG/USDT``, ``TAGUSDT`` and
+    ``TAG-USDT-SWAP``. Treating those strings as different keys creates
+    duplicate candidates downstream.
+    """
+    text = str(symbol or "").strip().upper()
+    if not text:
+        return ""
+    if "/" in text:
+        text = text.split("/", 1)[0]
+    else:
+        suffixes = (
+            "-USDT-SWAP", "-USD-SWAP", "_USDT", "_USD",
+            "-USDT", "-USD", "USDT", "PERP",
+        )
+        for suffix in suffixes:
+            if text.endswith(suffix) and len(text) > len(suffix):
+                text = text[: -len(suffix)]
+                break
+    base = re.sub(r"[^A-Z0-9]", "", text)
+    base = _WATCHLIST_BASE_ALIASES.get(base, base)
+    return f"{base}/USDT" if base else ""
 
 # Tiny in-memory cache so a burst of API calls (radar dashboard hits this on
 # every tab focus) doesn't repeatedly stat + read the JSON file. TTL kept
@@ -250,7 +281,7 @@ def _normalize(symbols: Iterable[str]) -> List[str]:
     out: List[str] = []
     seen: set = set()
     for s in symbols:
-        text = str(s or "").strip().upper()
+        text = normalize_altcoin_pair(s)
         text = _WATCHLIST_SYMBOL_ALIASES.get(text, text)
         if text and text not in seen:
             seen.add(text)
