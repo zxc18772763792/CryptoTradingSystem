@@ -18574,6 +18574,20 @@ body.app-page #altcoin-radar #altcoin-radar-operating-mode-banner {
     line-height: 1.45 !important;
 }
 
+/* At the normal Chrome 100% workspace width the global header already shows
+   the trading mode and feed status. Keep radar from adding a second page
+   header and a debug strip that push its first content row below every other
+   console tab. The title remains visible in the configuration card. */
+body.app-page #altcoin-radar .altcoin-radar-page-head,
+body.app-page #altcoin-radar #altcoin-radar-operating-mode-banner {
+    display: none !important;
+}
+
+body.app-page:has(#altcoin-radar.active) .primary-tabs {
+    margin: 0 0 18px;
+    padding: 5px;
+}
+
 body.app-page #altcoin-radar .ui-operating-mode-banner-content {
     display: flex;
     align-items: center;
@@ -18793,6 +18807,26 @@ body.app-page #altcoin-radar #altcoin-radar-output {
 
     body.app-page #altcoin-radar .altcoin-radar-inspector-card {
         max-height: calc(100vh - 98px);
+    }
+}
+
+@media (max-width: 1500px) {
+    /* The connected Chrome tab is 1098px wide at 100% zoom. At that size
+       the radar's 380px control rail cannot support the old multi-column
+       control matrix without vertical CJK wrapping. */
+    body.app-page #altcoin-radar .altcoin-radar-control-head,
+    body.app-page #altcoin-radar .altcoin-radar-control-matrix,
+    body.app-page #altcoin-radar .altcoin-radar-library-grid,
+    body.app-page #altcoin-radar .altcoin-radar-top-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    body.app-page #altcoin-radar .altcoin-radar-param-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    body.app-page #altcoin-radar .altcoin-radar-summary-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 }
 
