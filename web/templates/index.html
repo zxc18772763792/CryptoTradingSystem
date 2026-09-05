@@ -34,10 +34,11 @@
             integrity="sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7"
             crossorigin="anonymous"></script>
 </head>
-<body>
-    <div class="container">
-        <header>
-            <div>
+<body class="app-page">
+    <div class="container app-shell">
+        <header class="page-header">
+            <div class="brand-lockup">
+                <span class="header-kicker">CRYPTO TRADING SYSTEM</span>
                 <h1>加密交易系统控制台</h1>
                 <p class="header-subtitle">统一看板 | 模拟盘执行 | 风控熔断 | 多策略协同</p>
             </div>
@@ -57,7 +58,7 @@
             </div>
         </div>
 
-        <nav class="tabs">
+        <nav class="tabs primary-tabs" aria-label="主导航">
             <button class="tab-btn active" data-tab="dashboard">仪表盘</button>
             <button class="tab-btn" data-tab="news">新闻</button>
             <button class="tab-btn" data-tab="trading">交易</button>

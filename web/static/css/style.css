@@ -17927,3 +17927,575 @@ body:has(#ai-agent.active) .container {
     font-size: 12px;
     text-align: center;
 }
+
+/* =====================================================================
+   UI SYSTEM v3 — shared shell and stable page geometry
+   ---------------------------------------------------------------------
+   The application has several research-heavy workspaces, but they share
+   the same navigation, cards, controls, tables and status language. This
+   layer is the final contract for those primitives. Page-specific rules
+   may still tune content density, but should not redefine the shell.
+   ===================================================================== */
+:root {
+    --ui-content-max: 1900px;
+    --ui-gutter: clamp(16px, 2.15vw, 34px);
+    --ui-section-gap: 16px;
+    --ui-card-gap: 14px;
+    --ui-card-radius: 12px;
+    --ui-control-radius: 8px;
+    --ui-control-height: 36px;
+    --ui-focus-ring: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+}
+
+html {
+    background: var(--bg-main);
+    color-scheme: dark;
+    scroll-behavior: smooth;
+}
+
+body.app-page {
+    min-width: 320px;
+    min-height: 100vh;
+    background: var(--bg-main);
+}
+
+body.app-page .app-shell {
+    width: min(100%, var(--ui-content-max));
+    max-width: none;
+    padding: 24px var(--ui-gutter) 40px;
+}
+
+body.app-page .page-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+    align-items: end;
+    gap: 24px;
+    margin: 0 0 16px;
+    padding: 4px 0 18px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.brand-lockup {
+    min-width: 0;
+}
+
+.header-kicker {
+    display: block;
+    margin-bottom: 7px;
+    color: var(--positive-soft);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.18em;
+    line-height: 1;
+}
+
+body.app-page .page-header h1 {
+    margin: 0;
+    font-size: clamp(24px, 1.8vw, 32px);
+    line-height: 1.12;
+    letter-spacing: 0.01em;
+}
+
+body.app-page .header-subtitle {
+    margin: 7px 0 0;
+    color: var(--text-sub);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+body.app-page .status-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 7px;
+    min-width: 0;
+}
+
+body.app-page .status-bar > span:not(.status-badge):not(.mode-badge),
+body.app-page .status-bar > #current-time,
+body.app-page .status-bar > #news-now-time {
+    color: var(--text-faint);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+body.app-page .status-badge,
+body.app-page .mode-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 0 10px;
+    border: 1px solid rgba(var(--line-rgb), 0.22);
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 1;
+}
+
+body.app-page .page-link-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    margin-left: 0;
+    padding: 0 11px;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg);
+    color: var(--text-soft);
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+body.app-page .page-link-btn:hover,
+body.app-page .page-link-btn:focus-visible {
+    border-color: var(--accent);
+    background: var(--surface-raised);
+    color: var(--text-bright);
+    outline: none;
+}
+
+body.app-page .primary-tabs {
+    position: sticky;
+    top: 8px;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin: 0 0 18px;
+    padding: 5px;
+    overflow-x: auto;
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--ui-card-radius);
+    background: rgba(var(--panel-rgb), 0.94);
+    box-shadow: 0 10px 24px rgba(var(--shadow-rgb), 0.2);
+    scrollbar-width: thin;
+}
+
+body.app-page .primary-tabs .tab-btn {
+    flex: 0 0 auto;
+    min-height: 34px;
+    padding: 0 13px;
+    border: 1px solid transparent;
+    border-radius: var(--ui-control-radius);
+    color: var(--text-sub);
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+body.app-page .primary-tabs .tab-btn:hover,
+body.app-page .primary-tabs .tab-btn:focus-visible {
+    background: var(--surface-raised);
+    color: var(--text-bright);
+    outline: none;
+}
+
+body.app-page .primary-tabs .tab-btn.active {
+    border-color: var(--border-strong);
+    background: var(--surface-raised);
+    color: var(--text-bright);
+    box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+body.app-page #circuit-breaker-banner {
+    margin: 0 0 14px;
+}
+
+body.app-page .tab-content.active {
+    min-width: 0;
+    animation: ui-content-in 160ms ease-out;
+}
+
+@keyframes ui-content-in {
+    from { opacity: 0.72; transform: translateY(2px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Shared card, control and data primitives. */
+body.app-page .card {
+    min-width: 0;
+    border: 1px solid var(--card-border);
+    border-radius: var(--ui-card-radius);
+    background: var(--card-bg);
+    box-shadow: 0 10px 24px rgba(var(--shadow-rgb), 0.2);
+}
+
+body.app-page .card h3 {
+    margin-bottom: 13px;
+    padding-bottom: 9px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-bright);
+    font-size: 15px;
+    line-height: 1.3;
+}
+
+body.app-page .card h3::before {
+    width: 4px;
+    height: 15px;
+    margin-right: 8px;
+    border-radius: 3px;
+}
+
+body.app-page .form,
+body.app-page .inline-actions {
+    gap: 8px;
+}
+
+body.app-page .form-group {
+    gap: 5px;
+}
+
+body.app-page .form-group label,
+body.app-page .inline-actions label {
+    color: var(--text-sub);
+    font-size: 11px;
+    line-height: 1.35;
+}
+
+body.app-page .form-group input:not([type="checkbox"]):not([type="radio"]),
+body.app-page .form-group select,
+body.app-page .form-group textarea,
+body.app-page .inline-actions input:not([type="checkbox"]):not([type="radio"]),
+body.app-page .inline-actions select,
+body.app-page input:not([type="checkbox"]):not([type="radio"]),
+body.app-page select,
+body.app-page textarea {
+    border: 1px solid var(--border-strong);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg-deep);
+    color: var(--text-main);
+    font-size: 12px;
+}
+
+body.app-page .form-group input:not([type="checkbox"]):not([type="radio"]),
+body.app-page .form-group select,
+body.app-page .inline-actions input:not([type="checkbox"]):not([type="radio"]),
+body.app-page .inline-actions select,
+body.app-page input:not([type="checkbox"]):not([type="radio"]),
+body.app-page select {
+    min-height: var(--ui-control-height);
+}
+
+body.app-page .form-group input:focus,
+body.app-page .form-group select:focus,
+body.app-page .form-group textarea:focus,
+body.app-page .inline-actions input:focus,
+body.app-page .inline-actions select:focus,
+body.app-page input:focus,
+body.app-page select:focus,
+body.app-page textarea:focus {
+    border-color: var(--accent);
+    box-shadow: var(--ui-focus-ring);
+    outline: none;
+}
+
+body.app-page .btn {
+    min-height: var(--ui-control-height);
+    padding: 0 13px;
+    border: 1px solid transparent;
+    border-radius: var(--ui-control-radius);
+    font-size: 12px;
+    line-height: 1;
+    transition: background-color 140ms ease, border-color 140ms ease, filter 140ms ease, transform 140ms ease;
+}
+
+body.app-page .btn-sm {
+    min-height: 30px;
+    padding: 0 10px;
+    font-size: 11px;
+}
+
+body.app-page .btn:focus-visible {
+    box-shadow: var(--ui-focus-ring);
+    outline: none;
+}
+
+body.app-page .btn:hover {
+    transform: translateY(-1px);
+}
+
+body.app-page .table-container,
+body.app-page .output-box,
+body.app-page .list {
+    min-width: 0;
+}
+
+body.app-page .table-container {
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg-deep);
+}
+
+body.app-page .data-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+}
+
+body.app-page .data-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--surface-raised);
+    color: var(--text-sub);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+}
+
+body.app-page .data-table td {
+    color: var(--text-soft);
+    font-size: 12px;
+    vertical-align: middle;
+}
+
+body.app-page .data-table tbody tr:hover {
+    background: rgba(var(--accent-rgb), 0.06);
+}
+
+body.app-page .list-item {
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 0;
+    border-bottom-color: var(--border-subtle);
+}
+
+body.app-page .output-box {
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--ui-control-radius);
+    background: var(--panel-bg-deep);
+    color: var(--text-soft);
+    font-size: 11px;
+    line-height: 1.55;
+}
+
+/* Stable desktop geometry for the shared dashboard grids. */
+body.app-page #dashboard > .grid,
+body.app-page #strategies > .grid,
+body.app-page #data > .grid,
+body.app-page #backtest > .grid {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: var(--ui-card-gap);
+    align-items: stretch;
+}
+
+body.app-page #dashboard > .grid > .card,
+body.app-page #strategies > .grid > .card,
+body.app-page #data > .grid > .card,
+body.app-page #backtest > .grid > .card {
+    grid-column: span 4;
+    align-self: stretch;
+}
+
+body.app-page #dashboard > .grid > .card.wide,
+body.app-page #strategies > .grid > .card.wide,
+body.app-page #data > .grid > .card.wide,
+body.app-page #backtest > .grid > .card.wide {
+    grid-column: span 8;
+}
+
+body.app-page #trading .trading-workspace,
+body.app-page #research .research-workspace,
+body.app-page #altcoin-radar .altcoin-radar-workspace,
+body.app-page #arbitrage .arbitrage-workspace {
+    gap: var(--ui-section-gap);
+}
+
+body.app-page #trading .trading-main,
+body.app-page #research .research-main,
+body.app-page #altcoin-radar .altcoin-radar-main,
+body.app-page #arbitrage .arbitrage-main {
+    min-width: 0;
+}
+
+/* News uses the same 12-column rhythm as the main console. Fixed viewport
+   heights were causing cards to drift apart as copy or data changed. */
+body.news-page .news-layout,
+body.app-page #news .news-layout {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: var(--ui-card-gap);
+    align-items: stretch;
+}
+
+body.news-page .news-card,
+body.app-page #news .news-card {
+    grid-column: span 4;
+    height: auto;
+    min-height: 0;
+    align-self: stretch;
+    padding: 16px;
+}
+
+body.news-page .news-card-summary,
+body.app-page #news .news-card-summary {
+    grid-column: span 5;
+    min-height: 330px;
+}
+
+body.news-page .news-card-controls,
+body.app-page #news .news-card-controls {
+    grid-column: span 4;
+    min-height: 330px;
+}
+
+body.news-page .news-card-queue,
+body.app-page #news .news-card-queue {
+    grid-column: span 3;
+    min-height: 330px;
+}
+
+body.news-page .news-card-chart,
+body.app-page #news .news-card-chart {
+    grid-column: span 7;
+    min-height: 450px;
+}
+
+body.news-page .news-card-raw,
+body.app-page #news .news-card-raw {
+    grid-column: span 5;
+    min-height: 450px;
+}
+
+body.news-page .news-card-structured,
+body.app-page #news .news-card-structured {
+    grid-column: 1 / -1;
+    min-height: 430px;
+}
+
+body.news-page .news-scroll,
+body.app-page #news .news-scroll {
+    background: var(--panel-bg-deep);
+    border-color: var(--border-subtle);
+}
+
+body.news-page .news-scroll-compact,
+body.app-page #news .news-scroll-compact {
+    flex: 0 0 96px;
+    max-height: 96px;
+}
+
+body.news-page .news-card-summary .news-scroll-fill,
+body.app-page #news .news-card-summary .news-scroll-fill,
+body.news-page .news-card-queue .news-scroll-fill,
+body.app-page #news .news-card-queue .news-scroll-fill {
+    flex: 1 1 0;
+    max-height: 220px;
+    min-height: 0;
+}
+
+@media (max-width: 1260px) {
+    body.app-page #dashboard > .grid > .card,
+    body.app-page #strategies > .grid > .card,
+    body.app-page #data > .grid > .card,
+    body.app-page #backtest > .grid > .card {
+        grid-column: span 6;
+    }
+
+    body.app-page #dashboard > .grid > .card.wide,
+    body.app-page #strategies > .grid > .card.wide,
+    body.app-page #data > .grid > .card.wide,
+    body.app-page #backtest > .grid > .card.wide {
+        grid-column: 1 / -1;
+    }
+
+    body.news-page .news-card-summary,
+    body.app-page #news .news-card-summary,
+    body.news-page .news-card-controls,
+    body.app-page #news .news-card-controls {
+        grid-column: span 6;
+    }
+
+    body.news-page .news-card-queue,
+    body.app-page #news .news-card-queue,
+    body.news-page .news-card-chart,
+    body.app-page #news .news-card-chart,
+    body.news-page .news-card-raw,
+    body.app-page #news .news-card-raw,
+    body.news-page .news-card-structured,
+    body.app-page #news .news-card-structured {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 900px) {
+    body.app-page .app-shell {
+        padding: 18px 16px 30px;
+    }
+
+    body.app-page .page-header {
+        grid-template-columns: 1fr;
+        align-items: start;
+        gap: 12px;
+    }
+
+    body.app-page .status-bar {
+        justify-content: flex-start;
+    }
+
+    body.app-page .primary-tabs {
+        position: static;
+    }
+
+    body.app-page #dashboard > .grid,
+    body.app-page #strategies > .grid,
+    body.app-page #data > .grid,
+    body.app-page #backtest > .grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    body.app-page #dashboard > .grid > .card,
+    body.app-page #dashboard > .grid > .card.wide,
+    body.app-page #strategies > .grid > .card,
+    body.app-page #strategies > .grid > .card.wide,
+    body.app-page #data > .grid > .card,
+    body.app-page #data > .grid > .card.wide,
+    body.app-page #backtest > .grid > .card,
+    body.app-page #backtest > .grid > .card.wide,
+    body.news-page .news-card-summary,
+    body.app-page #news .news-card-summary,
+    body.news-page .news-card-controls,
+    body.app-page #news .news-card-controls,
+    body.news-page .news-card-queue,
+    body.app-page #news .news-card-queue,
+    body.news-page .news-card-chart,
+    body.app-page #news .news-card-chart,
+    body.news-page .news-card-raw,
+    body.app-page #news .news-card-raw,
+    body.news-page .news-card-structured,
+    body.app-page #news .news-card-structured {
+        grid-column: 1;
+    }
+
+    body.news-page .news-card,
+    body.app-page #news .news-card {
+        min-height: 0;
+    }
+}
+
+@media (max-width: 560px) {
+    body.app-page .app-shell {
+        padding-inline: 12px;
+    }
+
+    body.app-page .card,
+    body.news-page .news-card,
+    body.app-page #news .news-card {
+        padding: 13px;
+        border-radius: 10px;
+    }
+
+    body.app-page .form-row,
+    body.app-page .trading-order-card .form-row,
+    body.app-page .trading-account-card .form-row {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    body.app-page .primary-tabs .tab-btn {
+        padding-inline: 11px;
+    }
+}
