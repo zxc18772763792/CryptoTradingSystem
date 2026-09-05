@@ -111,3 +111,28 @@ def require_ops_permissions(request: Request, *permissions: str) -> OpsAuthConte
         status_code=status.HTTP_403_FORBIDDEN,
         detail=f"permission denied: {' or '.join(normalized)}",
     )
+
+
+def require_ops_permissions_dependency(*permissions: str):
+    """Build a FastAPI dependency that enforces Ops RBAC permissions.
+
+    The parent Ops router authenticates the request first and stores the
+    resulting context on ``request.state``.  Route-level dependencies created
+    here then make the authorization requirement explicit and ensure a denied
+    request never reaches endpoint code that may catch broad exceptions.
+    """
+    normalized = tuple(
+        str(permission or "").strip()
+        for permission in permissions
+        if str(permission or "").strip()
+    )
+
+    async def _dependency(request: Request) -> OpsAuthContext:
+        if not isinstance(getattr(request.state, "ops_auth", None), OpsAuthContext):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="ops authentication required",
+            )
+        return require_ops_permissions(request, *normalized)
+
+    return _dependency

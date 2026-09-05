@@ -11,7 +11,7 @@ import pytest
 from core.exchanges.base_exchange import OrderStatus
 from core.strategies import Signal, SignalType
 from core.trading.execution_engine import ExecutionEngine
-from core.trading.order_manager import OrderType
+from core.trading.order_manager import OrderRequest, OrderSide, OrderType
 from core.trading.position_manager import PositionSide, position_manager
 
 execution_engine_module = importlib.import_module("core.trading.execution_engine")
@@ -41,9 +41,33 @@ def test_resolved_order_fill_qty_only_falls_back_for_closed_orders():
     ) == pytest.approx(1.0)
 
 
-def test_manual_order_does_not_open_local_position_when_live_order_is_unfilled(monkeypatch):
+def test_paper_account_equity_deducts_fee_but_not_embedded_slippage(monkeypatch):
+    engine = ExecutionEngine()
+    engine._paper_trading = True
+    monkeypatch.setattr(
+        execution_engine_module.order_manager,
+        "get_order_metadata",
+        lambda order_id: {
+            "paper_fee_usd": 0.08,
+            "paper_slippage_cost_usd": 0.12,
+        },
+    )
+
+    costs = engine._consume_paper_order_cost("paper-order-1")
+
+    assert costs == {"fee_usd": pytest.approx(0.08), "slippage_cost_usd": pytest.approx(0.12)}
+    assert engine._paper_total_fees_usd == pytest.approx(0.08)
+    assert engine._consume_paper_order_cost("paper-order-1") == {
+        "fee_usd": 0.0,
+        "slippage_cost_usd": 0.0,
+    }
+
+
+def test_manual_order_does_not_open_local_position_when_live_order_is_unfilled(monkeypatch, tmp_path):
     engine = ExecutionEngine()
     engine._paper_trading = False
+    engine._pending_live_order_intents_path = tmp_path / "pending_order_intents.json"
+    engine._pending_live_order_intents = {}
 
     record_trade_calls: list[dict] = []
     notify_mock = AsyncMock(return_value=None)
@@ -111,6 +135,103 @@ def test_manual_order_does_not_open_local_position_when_live_order_is_unfilled(m
     assert position_manager.get_position("binance", "BTC/USDT", account_id="main", strategy="manual_demo") is None
     assert record_trade_calls == []
     assert notify_mock.await_args.args[0] == "manual_order_submitted"
+    pending = engine.list_pending_live_order_intents(unresolved_only=True)
+    assert len(pending) == 1
+    assert pending[0]["status"] == "open"
+    assert pending[0]["symbol"] == "BTC/USDT"
+    assert engine._pending_live_order_intents_path.exists()
+
+    retry = asyncio.run(
+        engine._execute_manual_order_single_in_active_mode(
+            exchange="binance",
+            symbol="BTC/USDT",
+            side="buy",
+            order_type="limit",
+            amount=1.0,
+            price=100.0,
+            leverage=2.0,
+            stop_loss=None,
+            take_profit=None,
+            trailing_stop_pct=None,
+            trailing_stop_distance=None,
+            trigger_price=None,
+            order_mode="normal",
+            iceberg_parts=1,
+            algo_slices=1,
+            algo_interval_sec=0,
+            account_id="main",
+            reduce_only=False,
+            strategy="manual_demo",
+            params={},
+        )
+    )
+    assert retry is None
+    execution_engine_module.order_manager.create_order.assert_awaited_once()
+
+
+def test_live_reconcile_quarantines_unmatched_exposure_without_local_positions(monkeypatch, tmp_path):
+    engine = ExecutionEngine()
+    engine._paper_trading = False
+    engine._pending_live_order_intents_path = tmp_path / "pending_order_intents.json"
+    engine._pending_live_order_intents = {}
+    request = OrderRequest(
+        symbol="BTC/USDT",
+        side=OrderSide.BUY,
+        order_type=OrderType.LIMIT,
+        amount=1.0,
+        price=100.0,
+        exchange="binance",
+        strategy="pending_demo",
+        account_id="main",
+        params={"clientOrderId": "pending-cid-1"},
+    )
+    engine._record_pending_live_order_intent(
+        request=request,
+        status="unknown",
+        reason="submit timeout",
+    )
+    reloaded = ExecutionEngine()
+    reloaded._pending_live_order_intents_path = engine._pending_live_order_intents_path
+    reloaded._pending_live_order_intents = reloaded._load_pending_live_order_intents()
+    assert reloaded.list_pending_live_order_intents(unresolved_only=True)[0]["status"] == "unknown"
+    connector = SimpleNamespace(
+        config=SimpleNamespace(default_type="future"),
+        get_positions=AsyncMock(
+            return_value=[
+                {
+                    "symbol": "BTCUSDT",
+                    "side": "long",
+                    "amount": 1.0,
+                    "entry_price": 101.0,
+                    "current_price": 102.0,
+                    "unrealizedPnl": 1.0,
+                    "leverage": 2.0,
+                }
+            ]
+        ),
+    )
+    notify_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(engine, "_ensure_exchange_connector", AsyncMock(return_value=connector))
+    monkeypatch.setattr(engine, "_notify_callbacks", notify_mock)
+
+    asyncio.run(engine._reconcile_local_positions_with_exchange())
+
+    quarantined = position_manager.get_position(
+        "binance",
+        "BTC/USDT",
+        account_id="main",
+        strategy="__exchange_quarantine__",
+    )
+    assert quarantined is not None
+    assert quarantined.quantity == pytest.approx(1.0)
+    assert quarantined.metadata["quarantined"] is True
+    assert quarantined.metadata["pending_order_intent_id"] == "pending-cid-1"
+    pending = engine.list_pending_live_order_intents(unresolved_only=True)
+    assert pending[0]["status"] == "exposure_quarantined"
+    assert any(
+        call.args and call.args[0] == "unmatched_exchange_exposure_quarantined"
+        for call in notify_mock.await_args_list
+    )
 
 
 def test_live_reconcile_syncs_local_position_size_from_exchange(monkeypatch):

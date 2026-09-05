@@ -18,7 +18,7 @@ from config.database import (
 )
 from config.settings import settings
 from core.governance.audit import GovernanceAuditEvent, new_trace_id, write_audit
-from core.governance.rbac import GovernanceIdentity, has_permission
+from core.governance.rbac import API_USER_ROLES, GovernanceIdentity, has_permission
 from core.governance.rbac import hash_api_key as _hash_api_key
 from core.governance.schemas import RiskConfigPayload, StrategyLifecycleState
 from core.risk.risk_manager import risk_manager
@@ -39,6 +39,51 @@ def _now() -> datetime:
 
 def _normalize_role(role: str) -> str:
     return str(role or "").upper().strip()
+
+
+_MIN_API_KEY_LENGTH = 32
+_MAX_API_KEY_LENGTH = 512
+_MIN_API_KEY_UNIQUE_CHARS = 8
+
+
+def _validate_api_user_role(role: str) -> str:
+    normalized = _normalize_role(role)
+    if normalized not in API_USER_ROLES:
+        raise HTTPException(status_code=422, detail="invalid API user role")
+    return normalized
+
+
+def _require_role_delegation(actor: GovernanceIdentity, target_role: str) -> None:
+    """Prevent API identities from minting a more privileged identity.
+
+    RBAC roles in this service are capability-based rather than a safe linear
+    hierarchy.  SYSTEM can delegate any allowlisted role; other identities may
+    only delegate their own role.  This is deliberately stricter than a numeric
+    rank and prevents gaining an incomparable permission set through another
+    role.
+    """
+    actor_role = _normalize_role(actor.role)
+    normalized_target = _validate_api_user_role(target_role)
+    if actor_role == "SYSTEM" or normalized_target == actor_role:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=f"role delegation denied: {actor_role} cannot manage {normalized_target}",
+    )
+
+
+def _validate_api_user_key(api_key: str) -> str:
+    value = str(api_key or "")
+    if value != value.strip():
+        raise HTTPException(status_code=422, detail="API key must not contain surrounding whitespace")
+    if not (_MIN_API_KEY_LENGTH <= len(value) <= _MAX_API_KEY_LENGTH):
+        raise HTTPException(
+            status_code=422,
+            detail=f"API key must be between {_MIN_API_KEY_LENGTH} and {_MAX_API_KEY_LENGTH} characters",
+        )
+    if len(set(value)) < _MIN_API_KEY_UNIQUE_CHARS:
+        raise HTTPException(status_code=422, detail="API key does not meet minimum complexity")
+    return value
 
 
 def _require_permission(identity: GovernanceIdentity, permission: str) -> None:
@@ -609,22 +654,32 @@ async def upsert_api_user(
     is_active: bool = True,
 ) -> Dict[str, Any]:
     _require_permission(actor, "deploy_config")
-    key_hash = _hash_api_key(api_key)
+    normalized_role = _validate_api_user_role(role)
+    _require_role_delegation(actor, normalized_role)
+    validated_key = _validate_api_user_key(api_key)
+    normalized_name = str(name or "").strip()
+    if not normalized_name:
+        raise HTTPException(status_code=422, detail="API user name is required")
+    key_hash = _hash_api_key(validated_key)
     async with async_session_maker() as session:
         result = await session.execute(select(ApiUser).where(ApiUser.api_key_hash == key_hash))
         row = result.scalars().first()
         if row is None:
             row = ApiUser(
-                name=str(name),
-                role=_normalize_role(role),
+                name=normalized_name,
+                role=normalized_role,
                 api_key_hash=key_hash,
                 is_active=bool(is_active),
                 created_at=_now(),
                 updated_at=_now(),
             )
         else:
-            row.name = str(name)
-            row.role = _normalize_role(role)
+            # A lower-privileged caller must not demote, disable, or otherwise
+            # modify a pre-existing higher-privileged identity even if it has
+            # learned that identity's raw API key.
+            _require_role_delegation(actor, str(row.role or ""))
+            row.name = normalized_name
+            row.role = normalized_role
             row.is_active = bool(is_active)
             row.updated_at = _now()
         session.add(row)
@@ -635,13 +690,13 @@ async def upsert_api_user(
             action="upsert_api_user",
             actor=actor.actor,
             role=actor.role,
-            input_payload={"name": name, "role": role, "is_active": is_active},
+            input_payload={"name": normalized_name, "role": normalized_role, "is_active": is_active},
             output_payload={"api_key_hash_prefix": key_hash[:12], "is_active": is_active},
         )
     )
     return {
-        "name": str(name),
-        "role": _normalize_role(role),
+        "name": normalized_name,
+        "role": normalized_role,
         "is_active": bool(is_active),
         "api_key_hash_prefix": key_hash[:12],
     }

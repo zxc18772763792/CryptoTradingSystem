@@ -270,7 +270,17 @@
     const seen = new Set();
     (Array.isArray(values) ? values : [values]).forEach((item) => {
       let text = String(item || '').trim().toUpperCase();
-      if (text === 'RNDR/USDT') text = 'RENDER/USDT';
+      if (text.includes('/')) {
+        text = text.split('/', 1)[0];
+      } else {
+        const suffix = ['-USDT-SWAP', '-USD-SWAP', '_USDT', '_USD', '-USDT', '-USD', 'USDT', 'PERP']
+          .find((candidate) => text.endsWith(candidate) && text.length > candidate.length);
+        if (suffix) text = text.slice(0, -suffix.length);
+      }
+      text = text.replace(/[^A-Z0-9]/g, '');
+      if (text === 'RNDR') text = 'RENDER';
+      if (text === 'MATIC') text = 'POL';
+      if (text) text = `${text}/USDT`;
       if (!text || seen.has(text)) return;
       seen.add(text);
       out.push(text);
@@ -998,6 +1008,25 @@
     });
   }
 
+  function dedupeRowsBySymbol(rows) {
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(rows) ? rows : []).forEach((rawRow) => {
+      const row = rawRow && typeof rawRow === 'object' ? { ...rawRow } : {};
+      const symbol = normalizeSymbols([row.symbol])[0] || '';
+      if (!symbol || seen.has(symbol)) return;
+      seen.add(symbol);
+      row.symbol = symbol;
+      row.tags = Array.from(new Set(
+        (Array.isArray(row.tags) ? row.tags : [])
+          .map((tag) => String(tag || '').trim())
+          .filter(Boolean)
+      ));
+      out.push(row);
+    });
+    return out;
+  }
+
   function renderSummary(summary) {
     const strip = q('altcoin-radar-summary-strip');
     if (!strip) return;
@@ -1066,7 +1095,11 @@
   }
 
   function renderTagRow(tags) {
-    const list = Array.isArray(tags) ? tags : [];
+    const list = Array.from(new Set(
+      (Array.isArray(tags) ? tags : [])
+        .map((tag) => String(tag || '').trim())
+        .filter(Boolean)
+    ));
     if (!list.length) {
       return '<span class="altcoin-radar-tag" data-tone="muted">待跟踪</span>';
     }
@@ -1098,7 +1131,7 @@
   function renderRanking(rows) {
     const tbody = q('altcoin-radar-ranking-body');
     if (!tbody) return;
-    const filteredRows = applyClientFilters(rows);
+    const filteredRows = applyClientFilters(dedupeRowsBySymbol(rows));
     state.filteredRows = filteredRows;
     if (!filteredRows.length) {
       const filterText = activeFilterSummary();
@@ -1592,10 +1625,13 @@
   }
 
   function renderScan(scanPayload) {
-    state.scan = scanPayload || null;
-    renderSummary(scanPayload?.summary || {});
-    renderRanking(scanPayload?.rows || []);
-    renderMeta(scanPayload || {});
+    const normalizedPayload = scanPayload && typeof scanPayload === 'object'
+      ? { ...scanPayload, rows: dedupeRowsBySymbol(scanPayload.rows || []) }
+      : null;
+    state.scan = normalizedPayload;
+    renderSummary(normalizedPayload?.summary || {});
+    renderRanking(normalizedPayload?.rows || []);
+    renderMeta(normalizedPayload || {});
   }
 
   function syncUniverseSelection(symbols) {

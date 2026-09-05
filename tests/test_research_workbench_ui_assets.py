@@ -19,13 +19,38 @@ def test_research_workbench_module_actions_share_primary_style():
     assert 'class="btn btn-primary btn-sm" id="btn-workbench-onchain"' in template
     assert 'class="btn btn-primary btn-sm" id="btn-workbench-discipline"' in template
     assert ".research-module-btns .btn" in style_css
-    assert "linear-gradient(135deg, #1a9a5e, #26dc85)" in style_css
+    assert (
+        "linear-gradient(135deg, #1a9a5e, #26dc85)" in style_css
+        or "linear-gradient(135deg, var(--positive-deep), var(--positive))" in style_css
+    )
     assert "bindAsyncButton('btn-workbench-market-state'" in workbench_js
     assert "bindAsyncButton('btn-workbench-discipline'" in workbench_js
     assert 'id="btn-refresh-market-sentiment-panel"' in template
     assert "async function syncWorkbenchMarketSentiment(payload, options = {})" in workbench_js
     assert "window.syncWorkbenchMarketSentiment = syncWorkbenchMarketSentiment;" in workbench_js
     assert "window.syncWorkbenchMarketSentiment(payload).catch(()=>{});" in app_js
+
+
+def test_research_workbench_guides_the_workflow_and_keeps_profile_chrome_current():
+    template = _read("web/templates/index.html")
+    style_css = _read("web/static/css/style.css")
+    workbench_js = _read("web/static/js/research_workbench.js")
+
+    assert 'id="research-section-nav"' in template
+    assert 'class="research-config-section research-universe-picker"' in template
+    assert 'id="research-universe-summary"' in template
+    assert 'id="research-factor-section"' in template
+    assert ".research-section-nav-links" in style_css
+    assert ".research-module-btns .btn" in style_css
+    assert "function renderWorkflowChrome(profile = getProfile())" in workbench_js
+    assert "function watchProgrammaticConfigChanges()" in workbench_js
+    assert "state.configObserver.observe(select" in workbench_js
+
+    marker = "function renderStatusCards()"
+    section = workbench_js.split(marker, 1)[1].split("function setOverviewCardValue", 1)[0]
+    assert "const profile = getProfile();" in section
+    assert "renderWorkflowChrome(profile);" in section
+    assert "运行总览后启用 30 分钟自动刷新" in section
 
 
 def test_research_workbench_recommendations_render_structured_actions():
@@ -83,6 +108,32 @@ def test_research_workbench_overview_button_uses_parallel_overview_endpoint():
     assert "apiResearch(`/overview?${profileQuery(state.profile)}`" in section
     assert "Object.entries(overview.modules || {}).forEach" in section
     assert "research.workbench.overview.fallback" in section
+
+
+def test_research_workbench_auto_refresh_stops_timers_when_tab_hidden():
+    workbench_js = _read("web/static/js/research_workbench.js")
+
+    stop_marker = "function stopWorkbenchAutoRefresh()"
+    assert stop_marker in workbench_js
+    stop_section = workbench_js.split(stop_marker, 1)[1].split(
+        "function startWorkbenchAutoRefresh", 1
+    )[0]
+    assert "clearInterval(state.autoRefreshTimer)" in stop_section
+    assert "clearInterval(state._countdownTimer)" in stop_section
+    assert "state.autoRefreshTimer = null;" in stop_section
+    assert "state._countdownTimer = null;" in stop_section
+
+    start_section = workbench_js.split("function startWorkbenchAutoRefresh", 1)[1].split(
+        "if (typeof document !== 'undefined')", 1
+    )[0]
+    assert "stopWorkbenchAutoRefresh();" in start_section
+    assert "document.hidden" in start_section
+
+    visibility_section = workbench_js.split("document.addEventListener('visibilitychange'", 1)[
+        1
+    ].split("function bindAsyncButton", 1)[0]
+    assert "if (document.hidden)" in visibility_section
+    assert "stopWorkbenchAutoRefresh();" in visibility_section
 
 
 def test_onchain_panels_use_auto_chain_resolution():

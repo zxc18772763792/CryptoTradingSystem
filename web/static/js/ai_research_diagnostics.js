@@ -114,7 +114,7 @@
       summaryEl.textContent = '首屏暂不抢重接口，可稍后自动补齐或手动刷新。';
     }
     if (!String(detailsEl.textContent || '').trim()) {
-      detailsEl.innerHTML = '<div style="padding:8px;background:#141f2f;border-radius:6px;">研究工作台会先显示提案、候选和运行信号，再补新闻/宏观诊断，避免首屏长时间空白。</div>';
+      detailsEl.innerHTML = '<div style="padding:8px;background:var(--card-bg);border-radius:6px;">研究工作台会先显示提案、候选和运行信号，再补新闻/宏观诊断，避免首屏长时间空白。</div>';
     }
   }
 
@@ -167,33 +167,33 @@
       : '新闻、宏观和微观数据已就绪';
 
     detailsEl.innerHTML = `
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">新闻诊断</div>
+      <div style="padding:8px;background:var(--card-bg);border-radius:6px;">
+        <div style="color:var(--accent-soft);font-weight:700;margin-bottom:4px;">新闻诊断</div>
         <div>范围 ${esc(summaryScope)} / 结构化事件 ${newsEvents} / 原始新闻 ${rawCount} / Feed ${feedCount}</div>
         <div>启用源 ${enabledSources} / 源状态 ${sourceStates.length} / LLM 队列 ${pendingNewsTasks}</div>
         <div>最近拉取 ${esc(lastPull?.timestamp ? fmtTs(lastPull.timestamp) : '--')} / 最近 LLM ${esc(lastLlm?.timestamp ? fmtTs(lastLlm.timestamp) : '--')}</div>
       </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">宏观 / 资金费率</div>
+      <div style="padding:8px;background:var(--card-bg);border-radius:6px;">
+        <div style="color:var(--accent-soft);font-weight:700;margin-bottom:4px;">宏观 / 资金费率</div>
         <div>缓存行数 ${fundingRows} / Funding ${Number.isFinite(fundingRate) ? fundingRate.toFixed(6) : '--'} / Basis ${Number.isFinite(basisPct) ? `${basisPct.toFixed(3)}%` : '--'}</div>
         <div>覆盖区间 ${esc(coverage?.start || '--')} ~ ${esc(coverage?.end || '--')}</div>
-        <div style="margin-top:4px;color:#7e92b2;">Funding 缓存路径: ${esc(fundingPath)}</div>
+        <div style="margin-top:4px;color:var(--text-faint);">Funding 缓存路径: ${esc(fundingPath)}</div>
       </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">社区 / 巨鲸 / 公告</div>
+      <div style="padding:8px;background:var(--card-bg);border-radius:6px;">
+        <div style="color:var(--accent-soft);font-weight:700;margin-bottom:4px;">社区 / 巨鲸 / 公告</div>
         <div>巨鲸 ${whaleCount} / 公告 ${announcementCount} / 微观点差 ${spreadBps.toFixed(2)} bps</div>
       </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">高级数据源</div>
+      <div style="padding:8px;background:var(--card-bg);border-radius:6px;">
+        <div style="color:var(--accent-soft);font-weight:700;margin-bottom:4px;">高级数据源</div>
         <div>缓存 ${premiumCachedCount}/${premiumRows.length} / Key 已配置 ${premiumConfiguredCount}</div>
         <div>${premiumActiveNames.length ? `活跃源 ${esc(premiumActiveNames.join(' / '))}` : '暂无活跃缓存源（可选）'}</div>
       </div>
-      <div style="padding:8px;background:#141f2f;border-radius:6px;">
-        <div style="color:#c2d0e8;font-weight:700;margin-bottom:4px;">存储说明</div>
-        <div style="margin-top:3px;color:#9fb1c9;">新闻库: ./data/crypto_trading.db</div>
-        <div style="margin-top:3px;color:#9fb1c9;">Funding 缓存: ${esc(fundingPath)}</div>
-        <div style="margin-top:3px;color:#9fb1c9;">高级源缓存: ./data/premium/*</div>
-        <div style="margin-top:3px;color:#9fb1c9;">当前币种新闻过少时会自动回退到全市场摘要，避免诊断全 0。</div>
+      <div style="padding:8px;background:var(--card-bg);border-radius:6px;">
+        <div style="color:var(--accent-soft);font-weight:700;margin-bottom:4px;">存储说明</div>
+        <div style="margin-top:3px;color:var(--text-sub);">新闻库: ./data/crypto_trading.db</div>
+        <div style="margin-top:3px;color:var(--text-sub);">Funding 缓存: ${esc(fundingPath)}</div>
+        <div style="margin-top:3px;color:var(--text-sub);">高级源缓存: ./data/premium/*</div>
+        <div style="margin-top:3px;color:var(--text-sub);">当前币种新闻过少时会自动回退到全市场摘要，避免诊断全 0。</div>
       </div>
     `;
   }
@@ -302,7 +302,7 @@
         };
       } catch (err) {
         summaryEl.textContent = `数据诊断加载失败: ${String(err?.message || err)}`;
-        detailsEl.innerHTML = '<div style="padding:8px;background:#141f2f;border-radius:6px;">请稍后重试，或点击“刷新诊断”。</div>';
+        detailsEl.innerHTML = '<div style="padding:8px;background:var(--card-bg);border-radius:6px;">请稍后重试，或点击“刷新诊断”。</div>';
         throw err;
       }
     })();

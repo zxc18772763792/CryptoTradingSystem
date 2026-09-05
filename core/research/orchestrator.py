@@ -374,6 +374,7 @@ def _recover_stale_jobs_on_startup(app: FastAPI) -> None:
     stale_states = {"research_running", "research_queued"}
     try:
         recovery_reason = "service restart; research job did not complete"
+        app.state.research_job_tasks = {}
         proposals = app.state.ai_proposal_registry.list(limit=None)
         for proposal in proposals:
             if str(proposal.status) not in stale_states:

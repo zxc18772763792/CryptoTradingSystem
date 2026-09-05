@@ -90,7 +90,7 @@ For daily use, remember this small command family:
 .\web.bat stop -IncludeWorkers
 ```
 
-`.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and starts in `paper` mode by default. It will not enter or restore `live` mode unless you explicitly pass `-AllowPersistedLiveMode`.
+`.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and now defaults to guarded `live` mode with `MARKET_WS_MODE=strategy_primary`, fail-closed live reads, and the WS quality guard enabled. Use `-PaperMode` for an explicit paper/offline-WS startup.
 
 When analytics-history is enabled, `.\web.bat status` may briefly show the service as `warming_up` while `/health` or `/api/status` finishes coming online. That is expected during heavier startup paths and is different from a true stopped state.
 
@@ -100,10 +100,10 @@ To start the service and explicitly request the AI autonomous agent too:
 .\web.bat start -StartAutonomousAgent
 ```
 
-To intentionally start the managed service in `live` mode:
+To explicitly opt out of live mode:
 
 ```bat
-.\web.bat start -AllowPersistedLiveMode
+.\web.bat start -PaperMode
 ```
 
 Useful variants:
@@ -136,9 +136,9 @@ After startup, always verify the runtime mode and agent state with:
 
 Managed mode rule:
 
-- `.\web.bat` and `.\web.bat start` default to `paper`
-- `.\web.bat start -AllowPersistedLiveMode` is the managed `live` startup path
-- `TRADING_MODE=live` is only for direct CLI startup outside the managed path
+- `.\web.bat` and `.\web.bat start` default to guarded `live + strategy_primary`
+- `.\web.bat start -PaperMode` is the explicit paper startup path and disables market WS authority
+- `-AllowPersistedLiveMode` remains accepted as a compatibility alias for an explicit live request
 - the autonomous agent does not start with the default boot path unless `AI_AUTONOMOUS_AGENT_AUTO_START=true` is present in the launching environment or you pass `-StartAutonomousAgent`
 
 For the full startup matrix, script responsibilities, and troubleshooting flow, see [STARTUP.md](STARTUP.md).
@@ -183,7 +183,7 @@ Startup and control:
 .\web.bat start
 .\web.bat status
 .\web.bat stop -IncludeWorkers
-.\web.bat start -AllowPersistedLiveMode
+.\web.bat start -PaperMode
 .\web.bat start -StartAutonomousAgent
 .\web.bat start -NoNewsWorkers
 .\web.bat start -NoNewsLlmWorker

@@ -21,6 +21,7 @@ from core.exchanges.base_exchange import (
     Position,
     Ticker,
 )
+from core.exchanges.order_parsing import resolve_ccxt_order_fill_price
 
 
 class OKXConnector(BaseExchange):
@@ -337,7 +338,7 @@ class OKXConnector(BaseExchange):
             symbol=ccxt_order.get("symbol", ""),
             side=OrderSide(ccxt_order.get("side", "buy")),
             type=OrderType(ccxt_order.get("type", "limit")),
-            price=float(ccxt_order.get("price", 0) or 0),
+            price=resolve_ccxt_order_fill_price(ccxt_order),
             amount=float(ccxt_order.get("amount", 0) or 0),
             filled=float(ccxt_order.get("filled", 0) or 0),
             remaining=float(ccxt_order.get("remaining", 0) or 0),

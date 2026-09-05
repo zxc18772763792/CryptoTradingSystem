@@ -2331,8 +2331,69 @@ def _compact_factor_library(data: Dict[str, Any]) -> Dict[str, Any]:
 def _compact_fama(data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(data, dict):
         return {}
-    if not data.get("latest") and not data.get("series") and not data.get("points"):
+    series = [row for row in list(data.get("series") or []) if isinstance(row, dict)]
+    points = int(data.get("points") or 0)
+    # The async Fama endpoint returns a placeholder with a zero-filled
+    # ``latest`` mapping while its background task is warming up.  Treating
+    # that mapping as real data makes the workbench render every factor as 0
+    # and, because the pending metadata used to be discarded here, prevents
+    # the client from recognizing that the result is only a placeholder.
+    if points <= 0 and not series:
         return {}
+    return {
+        "exchange": data.get("exchange"),
+        "timeframe": data.get("timeframe"),
+        "symbols_used": list(data.get("symbols_used") or [])[:12],
+        "points": points,
+        "universe_size": int(data.get("universe_size") or 0),
+        "universe_quality": data.get("universe_quality") or "unknown",
+        "latest": dict(data.get("latest") or {}),
+        "mean_24": dict(data.get("mean_24") or {}),
+        "std_24": dict(data.get("std_24") or {}),
+        "series": series[:120],
+        "warnings": list(data.get("warnings") or []),
+        "served_mode": data.get("served_mode") or "unknown",
+    }
+
+
+_FAMA_STYLE_FACTOR_IDS = ("MKT", "SMB", "HML", "MOM", "RMW", "CMA", "VOL")
+
+
+def _fama_from_factor_library(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the workbench Fama view from the canonical factor-library run."""
+    if not isinstance(data, dict) or int(data.get("points") or 0) <= 0:
+        return {}
+
+    latest_raw = dict(data.get("latest") or {})
+    latest = {
+        factor_id: latest_raw[factor_id]
+        for factor_id in _FAMA_STYLE_FACTOR_IDS
+        if factor_id in latest_raw
+    }
+    series: List[Dict[str, Any]] = []
+    for row in list(data.get("series") or []):
+        if not isinstance(row, dict):
+            continue
+        compact_row = {"timestamp": row.get("timestamp")}
+        compact_row.update(
+            {
+                factor_id: row[factor_id]
+                for factor_id in _FAMA_STYLE_FACTOR_IDS
+                if factor_id in row
+            }
+        )
+        series.append(compact_row)
+    if not latest and not series:
+        return {}
+
+    def _style_snapshot(name: str) -> Dict[str, Any]:
+        raw = dict(data.get(name) or {})
+        return {
+            factor_id: raw[factor_id]
+            for factor_id in _FAMA_STYLE_FACTOR_IDS
+            if factor_id in raw
+        }
+
     return {
         "exchange": data.get("exchange"),
         "timeframe": data.get("timeframe"),
@@ -2340,12 +2401,12 @@ def _compact_fama(data: Dict[str, Any]) -> Dict[str, Any]:
         "points": int(data.get("points") or 0),
         "universe_size": int(data.get("universe_size") or 0),
         "universe_quality": data.get("universe_quality") or "unknown",
-        "latest": dict(data.get("latest") or {}),
-        "mean_24": dict(data.get("mean_24") or {}),
-        "std_24": dict(data.get("std_24") or {}),
-        "series": [
-            row for row in list(data.get("series") or [])[:120] if isinstance(row, dict)
-        ],
+        "latest": latest,
+        "mean_24": _style_snapshot("mean_24"),
+        "std_24": _style_snapshot("std_24"),
+        "series": series[:120],
+        "warnings": ["Fama 专用快照仍在后台计算，当前复用因子库中的同口径风格因子。"],
+        "served_mode": "factor_library_fallback",
     }
 
 
@@ -2900,8 +2961,12 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
     factor_raw, fama_raw, cross_asset_raw = await asyncio.gather(
         factor_task, fama_task, cross_task
     )
-    fama = _compact_fama(fama_raw or {})
     factor_library = _compact_factor_library(factor_raw or {})
+    fama = _compact_fama(fama_raw or {})
+    fama_from_factor_library = False
+    if not fama and factor_library:
+        fama = _fama_from_factor_library(factor_library)
+        fama_from_factor_library = bool(fama)
     cross_asset = dict(cross_asset_raw or {})
 
     fallback_library = (
@@ -2920,6 +2985,8 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
             factor_library["correlation"] = fallback_library["correlation"]
 
     warnings: List[str] = list(factor_library.get("warnings") or [])
+    if fama_from_factor_library:
+        warnings.extend(list(fama.get("warnings") or []))
     if not factor_library:
         warnings.append("因子库超时，正在返回简化兜底摘要。")
     if not fama:
@@ -2938,6 +3005,7 @@ async def _build_factors_module(profile: ResearchProfile) -> Dict[str, Any]:
     degraded = (
         not factor_library
         or not fama
+        or fama_from_factor_library
         or str(factor_library.get("universe_quality") or "") == "low"
         or int(factor_library.get("universe_size") or 0) < 4
     )

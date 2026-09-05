@@ -6,11 +6,11 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from core.audit.ops_audit import ops_audit_scope
 from core.ops.service import api as ops_api
-from core.ops.service.auth import get_request_auth
+from core.ops.service.auth import get_request_auth, require_ops_permissions_dependency
 from prediction_markets.polymarket.paper_strategy import (
     PaperStrategyConfig,
     ProfileGuardrails,
@@ -45,7 +45,10 @@ async def polymarket_status(request: Request):
         return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/subscribe")
+@router.post(
+    "/polymarket/subscribe",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_data_sources"))],
+)
 async def polymarket_subscribe(request: Request, payload: ops_api.PolymarketSubscribeRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -77,7 +80,10 @@ async def polymarket_subscribe(request: Request, payload: ops_api.PolymarketSubs
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/unsubscribe")
+@router.post(
+    "/polymarket/unsubscribe",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_data_sources"))],
+)
 async def polymarket_unsubscribe(request: Request, payload: ops_api.PolymarketUnsubscribeRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -91,7 +97,10 @@ async def polymarket_unsubscribe(request: Request, payload: ops_api.PolymarketUn
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/worker_run_once")
+@router.post(
+    "/polymarket/worker_run_once",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_data_sources"))],
+)
 async def polymarket_worker_run_once(request: Request, payload: ops_api.PolymarketWorkerRunRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -260,7 +269,10 @@ async def polymarket_paper_summary(request: Request, account_id: str = "default"
         return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/paper/reset")
+@router.post(
+    "/polymarket/paper/reset",
+    dependencies=[Depends(require_ops_permissions_dependency("reset_paper_runtime"))],
+)
 async def polymarket_paper_reset(request: Request, payload: ops_api.PolymarketPaperResetRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -274,7 +286,10 @@ async def polymarket_paper_reset(request: Request, payload: ops_api.PolymarketPa
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/paper/order")
+@router.post(
+    "/polymarket/paper/order",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_orders"))],
+)
 async def polymarket_paper_order(request: Request, payload: ops_api.PolymarketPaperOrderRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -300,7 +315,10 @@ async def polymarket_paper_order(request: Request, payload: ops_api.PolymarketPa
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/paper/sweep")
+@router.post(
+    "/polymarket/paper/sweep",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_orders"))],
+)
 async def polymarket_paper_sweep(request: Request, account_id: str = "default"):
     auth = get_request_auth(request)
     async with ops_audit_scope(actor=auth.actor, endpoint="/ops/polymarket/paper/sweep", method="POST", params={"account_id": account_id}, ip=auth.client_ip) as audit_state:
@@ -315,7 +333,10 @@ async def polymarket_paper_sweep(request: Request, account_id: str = "default"):
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/paper/cancel")
+@router.post(
+    "/polymarket/paper/cancel",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_orders"))],
+)
 async def polymarket_paper_cancel(request: Request, payload: ops_api.PolymarketPaperCancelRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -351,7 +372,10 @@ async def polymarket_paper_positions(request: Request, account_id: str = "defaul
         return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/paper/strategy_once")
+@router.post(
+    "/polymarket/paper/strategy_once",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def polymarket_paper_strategy_once(request: Request, payload: ops_api.PolymarketPaperStrategyOnceRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -397,7 +421,10 @@ async def polymarket_paper_strategy_once(request: Request, payload: ops_api.Poly
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/paper/profile/promote")
+@router.post(
+    "/polymarket/paper/profile/promote",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def polymarket_paper_profile_promote(request: Request, payload: ops_api.PolymarketPaperProfilePromoteRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -428,7 +455,10 @@ async def polymarket_paper_profile_promote(request: Request, payload: ops_api.Po
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/replay/batch")
+@router.post(
+    "/polymarket/replay/batch",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def polymarket_replay_batch(request: Request, payload: ops_api.PolymarketReplayBatchRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -460,7 +490,10 @@ async def polymarket_replay_batch(request: Request, payload: ops_api.PolymarketR
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/replay/grid")
+@router.post(
+    "/polymarket/replay/grid",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def polymarket_replay_grid(request: Request, payload: ops_api.PolymarketReplayGridRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -496,7 +529,10 @@ async def polymarket_replay_grid(request: Request, payload: ops_api.PolymarketRe
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/replay/walk_forward")
+@router.post(
+    "/polymarket/replay/walk_forward",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def polymarket_replay_walk_forward(request: Request, payload: ops_api.PolymarketReplayWalkForwardRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -537,7 +573,10 @@ async def polymarket_replay_walk_forward(request: Request, payload: ops_api.Poly
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/arm_trading")
+@router.post(
+    "/polymarket/arm_trading",
+    dependencies=[Depends(require_ops_permissions_dependency("request_live"))],
+)
 async def polymarket_arm_trading(request: Request):
     auth = get_request_auth(request)
     async with ops_audit_scope(actor=auth.actor, endpoint="/ops/polymarket/arm_trading", method="POST", params={}, ip=auth.client_ip) as audit_state:
@@ -559,7 +598,10 @@ async def polymarket_arm_trading(request: Request):
             return ops_api._err(str(exc))
 
 
-@router.post("/polymarket/enable_trading")
+@router.post(
+    "/polymarket/enable_trading",
+    dependencies=[Depends(require_ops_permissions_dependency("approve_live"))],
+)
 async def polymarket_enable_trading(request: Request, x_ops_approval: Optional[str] = Header(default=None, alias="X-OPS-APPROVAL")):
     auth = get_request_auth(request)
     params = {"approval_code": x_ops_approval or ""}

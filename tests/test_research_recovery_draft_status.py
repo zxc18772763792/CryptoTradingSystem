@@ -39,6 +39,7 @@ def test_stale_research_proposal_recovers_to_draft(tmp_path, monkeypatch):
             ai_experiment_run_registry=run_registry,
             ai_lifecycle_registry=lifecycle_registry,
             research_jobs={"job-stale": {"status": "running"}},
+            research_job_tasks={"job-stale": SimpleNamespace()},
         )
     )
     monkeypatch.setattr("core.research.orchestrator._persist_research_jobs", lambda _app: None)
@@ -63,6 +64,7 @@ def test_stale_research_proposal_recovers_to_draft(tmp_path, monkeypatch):
     assert recovered_run.error == "service restart; research job did not complete"
     assert app.state.research_jobs["job-stale"]["status"] == "failed"
     assert app.state.research_jobs["job-stale"]["recovery_reason"] == "service restart; research job did not complete"
+    assert app.state.research_job_tasks == {}
 
 
 def test_prune_finished_research_job_tasks_clears_done_entries():

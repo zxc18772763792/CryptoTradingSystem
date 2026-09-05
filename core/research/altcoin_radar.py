@@ -12,7 +12,7 @@ from config.settings import settings
 from core.data.coinglass_altcoin import is_alt_candidate_symbol
 from core.research.altcoin_radar_perp import classify_signal_source, compute_perp_scores
 from core.research.altcoin_radar_narrative import classify_narrative_source, compute_narrative_scores
-from core.research.altcoin_radar_universe import get_sector, get_watchlist_symbols
+from core.research.altcoin_radar_universe import get_sector, get_watchlist_symbols, normalize_altcoin_pair
 from core.research.altcoin_radar_events import (
     bulk_update_ranks,
     compute_rank_jump_score,
@@ -476,7 +476,7 @@ def _normalize_symbols(symbols: Sequence[str]) -> List[str]:
     normalized: List[str] = []
     seen = set()
     for symbol in symbols:
-        text = str(symbol or "").strip().upper()
+        text = normalize_altcoin_pair(symbol)
         if not text or text in seen:
             continue
         seen.add(text)
@@ -722,19 +722,20 @@ def build_altcoin_rows(
     multi_payload = dict(multi_assets or {})
     # Phase 2: pre-compute watchlist set for O(1) membership test per symbol
     _watchlist_set = set(get_watchlist_symbols())
-    alerted = {str(symbol or "").strip().upper() for symbol in (alerted_symbols or []) if str(symbol or "").strip()}
-    market_snapshot_map = {str(k).upper(): dict(v or {}) for k, v in (market_snapshots or {}).items()}
-    micro_map = {str(k).upper(): dict(v or {}) for k, v in (micro_snapshots or {}).items()}
-    community_map = {str(k).upper(): dict(v or {}) for k, v in (community_snapshots or {}).items()}
-    whale_map = {str(k).upper(): dict(v or {}) for k, v in (whale_snapshots or {}).items()}
-    derivatives_map = {str(k).upper(): dict(v or {}) for k, v in (derivatives_snapshots or {}).items()}
+    alerted = {normalize_altcoin_pair(symbol) for symbol in (alerted_symbols or []) if normalize_altcoin_pair(symbol)}
+    market_frame_map = {normalize_altcoin_pair(k): v for k, v in market_frames.items() if normalize_altcoin_pair(k)}
+    market_snapshot_map = {normalize_altcoin_pair(k): dict(v or {}) for k, v in (market_snapshots or {}).items() if normalize_altcoin_pair(k)}
+    micro_map = {normalize_altcoin_pair(k): dict(v or {}) for k, v in (micro_snapshots or {}).items() if normalize_altcoin_pair(k)}
+    community_map = {normalize_altcoin_pair(k): dict(v or {}) for k, v in (community_snapshots or {}).items() if normalize_altcoin_pair(k)}
+    whale_map = {normalize_altcoin_pair(k): dict(v or {}) for k, v in (whale_snapshots or {}).items() if normalize_altcoin_pair(k)}
+    derivatives_map = {normalize_altcoin_pair(k): dict(v or {}) for k, v in (derivatives_snapshots or {}).items() if normalize_altcoin_pair(k)}
     factor_rows = {
-        str(item.get("symbol") or "").strip().upper(): dict(item or {})
+        normalize_altcoin_pair(item.get("symbol")): dict(item or {})
         for item in (factor_payload.get("asset_scores") or [])
         if str(item.get("symbol") or "").strip()
     }
     multi_rows = {
-        str(item.get("symbol") or "").strip().upper(): dict(item or {})
+        normalize_altcoin_pair(item.get("symbol")): dict(item or {})
         for item in (multi_payload.get("assets") or [])
         if str(item.get("symbol") or "").strip()
     }
@@ -771,11 +772,11 @@ def build_altcoin_rows(
     }
 
     interim: Dict[str, Dict[str, Any]] = {}
-    all_symbols = _normalize_symbols(list(market_frames.keys()) + list(market_snapshot_map.keys()))
+    all_symbols = _normalize_symbols(list(market_frame_map.keys()) + list(market_snapshot_map.keys()))
     for normalized_symbol in all_symbols:
         if not normalized_symbol:
             continue
-        frame = market_frames.get(normalized_symbol)
+        frame = market_frame_map.get(normalized_symbol)
         df = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
         market_snapshot = dict(market_snapshot_map.get(normalized_symbol) or {})
         if (df.empty or "close" not in df.columns) and not market_snapshot:

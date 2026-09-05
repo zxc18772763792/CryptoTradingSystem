@@ -12,7 +12,7 @@ from strategies.ai.ml_xgboost_strategy import MLXGBoostStrategy
 from strategies.arbitrage.dex_arbitrage import DEXArbitrageStrategy
 from strategies.factor_based.factor_strategies import HurstExponentStrategy, VaRBreakoutStrategy
 from strategies.macro.fund_flow import WhaleActivityStrategy
-from strategies.macro.market_sentiment import SocialSentimentStrategy
+from strategies.macro.market_sentiment import MarketSentimentStrategy, SocialSentimentStrategy
 from strategies.quantitative.mean_reversion import MeanReversionStrategy
 from strategies.technical.bollinger_strategy import BollingerSqueezeStrategy
 from strategies.technical.common_strategies import DonchianBreakoutStrategy
@@ -300,6 +300,80 @@ def test_social_sentiment_does_not_raise_mentions_from_strong_sentiment(monkeypa
 
     assert strategy._social_data["mentions"] == 1
     assert signals == []
+
+
+def test_market_sentiment_fear_greed_fetch_uses_ttl_cache(monkeypatch):
+    import strategies.macro.market_sentiment as module
+
+    calls = {"get": 0}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [{"value": "21"}]}
+
+    class _Client:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls["get"] += 1
+            return _Response()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _Client)
+    strategy = MarketSentimentStrategy("market_cache_test", {"sentiment_cache_ttl_sec": 300})
+
+    first = asyncio.run(strategy._fetch_fear_greed_index())
+    second = asyncio.run(strategy._fetch_fear_greed_index())
+
+    assert first == 21
+    assert second == 21
+    assert calls["get"] == 1
+
+
+def test_social_sentiment_trending_fetch_uses_ttl_cache(monkeypatch):
+    import strategies.macro.market_sentiment as module
+
+    calls = {"get": 0}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"coins": [{"item": {"symbol": "BTC"}}]}
+
+    class _Client:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls["get"] += 1
+            return _Response()
+
+    monkeypatch.setattr(module.httpx, "AsyncClient", _Client)
+    strategy = SocialSentimentStrategy("social_cache_test", {"trending_cache_ttl_sec": 300})
+
+    first = asyncio.run(strategy._fetch_trending_proxy("BTC"))
+    second = asyncio.run(strategy._fetch_trending_proxy("BTC"))
+
+    assert first == (100, 1.0)
+    assert second == (100, 1.0)
+    assert calls["get"] == 1
 
 
 def test_ml_xgboost_neutral_exit_uses_bar_timestamp(monkeypatch):

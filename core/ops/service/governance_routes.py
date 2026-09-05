@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
 from core.audit.ops_audit import ops_audit_scope
 from core.ops.service import api as ops_api
-from core.ops.service.auth import get_request_auth
+from core.ops.service.auth import get_request_auth, require_ops_permissions_dependency
 
 
 router = APIRouter()
@@ -24,7 +24,10 @@ async def governance_list_users(request: Request, limit: int = 100):
     return ops_api._ok({"items": rows, "count": len(rows)})
 
 
-@router.post("/governance/users/upsert")
+@router.post(
+    "/governance/users/upsert",
+    dependencies=[Depends(require_ops_permissions_dependency("deploy_config"))],
+)
 async def governance_upsert_user(request: Request, payload: ops_api.GovernanceApiUserUpsertRequest):
     auth = get_request_auth(request)
     identity = ops_api._governance_identity_from_auth(auth)

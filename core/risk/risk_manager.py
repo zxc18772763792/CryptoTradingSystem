@@ -118,7 +118,12 @@ class RiskManager:
         self._daily_stop_required_breaches_paper = 2
         self._daily_stop_required_breaches_live = 4
         self._risk_scope = self._normalize_scope(getattr(settings, "TRADING_MODE", "paper"))
-        self._trade_history = self._load_persisted_trade_history(self._risk_scope)
+        persisted_state = self._load_persisted_scope_state(self._risk_scope)
+        if persisted_state:
+            restored_state = self._snapshot_runtime_state()
+            restored_state.update(persisted_state)
+            self._check_new_day_for_state(restored_state)
+            self._restore_runtime_state(restored_state)
         self._scope_states: Dict[str, Dict[str, Any]] = {}
         self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
 
@@ -173,6 +178,7 @@ class RiskManager:
                 "scope": normalized,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "trade_history": rows[-self._trade_history_limit:],
+                "runtime_state": self._serialize_persisted_runtime_state(state),
             }
             tmp = path.with_suffix(".tmp")
             tmp.write_text(
@@ -214,24 +220,88 @@ class RiskManager:
         return self._trade_history_store_root / f"risk_trade_history_{normalized}.json"
 
     def _load_persisted_trade_history(self, scope: Optional[str] = None) -> List[Dict[str, Any]]:
-        path = self._trade_history_path(scope)
+        state = self._load_persisted_scope_state(scope)
+        rows = state.get("trade_history") if isinstance(state, dict) else None
+        return list(rows or [])[-self._trade_history_limit:]
+
+    @staticmethod
+    def _parse_persisted_datetime(value: Any) -> Optional[datetime]:
+        if isinstance(value, datetime):
+            ts = value
+        else:
+            text = str(value or "").strip()
+            if not text:
+                return None
+            try:
+                ts = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+
+    def _load_persisted_scope_state(self, scope: Optional[str] = None) -> Dict[str, Any]:
+        normalized = self._normalize_scope(scope or self._risk_scope)
+        path = self._trade_history_path(normalized)
         try:
             if not path.exists():
-                return []
+                return {}
             raw = json.loads(path.read_text(encoding="utf-8"))
             rows = raw.get("trade_history") if isinstance(raw, dict) else raw
             if not isinstance(rows, list):
-                return []
+                rows = []
             out: List[Dict[str, Any]] = []
             for row in rows:
                 if isinstance(row, dict):
                     out.append(dict(row))
-            return out[-self._trade_history_limit:]
+            state: Dict[str, Any] = {"trade_history": out[-self._trade_history_limit:]}
+            persisted = raw.get("runtime_state") if isinstance(raw, dict) else None
+            if isinstance(persisted, dict):
+                allowed = {
+                    "daily_trades",
+                    "daily_realized_pnl",
+                    "daily_start",
+                    "day_start_equity",
+                    "current_equity",
+                    "last_equity",
+                    "current_unrealized_pnl",
+                    "trading_halted",
+                    "halt_reason",
+                    "daily_stop_guard_until",
+                    "daily_stop_breach_count",
+                }
+                state.update({key: value for key, value in persisted.items() if key in allowed})
+                state["daily_start"] = self._parse_persisted_datetime(state.get("daily_start"))
+                state["daily_stop_guard_until"] = self._parse_persisted_datetime(
+                    state.get("daily_stop_guard_until")
+                )
+            return state
         except Exception as exc:
             logger.warning(
-                f"risk_manager: failed to load persisted trade history for scope={scope or self._risk_scope}: {exc}"
+                f"risk_manager: failed to load persisted runtime state for scope={normalized}: {exc}"
             )
-            return []
+            return {}
+
+    @staticmethod
+    def _serialize_persisted_runtime_state(state: Dict[str, Any]) -> Dict[str, Any]:
+        keys = (
+            "daily_trades",
+            "daily_realized_pnl",
+            "daily_start",
+            "day_start_equity",
+            "current_equity",
+            "last_equity",
+            "current_unrealized_pnl",
+            "trading_halted",
+            "halt_reason",
+            "daily_stop_guard_until",
+            "daily_stop_breach_count",
+        )
+        payload = {key: state.get(key) for key in keys}
+        for key in ("daily_start", "daily_stop_guard_until"):
+            value = payload.get(key)
+            payload[key] = value.isoformat() if isinstance(value, datetime) else None
+        return payload
 
     def _persist_trade_history(self, scope: Optional[str] = None) -> None:
         normalized = self._normalize_scope(scope or self._risk_scope)
@@ -239,13 +309,16 @@ class RiskManager:
             path = self._trade_history_path(normalized)
             path.parent.mkdir(parents=True, exist_ok=True)
             if normalized == self._risk_scope:
+                state = self._snapshot_runtime_state()
                 rows = list(self._trade_history[-self._trade_history_limit:])
             else:
                 state = self._scope_states.get(normalized) or self._initial_scope_state(normalized)
                 rows = list(state.get("trade_history") or [])
             payload = {
                 "scope": normalized,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
                 "trade_history": rows[-self._trade_history_limit:],
+                "runtime_state": self._serialize_persisted_runtime_state(state),
             }
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -254,7 +327,7 @@ class RiskManager:
             logger.warning(f"risk_manager: failed to persist trade history for scope={normalized}: {exc}")
 
     def _initial_scope_state(self, scope: str) -> Dict[str, Any]:
-        return {
+        state = {
             "daily_trades": 0,
             "daily_realized_pnl": 0.0,
             "daily_start": self._day_start(datetime.now(timezone.utc)),
@@ -264,13 +337,16 @@ class RiskManager:
             "current_unrealized_pnl": 0.0,
             "equity_curve": [],
             "equity_timeline": [],
-            "trade_history": self._load_persisted_trade_history(scope),
+            "trade_history": [],
             "alerts": [],
             "trading_halted": False,
             "halt_reason": "",
             "daily_stop_guard_until": None,
             "daily_stop_breach_count": 0,
         }
+        state.update(self._load_persisted_scope_state(scope))
+        self._check_new_day_for_state(state)
+        return state
 
     def _default_autonomy_threshold_values(self) -> Dict[str, float]:
         daily_loss_ratio = abs(float(self.max_daily_loss_ratio or 0.0))
@@ -734,6 +810,8 @@ class RiskManager:
                     "daily_realized_pnl": round(daily_realized_pnl, 4),
                 },
             )
+            self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
+            self._persist_trade_history(self._risk_scope)
 
     def reset_halt(self) -> None:
         self._trading_halted = False
@@ -751,6 +829,8 @@ class RiskManager:
             message="风控熔断状态已解除，并已重置日内基线",
             severity="warning",
         )
+        self._scope_states[self._risk_scope] = self._snapshot_runtime_state()
+        self._persist_trade_history(self._risk_scope)
 
     def clear_runtime_history(self) -> Dict[str, int]:
         """Clear runtime trade/alert/equity history for paper reset."""

@@ -38,30 +38,43 @@ def parquet_partition_lock(
     timeout_seconds = max(0.0, float(timeout_seconds))
     poll_seconds = max(0.01, float(poll_seconds))
     deadline = time.monotonic() + timeout_seconds
-    handle = open(lock_path, "a+b")
+    open_flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_BINARY"):
+        open_flags |= os.O_BINARY
+    fd: int | None = None
     acquired = False
     try:
-        # msvcrt.locking requires an existing byte and locks from the current
-        # file position. Do not use append writes after this initialization.
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
-
         while True:
             try:
-                handle.seek(0)
+                if fd is None:
+                    fd = os.open(lock_path, open_flags, 0o666)
+
+                # msvcrt.locking requires an existing byte and locks from the
+                # current file position. A racing process may already hold that
+                # byte, so initialize it with unbuffered I/O inside the retry
+                # loop and treat PermissionError like ordinary contention.
+                if os.path.getsize(lock_path) == 0:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.write(fd, b"\0")
+
+                os.lseek(fd, 0, os.SEEK_SET)
                 if os.name == "nt":
                     import msvcrt
 
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 else:
                     import fcntl
 
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 acquired = True
                 break
             except (OSError, BlockingIOError):
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    fd = None
                 if time.monotonic() >= deadline:
                     raise ParquetPartitionLockTimeout(
                         "Timed out after "
@@ -72,19 +85,23 @@ def parquet_partition_lock(
 
         yield
     finally:
-        if acquired:
+        if fd is not None and acquired:
             try:
-                handle.seek(0)
+                os.lseek(fd, 0, os.SEEK_SET)
                 if os.name == "nt":
                     import msvcrt
 
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
 
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError:
                 # Closing the handle releases the OS lock even if an explicit
                 # unlock races with process shutdown.
                 pass
-        handle.close()
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass

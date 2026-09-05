@@ -666,6 +666,27 @@ def test_sensitive_read_routes_are_dependency_gated():
     assert expected <= gated
 
 
+def test_ai_research_get_routes_require_read_permission():
+    missing = []
+    for route in ai_research.router.routes:
+        if not isinstance(route, APIRoute) or "GET" not in set(route.methods or set()):
+            continue
+        if not route.dependencies:
+            missing.append(route.path)
+
+    assert missing == []
+
+
+def test_ai_research_runtime_config_read_requires_ops_auth(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-token")
+    app = _build_app(("/api/ai", ai_research.router))
+    client = TestClient(app)
+
+    response = client.get("/api/ai/runtime-config")
+
+    assert response.status_code == 401
+
+
 def test_live_mode_confirm_requires_approve_live_permission_for_api_key(monkeypatch):
     monkeypatch.setenv("OPS_TOKEN", "test-token")
     trading_runtime.invalidate_trading_stats_cache()
@@ -753,7 +774,7 @@ def test_loopback_ui_cookie_sliding_renewal(monkeypatch):
     assert web_auth._LOCAL_UI_COOKIE_NAME not in (bare.headers.get("set-cookie") or "")
 
     # Acquire the session cookie from the index page.
-    home = client.get("/")
+    client.get("/")
     assert web_auth._LOCAL_UI_COOKIE_NAME in client.cookies
 
     # Any subsequent request carrying the valid cookie gets it RE-ISSUED,

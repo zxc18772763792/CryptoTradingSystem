@@ -11,7 +11,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
@@ -117,6 +117,19 @@ _NEWS_LLM_BACKGROUND_ENABLED = _env_bool("NEWS_LLM_BACKGROUND_ENABLED", True)
 _NEWS_LLM_EXTERNAL_ONLY = _env_bool("NEWS_LLM_EXTERNAL_ONLY", False)
 _EXTERNAL_NEWS_WORKER_ENABLED = _env_bool("START_NEWS_WORKER", False)
 _DATA_MAINTENANCE_ENABLED = _env_bool("DATA_MAINTENANCE_ENABLED", False)
+_DATA_MAINTENANCE_TOTAL_TIMEOUT_SEC = max(
+    1.0,
+    _env_float("DATA_MAINTENANCE_TOTAL_TIMEOUT_SEC", 300.0),
+)
+_DATA_MAINTENANCE_STEP_TIMEOUT_SEC = max(
+    1.0,
+    _env_float("DATA_MAINTENANCE_STEP_TIMEOUT_SEC", 60.0),
+)
+_DATA_MAINTENANCE_MARKET_TIMEOUT_SEC = max(
+    1.0,
+    _env_float("DATA_MAINTENANCE_MARKET_TIMEOUT_SEC", 45.0),
+)
+_SHUTDOWN_TOTAL_TIMEOUT_SEC = max(1.0, _env_float("SHUTDOWN_TOTAL_TIMEOUT_SEC", 45.0))
 _PUBLIC_MACRO_WORKERS_ENABLED = _env_bool(
     "PUBLIC_MACRO_WORKERS_ENABLED",
     bool(getattr(settings, "PUBLIC_MACRO_WORKERS_ENABLED", False)),
@@ -125,6 +138,7 @@ _PREMIUM_EXTERNAL_WORKERS_ENABLED = _env_bool(
     "PREMIUM_EXTERNAL_WORKERS_ENABLED",
     bool(getattr(settings, "PREMIUM_EXTERNAL_WORKERS_ENABLED", False)),
 )
+_EXTERNAL_DATA_IMPORT_RETRY_SEC = max(60.0, _env_float("EXTERNAL_DATA_IMPORT_RETRY_SEC", 900.0))
 _COINGLASS_WORKER_ENABLED = _env_bool(
     "COINGLASS_WORKER_ENABLED",
     bool(getattr(settings, "COINGLASS_WORKER_ENABLED", True)),
@@ -316,6 +330,28 @@ def _sync_market_data_hub_runtime_config() -> None:
 
 def _touch_runtime_task(task_name: str, *, success: bool = False) -> None:
     runtime_state.touch_task(task_name, success=success)
+
+
+async def _run_shutdown_step(
+    name: str,
+    factory: Callable[[], Awaitable[Any]],
+    *,
+    deadline: float,
+    timeout_sec: float,
+) -> bool:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        logger.warning(f"Skipping shutdown step {name}: total shutdown budget exhausted")
+        return False
+    try:
+        await asyncio.wait_for(factory(), timeout=max(0.001, min(timeout_sec, remaining)))
+        return True
+    except asyncio.TimeoutError:
+        logger.warning(f"Shutdown step {name} timed out")
+        return False
+    except Exception as exc:
+        logger.warning(f"Shutdown step {name} failed: {exc}")
+        return False
 
 
 def _sync_guarded_startup_account_mode(decision: StartupModeDecision | None) -> bool:
@@ -1297,6 +1333,24 @@ async def _has_recent_kline(exchange: str, symbol: str, timeframe: str, hours: i
         return False
 
 
+def _format_timeout_sec(timeout_sec: float) -> str:
+    return f"{float(timeout_sec):g}"
+
+
+async def _sleep_worker_interval(stop_event: asyncio.Event, delay_sec: float) -> None:
+    if stop_event.is_set() or delay_sec <= 0:
+        return
+    with contextlib.suppress(asyncio.TimeoutError):
+        await asyncio.wait_for(stop_event.wait(), timeout=float(delay_sec))
+
+
+async def _maintenance_wait_for(name: str, coro: Any, timeout_sec: float) -> Any:
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout_sec)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"{name} timed out after {_format_timeout_sec(timeout_sec)}s") from exc
+
+
 async def _sync_market_dataset(exchange: str, symbol: str, timeframe: str) -> Dict[str, Any]:
     from web.api import data as data_api
 
@@ -1310,7 +1364,11 @@ async def _sync_market_dataset(exchange: str, symbol: str, timeframe: str) -> Di
     }
     try:
         if timeframe == "1s":
-            recent_ok = await _has_recent_kline(exchange=exchange, symbol=symbol, timeframe="1s", hours=18)
+            recent_ok = await _maintenance_wait_for(
+                f"recent kline check {exchange} {symbol} {timeframe}",
+                _has_recent_kline(exchange=exchange, symbol=symbol, timeframe="1s", hours=18),
+                _DATA_MAINTENANCE_MARKET_TIMEOUT_SEC,
+            )
             if not recent_ok:
                 active_tasks = [
                     t
@@ -1334,31 +1392,47 @@ async def _sync_market_dataset(exchange: str, symbol: str, timeframe: str) -> Di
                         end_time=now,
                         window_days=1,
                     )
-            result["download"] = await data_api.run_download_historical_data(
-                exchange=exchange,
-                symbol=symbol,
-                timeframe="1s",
-                days=_sync_days_for_timeframe("1s"),
+            result["download"] = await _maintenance_wait_for(
+                f"download {exchange} {symbol} {timeframe}",
+                data_api.run_download_historical_data(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe="1s",
+                    days=_sync_days_for_timeframe("1s"),
+                ),
+                _DATA_MAINTENANCE_MARKET_TIMEOUT_SEC,
             )
         else:
-            result["download"] = await data_api.run_download_historical_data(
-                exchange=exchange,
-                symbol=symbol,
-                timeframe=timeframe,
-                days=_sync_days_for_timeframe(timeframe),
+            result["download"] = await _maintenance_wait_for(
+                f"download {exchange} {symbol} {timeframe}",
+                data_api.run_download_historical_data(
+                    exchange=exchange,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    days=_sync_days_for_timeframe(timeframe),
+                ),
+                _DATA_MAINTENANCE_MARKET_TIMEOUT_SEC,
             )
 
         if timeframe not in {"1w", "1M"}:
-            integrity = await data_api.check_data_integrity(exchange=exchange, symbol=symbol, timeframe=timeframe)
+            integrity = await _maintenance_wait_for(
+                f"integrity {exchange} {symbol} {timeframe}",
+                data_api.check_data_integrity(exchange=exchange, symbol=symbol, timeframe=timeframe),
+                _DATA_MAINTENANCE_MARKET_TIMEOUT_SEC,
+            )
             result["integrity"] = integrity
             missing_count = int(((integrity or {}).get("missing") or {}).get("missing_count") or 0)
             invalid_rows = int(((integrity or {}).get("quality") or {}).get("invalid_rows") or 0)
             duplicate_rows = int(((integrity or {}).get("quality") or {}).get("duplicate_rows") or 0)
             if missing_count > 0 or invalid_rows > 0 or duplicate_rows > 0:
-                result["repair"] = await data_api.repair_data_integrity(
-                    exchange=exchange,
-                    symbol=symbol,
-                    timeframe=timeframe,
+                result["repair"] = await _maintenance_wait_for(
+                    f"repair {exchange} {symbol} {timeframe}",
+                    data_api.repair_data_integrity(
+                        exchange=exchange,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                    ),
+                    _DATA_MAINTENANCE_MARKET_TIMEOUT_SEC,
                 )
     except Exception as e:
         result["error"] = str(e)
@@ -1382,15 +1456,28 @@ async def _collect_news_snapshot() -> Dict[str, Any]:
         return {"error": str(e), "count": 0}
 
 
-async def _maintenance_safe_call(name: str, coro: Any) -> Dict[str, Any]:
+async def _maintenance_safe_call(
+    name: str,
+    coro: Any,
+    timeout_sec: Optional[float] = None,
+) -> Dict[str, Any]:
     started = datetime.now(timezone.utc)
+    call_timeout = _DATA_MAINTENANCE_STEP_TIMEOUT_SEC if timeout_sec is None else timeout_sec
     try:
-        data = await coro
+        data = await _maintenance_wait_for(name, coro, call_timeout)
         return {
             "ok": True,
             "name": name,
             "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 3),
             "data": data,
+        }
+    except TimeoutError as e:
+        return {
+            "ok": False,
+            "name": name,
+            "timeout": True,
+            "latency_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 3),
+            "error": str(e),
         }
     except Exception as e:
         return {
@@ -1474,7 +1561,7 @@ async def _run_data_maintenance_once() -> Dict[str, Any]:
             lookback=1200,
         ),
     )
-    news_snapshot = await _collect_news_snapshot()
+    news_snapshot = await _maintenance_safe_call("news_snapshot", _collect_news_snapshot())
 
     report = {
         "started_at": started_at.isoformat(),
@@ -1506,8 +1593,9 @@ async def _google_trends_worker(stop_event: asyncio.Event) -> None:
     """Update Google Trends cache every 6 hours (requires pytrends, graceful no-op if absent)."""
     INTERVAL = 6 * 3600
     STARTUP_DELAY = 120  # let other workers start first
-    await asyncio.sleep(STARTUP_DELAY)
+    await _sleep_worker_interval(stop_event, STARTUP_DELAY)
     while not stop_event.is_set():
+        sleep_seconds = INTERVAL
         try:
             from core.data.google_trends_collector import update_all_keywords  # noqa: PLC0415
             result = await update_all_keywords()
@@ -1515,24 +1603,25 @@ async def _google_trends_worker(stop_event: asyncio.Event) -> None:
                 logger.debug(f"google_trends_worker: updated {list(result.keys())}")
             _touch_runtime_task("google_trends", success=True)
         except ImportError as exc:
-            # Optional dependency (pytrends) missing — disable worker permanently to avoid wasted loops.
-            logger.info(f"google_trends_worker: dependency missing, disabling worker: {exc}")
+            sleep_seconds = _EXTERNAL_DATA_IMPORT_RETRY_SEC
+            logger.info(
+                "google_trends_worker: dependency missing, retrying in {}s: {}",
+                _format_timeout_sec(sleep_seconds),
+                exc,
+            )
             _touch_runtime_task("google_trends", success=False)
-            return
         except Exception as exc:
             logger.debug(f"google_trends_worker: {exc}")
-        for _ in range(INTERVAL):
-            if stop_event.is_set():
-                break
-            await asyncio.sleep(1)
+        await _sleep_worker_interval(stop_event, sleep_seconds)
 
 
 async def _macro_cache_worker(stop_event: asyncio.Event) -> None:
     """Update FRED macro cache once daily (requires FRED_API_KEY env var)."""
     INTERVAL = 24 * 3600
     STARTUP_DELAY = 180
-    await asyncio.sleep(STARTUP_DELAY)
+    await _sleep_worker_interval(stop_event, STARTUP_DELAY)
     while not stop_event.is_set():
+        sleep_seconds = INTERVAL
         try:
             from core.data.macro_collector import update_macro_cache  # noqa: PLC0415
             result = await update_macro_cache()
@@ -1540,22 +1629,24 @@ async def _macro_cache_worker(stop_event: asyncio.Event) -> None:
                 logger.debug(f"macro_cache_worker: updated {list(result.keys())}")
             _touch_runtime_task("macro_cache", success=True)
         except ImportError as exc:
-            logger.info(f"macro_cache_worker: dependency missing, disabling worker: {exc}")
+            sleep_seconds = _EXTERNAL_DATA_IMPORT_RETRY_SEC
+            logger.info(
+                "macro_cache_worker: dependency missing, retrying in {}s: {}",
+                _format_timeout_sec(sleep_seconds),
+                exc,
+            )
             _touch_runtime_task("macro_cache", success=False)
-            return
         except Exception as exc:
             logger.debug(f"macro_cache_worker: {exc}")
-        for _ in range(INTERVAL):
-            if stop_event.is_set():
-                break
-            await asyncio.sleep(1)
+        await _sleep_worker_interval(stop_event, sleep_seconds)
 
 
 async def _glassnode_worker(stop_event: asyncio.Event) -> None:
     """Update Glassnode on-chain cache every 4h (no-op without GLASSNODE_API_KEY)."""
     INTERVAL = 4 * 3600
-    await asyncio.sleep(240)  # stagger: 4 min after startup
+    await _sleep_worker_interval(stop_event, 240)  # stagger: 4 min after startup
     while not stop_event.is_set():
+        sleep_seconds = INTERVAL
         try:
             from core.data.glassnode_collector import update_glassnode_cache  # noqa: PLC0415
             result = await update_glassnode_cache()
@@ -1563,22 +1654,24 @@ async def _glassnode_worker(stop_event: asyncio.Event) -> None:
                 logger.debug(f"glassnode_worker: updated {list(result.keys())}")
             _touch_runtime_task("glassnode", success=True)
         except ImportError as exc:
-            logger.info(f"glassnode_worker: dependency missing, disabling worker: {exc}")
+            sleep_seconds = _EXTERNAL_DATA_IMPORT_RETRY_SEC
+            logger.info(
+                "glassnode_worker: dependency missing, retrying in {}s: {}",
+                _format_timeout_sec(sleep_seconds),
+                exc,
+            )
             _touch_runtime_task("glassnode", success=False)
-            return
         except Exception as exc:
             logger.debug(f"glassnode_worker: {exc}")
-        for _ in range(INTERVAL):
-            if stop_event.is_set():
-                break
-            await asyncio.sleep(1)
+        await _sleep_worker_interval(stop_event, sleep_seconds)
 
 
 async def _cryptoquant_worker(stop_event: asyncio.Event) -> None:
     """Update CryptoQuant on-chain cache every 4h (no-op without CRYPTOQUANT_API_KEY)."""
     INTERVAL = 4 * 3600
-    await asyncio.sleep(270)  # stagger: 4.5 min after startup
+    await _sleep_worker_interval(stop_event, 270)  # stagger: 4.5 min after startup
     while not stop_event.is_set():
+        sleep_seconds = INTERVAL
         try:
             from core.data.cryptoquant_collector import update_cryptoquant_cache  # noqa: PLC0415
             result = await update_cryptoquant_cache()
@@ -1586,15 +1679,16 @@ async def _cryptoquant_worker(stop_event: asyncio.Event) -> None:
                 logger.debug(f"cryptoquant_worker: updated {list(result.keys())}")
             _touch_runtime_task("cryptoquant", success=True)
         except ImportError as exc:
-            logger.info(f"cryptoquant_worker: dependency missing, disabling worker: {exc}")
+            sleep_seconds = _EXTERNAL_DATA_IMPORT_RETRY_SEC
+            logger.info(
+                "cryptoquant_worker: dependency missing, retrying in {}s: {}",
+                _format_timeout_sec(sleep_seconds),
+                exc,
+            )
             _touch_runtime_task("cryptoquant", success=False)
-            return
         except Exception as exc:
             logger.debug(f"cryptoquant_worker: {exc}")
-        for _ in range(INTERVAL):
-            if stop_event.is_set():
-                break
-            await asyncio.sleep(1)
+        await _sleep_worker_interval(stop_event, sleep_seconds)
 
 
 async def _nansen_worker(stop_event: asyncio.Event) -> None:
@@ -1901,8 +1995,11 @@ async def _data_maintenance_worker(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         started = datetime.now(timezone.utc)
         try:
-            # Hard 5-minute cap; a hung exchange call must not block the entire worker forever.
-            result = await asyncio.wait_for(_run_data_maintenance_once(), timeout=300)
+            # A hung maintenance cycle must not block the worker forever.
+            result = await asyncio.wait_for(
+                _run_data_maintenance_once(),
+                timeout=_DATA_MAINTENANCE_TOTAL_TIMEOUT_SEC,
+            )
             logger.info(
                 "Background data maintenance done: "
                 f"sync={result.get('market_sync_count', 0)}, "
@@ -1910,10 +2007,14 @@ async def _data_maintenance_worker(stop_event: asyncio.Event) -> None:
             )
             _touch_runtime_task("data_maintenance", success=True)
         except asyncio.TimeoutError:
-            logger.warning("Background data maintenance timed out after 300s")
+            timeout_label = _format_timeout_sec(_DATA_MAINTENANCE_TOTAL_TIMEOUT_SEC)
+            logger.warning(f"Background data maintenance timed out after {timeout_label}s")
             _save_maintenance_snapshot(
                 "maintenance_error",
-                {"timestamp": datetime.now(timezone.utc).isoformat(), "error": "timeout after 300s"},
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "error": f"timeout after {timeout_label}s",
+                },
             )
         except Exception as e:
             logger.warning(f"Background data maintenance failed: {e}")
@@ -2202,42 +2303,65 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         logger.info("Shutting down Crypto Trading System...")
+        shutdown_deadline = time.monotonic() + _SHUTDOWN_TOTAL_TIMEOUT_SEC
         supervisor: RuntimeTaskSupervisor | None = getattr(app.state, "runtime_supervisor", None)
         if supervisor is not None:
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(supervisor.stop_all(timeout_sec=6.0), timeout=15)
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(autonomous_trading_agent.stop(), timeout=15)
-
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(strategy_health_monitor.stop(), timeout=15)
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(shutdown_ops_runtime(app, standalone=False), timeout=15)
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                strategy_manager.stop_all(close_positions=False, reason="service_shutdown"),
-                timeout=15,
+            await _run_shutdown_step(
+                "runtime_supervisor",
+                lambda: supervisor.stop_all(timeout_sec=6.0),
+                deadline=shutdown_deadline,
+                timeout_sec=15,
             )
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(execution_engine.stop(), timeout=15)
+        await _run_shutdown_step(
+            "autonomous_trading_agent",
+            autonomous_trading_agent.stop,
+            deadline=shutdown_deadline,
+            timeout_sec=15,
+        )
+        await _run_shutdown_step(
+            "strategy_health_monitor",
+            strategy_health_monitor.stop,
+            deadline=shutdown_deadline,
+            timeout_sec=15,
+        )
+        await _run_shutdown_step(
+            "ops_runtime",
+            lambda: shutdown_ops_runtime(app, standalone=False),
+            deadline=shutdown_deadline,
+            timeout_sec=15,
+        )
+        await _run_shutdown_step(
+            "strategy_manager",
+            lambda: strategy_manager.stop_all(close_positions=False, reason="service_shutdown"),
+            deadline=shutdown_deadline,
+            timeout_sec=15,
+        )
+        await _run_shutdown_step(
+            "execution_engine",
+            execution_engine.stop,
+            deadline=shutdown_deadline,
+            timeout_sec=15,
+        )
         with contextlib.suppress(Exception):
             backtest.shutdown_optimize_process_pools(wait=False)
         with contextlib.suppress(Exception):
             position_manager.flush()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                audit_logger.drain_background_tasks(timeout=5.0, cancel_pending=True),
-                timeout=7,
-            )
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(
-                runtime_bootstrap.shutdown_shared_runtime(
-                    include_news=True,
-                    close_exchanges=True,
-                    close_database=True,
-                ),
-                timeout=15,
-            )
+        await _run_shutdown_step(
+            "audit_logger",
+            lambda: audit_logger.drain_background_tasks(timeout=5.0, cancel_pending=True),
+            deadline=shutdown_deadline,
+            timeout_sec=7,
+        )
+        await _run_shutdown_step(
+            "shared_runtime",
+            lambda: runtime_bootstrap.shutdown_shared_runtime(
+                include_news=True,
+                close_exchanges=True,
+                close_database=True,
+            ),
+            deadline=shutdown_deadline,
+            timeout_sec=15,
+        )
 
         logger.info("System shutdown complete")
 

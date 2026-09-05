@@ -458,40 +458,40 @@ Do not start Rust before Phase 3. Native acceleration should be the last mile af
 
 ### Milestone A - Measured Baseline
 
-- [ ] `scripts/benchmark_backtest_runtime.py` exists.
+- [x] `scripts/benchmark_backtest_runtime.py` exists. (2026-08-07 local scan: benchmark script is present.)
 - [ ] Baseline JSON recorded for at least three workloads.
 - [ ] cProfile output identifies top runtime costs.
 - [ ] No behavior changes yet.
 
 ### Milestone B - Faster Trusted Replay
 
-- [ ] Replay loop avoids unnecessary dataframe copies.
+- [x] Replay loop avoids unnecessary dataframe copies. (2026-08-10 local scan: `_replay_signal_strategy_position` skips per-bar `.copy()` for strategies that opt in with `mutates_input = False`, guarded by `BACKTEST_REPLAY_VIEW_FAST_PATH`.)
 - [ ] OHLCV numeric normalization happens once.
 - [ ] Position series cache exists for one request.
-- [ ] Existing runtime consistency tests pass.
+- [x] Existing runtime consistency tests pass. (2026-08-10 local scan: `tests/test_backtest_runtime_consistency.py` passed.)
 - [ ] Benchmark shows improvement or confirms next bottleneck.
 
 ### Milestone C - MultiFactorHF Fast Exact
 
 - [ ] Batch factor frame API exists.
-- [ ] MultiFactorHF fast position builder exists.
-- [ ] Parity tests against real replay pass.
+- [x] MultiFactorHF fast position builder exists. (2026-08-09 local scan: `strategies/quantitative/multi_factor_hf_fast.py` provides `build_multifactor_hf_position_series`, gated by `BACKTEST_FAST_EXACT_STRATEGIES` in `web/api/backtest.py`.)
+- [x] Parity tests against real replay pass. (2026-08-09 local scan: `tests/test_multi_factor_hf_parity.py` covers five regime fixtures against `_replay_signal_strategy_position(MultiFactorHFStrategy, ...)`.)
 - [ ] API result exposes `backtest_engine_mode`.
 - [ ] 1-year 5m benchmark improves materially.
 
 ### Milestone D - Array Execution Engine
 
-- [ ] `core/backtest/execution_arrays.py` exists.
+- [x] `core/backtest/execution_arrays.py` exists. (2026-08-07 local scan: array simulator module is present.)
 - [ ] Parity tests cover stop/take/trailing/reversal.
-- [ ] `_simulate_execution_summary` can use array path.
-- [ ] Python fallback remains available.
+- [x] `_simulate_execution_summary` can use array path. (2026-08-07 local scan: opt-in `BACKTEST_FAST_EXIT_ARRAYS` dispatches supported configs to `simulate_execution_arrays`.)
+- [x] Python fallback remains available. (2026-08-07 local scan: unsupported configs and array-path exceptions still fall back to `run_exit_engine`.)
 
 ### Milestone E - Optimize/Compare Scale
 
 - [ ] Per-request factor cache exists.
 - [ ] Optimize mode reuses precomputed factors where possible.
 - [ ] Compare mode avoids repeated data loads.
-- [ ] Optional parallel trial execution is bounded by settings.
+- [x] Optional parallel trial execution is bounded by settings. (2026-08-10 local scan: `_optimize_strategy_on_df` uses `BACKTEST_OPTIMIZE_WORKERS` and `BACKTEST_OPTIMIZE_PARALLEL_MIN_TRIALS`, with serial fallback/parity coverage in `tests/test_optimize_parallel.py`.)
 
 ### Milestone F - Native Gate
 

@@ -3,6 +3,7 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from core.backtest.common_pnl import build_common_pnl_summary
 from core.backtest.backtest_engine import BacktestConfig, BacktestEngine
@@ -68,6 +69,40 @@ def test_backtest_engine_dynamic_cost_breakdown():
         assert hasattr(t, "slippage_cost")
         assert hasattr(t, "funding_pnl")
         assert hasattr(t, "net_pnl")
+
+
+def test_backtest_adverse_fill_prices_do_not_double_debit_slippage():
+    cfg = BacktestConfig(
+        initial_capital=1000.0,
+        position_size_pct=0.1,
+        leverage=1.0,
+        commission_rate=0.0,
+        fee_model="flat",
+        slippage_model="flat",
+        slippage=0.001,
+    )
+    engine = BacktestEngine(cfg)
+    now = datetime(2026, 1, 1)
+    buy = Signal(
+        symbol="BTC/USDT",
+        signal_type=SignalType.BUY,
+        price=100.0,
+        timestamp=now,
+        strategy_name="slippage_regression",
+        strength=1.0,
+    )
+
+    async def round_trip():
+        await engine._execute_buy(buy, 100.0, now, None)
+        await engine._close_position("BTC/USDT", 100.0, now, "long", None)
+
+    asyncio.run(round_trip())
+
+    close_trade = [trade for trade in engine._trades if trade.trade_stage == "close"][0]
+    assert close_trade.gross_pnl == pytest.approx(-0.2)
+    assert close_trade.slippage_cost == pytest.approx(0.1)
+    assert close_trade.net_pnl == pytest.approx(-0.2)
+    assert engine._capital == pytest.approx(999.8)
 
 
 def test_backtest_engine_uses_funding_provider_when_column_missing(tmp_path):

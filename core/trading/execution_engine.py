@@ -7,6 +7,7 @@ import contextlib
 from contextvars import ContextVar
 import json
 import math
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -93,9 +94,15 @@ _COINGLASS_REVERSAL_FILTER_STRATEGIES = {
     "MeanReversionHalfLifeStrategy",
 }
 _COINGLASS_REVERSAL_LIQUIDATION_COOLDOWN_USD = 25_000_000.0
+_UNRESOLVED_LIVE_ORDER_INTENT_STATUSES = {
+    "open",
+    "partial",
+    "unknown",
+    "exposure_quarantined",
+}
 
 
-@dataclass
+@dataclass(frozen=True)
 class ConditionalManualOrder:
     conditional_id: str
     created_at: str
@@ -114,6 +121,9 @@ class ConditionalManualOrder:
     account_id: str
     strategy: str = "manual"
     reduce_only: bool = False
+    # Bound once when the conditional order is created.  It must never follow
+    # later account/global mode changes: a paper intent must not become live.
+    trading_mode: str = "paper"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -134,6 +144,7 @@ class ConditionalManualOrder:
             "account_id": self.account_id,
             "strategy": self.strategy,
             "reduce_only": self.reduce_only,
+            "trading_mode": self.trading_mode,
         }
 
 
@@ -184,6 +195,7 @@ class ExecutionEngine:
         }
 
         self._conditional_orders: Dict[str, ConditionalManualOrder] = {}
+        self._conditional_mode_mismatch_notified: set[str] = set()
         self._conditional_seq = 0
         self._last_bg_check_at: Optional[datetime] = None
         self._bg_check_interval_seconds = 2.0
@@ -209,7 +221,9 @@ class ExecutionEngine:
         self._live_review_root = Path("./data/cache/live_review")
         self._live_trade_journal_path = self._live_review_root / "strategy_trade_journal.jsonl"
         self._live_trade_counts_path = self._live_review_root / "strategy_trade_counts.json"
+        self._pending_live_order_intents_path = self._live_review_root / "pending_order_intents.json"
         self._live_strategy_trade_counts: Dict[str, int] = self._load_live_trade_counts()
+        self._pending_live_order_intents: Dict[str, Dict[str, Any]] = self._load_pending_live_order_intents()
         self._live_review_lock: Optional[asyncio.Lock] = None
         self._live_review_lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._live_fee_backfill_cache: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
@@ -357,6 +371,32 @@ class ExecutionEngine:
             fallback=fallback or self.get_trading_mode(),
         )
 
+    def _stored_conditional_order_mode(self, conditional: Any) -> str:
+        """Return an immutable conditional-order mode with a fail-safe legacy default.
+
+        Conditional orders created before the mode field existed cannot prove
+        that they were authorized for live trading.  Treat those in-memory
+        objects as paper orders so a process upgrade/account-mode change cannot
+        turn an old paper intent into a real order.
+        """
+        raw_mode = str(getattr(conditional, "trading_mode", "") or "").strip().lower()
+        if raw_mode not in {"paper", "live"}:
+            return "paper"
+        return self._normalize_trading_mode(raw_mode)
+
+    def _conditional_account_mode(self, conditional: Any) -> Optional[str]:
+        try:
+            return self._resolve_account_trading_mode(
+                getattr(conditional, "account_id", "main"),
+                fallback=self.get_trading_mode(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Unable to resolve account mode for conditional order; freezing it: "
+                f"account_id={getattr(conditional, 'account_id', 'main')} error={exc}"
+            )
+            return None
+
     def _activate_runtime_mode(self, mode: str, *, reset_baseline: bool = False) -> None:
         resolved = self._normalize_trading_mode(mode)
         self._paper_trading = resolved == "paper"
@@ -457,6 +497,150 @@ class ExecutionEngine:
             tmp.replace(self._live_trade_counts_path)
         except Exception as exc:
             logger.warning(f"persist live trade counts failed: {exc}")
+
+    def _load_pending_live_order_intents(self) -> Dict[str, Dict[str, Any]]:
+        try:
+            if not self._pending_live_order_intents_path.exists():
+                return {}
+            raw = json.loads(self._pending_live_order_intents_path.read_text(encoding="utf-8"))
+            rows = raw.get("intents") if isinstance(raw, dict) else raw
+            if not isinstance(rows, list):
+                return {}
+            intents: Dict[str, Dict[str, Any]] = {}
+            for item in rows:
+                if not isinstance(item, dict):
+                    continue
+                intent_id = str(item.get("intent_id") or "").strip()
+                if not intent_id:
+                    continue
+                payload = dict(item)
+                payload["intent_id"] = intent_id
+                intents[intent_id] = payload
+            return intents
+        except Exception as exc:
+            logger.warning(f"load pending live order intents failed: {exc}")
+            return {}
+
+    def _persist_pending_live_order_intents(self) -> None:
+        try:
+            self._pending_live_order_intents_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "version": 1,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "intents": list(self._pending_live_order_intents.values())[-1000:],
+            }
+            tmp = self._pending_live_order_intents_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self._pending_live_order_intents_path)
+        except Exception as exc:
+            logger.warning(f"persist pending live order intents failed: {exc}")
+
+    @staticmethod
+    def _is_ambiguous_submit_failure(reason: Any) -> bool:
+        text = str(reason or "").strip().lower()
+        return any(
+            token in text
+            for token in (
+                "timeout",
+                "timed out",
+                "network",
+                "connection",
+                "temporarily unavailable",
+                "server disconnected",
+            )
+        )
+
+    def _record_pending_live_order_intent(
+        self,
+        *,
+        request: OrderRequest,
+        status: str,
+        order: Optional[Any] = None,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        params = dict(getattr(request, "params", {}) or {})
+        client_order_id = str(
+            params.get("newClientOrderId")
+            or params.get("clientOrderId")
+            or params.get("client_order_id")
+            or ""
+        ).strip()
+        order_id = str(getattr(order, "id", "") or "").strip()
+        intent_id = client_order_id or order_id or f"intent-{uuid.uuid4().hex}"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        existing = dict(self._pending_live_order_intents.get(intent_id) or {})
+        payload = {
+            **existing,
+            "intent_id": intent_id,
+            "client_order_id": client_order_id or None,
+            "order_id": order_id or existing.get("order_id"),
+            "account_id": str(getattr(request, "account_id", "main") or "main"),
+            "exchange": str(getattr(request, "exchange", "") or "").strip().lower(),
+            "symbol": str(getattr(request, "symbol", "") or ""),
+            "side": str(getattr(getattr(request, "side", None), "value", getattr(request, "side", "")) or "").lower(),
+            "order_type": str(
+                getattr(getattr(request, "order_type", None), "value", getattr(request, "order_type", "")) or ""
+            ).lower(),
+            "requested_amount": float(getattr(request, "amount", 0.0) or 0.0),
+            "filled_amount": float(getattr(order, "filled", 0.0) or 0.0),
+            "remaining_amount": float(getattr(order, "remaining", 0.0) or 0.0),
+            "reduce_only": bool(getattr(request, "reduce_only", False)),
+            "strategy": str(getattr(request, "strategy", "") or ""),
+            "status": str(status or "unknown").strip().lower(),
+            "reason": str(reason or ""),
+            "created_at": existing.get("created_at") or now_iso,
+            "updated_at": now_iso,
+        }
+        self._pending_live_order_intents[intent_id] = payload
+        self._persist_pending_live_order_intents()
+        return dict(payload)
+
+    def _find_unresolved_live_order_intent(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        account_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        target_exchange = str(exchange or "").strip().lower()
+        target_symbol = self._canonical_symbol(symbol)
+        target_account = str(account_id or "main")
+        for item in self._pending_live_order_intents.values():
+            if str(item.get("status") or "").lower() not in _UNRESOLVED_LIVE_ORDER_INTENT_STATUSES:
+                continue
+            if str(item.get("account_id") or "main") != target_account:
+                continue
+            if str(item.get("exchange") or "").strip().lower() != target_exchange:
+                continue
+            if self._canonical_symbol(str(item.get("symbol") or "")) != target_symbol:
+                continue
+            return dict(item)
+        return None
+
+    def list_pending_live_order_intents(self, *, unresolved_only: bool = False) -> List[Dict[str, Any]]:
+        rows = [dict(item) for item in self._pending_live_order_intents.values()]
+        if unresolved_only:
+            rows = [
+                item
+                for item in rows
+                if str(item.get("status") or "").lower() in _UNRESOLVED_LIVE_ORDER_INTENT_STATUSES
+            ]
+        return sorted(rows, key=lambda item: str(item.get("created_at") or ""))
+
+    def resolve_pending_live_order_intent(self, intent_id: str, *, resolution: str) -> bool:
+        key = str(intent_id or "").strip()
+        item = self._pending_live_order_intents.get(key)
+        if not item:
+            return False
+        resolved = str(resolution or "").strip().lower()
+        if resolved not in {"canceled", "rejected", "filled_accounted", "exchange_flat_confirmed"}:
+            return False
+        item["status"] = "resolved"
+        item["resolution"] = resolved
+        item["resolved_at"] = datetime.now(timezone.utc).isoformat()
+        item["updated_at"] = item["resolved_at"]
+        self._persist_pending_live_order_intents()
+        return True
 
     @staticmethod
     def _signal_to_dict_safe(signal: Signal) -> Dict[str, Any]:
@@ -2451,9 +2635,11 @@ class ExecutionEngine:
         fee_usd = self._safe_nonnegative_float(meta.get("paper_fee_usd"), 0.0)
         slippage_cost_usd = self._safe_nonnegative_float(meta.get("paper_slippage_cost_usd"), 0.0)
         self._paper_fee_applied_orders.add(oid)
-        total_cost_usd = fee_usd + slippage_cost_usd
-        if total_cost_usd > 0:
-            self._paper_total_fees_usd += float(total_cost_usd)
+        # Paper fills already use the adverse, slipped execution price.  Only
+        # explicit fees are deducted from account equity here; slippage remains
+        # an attribution metric and must not be charged a second time.
+        if fee_usd > 0:
+            self._paper_total_fees_usd += float(fee_usd)
         return {
             "fee_usd": float(fee_usd),
             "slippage_cost_usd": float(slippage_cost_usd),
@@ -3472,7 +3658,8 @@ class ExecutionEngine:
         if self._current_trading_mode() == "paper":
             return
         local_positions = list(position_manager.get_all_positions())
-        if not local_positions:
+        pending_intents = self.list_pending_live_order_intents(unresolved_only=True)
+        if not local_positions and not pending_intents:
             return
 
         now = datetime.now(timezone.utc)
@@ -3496,8 +3683,19 @@ class ExecutionEngine:
             if local_symbol and local_side in {"long", "short"}:
                 active_local_keys.add((account_id, exchange_name, local_symbol, local_side))
             grouped.setdefault((exchange_name, account_id), []).append(pos)
+        for intent in pending_intents:
+            exchange_name = str(intent.get("exchange") or "").strip().lower()
+            account_id = str(intent.get("account_id") or "main")
+            if exchange_name:
+                grouped.setdefault((exchange_name, account_id), [])
 
         for (exchange_name, account_id), positions in grouped.items():
+            group_pending_intents = [
+                item
+                for item in pending_intents
+                if str(item.get("exchange") or "").strip().lower() == exchange_name
+                and str(item.get("account_id") or "main") == account_id
+            ]
             connector = await self._ensure_exchange_connector(exchange_name, account_id=account_id)
             if not connector:
                 continue
@@ -3655,6 +3853,68 @@ class ExecutionEngine:
                         "reason": "exchange_flat_manual_close",
                     },
                 )
+
+            intents_changed = False
+            for intent in group_pending_intents:
+                symbol_key = self._canonical_symbol(str(intent.get("symbol") or ""))
+                side = "long" if str(intent.get("side") or "").lower() == "buy" else "short"
+                snapshot = exchange_side_snapshots.get((symbol_key, side))
+                if snapshot is None:
+                    continue
+                already_accounted = any(
+                    self._canonical_symbol(str(getattr(pos, "symbol", "") or "")) == symbol_key
+                    and str(getattr(getattr(pos, "side", None), "value", "") or "").lower() == side
+                    for pos in positions
+                )
+                if already_accounted:
+                    continue
+                entry_price = float(snapshot.get("entry_price") or snapshot.get("current_price") or 0.0)
+                quantity = float(snapshot.get("quantity") or 0.0)
+                if not symbol_key or entry_price <= 0 or quantity <= 0:
+                    continue
+                quarantined = position_manager.open_position(
+                    exchange=exchange_name,
+                    symbol=str(intent.get("symbol") or symbol_key),
+                    side=PositionSide.LONG if side == "long" else PositionSide.SHORT,
+                    entry_price=entry_price,
+                    quantity=quantity,
+                    leverage=float(snapshot.get("leverage") or 1.0),
+                    strategy="__exchange_quarantine__",
+                    account_id=account_id,
+                    metadata={
+                        "source": "exchange_live",
+                        "quarantined": True,
+                        "block_new_entries": True,
+                        "pending_order_intent_id": intent.get("intent_id"),
+                        "trading_mode": "live",
+                    },
+                )
+                self._sync_local_position_from_exchange(quarantined, snapshot)
+                stored_intent = self._pending_live_order_intents.get(str(intent.get("intent_id") or ""))
+                if stored_intent is not None:
+                    stored_intent["status"] = "exposure_quarantined"
+                    stored_intent["quarantined_position_strategy"] = "__exchange_quarantine__"
+                    stored_intent["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    intents_changed = True
+                logger.critical(
+                    "Quarantined unmatched exchange exposure discovered from a pending live order intent: "
+                    f"intent_id={intent.get('intent_id')} exchange={exchange_name} symbol={symbol_key} "
+                    f"side={side} quantity={quantity} account_id={account_id}"
+                )
+                await self._notify_callbacks(
+                    "unmatched_exchange_exposure_quarantined",
+                    {
+                        "intent_id": intent.get("intent_id"),
+                        "exchange": exchange_name,
+                        "symbol": symbol_key,
+                        "side": side,
+                        "quantity": quantity,
+                        "account_id": account_id,
+                        "status": "exposure_quarantined",
+                    },
+                )
+            if intents_changed:
+                self._persist_pending_live_order_intents()
 
         stale_keys = [
             key
@@ -3850,6 +4110,39 @@ class ExecutionEngine:
             account_id = str(signal.metadata.get("account_id", "main"))
             exchange = self._resolve_signal_exchange(signal, account_id)
             leverage = float(signal.metadata.get("leverage", 1.0) or 1.0)
+            if self._current_trading_mode() == "live" and not is_reduce_only_meta:
+                pending_intent = self._find_unresolved_live_order_intent(
+                    exchange=exchange,
+                    symbol=signal.symbol,
+                    account_id=account_id,
+                )
+                if pending_intent is not None:
+                    reason = "unresolved_live_order_intent"
+                    self._signal_diagnostics["risk_rejected"] = int(
+                        self._signal_diagnostics.get("risk_rejected", 0)
+                    ) + 1
+                    self._signal_diagnostics["last_result"] = {
+                        "status": "pending_live_order_blocked",
+                        "strategy": signal.strategy_name,
+                        "symbol": signal.symbol,
+                        "exchange": exchange,
+                        "account_id": account_id,
+                        "reason": reason,
+                        "intent_id": pending_intent.get("intent_id"),
+                        "intent_status": pending_intent.get("status"),
+                    }
+                    self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
+                    logger.error(
+                        "Blocked live strategy entry while a prior order is unresolved: "
+                        f"strategy={signal.strategy_name} symbol={signal.symbol} exchange={exchange} "
+                        f"account_id={account_id} intent_id={pending_intent.get('intent_id')} "
+                        f"intent_status={pending_intent.get('status')}"
+                    )
+                    await self._notify_callbacks(
+                        "live_order_retry_blocked",
+                        dict(self._signal_diagnostics["last_result"]),
+                    )
+                    return None
             trade_policy = self._resolve_strategy_trade_policy(signal.strategy_name, exchange)
             strategy_lookup = self._strategy_lookup_value(signal.strategy_name)
             require_strategy_isolation = bool(strategy_lookup) or self._requires_strategy_position_isolation(signal)
@@ -4464,21 +4757,35 @@ class ExecutionEngine:
                     "account_id": account_id,
                 }
                 self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
-                await order_manager.record_rejected_order(
-                    request=req,
-                    reason=fail_reason,
-                    price=quote_price or signal.price,
-                )
+                pending_intent: Optional[Dict[str, Any]] = None
+                if self._current_trading_mode() == "live":
+                    pending_intent = self._record_pending_live_order_intent(
+                        request=req,
+                        status="unknown",
+                        reason=fail_reason,
+                    )
+                    await self._notify_callbacks("live_order_intent_pending", pending_intent)
+                else:
+                    await order_manager.record_rejected_order(
+                        request=req,
+                        reason=fail_reason,
+                        price=quote_price or signal.price,
+                    )
                 logger.error(
                     f"Strategy order timeout: strategy={signal.strategy_name} "
-                    f"symbol={signal.symbol} exchange={exchange} account_id={account_id}"
+                    f"symbol={signal.symbol} exchange={exchange} account_id={account_id} "
+                    f"intent_id={(pending_intent or {}).get('intent_id')} state=unknown"
                 )
                 return None
             if not order:
                 fail_reason = str(order_manager.get_last_error() or "").strip() or "下单执行失败"
+                ambiguous_submit = (
+                    self._current_trading_mode() == "live"
+                    and self._is_ambiguous_submit_failure(fail_reason)
+                )
                 self._signal_diagnostics["order_failed"] = int(self._signal_diagnostics.get("order_failed", 0)) + 1
                 self._signal_diagnostics["last_result"] = {
-                    "status": "order_failed",
+                    "status": "order_unknown" if ambiguous_submit else "order_failed",
                     "strategy": signal.strategy_name,
                     "symbol": signal.symbol,
                     "exchange": exchange,
@@ -4486,11 +4793,19 @@ class ExecutionEngine:
                     "reason": fail_reason,
                 }
                 self._signal_diagnostics["last_updated_at"] = datetime.now(timezone.utc).isoformat()
-                await order_manager.record_rejected_order(
-                    request=req,
-                    reason=fail_reason,
-                    price=quote_price or signal.price,
-                )
+                if ambiguous_submit:
+                    pending_intent = self._record_pending_live_order_intent(
+                        request=req,
+                        status="unknown",
+                        reason=fail_reason,
+                    )
+                    await self._notify_callbacks("live_order_intent_pending", pending_intent)
+                else:
+                    await order_manager.record_rejected_order(
+                        request=req,
+                        reason=fail_reason,
+                        price=quote_price or signal.price,
+                    )
                 logger.error(
                     f"Strategy order failed: strategy={signal.strategy_name} "
                     f"symbol={signal.symbol} exchange={exchange} account_id={account_id} "
@@ -4500,6 +4815,20 @@ class ExecutionEngine:
 
             fill_price = float(order.price or signal.price or quote_price or 0.0)
             exec_amount = self._resolved_order_fill_qty(order, qty)
+            order_status = str(
+                getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or ""
+            ).lower()
+            order_remaining = float(getattr(order, "remaining", 0.0) or 0.0)
+            if self._current_trading_mode() == "live" and (
+                order_status == "open" or order_remaining > 1e-12
+            ):
+                pending_intent = self._record_pending_live_order_intent(
+                    request=req,
+                    status="partial" if exec_amount > 0 else "open",
+                    order=order,
+                    reason="exchange_order_not_terminal",
+                )
+                await self._notify_callbacks("live_order_intent_pending", pending_intent)
             cost_details = await self._resolve_execution_costs(
                 order=order,
                 exchange=exchange,
@@ -5319,8 +5648,10 @@ class ExecutionEngine:
         account_id: str,
         strategy: str,
         reduce_only: bool,
+        trading_mode: str,
     ) -> Dict[str, Any]:
         cid = self._new_conditional_id()
+        bound_mode = self._normalize_trading_mode(trading_mode)
         self._conditional_orders[cid] = ConditionalManualOrder(
             conditional_id=cid,
             created_at=datetime.now(timezone.utc).isoformat(),
@@ -5339,6 +5670,7 @@ class ExecutionEngine:
             account_id=account_id,
             strategy=strategy,
             reduce_only=bool(reduce_only),
+            trading_mode=bound_mode,
         )
         payload = {
             "conditional_id": cid,
@@ -5349,6 +5681,7 @@ class ExecutionEngine:
             "trigger_price": float(trigger_price),
             "amount": float(amount),
             "account_id": account_id,
+            "trading_mode": bound_mode,
         }
         await self._notify_callbacks("conditional_queued", payload)
         return payload
@@ -5375,12 +5708,27 @@ class ExecutionEngine:
         reduce_only: bool,
         strategy: str,
         params: Optional[Dict[str, Any]] = None,
+        bound_trading_mode: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
-        mode = self._resolve_account_trading_mode(
-            account_id,
-            metadata=dict(params or {}),
-            fallback=self.get_trading_mode(),
-        )
+        if bound_trading_mode is not None:
+            mode = self._normalize_trading_mode(bound_trading_mode)
+            account_mode = self._resolve_account_trading_mode(
+                account_id,
+                metadata=dict(params or {}),
+                fallback=self.get_trading_mode(),
+            )
+            if account_mode != mode:
+                logger.error(
+                    "Refused conditional order execution after account mode changed: "
+                    f"account_id={account_id} stored_mode={mode} current_mode={account_mode}"
+                )
+                return None
+        else:
+            mode = self._resolve_account_trading_mode(
+                account_id,
+                metadata=dict(params or {}),
+                fallback=self.get_trading_mode(),
+            )
         async with self._mode_guard(mode):
             return await self._execute_manual_order_single_in_active_mode(
                 exchange=exchange,
@@ -5451,6 +5799,33 @@ class ExecutionEngine:
             (is_sell and existing_position and existing_position.side == PositionSide.LONG)
             or ((not is_sell) and existing_position and existing_position.side == PositionSide.SHORT)
         )
+
+        if active_mode == "live" and not reduce_only and not closes_existing:
+            pending_intent = self._find_unresolved_live_order_intent(
+                exchange=exchange,
+                symbol=symbol,
+                account_id=account_id,
+            )
+            if pending_intent is not None:
+                logger.error(
+                    "Blocked live manual entry while a prior order is unresolved: "
+                    f"symbol={symbol} exchange={exchange} account_id={account_id} "
+                    f"intent_id={pending_intent.get('intent_id')} "
+                    f"intent_status={pending_intent.get('status')}"
+                )
+                await self._notify_callbacks(
+                    "live_order_retry_blocked",
+                    {
+                        "type": "manual_order",
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "account_id": account_id,
+                        "reason": "unresolved_live_order_intent",
+                        "intent_id": pending_intent.get("intent_id"),
+                        "intent_status": pending_intent.get("status"),
+                    },
+                )
+                return None
 
         if reduce_only and not closes_existing:
             return None
@@ -5530,10 +5905,30 @@ class ExecutionEngine:
         )
         order = await order_manager.create_order(request)
         if not order:
+            fail_reason = str(order_manager.get_last_error() or "").strip()
+            if active_mode == "live" and self._is_ambiguous_submit_failure(fail_reason):
+                pending_intent = self._record_pending_live_order_intent(
+                    request=request,
+                    status="unknown",
+                    reason=fail_reason,
+                )
+                await self._notify_callbacks("live_order_intent_pending", pending_intent)
             return None
 
         fill_price = float(order.price or price or quote_price or 0.0)
         exec_amount = self._resolved_order_fill_qty(order, requested_amount)
+        order_status = str(
+            getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or ""
+        ).lower()
+        order_remaining = float(getattr(order, "remaining", 0.0) or 0.0)
+        if active_mode == "live" and (order_status == "open" or order_remaining > 1e-12):
+            pending_intent = self._record_pending_live_order_intent(
+                request=request,
+                status="partial" if exec_amount > 0 else "open",
+                order=order,
+                reason="exchange_order_not_terminal",
+            )
+            await self._notify_callbacks("live_order_intent_pending", pending_intent)
         cost_details = await self._resolve_execution_costs(
             order=order,
             exchange=exchange,
@@ -5834,6 +6229,10 @@ class ExecutionEngine:
                 or (str(side).lower() == "sell" and last_price <= float(trigger_price))
             )
             if not trigger_hit:
+                conditional_trading_mode = self._resolve_account_trading_mode(
+                    account_id,
+                    fallback=self.get_trading_mode(),
+                )
                 return await self._queue_conditional_order(
                     exchange=exchange,
                     symbol=symbol,
@@ -5850,6 +6249,7 @@ class ExecutionEngine:
                     account_id=account_id,
                     strategy=strategy,
                     reduce_only=reduce_only,
+                    trading_mode=conditional_trading_mode,
                 )
 
         if mode in {"iceberg", "twap", "vwap"}:
@@ -6219,15 +6619,39 @@ class ExecutionEngine:
         if not self._conditional_orders:
             return
 
+        runtime_mode = self._current_trading_mode()
         for cid in list(self._conditional_orders.keys()):
             cond = self._conditional_orders.get(cid)
             if not cond:
                 continue
-            if self._resolve_account_trading_mode(
-                getattr(cond, "account_id", "main"),
-                fallback=self._current_trading_mode(),
-            ) != self._current_trading_mode():
+            stored_mode = self._stored_conditional_order_mode(cond)
+            if stored_mode != runtime_mode:
                 continue
+            account_mode = self._conditional_account_mode(cond)
+            if account_mode != stored_mode:
+                if cid not in self._conditional_mode_mismatch_notified:
+                    self._conditional_mode_mismatch_notified.add(cid)
+                    reason = "account_trading_mode_changed"
+                    logger.error(
+                        "Conditional order frozen because its bound mode no longer matches the account: "
+                        f"conditional_id={cid} account_id={getattr(cond, 'account_id', 'main')} "
+                        f"stored_mode={stored_mode} current_mode={account_mode or 'unknown'}"
+                    )
+                    await self._notify_callbacks(
+                        "conditional_frozen",
+                        {
+                            "conditional_id": cid,
+                            "account_id": getattr(cond, "account_id", "main"),
+                            "exchange": getattr(cond, "exchange", ""),
+                            "symbol": getattr(cond, "symbol", ""),
+                            "trading_mode": stored_mode,
+                            "current_account_mode": account_mode or "unknown",
+                            "status": "frozen",
+                            "reason": reason,
+                        },
+                    )
+                continue
+            self._conditional_mode_mismatch_notified.discard(cid)
             current = await self._resolve_price(cond.exchange, cond.symbol, cond.price)
             if current <= 0:
                 continue
@@ -6256,6 +6680,7 @@ class ExecutionEngine:
                 reduce_only=cond.reduce_only,
                 strategy=cond.strategy,
                 params={"conditional_id": cid, "trigger_price": cond.trigger_price},
+                bound_trading_mode=stored_mode,
             )
             if result:
                 await self._notify_callbacks(
@@ -6270,6 +6695,7 @@ class ExecutionEngine:
                     },
                 )
                 self._conditional_orders.pop(cid, None)
+                self._conditional_mode_mismatch_notified.discard(cid)
 
     def _background_tick_modes(self) -> List[str]:
         current = self._normalize_trading_mode(self.get_trading_mode())
@@ -6282,14 +6708,7 @@ class ExecutionEngine:
     def _has_background_work_for_mode(self, mode: str, *, fallback: str) -> bool:
         target = self._normalize_trading_mode(mode)
         for cond in self._conditional_orders.values():
-            try:
-                cond_mode = self._resolve_account_trading_mode(
-                    getattr(cond, "account_id", "main"),
-                    fallback=fallback,
-                )
-            except Exception:
-                cond_mode = fallback
-            if cond_mode == target:
+            if self._stored_conditional_order_mode(cond) == target:
                 return True
         try:
             return bool(position_manager.get_all_positions(scope=target))
@@ -6359,6 +6778,7 @@ class ExecutionEngine:
     async def stop(self) -> None:
         self._running = False
         self._conditional_orders.clear()
+        self._conditional_mode_mismatch_notified.clear()
         if self._queue_task and not self._queue_task.done():
             self._queue_task.cancel()
             try:
@@ -6378,11 +6798,30 @@ class ExecutionEngine:
         logger.info("Execution engine stopped")
 
     def list_conditional_orders(self) -> List[Dict[str, Any]]:
-        return [o.to_dict() for o in self._conditional_orders.values()]
+        rows: List[Dict[str, Any]] = []
+        for cid, conditional in self._conditional_orders.items():
+            serializer = getattr(conditional, "to_dict", None)
+            row = dict(serializer()) if callable(serializer) else {
+                "conditional_id": cid,
+                "account_id": getattr(conditional, "account_id", "main"),
+                "exchange": getattr(conditional, "exchange", ""),
+                "symbol": getattr(conditional, "symbol", ""),
+            }
+            stored_mode = self._stored_conditional_order_mode(conditional)
+            account_mode = self._conditional_account_mode(conditional)
+            mode_mismatch = account_mode != stored_mode
+            row["trading_mode"] = stored_mode
+            row["current_account_mode"] = account_mode or "unknown"
+            row["status"] = "frozen" if mode_mismatch else "queued"
+            if mode_mismatch:
+                row["freeze_reason"] = "account_trading_mode_changed"
+            rows.append(row)
+        return rows
 
     def cancel_conditional_order(self, conditional_id: str) -> bool:
         if conditional_id in self._conditional_orders:
             del self._conditional_orders[conditional_id]
+            self._conditional_mode_mismatch_notified.discard(conditional_id)
             return True
         return False
 
@@ -6391,16 +6830,14 @@ class ExecutionEngine:
         paper_conditional_ids = [
             cid
             for cid, cond in self._conditional_orders.items()
-            if self._resolve_account_trading_mode(
-                getattr(cond, "account_id", "main"),
-                fallback="paper",
-            ) == "paper"
+            if self._stored_conditional_order_mode(cond) == "paper"
         ]
         conditional_count = len(paper_conditional_ids)
         fee_count = len(self._paper_fee_applied_orders)
         fee_total = float(self._paper_total_fees_usd or 0.0)
         for cid in paper_conditional_ids:
             self._conditional_orders.pop(cid, None)
+            self._conditional_mode_mismatch_notified.discard(cid)
         queue_cleared = 0
         queue = self._signal_queue
         if queue is not None:

@@ -4,11 +4,11 @@ import asyncio
 import secrets
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
 from core.audit.ops_audit import ops_audit_scope
 from core.ops.service import api as ops_api
-from core.ops.service.auth import get_request_auth
+from core.ops.service.auth import get_request_auth, require_ops_permissions_dependency
 from core.research import orchestrator as ai_orchestrator
 
 
@@ -137,7 +137,10 @@ async def _run_ai_proposal_job(app, *, job_id: str, proposal_id: str, config, ac
         app.state.research_job_tasks.pop(job_id, None)
 
 
-@router.post("/ai/proposal")
+@router.post(
+    "/ai/proposal",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def create_ai_proposal(request: Request, payload: ops_api.AIProposalCreateRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -184,7 +187,10 @@ async def get_ai_proposal(request: Request, proposal_id: str = ops_api.FPath(...
     return ops_api._ok({"proposal": item.model_dump(mode="json")})
 
 
-@router.delete("/ai/proposal/{proposal_id}")
+@router.delete(
+    "/ai/proposal/{proposal_id}",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def delete_ai_proposal(request: Request, proposal_id: str = ops_api.FPath(...)):
     auth = get_request_auth(request)
     async with ops_audit_scope(
@@ -229,7 +235,10 @@ async def get_ai_proposal_lifecycle(request: Request, proposal_id: str = ops_api
     return ops_api._ok({"proposal_id": proposal_id, "items": rows, "count": len(rows)})
 
 
-@router.post("/ai/proposal/{proposal_id}/run")
+@router.post(
+    "/ai/proposal/{proposal_id}/run",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def run_ai_proposal(request: Request, proposal_id: str, payload: ops_api.AIProposalRunRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()
@@ -406,7 +415,10 @@ async def get_ai_candidate(request: Request, candidate_id: str = ops_api.FPath(.
     return ops_api._ok({"candidate": item.model_dump(mode="json")})
 
 
-@router.post("/ai/candidate/{candidate_id}/promote")
+@router.post(
+    "/ai/candidate/{candidate_id}/promote",
+    dependencies=[Depends(require_ops_permissions_dependency("manage_ai_research"))],
+)
 async def promote_ai_candidate(request: Request, candidate_id: str, payload: ops_api.AICandidatePromotionRequest):
     auth = get_request_auth(request)
     params = payload.model_dump()

@@ -149,3 +149,15 @@ def test_matic_alias_normalizes_to_pol(tmp_path, monkeypatch):
     loaded = universe.get_watchlist_symbols()
     assert "POL/USDT" in loaded
     assert "MATIC/USDT" not in loaded
+
+
+def test_symbol_formats_share_one_canonical_pair():
+    variants = ["tag/usdt", "TAGUSDT", "TAG-USDT", "TAG-USDT-SWAP", " tag "]
+
+    normalized = universe.resolve_universe_scope(
+        "research",
+        research_symbols=variants,
+    )
+
+    assert normalized == ["TAG/USDT"]
+    assert universe.normalize_altcoin_pair("PYUSD") == "PYUSD/USDT"

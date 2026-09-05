@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
+from time import monotonic
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -58,6 +59,7 @@ class MarketSentimentStrategy(StrategyBase):
             "take_profit_pct": 0.10,
             "exchange": "binance",
             "timeout_sec": 6,
+            "sentiment_cache_ttl_sec": 300,
         }
         if params:
             default_params.update(params)
@@ -65,6 +67,7 @@ class MarketSentimentStrategy(StrategyBase):
         super().__init__(name, default_params)
         self._sentiment_data: Dict[str, Any] = {}
         self._regime_bias: Dict[str, int] = {}
+        self._fear_greed_cache: Optional[Tuple[float, int]] = None
 
     def update_sentiment(
         self,
@@ -80,6 +83,13 @@ class MarketSentimentStrategy(StrategyBase):
         }
 
     async def _fetch_fear_greed_index(self) -> Optional[int]:
+        ttl = max(0.0, float(self.params.get("sentiment_cache_ttl_sec", 300) or 0.0))
+        now = monotonic()
+        if ttl > 0 and self._fear_greed_cache is not None:
+            cached_at, cached_value = self._fear_greed_cache
+            if now - cached_at <= ttl:
+                return cached_value
+
         url = "https://api.alternative.me/fng/?limit=1"
         try:
             async with httpx.AsyncClient(timeout=float(self.params.get("timeout_sec", 6))) as client:
@@ -89,7 +99,10 @@ class MarketSentimentStrategy(StrategyBase):
             rows = payload.get("data") or []
             if not rows:
                 return None
-            return int(rows[0].get("value"))
+            value = int(rows[0].get("value"))
+            if ttl > 0:
+                self._fear_greed_cache = (now, value)
+            return value
         except Exception as e:
             logger.debug(f"{self.name} fear/greed unavailable: {e}")
             return None
@@ -265,6 +278,7 @@ class SocialSentimentStrategy(StrategyBase):
             "stop_loss_pct": 0.05,
             "take_profit_pct": 0.10,
             "timeout_sec": 6,
+            "trending_cache_ttl_sec": 300,
         }
         if params:
             default_params.update(params)
@@ -272,6 +286,7 @@ class SocialSentimentStrategy(StrategyBase):
         super().__init__(name, default_params)
         self._social_data: Dict[str, Any] = {}
         self._regime_bias: Dict[str, int] = {}
+        self._trending_cache: Dict[str, Tuple[float, Tuple[int, float]]] = {}
 
     def update_social_data(
         self,
@@ -295,6 +310,16 @@ class SocialSentimentStrategy(StrategyBase):
         return str(symbol or "").replace("/", "").upper()
 
     async def _fetch_trending_proxy(self, base_asset: str) -> Tuple[int, float]:
+        cache_key = str(base_asset or "").upper()
+        ttl = max(0.0, float(self.params.get("trending_cache_ttl_sec", 300) or 0.0))
+        now = monotonic()
+        if ttl > 0:
+            cached = self._trending_cache.get(cache_key)
+            if cached is not None:
+                cached_at, cached_value = cached
+                if now - cached_at <= ttl:
+                    return cached_value
+
         url = "https://api.coingecko.com/api/v3/search/trending"
         try:
             async with httpx.AsyncClient(timeout=float(self.params.get("timeout_sec", 6))) as client:
@@ -314,7 +339,10 @@ class SocialSentimentStrategy(StrategyBase):
             # map to rough "mentions" scale and trending score [0,1]
             mention_count = int(20 + mentions * 80)
             trending_score = max(0.0, min(1.0, rank_weight))
-            return mention_count, trending_score
+            result = (mention_count, trending_score)
+            if ttl > 0:
+                self._trending_cache[cache_key] = (now, result)
+            return result
         except Exception as e:
             logger.debug(f"{self.name} trending proxy unavailable: {e}")
             return 20, 0.0

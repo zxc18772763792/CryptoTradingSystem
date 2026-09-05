@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import sys
+import time
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
@@ -11,6 +14,33 @@ from starlette.middleware.cors import CORSMiddleware
 from core.ops.service import auth as ops_auth_module
 from web import main as web_main
 from web.startup_mode import StartupModeDecision
+
+
+def _clone_market_ws_quality_guard():
+    guard = web_main._market_ws_quality_guard
+    if guard is None:
+        return None
+
+    from core.marketdata.ws_quality_guard import WsQualityGuard
+
+    return WsQualityGuard(
+        enabled=guard.enabled,
+        window_sec=guard.window_sec,
+        max_tick_age_ms=guard.max_tick_age_ms,
+        min_samples=guard.min_samples,
+        degrade_unhealthy_fraction=guard.degrade_unhealthy_fraction,
+        degrade_breach_delta=guard.degrade_breach_delta,
+        degrade_invalid_delta=guard.degrade_invalid_delta,
+        recover_healthy_sec=guard.recover_healthy_sec,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_market_ws_quality_guard(monkeypatch):
+    monkeypatch.setattr(web_main, "_market_ws_quality_guard", _clone_market_ws_quality_guard())
+    web_main.market_data_hub.clear()
+    yield
+    web_main.market_data_hub.clear()
 
 
 def test_model_env_fields_include_news_llm_backup_chain():
@@ -79,6 +109,70 @@ def test_optional_external_data_workers_can_be_enabled(monkeypatch):
     assert "cryptoquant" in factories
     assert "nansen" in factories
     assert "kaiko" in factories
+
+
+def test_optional_external_worker_retries_after_import_error(monkeypatch):
+    original_import = builtins.__import__
+    sys.modules.pop("core.data.google_trends_collector", None)
+
+    touches = []
+    sleep_calls = []
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "core.data.google_trends_collector":
+            raise ImportError("pytrends unavailable")
+        return original_import(name, globals, locals, fromlist, level)
+
+    async def fake_sleep_worker_interval(stop_event, delay_sec):
+        sleep_calls.append(delay_sec)
+        if len(sleep_calls) >= 3:
+            stop_event.set()
+
+    def fake_touch_runtime_task(task_name, *, success=False):
+        touches.append((task_name, success))
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(web_main, "_sleep_worker_interval", fake_sleep_worker_interval)
+    monkeypatch.setattr(web_main, "_touch_runtime_task", fake_touch_runtime_task)
+
+    asyncio.run(web_main._google_trends_worker(asyncio.Event()))
+
+    assert touches == [("google_trends", False), ("google_trends", False)]
+    assert len(sleep_calls) == 3
+
+
+def test_maintenance_safe_call_reports_timeout(monkeypatch):
+    async def _slow_step():
+        await asyncio.sleep(10)
+
+    async def _run():
+        return await web_main._maintenance_safe_call("slow_step", _slow_step(), timeout_sec=0.01)
+
+    result = asyncio.run(_run())
+
+    assert result["ok"] is False
+    assert result["timeout"] is True
+    assert "slow_step timed out after 0.01s" in result["error"]
+
+
+def test_sync_market_dataset_reports_download_timeout(monkeypatch):
+    from web.api import data as data_api
+
+    async def _slow_download(**_kwargs):
+        await asyncio.sleep(10)
+
+    async def _unexpected_integrity(**_kwargs):
+        raise AssertionError("integrity should not run after download timeout")
+
+    monkeypatch.setattr(web_main, "_DATA_MAINTENANCE_MARKET_TIMEOUT_SEC", 0.01)
+    monkeypatch.setattr(data_api, "run_download_historical_data", _slow_download)
+    monkeypatch.setattr(data_api, "check_data_integrity", _unexpected_integrity)
+
+    result = asyncio.run(web_main._sync_market_dataset("binance", "BTC/USDT", "1m"))
+
+    assert result["download"] is None
+    assert result["integrity"] is None
+    assert "download binance BTC/USDT 1m timed out after 0.01s" in result["error"]
 
 
 def test_collect_watch_symbols_prefers_configured_market_ws_symbols(monkeypatch):
@@ -970,9 +1064,7 @@ def test_websocket_rejects_non_loopback_without_credentials(monkeypatch):
     class _WebSocket:
         client = _Client()
         cookies = {}
-        headers = {}
-
-    monkeypatch.setattr(web_main, "_ws_client_ip", lambda websocket: "203.0.113.10")
+        headers = {"origin": "http://127.0.0.1:8000"}
 
     assert web_main._ws_is_authorized(_WebSocket()) is False
 
@@ -984,9 +1076,8 @@ def test_websocket_rejects_forged_cookie_from_non_loopback(monkeypatch):
     class _WebSocket:
         client = _Client()
         cookies = {"cts_local_ui_session": "forged"}
-        headers = {}
+        headers = {"origin": "http://127.0.0.1:8000"}
 
-    monkeypatch.setattr(web_main, "_ws_client_ip", lambda websocket: "203.0.113.10")
     monkeypatch.setattr(web_main, "_has_valid_local_ui_session", lambda websocket: False)
 
     assert web_main._ws_is_authorized(_WebSocket()) is False
@@ -999,32 +1090,95 @@ def test_websocket_allows_valid_ops_token_from_non_loopback(monkeypatch):
     class _WebSocket:
         client = _Client()
         cookies = {}
-        headers = {"x-ops-token": "test-token"}
+        headers = {
+            "origin": "http://127.0.0.1:8000",
+            "x-ops-token": "test-token",
+        }
 
-    monkeypatch.setattr(web_main, "_ws_client_ip", lambda websocket: "203.0.113.10")
     monkeypatch.setattr(web_main, "_has_valid_local_ui_session", lambda websocket: False)
     monkeypatch.setattr(ops_auth_module, "get_ops_token", lambda required=False: "test-token")
 
     assert web_main._ws_is_authorized(_WebSocket()) is True
 
 
-def test_websocket_allows_loopback_without_credentials(monkeypatch):
+def test_websocket_rejects_loopback_without_credentials(monkeypatch):
     class _Client:
         host = "127.0.0.1"
 
     class _WebSocket:
         client = _Client()
         cookies = {}
-        headers = {}
+        headers = {"origin": "http://127.0.0.1:8000"}
 
-    monkeypatch.setattr(web_main, "_ws_client_ip", lambda websocket: "127.0.0.1")
 
-    assert web_main._ws_is_authorized(_WebSocket()) is True
+    assert web_main._ws_is_authorized(_WebSocket()) is False
+
+
+def test_websocket_rejects_valid_token_from_disallowed_origin(monkeypatch):
+    class _Client:
+        host = "127.0.0.1"
+
+    class _WebSocket:
+        client = _Client()
+        cookies = {}
+        headers = {
+            "origin": "https://attacker.example",
+            "x-ops-token": "test-token",
+        }
+
+    monkeypatch.setattr(web_main, "_has_valid_local_ui_session", lambda websocket: False)
+    monkeypatch.setattr(ops_auth_module, "get_ops_token", lambda required=False: "test-token")
+
+    assert web_main._ws_is_authorized(_WebSocket()) is False
 
 
 def test_livez_and_health_are_lightweight_liveness_aliases():
     assert asyncio.run(web_main.livez_check())["status"] == "alive"
     assert asyncio.run(web_main.health_check())["status"] == "healthy"
+
+
+def test_shutdown_step_respects_shared_deadline():
+    async def run() -> None:
+        calls = {"started": 0}
+
+        async def slow_stop() -> None:
+            calls["started"] += 1
+            await asyncio.sleep(1)
+
+        started = time.perf_counter()
+        ok = await web_main._run_shutdown_step(
+            "slow_stop",
+            slow_stop,
+            deadline=time.monotonic() + 0.02,
+            timeout_sec=5.0,
+        )
+        elapsed = time.perf_counter() - started
+
+        assert ok is False
+        assert calls["started"] == 1
+        assert elapsed < 0.25
+
+    asyncio.run(run())
+
+
+def test_shutdown_step_skips_when_shared_deadline_is_exhausted():
+    async def run() -> None:
+        calls = {"started": 0}
+
+        async def should_not_start() -> None:
+            calls["started"] += 1
+
+        ok = await web_main._run_shutdown_step(
+            "already_late",
+            should_not_start,
+            deadline=time.monotonic() - 1.0,
+            timeout_sec=5.0,
+        )
+
+        assert ok is False
+        assert calls["started"] == 0
+
+    asyncio.run(run())
 
 
 def test_runtime_readiness_requires_fresh_critical_task_heartbeats(monkeypatch):

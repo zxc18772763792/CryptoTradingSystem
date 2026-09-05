@@ -128,7 +128,12 @@ def _select_ai_runtime_restore_winners(rows: List[Any]) -> Dict[str, str]:
 
 
 async def persist_strategy_snapshot(name: str, state_override: Optional[str] = None) -> bool:
-    """Persist current strategy manager state for one strategy."""
+    """Persist current strategy manager state for one strategy.
+
+    ``True`` is the durability acknowledgement.  Callers handling a control
+    plane mutation must treat ``False`` as a failed mutation instead of
+    reporting success based only on the in-memory strategy manager state.
+    """
     info = strategy_manager.get_strategy_info(name)
     if not info:
         return False

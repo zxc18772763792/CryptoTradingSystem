@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from types import SimpleNamespace
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock
@@ -9,6 +10,8 @@ import pytest
 
 from core.risk.risk_manager import RiskManager
 from web.api import trading as trading_api
+
+risk_module = importlib.import_module("core.risk.risk_manager")
 
 
 def _reset_realized_cache() -> None:
@@ -236,6 +239,38 @@ def test_risk_manager_does_not_halt_on_external_equity_drop_when_system_pnl_flat
     assert report["equity"]["daily_total_pnl_ratio"] == pytest.approx(-0.04)
     assert report["equity"]["daily_stop_basis_ratio"] == pytest.approx(0.0)
     assert report["discipline"]["fresh_entry_allowed"] is True
+
+
+def test_risk_manager_catastrophic_backstop_halts_zero_trade_live_loss(tmp_path, monkeypatch):
+    manager = RiskManager(use_persisted_overlay=False)
+    manager.configure_storage(tmp_path)
+    manager.set_account_scope("live", reset_baseline=False)
+    manager.max_daily_loss_ratio = 0.02
+    manager._daily_stop_required_breaches_live = 1
+    manager._daily_stop_guard_until = None
+
+    monkeypatch.setattr(
+        risk_module,
+        "_position_manager",
+        lambda: SimpleNamespace(
+            get_position_count=lambda: 0,
+            get_all_positions=lambda *args, **kwargs: [],
+            get_total_pnl=lambda: 0.0,
+        ),
+    )
+
+    manager.update_equity(
+        9500.0,
+        day_start_equity=10000.0,
+        current_unrealized_pnl=-500.0,
+        daily_realized_pnl=0.0,
+        scope="live",
+    )
+
+    report = manager.get_risk_report(scope="live")
+    assert report["trading_halted"] is True
+    assert report["equity"]["daily_stop_basis_ratio"] == pytest.approx(-0.05)
+    assert report["discipline"]["fresh_entry_allowed"] is False
 
 
 def test_resolve_live_daily_realized_pnl_prefers_binance_income(monkeypatch):

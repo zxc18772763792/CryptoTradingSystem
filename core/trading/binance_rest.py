@@ -4,7 +4,9 @@ import asyncio
 import hashlib
 import hmac
 import inspect
+import threading
 import time
+import weakref
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
@@ -18,6 +20,10 @@ from core.utils.asset_valuation import STABLE_COINS
 _BINANCE_REST_TIMEOUT_SEC = 8.0
 _BINANCE_RECV_WINDOW = 59000
 _BINANCE_TIME_OFFSET_MS: Dict[str, Any] = {"api": 0, "fapi": 0, "ts": 0.0}
+_BINANCE_TIME_OFFSET_LOCKS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+    weakref.WeakKeyDictionary()
+)
+_BINANCE_TIME_OFFSET_LOCK_GUARD = threading.Lock()
 
 
 def _apply_httpx_proxy_kw(client_kwargs: Dict[str, Any], proxy_url: Optional[str]) -> None:
@@ -42,6 +48,58 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value or 0.0)
     except Exception:
         return float(default)
+
+
+def _get_binance_time_offset_lock() -> asyncio.Lock:
+    """Return a refresh lock bound to the currently running event loop.
+
+    The module is reused by the web runtime, scripts, and tests. A single
+    process-global ``asyncio.Lock`` becomes permanently bound after its first
+    contended use and then fails when a later runner creates a new loop.
+    Weakly keying locks by loop keeps refresh serialization without leaking
+    closed loops or coupling independent runtimes.
+    """
+    loop = asyncio.get_running_loop()
+    with _BINANCE_TIME_OFFSET_LOCK_GUARD:
+        lock = _BINANCE_TIME_OFFSET_LOCKS.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            _BINANCE_TIME_OFFSET_LOCKS[loop] = lock
+        return lock
+
+
+async def _refresh_binance_time_offset(
+    target_host: str,
+    *,
+    proxy_url: Optional[str],
+    force: bool = False,
+) -> int:
+    now_ts = time.time()
+    if (not force) and (now_ts - float(_BINANCE_TIME_OFFSET_MS.get("ts") or 0.0)) <= 180.0:
+        cached = int(_BINANCE_TIME_OFFSET_MS.get(target_host, 0) or 0)
+        if cached:
+            return cached
+
+    async with _get_binance_time_offset_lock():
+        now_ts = time.time()
+        if (not force) and (now_ts - float(_BINANCE_TIME_OFFSET_MS.get("ts") or 0.0)) <= 180.0:
+            cached = int(_BINANCE_TIME_OFFSET_MS.get(target_host, 0) or 0)
+            if cached:
+                return cached
+
+        time_url = "https://api.binance.com/api/v3/time"
+        if target_host == "fapi":
+            time_url = "https://fapi.binance.com/fapi/v1/time"
+        client_kwargs: Dict[str, Any] = {"timeout": 3.0}
+        _apply_httpx_proxy_kw(client_kwargs, proxy_url)
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.get(time_url)
+            resp.raise_for_status()
+            server_ms = int((resp.json() or {}).get("serverTime") or 0)
+        offset = int(server_ms - int(time.time() * 1000))
+        _BINANCE_TIME_OFFSET_MS[target_host] = offset
+        _BINANCE_TIME_OFFSET_MS["ts"] = now_ts
+        return offset
 
 
 def _binance_credentials(account_id: Optional[str] = None) -> Dict[str, str]:
@@ -99,36 +157,20 @@ async def binance_signed_request(
 
     proxy_url = credentials["proxy"] or None
 
-    async def _refresh_time_offset(target_host: str, *, force: bool = False) -> int:
-        now_ts = time.time()
-        if (not force) and (now_ts - float(_BINANCE_TIME_OFFSET_MS.get("ts") or 0.0)) <= 180.0:
-            cached = int(_BINANCE_TIME_OFFSET_MS.get(target_host, 0) or 0)
-            if cached:
-                return cached
-        time_url = "https://api.binance.com/api/v3/time"
-        if target_host == "fapi":
-            time_url = "https://fapi.binance.com/fapi/v1/time"
-        client_kwargs: Dict[str, Any] = {"timeout": 3.0}
-        _apply_httpx_proxy_kw(client_kwargs, proxy_url)
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            resp = await client.get(time_url)
-            resp.raise_for_status()
-            server_ms = int((resp.json() or {}).get("serverTime") or 0)
-        offset = int(server_ms - int(time.time() * 1000))
-        _BINANCE_TIME_OFFSET_MS[target_host] = offset
-        _BINANCE_TIME_OFFSET_MS["ts"] = now_ts
-        return offset
-
     async def _ensure_offsets() -> None:
         await asyncio.gather(
-            _refresh_time_offset("api", force=False),
-            _refresh_time_offset("fapi", force=False),
+            _refresh_binance_time_offset("api", proxy_url=proxy_url, force=False),
+            _refresh_binance_time_offset("fapi", proxy_url=proxy_url, force=False),
             return_exceptions=True,
         )
 
     async def _send_once(force_time_refresh: bool = False) -> httpx.Response:
         if force_time_refresh:
-            await _refresh_time_offset("fapi" if host == "fapi" else "api", force=True)
+            await _refresh_binance_time_offset(
+                "fapi" if host == "fapi" else "api",
+                proxy_url=proxy_url,
+                force=True,
+            )
         offset_ms = int(_BINANCE_TIME_OFFSET_MS.get("fapi" if host == "fapi" else "api", 0) or 0)
         payload: Dict[str, Any] = dict(params or {})
         payload["timestamp"] = int(time.time() * 1000) + offset_ms

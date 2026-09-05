@@ -56,8 +56,7 @@ def test_strategy_register_endpoint_applies_runtime_policy(monkeypatch):
     register_mock = MagicMock(return_value=True)
     monkeypatch.setattr(strategies_api, "_get_strategy_classes", lambda: {"MAStrategy": object})
     monkeypatch.setattr(strategies_api.strategy_manager, "register_strategy", register_mock)
-    monkeypatch.setattr(strategies_api, "_persist_if_exists", AsyncMock(return_value=None))
-    monkeypatch.setattr(strategies_api.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(strategies_api, "_persist_if_exists", AsyncMock(return_value=True))
     monkeypatch.setattr(strategies_api.audit_logger, "log", AsyncMock(return_value=None))
 
     request = strategies_api.StrategyRegisterRequest(
@@ -88,8 +87,7 @@ def test_strategy_register_endpoint_requires_explicit_live_runtime_mode(monkeypa
     register_mock = MagicMock(return_value=True)
     monkeypatch.setattr(strategies_api, "_get_strategy_classes", lambda: {"MAStrategy": object})
     monkeypatch.setattr(strategies_api.strategy_manager, "register_strategy", register_mock)
-    monkeypatch.setattr(strategies_api, "_persist_if_exists", AsyncMock(return_value=None))
-    monkeypatch.setattr(strategies_api.asyncio, "create_task", lambda coro: coro.close())
+    monkeypatch.setattr(strategies_api, "_persist_if_exists", AsyncMock(return_value=True))
     monkeypatch.setattr(strategies_api.audit_logger, "log", AsyncMock(return_value=None))
 
     request = strategies_api.StrategyRegisterRequest(

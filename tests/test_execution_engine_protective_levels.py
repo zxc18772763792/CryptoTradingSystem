@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 import importlib
 import sys
@@ -94,7 +95,10 @@ def test_background_tick_checks_live_scope_when_live_work_exists(monkeypatch):
     engine = ExecutionEngine()
     engine.set_paper_trading(True, sync_runtime_state=False)
     engine._bg_check_interval_seconds = 0
-    engine._conditional_orders["live_cond"] = SimpleNamespace(account_id="acct_live")
+    engine._conditional_orders["live_cond"] = SimpleNamespace(
+        account_id="acct_live",
+        trading_mode="live",
+    )
     events = []
 
     async def fake_reconcile():
@@ -124,6 +128,98 @@ def test_background_tick_checks_live_scope_when_live_work_exists(monkeypatch):
         "live:conditional",
         "live:protective",
     ]
+
+
+def test_conditional_order_stays_paper_and_freezes_after_account_switches_live(monkeypatch):
+    engine = ExecutionEngine()
+    engine.set_paper_trading(True, sync_runtime_state=False)
+    account_mode = {"main": "paper"}
+    current_price = {"value": 100.0}
+    notifications = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(
+        engine,
+        "_resolve_account_trading_mode",
+        lambda account_id, *, metadata=None, fallback=None: account_mode.get(account_id, fallback or "paper"),
+    )
+    monkeypatch.setattr(
+        engine,
+        "_resolve_price",
+        AsyncMock(side_effect=lambda exchange, symbol, fallback=None: current_price["value"]),
+    )
+    monkeypatch.setattr(engine, "_notify_callbacks", notifications)
+
+    queued = asyncio.run(
+        engine.execute_manual_order(
+            exchange="binance",
+            symbol="BTC/USDT",
+            side="buy",
+            order_type="market",
+            amount=1.0,
+            trigger_price=101.0,
+            order_mode="conditional",
+            account_id="main",
+        )
+    )
+
+    assert queued is not None
+    assert queued["trading_mode"] == "paper"
+    conditional = engine._conditional_orders[queued["conditional_id"]]
+    assert conditional.trading_mode == "paper"
+    with pytest.raises(FrozenInstanceError):
+        conditional.trading_mode = "live"
+
+    execute_mock = AsyncMock(return_value={"order_id": "must-not-submit"})
+    monkeypatch.setattr(engine, "_execute_manual_order_single", execute_mock)
+    account_mode["main"] = "live"
+    current_price["value"] = 102.0
+
+    asyncio.run(engine._check_conditional_orders())
+    asyncio.run(engine._check_conditional_orders())
+
+    execute_mock.assert_not_awaited()
+    listed = engine.list_conditional_orders()
+    assert listed == [
+        {
+            **conditional.to_dict(),
+            "current_account_mode": "live",
+            "status": "frozen",
+            "freeze_reason": "account_trading_mode_changed",
+        }
+    ]
+    frozen_events = [
+        call
+        for call in notifications.await_args_list
+        if call.args and call.args[0] == "conditional_frozen"
+    ]
+    assert len(frozen_events) == 1
+    assert frozen_events[0].args[1]["trading_mode"] == "paper"
+    assert frozen_events[0].args[1]["current_account_mode"] == "live"
+
+
+def test_conditional_background_routing_and_paper_clear_use_stored_mode(monkeypatch):
+    engine = ExecutionEngine()
+    engine.set_paper_trading(False, sync_runtime_state=False)
+    engine._conditional_orders["legacy"] = SimpleNamespace(account_id="main")
+    engine._conditional_orders["live"] = SimpleNamespace(account_id="main", trading_mode="live")
+
+    monkeypatch.setattr(
+        engine,
+        "_resolve_account_trading_mode",
+        lambda account_id, *, metadata=None, fallback=None: "live",
+    )
+    monkeypatch.setattr(position_manager, "get_all_positions", lambda scope=None: [])
+
+    # A legacy object has no proof of live authorization, so it fails safe to
+    # paper.  Background routing must use the stored/defaulted order mode, not
+    # the account's current live mode.
+    assert engine._has_background_work_for_mode("paper", fallback="live") is True
+    assert engine._has_background_work_for_mode("live", fallback="live") is True
+
+    cleared = engine.clear_paper_runtime()
+
+    assert cleared["conditional_orders_cleared"] == 1
+    assert set(engine._conditional_orders) == {"live"}
 
 
 def test_auto_inject_buy_levels_from_policy_pct():

@@ -1919,13 +1919,14 @@ def _audit_pair_dataframe(symbol: str = "ETH/USDT", rows: int = 320) -> pd.DataF
     )
 
 
-async def _persist_if_exists(name: str, state_override: Optional[str] = None) -> None:
+async def _persist_if_exists(name: str, state_override: Optional[str] = None) -> bool:
     if not name:
-        return
+        return False
     try:
-        await persist_strategy_snapshot(name, state_override=state_override)
-    except Exception:
-        pass
+        return bool(await persist_strategy_snapshot(name, state_override=state_override))
+    except Exception as exc:
+        logger.warning(f"Failed to persist strategy snapshot {name}: {exc}")
+        return False
 
 
 def _select_default_start_all_strategies(available: Dict[str, Any]) -> List[str]:
@@ -2618,8 +2619,28 @@ async def register_strategy(request: StrategyRegisterRequest):
         )
         raise HTTPException(status_code=400, detail="Failed to register strategy")
 
-    # Fire-and-forget DB writes so the response returns immediately
-    # (avoids blocking on SQLite lock held by the news background worker)
+    persisted = await _persist_if_exists(request.name, state_override="idle")
+    if not persisted:
+        rolled_back = strategy_manager.unregister_strategy(request.name)
+        _schedule_audit_log(
+            module="strategy",
+            action="register",
+            status="failed",
+            message=request.name,
+            details={
+                **request.model_dump(),
+                "reason": "persistence_failed",
+                "memory_registration_rolled_back": bool(rolled_back),
+            },
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Strategy persistence failed; the in-memory registration was rolled back. "
+                "Retry after the runtime database is available."
+            ),
+        )
+
     _schedule_audit_log(
         module="strategy",
         action="register",
@@ -2627,7 +2648,6 @@ async def register_strategy(request: StrategyRegisterRequest):
         message=request.name,
         details=request.model_dump(),
     )
-    asyncio.create_task(_persist_if_exists(request.name, state_override="idle"))
 
     return {
         "success": True,
