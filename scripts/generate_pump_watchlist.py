@@ -64,6 +64,69 @@ BINANCE_PACE_SEC = 0.25
 _ONCHAIN_DIR = PROJECT_ROOT / "data" / "research" / "onchain"
 
 
+def _fetch_top_onchain(
+    bases: List[str],
+    mcap_by_base: Dict[str, float],
+    price_by_base: Dict[str, float],
+) -> tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]]]:
+    """Fetch holder concentration (GeckoTerminal) + unlock proximity (DefiLlama)
+    for a specific list of bases (this run's top-N). Reuses the snapshot module's
+    per-coin fetchers so the logic stays single-sourced. Best-effort: any coin
+    without a resolvable DEX contract / holder data / unlock schedule is omitted.
+    """
+    holders: Dict[str, Dict[str, Any]] = {}
+    unlocks: Dict[str, Dict[str, Any]] = {}
+    try:
+        from scripts.snapshot_onchain_features import (  # noqa: PLC0415
+            CG_API,
+            CHAIN_MAP,
+            _get_json,
+            fetch_holder_row,
+            fetch_unlock_features,
+            load_unlock_slugs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"onchain enrichment unavailable: {exc}")
+        return holders, unlocks
+
+    want = {b.upper() for b in bases}
+    # symbol -> platforms (pick an entry that carries a contract on a known chain)
+    sym_platforms: Dict[str, Dict[str, str]] = {}
+    try:
+        listing = _get_json(f"{CG_API}/coins/list", {"include_platform": "true"})
+        known = {cg for cg, _ in CHAIN_MAP}
+        for coin in listing:
+            sym = str(coin.get("symbol") or "").upper()
+            if sym not in want or sym in sym_platforms:
+                continue
+            plats = {k: v for k, v in (coin.get("platforms") or {}).items() if v}
+            if plats and (set(plats) & known):
+                sym_platforms[sym] = plats
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"coingecko platform lookup failed: {exc}")
+
+    slugs = load_unlock_slugs()
+    for base in bases:
+        plats = sym_platforms.get(base.upper())
+        if plats:
+            try:
+                row = fetch_holder_row(plats)
+                if row:
+                    holders[base] = row
+            except Exception:  # noqa: BLE001
+                pass
+        slug = slugs.get(base)
+        if slug:
+            try:
+                row = fetch_unlock_features(slug, mcap_by_base.get(base), price_by_base.get(base))
+                if row:
+                    unlocks[base] = row
+            except Exception:  # noqa: BLE001
+                pass
+    logger.info(f"onchain top-N enrichment: holders {len(holders)}/{len(bases)}, unlocks {len(unlocks)}/{len(bases)}")
+    return holders, unlocks
+
+
 def _load_onchain_snapshot(kind: str) -> Dict[str, Dict[str, Any]]:
     """Read the latest holder/unlock snapshot (context columns; may be absent)."""
     path = _ONCHAIN_DIR / kind / "latest.json"
@@ -184,13 +247,21 @@ async def main() -> None:
 
     snapshots = await load_coinglass_market_snapshots("binance", manual=True)
     mcap_by_base: Dict[str, float] = {}
+    price_by_base: Dict[str, float] = {}
     for sym, row in snapshots.items():
+        base = sym.split("/")[0]
         try:
             mcap = float(row.get("market_cap_usd"))
+            if mcap > 0:
+                mcap_by_base[base] = mcap
         except Exception:
-            continue
-        if mcap > 0:
-            mcap_by_base[sym.split("/")[0]] = mcap
+            pass
+        try:
+            price = float(row.get("current_price") or row.get("price") or 0.0)
+            if price > 0:
+                price_by_base[base] = price
+        except Exception:
+            pass
 
     universe = load_universe(args.max_symbols, mcap_by_base)
     logger.info(f"watchlist universe: {len(universe)} symbols")
@@ -235,10 +306,14 @@ async def main() -> None:
     scored = score_universe(feature_rows, model)
     logger.info(f"scored {len(scored)} symbols, skipped {len(skipped)}")
 
-    # On-chain display columns (context only, not scored): holder concentration
-    # from the weekly GeckoTerminal snapshot + unlock proximity from DefiLlama.
-    holder_rows = _load_onchain_snapshot("holder_snapshots")
-    unlock_rows = _load_onchain_snapshot("unlocks")
+    # On-chain display columns (context only, not scored): fetch holder
+    # concentration + unlock proximity for THIS run's own top-N coins directly,
+    # rather than a separately-scoped weekly snapshot (which drifts off the live
+    # watchlist universe and leaves the columns blank). Brand-new coins without a
+    # DEX contract / GeckoTerminal holder data / unlock schedule stay blank —
+    # that is a real coverage limit, not a bug.
+    top_bases = [b for b, _ in scored.head(args.top).iterrows()]
+    holder_rows, unlock_rows = _fetch_top_onchain(top_bases, mcap_by_base, price_by_base)
 
     entries = []
     for rank, (base, row) in enumerate(scored.head(args.top).iterrows(), start=1):
