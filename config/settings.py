@@ -57,14 +57,19 @@ class Settings(BaseSettings):
     GATE_API_SECRET: str = ""
     BYBIT_API_KEY: str = ""
     BYBIT_API_SECRET: str = ""
-    COINGLASS_ENABLED: bool = False
-    COINGLASS_BASE_URL: str = "https://proxy.keystore.com.cn/api/v1/proxy/coinglass"
-    # The keystore module catalog (api-spec discovery) lives on the www host
-    # only; the proxy host 404s it.
-    COINGLASS_SPEC_ROOT_URL: str = "https://www.keystore.com.cn"
+    COINGLASS_ENABLED: bool = True
+    # 2026-09-06: migrated from the keystore relay (started returning HTTP 403)
+    # to the vip2.coinglass.site relay. This relay serves NON-versioned paths
+    # (/api/futures/..., /api/lsr/...), so COINGLASS_STRIP_API_VERSION strips the
+    # /v3 /v4 prefixes the dataset manifests carry. Key in config/coinglass_api_key.txt
+    # (gitignored). Auth header is X-Api-Key (already used by the client).
+    COINGLASS_BASE_URL: str = "https://vip2.coinglass.site"
+    COINGLASS_SPEC_ROOT_URL: str = "https://vip2.coinglass.site"
     COINGLASS_API_KEY: str = ""
-    # keystore Pro plan allows 10 req/min; the local limiter must not exceed it.
-    COINGLASS_RATE_LIMIT_PER_MIN: int = 10
+    # vip2 relay: 11 req/60s per data type; keep the local limiter at/under it.
+    COINGLASS_RATE_LIMIT_PER_MIN: int = 11
+    # vip2 relay uses non-versioned endpoint paths; strip /v3 /v4 from manifest paths.
+    COINGLASS_STRIP_API_VERSION: bool = True
     COINGLASS_DAILY_BUDGET: int = 50000
     COINGLASS_MONTHLY_BUDGET: int = 500000
     COINGLASS_INCLUDE_AI: bool = True
