@@ -77,6 +77,7 @@ from strategies.macro import (
     FundFlowStrategy,
     WhaleActivityStrategy,
     OnChainFlowRegimeStrategy,
+    KolConsensusStrategy,
 )
 
 from strategies.ai import (
@@ -177,6 +178,7 @@ ALL_STRATEGIES = [
     "FundFlowStrategy",
     "WhaleActivityStrategy",
     "OnChainFlowRegimeStrategy",
+    "KolConsensusStrategy",
     "SupplyEventStrategy",
     "MLXGBoostStrategy",
     # Factor-based strategies
@@ -269,6 +271,7 @@ __all__ = [
     "FundFlowStrategy",
     "WhaleActivityStrategy",
     "OnChainFlowRegimeStrategy",
+    "KolConsensusStrategy",
     "SupplyEventStrategy",
     "MLXGBoostStrategy",
     # Factor-based strategies

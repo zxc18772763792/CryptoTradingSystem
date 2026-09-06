@@ -2188,24 +2188,6 @@
                                     </div>
                                 </div>
 
-                                <div class="ai-top-intro-stack ai-agent-intent-grid" data-agent-contract="基于实时行情、聚合信号、风控和执行状态独立给出动作并尝试下单。">
-                                    <div class="ai-top-intro-box">
-                                        <div class="ai-top-intro-box-title">01 运行总览</div>
-                                        <div class="ai-top-intro-box-desc">确认代理状态、当前盯盘、执行模式和最近决策。</div>
-                                    </div>
-                                    <div class="ai-top-intro-box">
-                                        <div class="ai-top-intro-box-title">02 动作触发</div>
-                                        <div class="ai-top-intro-box-desc">启动、停止或单次试跑，先小步验证再长期运行。</div>
-                                    </div>
-                                    <div class="ai-top-intro-box">
-                                        <div class="ai-top-intro-box-title">03 风险判断</div>
-                                        <div class="ai-top-intro-box-desc">查看 Hold 主因、资金预算、风控阈值和自动选币纪律。</div>
-                                    </div>
-                                    <div class="ai-top-intro-box">
-                                        <div class="ai-top-intro-box-title">04 日志复盘</div>
-                                        <div class="ai-top-intro-box-desc">用决策日志和放行交易复盘闭环每一次执行。</div>
-                                    </div>
-                                </div>
 
                                 <div class="ai-agent-control-grid">
                                     <section id="ai-agent-card" class="ai-auto-step ai-agent-panel ai-agent-panel-status">
@@ -2220,20 +2202,7 @@
                                             <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                                 <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
                                                 <button class="btn btn-sm btn-danger" id="ai-agent-stop-btn" onclick="agentStop()">停止</button>
-                                            </div>
-                                        </div>
-                                    </section>
-
-                                    <section class="ai-auto-step ai-agent-panel ai-agent-panel-single">
-                                        <div class="ai-auto-step-index">2</div>
-                                        <div class="ai-auto-step-body">
-                                            <div class="ai-auto-step-title">单次试跑</div>
-                                            <div class="ai-auto-step-desc">当你只想抽检一次自治判断时，用这一张卡就够了，避免直接长期开启。</div>
-                                            <div class="ai-agent-action-note">
-                                                推荐场景：刚改完提示词、风控、模型参数，或者想快速确认当前会不会继续观望。
-                                            </div>
-                                            <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
-                                                <button class="btn btn-sm" id="ai-agent-run-once-btn" onclick="agentRunOnce()">立即跑一轮</button>
+                                                <button class="btn btn-sm" id="ai-agent-run-once-btn" onclick="agentRunOnce()">单次试跑</button>
                                             </div>
                                         </div>
                                     </section>
@@ -2250,7 +2219,15 @@
                                     </section>
 
                                     <div class="ai-agent-decision-strip">
-                                        <section id="ai-agent-ranking-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
+                                        <details id="ai-agent-settings-panel" class="ai-agent-settings-drawer">
+                                            <summary>
+                                                <span>
+                                                    <strong>选币、仓位与风险设置</strong>
+                                                    <small>默认收起；只有调整运行参数时展开</small>
+                                                </span>
+                                                <span class="ai-agent-settings-summary-action">展开设置</span>
+                                            </summary>
+                                            <section id="ai-agent-ranking-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
                                             <div class="ai-agent-section-head">
                                                 <div>
                                                     <div class="ai-agent-section-title">币种模式与自动选币</div>
@@ -2317,7 +2294,8 @@
                                                 <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
                                                 <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
                                             </div>
-                                        </section>
+                                            </section>
+                                        </details>
 
                                         <section id="ai-agent-journal-panel" class="ai-agent-panel ai-agent-panel-journal">
                                             <div class="ai-auto-step-head">
@@ -2631,6 +2609,53 @@
                                     <tbody id="pump-watchlist-body">
                                         <tr>
                                             <td colspan="12" class="altcoin-radar-empty">等待名单数据...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="card altcoin-radar-table-card" id="kol-consensus-card">
+                            <div class="research-lab-header">
+                                <div>
+                                    <h3>大盘 KOL 共识 · 风险体制</h3>
+                                    <div class="research-control-notes">高胜率 KOL 蒸馏的多空判断，仅 5 大币（BTC/ETH/SOL/DOGE/BNB）——判断"现在玩山寨险不险"的宏观背景灯，不是山寨选币信号，不参与上方模型打分。</div>
+                                </div>
+                                <div class="inline-actions">
+                                    <span id="kol-consensus-note" class="altcoin-radar-inline-note">加载中...</span>
+                                </div>
+                            </div>
+                            <div id="kol-consensus-strip" class="altcoin-radar-summary-grid">
+                                <div class="altcoin-radar-summary-metric"><span>风险体制</span><strong>--</strong></div>
+                            </div>
+                        </div>
+
+                        <div class="card altcoin-radar-table-card" id="lsr-crowding-card">
+                            <div class="research-lab-header">
+                                <div>
+                                    <h3>多空拥挤度 · LSR 实时</h3>
+                                    <div class="research-control-notes">聪明钱/大户当前最拥挤的持仓（仓位，非预测）；比值越极端越拥挤，回撤/挤压风险越高。补实时扫描的"控盘/拥挤"维度。</div>
+                                </div>
+                                <div class="inline-actions">
+                                    <span id="lsr-crowding-note" class="altcoin-radar-inline-note">加载中...</span>
+                                </div>
+                            </div>
+                            <div class="table-container altcoin-radar-table-scroll">
+                                <table class="altcoin-radar-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>币种</th>
+                                            <th title="聪明钱多头名义/空头名义，>1 偏多 <1 偏空">多空比</th>
+                                            <th>拥挤度</th>
+                                            <th title="约 2 分钟内多空比变化">Δ2m</th>
+                                            <th title="约 4 小时内多空比变化">Δ4h</th>
+                                            <th title="大户持仓数量多空比">大户比</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="lsr-crowding-body">
+                                        <tr>
+                                            <td colspan="7" class="altcoin-radar-empty">等待拥挤度数据...</td>
                                         </tr>
                                     </tbody>
                                 </table>

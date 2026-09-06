@@ -10,6 +10,7 @@ from strategies.macro.fund_flow import (
     WhaleActivityStrategy,
 )
 from strategies.macro.onchain_flow_regime import OnChainFlowRegimeStrategy
+from strategies.macro.kol_consensus import KolConsensusStrategy
 
 __all__ = [
     "MarketSentimentStrategy",
@@ -17,4 +18,5 @@ __all__ = [
     "FundFlowStrategy",
     "WhaleActivityStrategy",
     "OnChainFlowRegimeStrategy",
+    "KolConsensusStrategy",
 ]

@@ -596,6 +596,15 @@ STRATEGY_REGISTRY: Dict[str, Dict[str, Any]] = {
         "symbols": ["BTC/USDT", "ETH/USDT"],
         "backtest": {"supported": True, "description": "链上交易所资金流 regime 过滤器", "optimization_grid": {"accumulation_enter": [0.60, 0.65, 0.70], "distribution_enter": [0.60, 0.65, 0.70], "stale_data_ttl_hours": [12, 24, 48]}},
     },
+    "KolConsensusStrategy": {
+        "category": "宏观",
+        "risk": "high",
+        "usage": "KOL 共识多空信号（仅 BTC/ETH/SOL/DOGE/BNB 五大币，大盘方向/风险体制，未验证仅纸面）",
+        "defaults": {"regime_mode": True, "trade_mode": False, "min_confidence": 0.35, "allow_long": True, "allow_short": True, "max_snapshot_age_hours": 30.0, "stop_loss_pct": 0.05, "take_profit_pct": 0.10, "market_type": "future", "use_atr_stops": False},
+        "timeframe": "1d",
+        "symbols": ["BTC/USDT", "ETH/USDT", "SOL/USDT", "DOGE/USDT", "BNB/USDT"],
+        "backtest": {"supported": False, "description": "KOL 共识策略（vip2 relay /api/lsr/consensus/v1）", "reason": "共识是实时每日快照、无历史数据，无法回测；需前向纸面积累后再评估"},
+    },
     "MLXGBoostStrategy": {
         "category": "机器学习",
         "risk": "medium",

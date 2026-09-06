@@ -2436,6 +2436,85 @@
     }
   }
 
+  const KOL_DECISION_TONE = { long: 'ok', short: 'danger', neutral: 'neutral' };
+
+  function renderKolConsensus(payload) {
+    const strip = q('kol-consensus-strip');
+    const note = q('kol-consensus-note');
+    if (!strip) return;
+    if (!payload || payload.available === false) {
+      strip.innerHTML = '<div class="altcoin-radar-summary-metric"><span>风险体制</span><strong>不可用</strong></div>';
+      if (note) { note.textContent = payload && payload.error ? `不可用（${escapeHtml(String(payload.error))}）` : '不可用'; note.dataset.tone = 'warn'; }
+      return;
+    }
+    const tone = payload.risk_tone || {};
+    const cells = [];
+    cells.push(`<div class="altcoin-radar-summary-metric" data-tone="${escapeHtml(tone.tone || 'neutral')}"><span>风险体制</span><strong>${escapeHtml(tone.label || '--')}</strong></div>`);
+    (payload.rows || []).forEach((row) => {
+      const t = KOL_DECISION_TONE[String(row.decision || 'neutral')] || 'neutral';
+      cells.push(`<div class="altcoin-radar-summary-metric" data-tone="${t}"><span>${escapeHtml(String(row.symbol || ''))}</span><strong>${escapeHtml(String(row.decision_label || ''))} · ${Math.round(toNumber(row.confidence, 0) * 100)}%</strong></div>`);
+    });
+    strip.innerHTML = cells.join('');
+    if (note) {
+      const age = (payload.rows && payload.rows[0] && payload.rows[0].snapshot_age_hours != null) ? `${Number(payload.rows[0].snapshot_age_hours).toFixed(0)}h 前` : '';
+      note.textContent = `覆盖 ${escapeHtml(payload.coverage || '5 大币')}${age ? ' · ' + age : ''}`;
+      note.dataset.tone = 'neutral';
+    }
+  }
+
+  async function loadKolConsensus() {
+    const apiFetch = requireApi();
+    if (!apiFetch) return;
+    try {
+      const resp = await apiFetch('/altcoin/radar/kol-consensus', { timeoutMs: 20000 });
+      renderKolConsensus(resp);
+    } catch (error) {
+      const note = q('kol-consensus-note');
+      if (note) { note.textContent = `加载失败：${error?.message || error}`; note.dataset.tone = 'warn'; }
+    }
+  }
+
+  function renderLsrCrowding(payload) {
+    const body = q('lsr-crowding-body');
+    const note = q('lsr-crowding-note');
+    if (!body) return;
+    if (!payload || payload.available === false) {
+      body.innerHTML = `<tr><td colspan="7" class="altcoin-radar-empty">拥挤度不可用${payload && payload.error ? '（' + escapeHtml(String(payload.error)) + '）' : ''}</td></tr>`;
+      if (note) { note.textContent = '不可用'; note.dataset.tone = 'warn'; }
+      return;
+    }
+    const rows = Array.isArray(payload.rows) ? payload.rows : [];
+    if (!rows.length) {
+      body.innerHTML = '<tr><td colspan="7" class="altcoin-radar-empty">暂无拥挤度数据</td></tr>';
+      if (note) note.textContent = '空';
+      return;
+    }
+    body.innerHTML = rows.map((row, i) => [
+      '<tr>',
+      `<td>${i + 1}</td>`,
+      `<td><strong>${escapeHtml(String(row.symbol || ''))}</strong></td>`,
+      `<td>${toNumber(row.ratio, 0).toFixed(2)}</td>`,
+      `<td>${escapeHtml(String(row.crowding || '--'))}</td>`,
+      `<td>${escapeHtml(String(row.delta_2m_pct || '--'))}</td>`,
+      `<td>${escapeHtml(String(row.delta_4h_pct || '--'))}</td>`,
+      `<td>${toNumber(row.whale_ratio, 0).toFixed(2)}</td>`,
+      '</tr>',
+    ].join('')).join('');
+    if (note) { note.textContent = `${rows.length} 币 · ${escapeHtml(payload.mode || 'trader')} 口径`; note.dataset.tone = 'neutral'; }
+  }
+
+  async function loadLsrCrowding() {
+    const apiFetch = requireApi();
+    if (!apiFetch) return;
+    try {
+      const resp = await apiFetch('/altcoin/radar/lsr-crowding?limit=25', { timeoutMs: 20000 });
+      renderLsrCrowding(resp);
+    } catch (error) {
+      const note = q('lsr-crowding-note');
+      if (note) { note.textContent = `加载失败：${error?.message || error}`; note.dataset.tone = 'warn'; }
+    }
+  }
+
   function schedulePumpWatchlistPoll() {
     if (state.pumpWatchlistPollTimer) window.clearTimeout(state.pumpWatchlistPollTimer);
     state.pumpWatchlistPollCount = (state.pumpWatchlistPollCount || 0) + 1;
@@ -2491,6 +2570,8 @@
     bindAltcoinRadarPage();
     refreshOperatingModeBanner({ force }).catch(() => {});
     loadPumpWatchlist().catch(() => {});
+    loadKolConsensus().catch(() => {});
+    loadLsrCrowding().catch(() => {});
     const universePromise = loadUniverseOptions(force).catch((error) => {
       console.warn('loadAltcoinRadarTabData universe bootstrap failed', error?.message || error);
     });
