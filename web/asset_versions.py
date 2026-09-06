@@ -7,7 +7,7 @@ from typing import Final
 ASSET_VERSIONS: Final[dict[str, int]] = {
     "css/style.css": 128,
     "js/app.js": 146,
-    "js/altcoin_radar.js": 28,
+    "js/altcoin_radar.js": 29,
     "js/research_workbench.js": 12,
     "js/ai_research.js": 51,
     "js/ai_research_diagnostics.js": 6,
