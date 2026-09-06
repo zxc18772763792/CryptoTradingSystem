@@ -75,7 +75,7 @@
   const BACKGROUND_REFRESH_MAX_POLLS = 6;
   const ALTCOIN_RADAR_PREFS_KEY = 'altcoinRadar.controls.v1';
   const RADAR_MODES = new Set(['combined', 'perp', 'narrative']);
-  const UNIVERSE_SCOPES = new Set(['research', 'expanded', 'watchlist']);
+  const UNIVERSE_SCOPES = new Set(['research', 'expanded', 'alpha', 'watchlist']);
 
   const state = {
     bound: false,
@@ -328,7 +328,7 @@
       filter: String(q('altcoin-radar-filter')?.value || 'all').trim() || 'all',
       onlyAlerted: !!q('altcoin-radar-only-alerted')?.checked,
       excludeRetired: q('altcoin-radar-exclude-retired')?.checked !== false,
-      universeSymbols: normalizeSymbols(getSelectedValues('altcoin-radar-universe')).slice(0, 30),
+      universeSymbols: normalizeSymbols(getSelectedValues('altcoin-radar-universe')).slice(0, 60),
       // Phase 1
       radarMode: normalizeRadarMode(state.radarMode),
       universeScope: normalizeUniverseScope(q('altcoin-radar-universe-scope')?.value || 'research'),
@@ -417,7 +417,8 @@
 
   function universeScopeLabel(scope) {
     if (scope === 'watchlist') return 'Watchlist 收藏列表';
-    if (scope === 'expanded') return '扩展扫描（自动补齐 ~100）';
+    if (scope === 'alpha') return 'Binance Alpha 目录（最多约400）';
+    if (scope === 'expanded') return '扩展扫描（自动补齐 ~400）';
     return '研究清单（使用下方多选）';
   }
 
@@ -464,6 +465,7 @@
     const used = normalizeSymbols(state.scan?.scan_meta?.symbols_used || state.scan?.summary?.symbols_used || []);
     if (controls.universeScope !== 'research') {
       if (used.length) return used;
+      if (controls.universeScope === 'alpha') return normalizeSymbols(state.universeCatalog?.alphaSymbols || []);
       if (controls.universeScope === 'watchlist') return normalizeSymbols(state.watchlist || []);
     }
     const selected = controls.universeSymbols;
@@ -565,7 +567,8 @@
     const catalogMeta = state.universeCatalog || {};
     const scopeLabelMap = {
       research: '研究清单（使用下方多选）',
-      expanded: '扩展扫描（自动补齐 ~100）',
+      expanded: '扩展扫描（自动补齐 ~400）',
+      alpha: 'Binance Alpha 目录（最多约400）',
       watchlist: 'Watchlist 收藏列表',
     };
     const currentScopeLabel = scopeLabelMap[controls.universeScope] || '研究清单（使用下方多选）';
@@ -578,6 +581,8 @@
         text += ` · 已选 ${selectedCount || 0} 个币种`;
       } else if (controls.universeScope === 'watchlist') {
         text += ` · Watchlist ${watchlistCount} 个成员`;
+      } else if (controls.universeScope === 'alpha') {
+        text += ` · Alpha ${toNumber(catalogMeta.alphaCount, 0)} 个目录候选`;
       } else if (usedCount) {
         text += ` · 当前扫描 ${usedCount} 个币种`;
       }
@@ -606,6 +611,8 @@
     if (text.includes('高控盘')) return 'control';
     if (text.includes('派发') || text.includes('风险')) return 'danger';
     if (text.includes('预警')) return 'control';
+    if (text.includes('Alpha')) return 'narrative';
+    if (text.includes('上行')) return 'ignition';
     if (text === 'Perp Ignition') return 'ignition';
     if (text === 'Late Stage') return 'danger';
     if (text === 'Narrative') return 'narrative';
@@ -654,6 +661,7 @@
     const dataQuality = row?.data_quality || {};
     const source = String(freshness.market_source || dataQuality.market_source || '').trim();
     const sourceType = String(freshness.market_source_type || dataQuality.market_source_type || '').trim();
+    if (source.includes('binance_alpha') || row?.is_alpha) return 'Binance Alpha';
     if (source.includes('binance_futures')) return 'futures ticker';
     if (source.includes('binance_spot')) return 'spot ticker';
     if (source.includes('coinglass')) return 'CoinGlass';
@@ -719,6 +727,7 @@
   function universeSourceLabel(meta) {
     const fallbackSource = String(meta?.fallbackSource || '').trim();
     const source = String(meta?.source || '').trim();
+    if (source === 'research_plus_binance_alpha' || meta?.alphaCount) return '候选来源：研究池 + Binance Alpha';
     if (fallbackSource === 'coinglass_altcoin_universe_cache') return '候选来源：缓存研究池';
     if (fallbackSource === 'data_symbols') return '候选来源：默认列表';
     if (fallbackSource === 'client_default') return '候选来源：前端默认列表';
@@ -802,12 +811,21 @@
     let finalSymbols = DEFAULT_UNIVERSE.slice();
     let defaultCount = Math.min(12, finalSymbols.length);
     try {
-      const resp = await apiFetch(`/data/research/symbols?exchange=${encodeURIComponent(controls.exchange)}&include_major=false`, {
-        timeoutMs: 15000,
-      });
+      let resp;
+      try {
+        resp = await apiFetch(`/altcoin/radar/universe?exchange=${encodeURIComponent(controls.exchange)}&refresh=${force ? 'true' : 'false'}`, {
+          timeoutMs: 20000,
+        });
+      } catch (primaryError) {
+        // Keep the older research endpoint as an offline/backward-compatible
+        // fallback when the backend has not reloaded the new Alpha route yet.
+        resp = await apiFetch(`/data/research/symbols?exchange=${encodeURIComponent(controls.exchange)}&include_major=false`, {
+          timeoutMs: 15000,
+        });
+      }
       const symbols = normalizeSymbols(resp?.symbols || []);
       if (symbols.length) finalSymbols = symbols;
-      defaultCount = Math.max(1, Math.min(finalSymbols.length, toNumber(resp?.default_count, finalSymbols.length)));
+      defaultCount = Math.max(1, Math.min(finalSymbols.length, toNumber(resp?.default_count, Math.min(12, finalSymbols.length))));
       state.universeCatalog = {
         source: String(resp?.source || '').trim(),
         fallbackSource: String(resp?.fallback_source || '').trim(),
@@ -816,6 +834,11 @@
         symbolScope: String(resp?.symbol_scope || '').trim(),
         benchmarkCount: Array.isArray(resp?.major_market_cap_symbols) ? resp.major_market_cap_symbols.length : 0,
         count: finalSymbols.length,
+        researchCount: toNumber(resp?.research_count, 0),
+        alphaCount: toNumber(resp?.alpha_count, Array.isArray(resp?.alpha_symbols) ? resp.alpha_symbols.length : 0),
+        alphaSymbols: normalizeSymbols(resp?.alpha_symbols || []),
+        alphaMeta: resp?.alpha_meta || {},
+        symbolMeta: resp?.symbol_meta && typeof resp.symbol_meta === 'object' ? resp.symbol_meta : {},
       };
       if (resp?.warning) {
         const sourceLabel = universeSourceLabel(state.universeCatalog) || '候选列表已回退';
@@ -829,11 +852,25 @@
         warning: String(error?.message || error || '').trim(),
         updatedAt: '',
         count: finalSymbols.length,
+        researchCount: finalSymbols.length,
+        alphaCount: 0,
+        alphaSymbols: [],
+        alphaMeta: {},
+        symbolMeta: {},
       };
       setStatus(`候选列表加载失败，已回退到默认列表：${error.message}`, 'warn');
     }
+    const symbolMeta = state.universeCatalog?.symbolMeta || {};
     selectEl.innerHTML = finalSymbols
-      .map((symbol) => `<option value="${escapeHtml(symbol)}">${escapeHtml(symbol)}</option>`)
+      .map((symbol) => {
+        const meta = symbolMeta[symbol] || {};
+        const display = String(meta.display_symbol || '').trim();
+        const chain = String(meta.chain_name || '').trim();
+        const label = display
+          ? `${symbol} · ${display}${chain ? ` · ${chain}` : ''}`
+          : symbol;
+        return `<option value="${escapeHtml(symbol)}">${escapeHtml(label)}</option>`;
+      })
       .join('');
     const preserveCurrentSelection = state.universeLoadedFor === cacheKey && currentSelected.length;
     const savedSelection = normalizeSymbols(loadSavedControls().universeSymbols || state.savedUniverseSymbols || [])
@@ -927,7 +964,7 @@
     params.set('timeframe', options.timeframe);
     params.set('view', options.timeframe);
     params.set('sort_by', options.sortBy);
-    params.set('limit', options.universeScope === 'expanded' ? '100' : '30');
+    params.set('limit', ['expanded', 'alpha', 'watchlist'].includes(options.universeScope) ? '120' : '60');
     params.set('exclude_retired', options.excludeRetired ? 'true' : 'false');
     params.set('refresh', refresh ? 'true' : 'false');
     // Phase 1
@@ -1004,6 +1041,7 @@
       // Phase 2 new filters
       if (controls.filter === 'narrative_ignition' && row?.signal_source !== 'narrative_ignition') return false;
       if (controls.filter === 'watchlist' && !row?.in_watchlist) return false;
+      if (controls.filter === 'alpha' && !row?.is_alpha) return false;
       return true;
     });
   }
@@ -1033,6 +1071,8 @@
     const leader = summary?.leader || null;
     const metrics = [
       ['扫描币数', String(summary?.scanned_count ?? '--')],
+      ['Alpha 币', String(summary?.alpha_count ?? '--')],
+      ['潜在上行', String(summary?.upside_count ?? '--')],
       ['异动启动', String(summary?.anomaly_count ?? '--')],
       ['布局吸筹', String(summary?.accumulation_count ?? '--')],
       ['高控盘', String(summary?.control_count ?? '--')],
@@ -1060,6 +1100,7 @@
     const meta = scanPayload?.scan_meta || {};
     const cache = meta?.cache || {};
     const summary = scanPayload?.summary || {};
+    const alphaMeta = scanPayload?.alpha_meta || {};
     const cacheStatus = cache.refreshing
       ? (cache.stale ? '旧结果回显，后台刷新中' : '缓存回显，后台刷新中')
       : (cache.hit ? '缓存命中' : '新鲜计算');
@@ -1067,6 +1108,7 @@
       ['状态', cacheStatus],
       ['缓存', cache.ttl_sec ? `${toNumber(cache.age_sec, 0).toFixed(1)}s / ${cache.ttl_sec}s` : '--'],
       ['币池', Array.isArray(meta.symbols_used) && meta.symbols_used.length ? `${meta.symbols_used.length} 个币种` : '--'],
+      ['Alpha', alphaMeta.count ? `${alphaMeta.active_count || alphaMeta.count} 个 · ${alphaMeta.stale ? '本地旧目录' : '已同步'}` : '未接入 / 无目录'],
       ['更新时间', meta.generated_at ? fmtDateTime(meta.generated_at) : '--'],
     ];
     metaBox.innerHTML = rows
@@ -1128,6 +1170,13 @@
     return parts.join(' · ');
   }
 
+  function displaySymbolLabel(row) {
+    const symbol = String(row?.symbol || '').trim();
+    const alpha = row?.alpha_context || {};
+    const display = String(alpha.display_symbol || '').trim();
+    return display && display !== symbol ? `${display} · ${symbol}` : symbol;
+  }
+
   function renderRanking(rows) {
     const tbody = q('altcoin-radar-ranking-body');
     if (!tbody) return;
@@ -1137,7 +1186,7 @@
       const filterText = activeFilterSummary();
       tbody.innerHTML = `
         <tr>
-          <td colspan="12" class="altcoin-radar-empty">
+          <td colspan="13" class="altcoin-radar-empty">
             当前过滤条件下没有候选：${escapeHtml(filterText)}。
             <button type="button" class="btn btn-sm" data-row-action="clear-filters">清除筛选</button>
           </td>
@@ -1148,6 +1197,7 @@
     tbody.innerHTML = filteredRows
       .map((row) => {
         const symbol = String(row?.symbol || '').trim();
+        const symbolLabel = displaySymbolLabel(row);
         const selected = symbol && symbol === state.selectedSymbol;
         const defaultPreset = pickDefaultPreset(row);
         const activeKinds = alertKindsForRow(row);
@@ -1158,6 +1208,8 @@
         // Phase 1: rank jump score chip
         const rjScore = toNumber(row?.rank_jump_score, 0);
         const rjClass = rjScore >= 0.3 ? 'altcoin-radar-score-badge score-high' : 'altcoin-radar-score-badge';
+        const upsideScore = toNumber(row?.upside_score, 0);
+        const upsideClass = upsideScore >= 0.70 ? 'altcoin-radar-score-badge score-high' : 'altcoin-radar-score-badge';
         // Phase 1: signal source chip
         const src = String(row?.signal_source || '');
         const srcLabel = signalSourceLabel(src);
@@ -1169,10 +1221,11 @@
             <td><span class="altcoin-radar-rank-chip">${escapeHtml(String(row?.rank ?? '--'))}</span></td>
             <td>
               <div class="altcoin-radar-symbol-cell">
-                <div class="altcoin-radar-symbol-main">${escapeHtml(symbol || '--')}</div>
+                <div class="altcoin-radar-symbol-main">${escapeHtml(symbolLabel || '--')}</div>
                 <div class="altcoin-radar-symbol-sub">${escapeHtml(String(row?.signal_state || '待跟踪'))}</div>
               </div>
             </td>
+            <td><span class="${upsideClass}" title="多因子上行筛选分，不代表收益承诺">${escapeHtml(shortPercent(row?.upside_score))}</span></td>
             <td><span class="altcoin-radar-score-badge">${escapeHtml(shortPercent(row?.layout_score))}</span></td>
             <td><span class="altcoin-radar-score-badge">${escapeHtml(shortPercent(row?.alert_score))}</span></td>
             <td><span class="altcoin-radar-score-badge">${escapeHtml(shortPercent(row?.accumulation_score))}</span></td>
@@ -1350,7 +1403,7 @@
     }
     if (empty) empty.textContent = '';
     if (shell) shell.classList.remove('is-hidden');
-    q('altcoin-radar-selected-symbol').textContent = selected.symbol || '--';
+    q('altcoin-radar-selected-symbol').textContent = displaySymbolLabel(selected) || '--';
     const subtitleEl = q('altcoin-radar-selected-subtitle');
     if (subtitleEl) {
       const statusNote = String(fallbackError || '').trim();
@@ -1364,6 +1417,7 @@
     }
     q('altcoin-radar-selected-tags').innerHTML = renderTagRow(selected.tags);
     q('altcoin-radar-selected-scores').innerHTML = [
+      ['潜在上行', selected.upside_score],
       ['Derivatives Heat', selected.derivatives_heat_score],
       ['Squeeze', selected.squeeze_score],
       ['Crowding Risk', selected.crowding_risk_score],
@@ -1427,8 +1481,14 @@
     const selectedFreshness = selected?.freshness || {};
     const derivativesContext = detailPayload?.derivatives_context || selected?.derivatives_context || {};
     const derivativesError = String(derivativesContext.source_error || '').trim();
+    const alphaContext = selected?.alpha_context || {};
     renderListItems('altcoin-radar-data-quality', [
       ['Market Source', marketSourceLabel(selected)],
+      ...(selected?.is_alpha ? [
+        ['Alpha ID', alphaContext.alpha_id || '--'],
+        ['Alpha Chain', alphaContext.chain_name || '--'],
+        ['Alpha Directory', alphaContext.hot_tag ? 'Hot' : 'standard'],
+      ] : []),
       ['Market As Of', selectedFreshness.as_of ? fmtDateTime(selectedFreshness.as_of) : '--'],
       ['市场新鲜度', toPercent(dataQuality.market_data_freshness, 0)],
       ['快照新鲜度', toPercent(dataQuality.snapshot_freshness, 0)],
@@ -1442,6 +1502,12 @@
 
     const metrics = selected?.metrics || {};
     renderListItems('altcoin-radar-key-metrics', [
+      ...(selected?.is_alpha ? [
+        ['Alpha 24h', toPercent(alphaContext.percent_change_24h, 1)],
+        ['Alpha 流动性', shortNumber(alphaContext.liquidity_usd)],
+        ['Alpha holders', shortNumber(alphaContext.holders)],
+        ['Alpha 24h 成交', shortNumber(alphaContext.volume_24h_usd)],
+      ] : []),
       ['OI 1h', shortPercent(metrics.oi_change_1h)],
       ['Funding', shortPercent(metrics.funding_rate)],
       ['Basis', shortPercent(metrics.basis_pct)],
@@ -1635,7 +1701,7 @@
   }
 
   function syncUniverseSelection(symbols) {
-    const universe = normalizeSymbols(symbols).slice(0, 30);
+    const universe = normalizeSymbols(symbols).slice(0, 60);
     if (!universe.length) return;
     const selectEl = q('altcoin-radar-universe');
     if (!(selectEl instanceof HTMLSelectElement)) return;

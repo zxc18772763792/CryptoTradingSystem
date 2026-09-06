@@ -39,6 +39,18 @@ from core.data import (
     download_binance_1s_daily_archive,
 )
 from core.data.data_storage import _normalize_parquet_frame_index
+from core.data.alpha_market_data import (
+    ALPHA_DATA_SOURCE,
+    get_alpha_coverage,
+    get_alpha_source_status,
+    is_alpha_data_source,
+    is_alpha_symbol,
+    list_alpha_datasets,
+    list_alpha_symbols,
+    load_alpha_klines,
+    load_alpha_ticker,
+    normalize_data_source,
+)
 from core.data.coinglass_altcoin import (
     build_exchange_altcoin_universe,
     is_alt_candidate_symbol,
@@ -159,6 +171,10 @@ _RESEARCH_UNIVERSE_SUMMARY_PATH = _PROJECT_ROOT / "data" / "research" / "researc
 _RESEARCH_UNIVERSE_LOG_PATH = _PROJECT_ROOT / "logs" / "research_universe_refresh.log"
 _REPLAY_SESSION_TTL_SEC = 30 * 60.0
 _REPLAY_SESSION_MAX_ACTIVE = 12
+
+
+def _is_alpha_request(exchange: Any, symbol: Any = "") -> bool:
+    return is_alpha_data_source(exchange) or is_alpha_symbol(symbol)
 
 
 def _cancel_pending_task(task: Optional[asyncio.Task[Any]]) -> bool:
@@ -1574,6 +1590,14 @@ async def _load_local_or_aggregate(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
 ) -> pd.DataFrame:
+    if _is_alpha_request(exchange, symbol):
+        return await asyncio.to_thread(
+            load_alpha_klines,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time=start_time,
+            end_time=end_time,
+        )
     df = await data_storage.load_klines_from_parquet(
         exchange=exchange,
         symbol=symbol,
@@ -3697,7 +3721,7 @@ async def get_klines(
     start_time = _normalize_query_datetime(start_time)
     end_time = _normalize_query_datetime(end_time)
     limit = max(10, min(limit, 5000))
-    requested_exchange = str(exchange or "").lower() or "binance"
+    requested_exchange = normalize_data_source(exchange) or "binance"
     align_mode = str(align or "tail").lower()
     candidates = [requested_exchange] + [
         ex for ex in ["binance", "gate", "okx"] if ex != requested_exchange
@@ -3716,6 +3740,54 @@ async def get_klines(
         if timeframe in _SUB_MINUTE_TIMEFRAMES:
             lookback_seconds = max(900, min(lookback_seconds, 6 * 3600))
         load_start = effective_end - timedelta(seconds=lookback_seconds)
+
+    # Alpha symbols are synthetic identifiers backed by the collector's
+    # SQLite store.  They must never fall through to normal spot connectors.
+    if _is_alpha_request(requested_exchange, symbol):
+        alpha_df = await asyncio.to_thread(
+            load_alpha_klines,
+            symbol=symbol,
+            timeframe=timeframe,
+            start_time=load_start,
+            end_time=load_end,
+            limit=limit,
+            align=align_mode,
+        )
+        alpha_df = _normalize_kline_frame_for_compare(alpha_df)
+        if start_time:
+            alpha_df = alpha_df[alpha_df.index >= start_time]
+        if end_time:
+            alpha_df = alpha_df[alpha_df.index <= end_time]
+        if not alpha_df.empty:
+            if align_mode == "head" or (start_time and not end_time):
+                alpha_df = alpha_df.head(limit)
+            else:
+                alpha_df = alpha_df.tail(limit)
+        return {
+            "exchange": ALPHA_DATA_SOURCE,
+            "actual_exchange": ALPHA_DATA_SOURCE,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "source": "binance_alpha_collector",
+            "source_type": "collector_sqlite",
+            "managed": True,
+            "data": [
+                {
+                    "timestamp": _to_utc_iso(idx),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row.get("volume", 0.0)),
+                }
+                for idx, row in alpha_df.iterrows()
+            ],
+            **(
+                {"message": "Alpha 采集库中暂无该标的或周期的数据"}
+                if alpha_df.empty
+                else {}
+            ),
+        }
 
     async def _fetch_live_df(ex_name: str, live_limit: int) -> pd.DataFrame:
         if timeframe in _SUB_MINUTE_TIMEFRAMES:
@@ -3945,6 +4017,11 @@ async def get_klines(
 
 @router.get("/ticker")
 async def get_ticker(exchange: str, symbol: str):
+    if _is_alpha_request(exchange, symbol):
+        ticker = await asyncio.to_thread(load_alpha_ticker, symbol=symbol)
+        if ticker:
+            return ticker
+        raise HTTPException(status_code=404, detail="Alpha 采集库中暂无该标的行情")
     try:
         return await _load_ticker_payload(exchange, symbol)
     except Exception as e:
@@ -3952,6 +4029,24 @@ async def get_ticker(exchange: str, symbol: str):
 
 @router.get("/tickers")
 async def get_tickers(exchange: str):
+    if is_alpha_data_source(exchange):
+        catalog = await asyncio.to_thread(list_alpha_symbols)
+        tickers = []
+        for symbol in list(catalog.get("symbols") or [])[:20]:
+            meta = dict((catalog.get("symbol_meta") or {}).get(symbol) or {})
+            tickers.append(
+                {
+                    "symbol": symbol,
+                    "display_symbol": meta.get("display_symbol") or "",
+                    "official_symbol": meta.get("official_symbol") or "",
+                    "quote_asset": meta.get("quote_asset") or "",
+                    "last": float(meta.get("price") or 0.0),
+                    "change_24h": float(meta.get("price_change_24h") or 0.0) / 100.0,
+                    "volume_24h": float(meta.get("volume_24h") or 0.0),
+                    "source": "binance_alpha_collector",
+                }
+            )
+        return {"exchange": ALPHA_DATA_SOURCE, "tickers": tickers}
     symbols = exchange_manager.get_supported_symbols(exchange)
     tickers = []
 
@@ -3984,6 +4079,8 @@ async def run_download_historical_data(
     end_time: Optional[datetime] = None,
     progress_callback: Optional[Any] = None,
 ):
+    if _is_alpha_request(exchange, symbol):
+        raise ValueError("Binance Alpha 数据由后台采集器持续增量维护，不支持普通交易所历史下载")
     symbol = _normalize_symbol_alias(normalize_symbol(symbol) or str(symbol or "").strip())
     start_time = _normalize_query_datetime(start_time)
     end_time = _normalize_query_datetime(end_time)
@@ -4476,6 +4573,11 @@ async def download_historical_data(
     end_time: Optional[datetime] = None,
     background: Optional[bool] = None,
 ):
+    if _is_alpha_request(exchange, symbol):
+        raise HTTPException(
+            status_code=409,
+            detail="Binance Alpha 数据由后台采集器持续增量维护，不支持手工历史下载",
+        )
     payload = {
         "exchange": exchange,
         "symbol": symbol,
@@ -4522,6 +4624,11 @@ async def download_historical_data_batch(req: BatchDownloadRequest):
         raise HTTPException(status_code=400, detail="symbols 不能为空")
     if len(symbols) > 100:
         raise HTTPException(status_code=400, detail="单次批量下载最多支持 100 个 symbols")
+    if is_alpha_data_source(exchange) or any(is_alpha_symbol(symbol) for symbol in symbols):
+        raise HTTPException(
+            status_code=409,
+            detail="Binance Alpha 数据由后台采集器持续增量维护，不支持普通交易所批量下载",
+        )
 
     start_time = _normalize_query_datetime(req.start_time)
     end_time = _normalize_query_datetime(req.end_time)
@@ -4586,6 +4693,8 @@ async def check_data_integrity(
     symbol: str,
     timeframe: str = "1h",
 ):
+    alpha_request = _is_alpha_request(exchange, symbol)
+    exchange = ALPHA_DATA_SOURCE if alpha_request else (normalize_data_source(exchange) or "binance")
     df = await _load_local_or_aggregate(exchange=exchange, symbol=symbol, timeframe=timeframe)
     if df.empty:
         return {
@@ -4596,6 +4705,7 @@ async def check_data_integrity(
             "message": "无本地数据",
             "quality": _validate_ohlcv(df),
             "missing": {"missing_count": 0, "missing_preview": []},
+            "managed": alpha_request,
         }
 
     quality = _validate_ohlcv(df)
@@ -4612,6 +4722,8 @@ async def check_data_integrity(
         "rows": int(len(df)),
         "start": df.index.min().isoformat(),
         "end": df.index.max().isoformat(),
+        "managed": alpha_request,
+        "source_type": "collector_sqlite" if alpha_request else "parquet",
     }
 
 
@@ -4621,6 +4733,11 @@ async def repair_data_integrity(
     symbol: str,
     timeframe: str = "1h",
 ):
+    if _is_alpha_request(exchange, symbol):
+        raise HTTPException(
+            status_code=409,
+            detail="Binance Alpha 数据由后台采集器持续增量维护，无需手工修复",
+        )
     df = await _load_local_or_aggregate(exchange=exchange, symbol=symbol, timeframe=timeframe)
     if df.empty:
         raise HTTPException(status_code=404, detail="无本地数据可修复")
@@ -4659,6 +4776,11 @@ async def cross_validate_data(
     secondary_exchange: str = "gate",
     limit: int = 500,
 ):
+    if is_alpha_symbol(symbol) or is_alpha_data_source(primary_exchange) or is_alpha_data_source(secondary_exchange):
+        raise HTTPException(
+            status_code=409,
+            detail="Binance Alpha 使用唯一 Alpha 标识，不能与普通交易所交易对直接交叉验证",
+        )
     primary = await _load_local_or_aggregate(primary_exchange, symbol, timeframe)
     secondary = await _load_local_or_aggregate(secondary_exchange, symbol, timeframe)
 
@@ -4702,6 +4824,11 @@ async def cross_validate_data(
 
 @router.post("/reconnect", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def reconnect_exchange(exchange: str):
+    if is_alpha_data_source(exchange):
+        raise HTTPException(
+            status_code=409,
+            detail="Binance Alpha 是后台托管数据源，不使用交易所连接器重连",
+        )
     connector = exchange_manager.get_exchange(exchange)
     if not connector:
         ok = await exchange_manager.initialize([exchange])
@@ -4726,6 +4853,12 @@ async def reconnect_exchange(exchange: str):
 
 @router.get("/coverage")
 async def get_data_coverage(exchange: str, symbol: str, timeframe: str = "1h"):
+    if _is_alpha_request(exchange, symbol):
+        return await asyncio.to_thread(
+            get_alpha_coverage,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
     return await historical_data_manager.get_data_coverage(
         exchange=exchange,
         symbol=symbol,
@@ -4735,7 +4868,15 @@ async def get_data_coverage(exchange: str, symbol: str, timeframe: str = "1h"):
 
 @router.get("/storage/stats")
 async def get_storage_stats():
-    return await data_storage.get_storage_stats()
+    stats = await data_storage.get_storage_stats()
+    alpha_source = await asyncio.to_thread(get_alpha_source_status)
+    managed_size_mb = float(alpha_source.get("database_size_mb") or 0.0)
+    return {
+        **stats,
+        "total_size_mb": round(float(stats.get("total_size_mb") or 0.0) + managed_size_mb, 2),
+        "sources": [*(stats.get("exchanges") or []), ALPHA_DATA_SOURCE],
+        "managed_sources": [alpha_source],
+    }
 
 
 @router.get("/storage/health")
@@ -4959,6 +5100,27 @@ async def get_storage_health(exact: bool = False):
                 }
             )
 
+    alpha_source = await asyncio.to_thread(get_alpha_source_status)
+    alpha_coverage = list(alpha_source.get("timeframe_coverage") or [])
+    alpha_has_issue = bool(alpha_source.get("stale") or alpha_source.get("last_error"))
+    if alpha_source.get("available"):
+        exchange_rows.append(
+            {
+                "exchange": ALPHA_DATA_SOURCE,
+                "dataset_count": int(alpha_source.get("dataset_count") or 0),
+                "symbol_count": int(alpha_source.get("symbol_count") or 0),
+                "timeframe_count": len(alpha_source.get("timeframes") or []),
+                "files": 1,
+                "partition_files": 0,
+                "corrupt_files": 0,
+                "size_mb": float(alpha_source.get("database_size_mb") or 0.0),
+                "issue_count": 1 if alpha_has_issue else 0,
+                "latest_modified_at": alpha_source.get("updated_at") or alpha_source.get("last_success_at"),
+                "source_type": "collector_sqlite",
+                "managed": True,
+            }
+        )
+
     backup_summary = _summarize_backup_batches(backup_root)
     datasets.sort(
         key=lambda row: (
@@ -4975,17 +5137,17 @@ async def get_storage_health(exact: bool = False):
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "summary": {
             "exchange_count": len(exchange_rows),
-            "dataset_count": len(datasets),
-            "symbol_count": len(unique_symbols),
-            "timeframe_count": len(unique_timeframes),
-            "active_files": total_active_files,
+            "dataset_count": len(datasets) + int(alpha_source.get("dataset_count") or 0),
+            "symbol_count": len(unique_symbols) + int(alpha_source.get("symbol_count") or 0),
+            "timeframe_count": len(unique_timeframes.union(set(alpha_source.get("timeframes") or []))),
+            "active_files": total_active_files + (1 if alpha_source.get("available") else 0),
             "partition_files": total_partition_files,
             "corrupt_files": total_corrupt_files,
             "duplicate_symbol_buckets": len(duplicate_symbol_dirs),
-            "datasets_with_issues": datasets_with_issues,
+            "datasets_with_issues": datasets_with_issues + (1 if alpha_has_issue else 0),
             "backup_batches": int(backup_summary["count"]),
             "backup_symbol_dirs": int(backup_summary["symbol_dirs"]),
-            "total_size_mb": round(total_size_bytes / (1024 * 1024), 2),
+            "total_size_mb": round(total_size_bytes / (1024 * 1024) + float(alpha_source.get("database_size_mb") or 0.0), 2),
             "exact_scan_count": exact_scan_count,
             "fast_scan_count": fast_scan_count,
             "suppressed_gap_datasets": suppressed_gap_datasets,
@@ -4995,11 +5157,17 @@ async def get_storage_health(exact: bool = False):
         "duplicates": duplicate_symbol_dirs,
         "backups": backup_summary,
         "datasets": datasets,
+        "managed_sources": [
+            {
+                **alpha_source,
+                "datasets": alpha_coverage,
+            }
+        ],
     }
 
 
 @router.get("/available")
-async def get_available_data():
+async def get_available_data(include_managed: bool = True):
     storage_path = Path(settings.DATA_STORAGE_PATH)
     available = []
     seen = set()
@@ -5028,6 +5196,15 @@ async def get_available_data():
                             "timeframe": file.stem,
                         }
                     )
+
+    if include_managed:
+        alpha_rows = await asyncio.to_thread(list_alpha_datasets)
+        for row in alpha_rows:
+            key = (ALPHA_DATA_SOURCE, str(row.get("symbol") or ""), str(row.get("timeframe") or ""))
+            if not key[1] or not key[2] or key in seen:
+                continue
+            seen.add(key)
+            available.append(dict(row))
 
     return {"available": available, "count": len(available)}
 
@@ -5075,8 +5252,10 @@ async def get_data_symbols(exchange: str = "binance"):
             "count": len(merged),
         }
 
-    exchange_name = str(exchange or "binance").strip().lower() or "binance"
-    available_rows = (await get_available_data()).get("available") or []
+    exchange_name = normalize_data_source(exchange) or "binance"
+    if is_alpha_data_source(exchange_name):
+        return await asyncio.to_thread(list_alpha_symbols)
+    available_rows = (await get_available_data(include_managed=False)).get("available") or []
     preferred = [
         "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT",
         "ADA/USDT", "TRX/USDT", "TON/USDT", "LINK/USDT", "AVAX/USDT", "DOT/USDT", "POL/USDT",
@@ -5085,6 +5264,42 @@ async def get_data_symbols(exchange: str = "binance"):
         "MKR/USDT", "UNI/USDT", "FIL/USDT", "HBAR/USDT", "ICP/USDT",
     ]
     return _build_symbol_payload(exchange_name, preferred)
+
+
+@router.get("/source/status")
+async def get_data_source_status(exchange: str = "binance"):
+    exchange_name = normalize_data_source(exchange) or "binance"
+    if is_alpha_data_source(exchange_name):
+        return await asyncio.to_thread(get_alpha_source_status)
+
+    symbols = await get_data_symbols(exchange=exchange_name)
+    local_count = int(symbols.get("local_count") or 0)
+    return {
+        "exchange": exchange_name,
+        "source": exchange_name,
+        "source_type": "exchange_parquet",
+        "state": "ready" if symbols.get("count") else "unavailable",
+        "enabled": True,
+        "available": bool(symbols.get("count")),
+        "stale": False,
+        "symbol_count": int(symbols.get("count") or 0),
+        "local_symbol_count": local_count,
+        "timeframes": list(_RESAMPLE_RULES),
+        "capabilities": {
+            "klines": True,
+            "integrity_check": True,
+            "replay": True,
+            "managed_refresh": False,
+            "manual_download": True,
+            "repair": True,
+            "exchange_reconnect": True,
+        },
+        "message": (
+            f"已发现 {local_count} 个本地币种，缺失区间可从 {exchange_name} 自动补齐"
+            if local_count
+            else f"本地暂无 {exchange_name} 数据，加载行情时可自动补齐"
+        ),
+    }
 
 
 _RESEARCH_MAJOR_SYMBOL_FALLBACK = [
@@ -6512,6 +6727,11 @@ async def start_second_level_backfill(
     days: int = 365,
     window_days: int = 1,
 ):
+    if _is_alpha_request(exchange, symbol):
+        raise HTTPException(
+            status_code=409,
+            detail="Binance Alpha 不支持普通交易所秒级回填，数据由后台采集器维护",
+        )
     days = max(1, min(days, 1200))
     # tz-aware UTC: second_level_backfill converts bounds via .timestamp(),
     # which would re-interpret a naive datetime in the host's local zone.
@@ -6559,8 +6779,9 @@ async def stop_second_level_backfill_task(task_id: str):
 @router.post("/replay/start", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def start_replay(req: ReplayStartRequest):
     _prune_replay_sessions()
+    replay_exchange = ALPHA_DATA_SOURCE if _is_alpha_request(req.exchange, req.symbol) else req.exchange
     df = await _load_symbol_df(
-        exchange=req.exchange,
+        exchange=replay_exchange,
         symbol=req.symbol,
         timeframe=req.timeframe,
         start_time=req.start_time,
@@ -6572,7 +6793,7 @@ async def start_replay(req: ReplayStartRequest):
     window = max(20, min(int(req.window or 300), 5000))
     replay_id = _new_replay_id(
         {
-            "exchange": req.exchange,
+            "exchange": replay_exchange,
             "symbol": req.symbol,
             "timeframe": req.timeframe,
         }
@@ -6580,7 +6801,7 @@ async def start_replay(req: ReplayStartRequest):
     now_utc = datetime.now(timezone.utc)
     now_monotonic = time.monotonic()
     _REPLAY_SESSIONS[replay_id] = {
-        "exchange": req.exchange,
+        "exchange": replay_exchange,
         "symbol": req.symbol,
         "timeframe": req.timeframe,
         "window": window,
@@ -6595,7 +6816,7 @@ async def start_replay(req: ReplayStartRequest):
     _prune_replay_sessions(keep_id=replay_id)
     return {
         "replay_id": replay_id,
-        "exchange": req.exchange,
+        "exchange": replay_exchange,
         "symbol": req.symbol,
         "timeframe": req.timeframe,
         "total": int(len(df)),

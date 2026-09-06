@@ -2113,6 +2113,7 @@ if(uiLoadState.dataInitialized)return;
 uiLoadState.dataInitialized=true;
 loadDataSymbolOptions(document.getElementById('data-exchange')?.value||'binance',['data-symbol']);
 loadDataSymbolOptions(document.getElementById('download-exchange')?.value||'binance',['download-symbol']);
+loadManagedDataSourceStatus().catch(err=>console.warn('loadManagedDataSourceStatus failed',err?.message||err));
 loadBacktestSymbolOptions('binance');
 scheduleKlineRealtime();
 setTimeout(()=>{loadDataStorageHealth(null,{skipStorage:true}).catch(err=>console.warn('loadDataStorageHealth failed',err?.message||err));},900);
@@ -3542,6 +3543,7 @@ const marketDataState={exchange:'',symbol:'',timeframe:'',limit:1200,bars:[],isL
 const autoDataOpsState={downloadAt:new Map(),repairAt:new Map(),lastHintAt:0};
 const MARKET_MAX_BARS=14000;
 const KLINE_UI_TZ_OFFSET_MS=8*60*60*1000;
+function isManagedAlphaSource(exchange){return ['alpha','binance_alpha'].includes(String(exchange||'').trim().toLowerCase());}
 function klinePad2(n){return String(Math.max(0,Number(n)||0)).padStart(2,'0');}
 function klineUtcIso(ms){
 const d=new Date(ms);
@@ -3625,6 +3627,7 @@ return{
 };
 }
 async function autoBackfillData({exchange,symbol,timeframe,reason='auto',startTime=null,endTime=null}){
+if(isManagedAlphaSource(exchange))return false;
 const tf=String(timeframe||'');
 const isSubMinute=(tf.endsWith('s') && tf!=='1s');
 const requestTf=isSubMinute?'1s':tf;
@@ -3711,7 +3714,7 @@ const firstMs=klineToMs(bars[0]?.timestamp);
 if(!Number.isFinite(firstMs)){marketDataState.isLoadingLeft=false;return;}
 const endTime=new Date(firstMs-1000).toISOString();
 const chunk=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:marketDataState.limit,endTime,align:'tail',timeoutMs:30000});
-if(chunk.length){marketDataState.bars=cropBars(mergeBars(chunk,marketDataState.bars));renderKlineChart(true);}else{
+if(chunk.length){marketDataState.bars=cropBars(mergeBars(chunk,marketDataState.bars));renderKlineChart(true);}else if(!isManagedAlphaSource(marketDataState.exchange)){
   const tfSec=timeframeSeconds(marketDataState.timeframe);
   const spanMs=Math.max(10*60*1000, Math.min(6*3600*1000, marketDataState.limit*tfSec*1000));
   await autoBackfillData({
@@ -3733,7 +3736,7 @@ const lastMs=klineToMs(bars[bars.length-1]?.timestamp);
 if(!Number.isFinite(lastMs)){marketDataState.isLoadingRight=false;return;}
 const startTime=new Date(lastMs+1000).toISOString();
 const chunk=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:marketDataState.limit,startTime,align:'head',timeoutMs:30000});
-if(chunk.length){marketDataState.bars=cropBars(mergeBars(marketDataState.bars,chunk));renderKlineChart(true);}else{
+if(chunk.length){marketDataState.bars=cropBars(mergeBars(marketDataState.bars,chunk));renderKlineChart(true);}else if(!isManagedAlphaSource(marketDataState.exchange)){
   const tfSec=timeframeSeconds(marketDataState.timeframe);
   const spanMs=Math.max(10*60*1000, Math.min(4*3600*1000, marketDataState.limit*tfSec*1000));
   await autoBackfillData({
@@ -3787,7 +3790,7 @@ const startTime=new Date(lastMs-Math.max(1000,tfSec*3000)).toISOString();
 const latest=await fetchKlinesChunk({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,limit:Math.min(600,marketDataState.limit),startTime,align:'head',timeoutMs:15000});
 if(refreshKey!==`${marketDataState.exchange}|${marketDataState.symbol}|${marketDataState.timeframe}|${marketDataState.loadSeq}`)return;
 marketDataState.lastRealtimePollAt=Date.now();
-if(latest.length){marketDataState.bars=cropBars(mergeBars(marketDataState.bars,latest));renderKlineChart(true);}else if(hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
+if(latest.length){marketDataState.bars=cropBars(mergeBars(marketDataState.bars,latest));renderKlineChart(true);}else if(!isManagedAlphaSource(marketDataState.exchange)&&hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
   const range=inferBackfillRangeFromBars(marketDataState.bars, marketDataState.timeframe);
   await autoBackfillData({exchange:marketDataState.exchange,symbol:marketDataState.symbol,timeframe:marketDataState.timeframe,reason:'realtime-gap',...range});
 }
@@ -3801,6 +3804,7 @@ setTimeout(()=>{refreshKlineRealtime().catch(()=>{});},300);
 }
 async function loadKlinesByForm(){
 const ex=document.getElementById('data-exchange').value,s=document.getElementById('data-symbol').value,tf=document.getElementById('data-timeframe').value,l=parseInt(document.getElementById('data-limit').value||'1200',10);
+const managedSource=isManagedAlphaSource(ex);
 const loadSeq=marketDataState.loadSeq+1;
 marketDataState.loadSeq=loadSeq;
 marketDataState.exchange=ex;
@@ -3814,7 +3818,7 @@ try{
 let actualExchange=ex;
 const isSubSecond=String(tf||'').endsWith('s');
 let data=await fetchKlinesChunk({exchange:ex,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?35000:45000});
-if(!data.length&&ex!=='binance'){
+if(!data.length&&ex!=='binance'&&!managedSource){
 const alt='binance';
 const altData=await fetchKlinesChunk({exchange:alt,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?35000:45000});
 if(altData.length){
@@ -3826,6 +3830,9 @@ notify(`当前 ${ex} 数据不足，已自动切换到 ${alt}`);
 }
 }
 if(!data.length){
+if(managedSource){
+  throw new Error(`${s} ${tf} 尚未进入 Alpha 采集库；请选择已采集周期或等待下一轮后台采集`);
+}
 await autoBackfillData({exchange:actualExchange,symbol:s,timeframe:tf,reason:'initial-load'});
 await new Promise(r=>setTimeout(r,isSubSecond?1800:900));
 data=await fetchKlinesChunk({exchange:actualExchange,symbol:s,timeframe:tf,limit:marketDataState.limit,align:'tail',timeoutMs:isSubSecond?40000:50000});
@@ -3835,7 +3842,7 @@ if(!data.length){throw new Error(`${s} ${tf} 暂无可用数据，已触发后�
 marketDataState.exchange=actualExchange;
 await drawK(data);
 if(loadSeq===marketDataState.loadSeq)scheduleKlineRealtime();
-if(hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
+if(!managedSource&&hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
   const range=inferBackfillRangeFromBars(marketDataState.bars, marketDataState.timeframe);
   await autoBackfillData({exchange:actualExchange,symbol:s,timeframe:tf,reason:'gap-check',...range});
 }
@@ -3853,15 +3860,91 @@ try{
 const ex=String(exchange||'binance').trim().toLowerCase()||'binance';
 const resp=await api(`/data/symbols?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
 const symbols=(Array.isArray(resp?.symbols)?resp.symbols:[]).filter(Boolean);
-if(!symbols.length)return;
+const symbolMeta=(resp?.symbol_meta&&typeof resp.symbol_meta==='object')?resp.symbol_meta:{};
+if(selectIds.includes('data-symbol'))updateDataTimeframeOptions(resp?.timeframes||[],isManagedAlphaSource(ex));
+if(!symbols.length){
+  if(selectIds.includes('data-symbol'))await loadDataSourceStatus(ex).catch(()=>{});
+  return;
+}
 selectIds.forEach(id=>{
 const el=document.getElementById(id);
 if(!el)return;
 const current=String(el.value||'BTC/USDT');
-el.innerHTML=symbols.map(sym=>`<option value="${esc(sym)}"${sym===current?' selected':''}>${esc(sym)}</option>`).join('');
+el.innerHTML=symbols.map(sym=>{
+  const meta=symbolMeta?.[sym]||{};
+  const display=String(meta.display_symbol||'').trim();
+  const name=String(meta.name||'').trim();
+  const quote=String(meta.quote_asset||'').trim();
+  const chain=String(meta.chain_name||'').trim();
+  const stableId=String(sym||'').split('/')[0];
+  const label=isManagedAlphaSource(ex)?[display||stableId,name,stableId,quote,chain].filter(Boolean).join(' · '):sym;
+  const title=isManagedAlphaSource(ex)?`${stableId} · 实际市场 ${meta.official_symbol||'--'} · ${chain||'未知链'}`:'';
+  return `<option value="${esc(sym)}" title="${esc(title)}"${sym===current?' selected':''}>${esc(label)}</option>`;
+}).join('');
 el.value=symbols.includes(current)?current:(symbols.includes('BTC/USDT')?'BTC/USDT':symbols[0]);
 });
+if(selectIds.includes('data-symbol'))await loadDataSourceStatus(ex).catch(()=>{});
 }catch(e){console.warn('loadDataSymbolOptions failed',e?.message||e);}
+}
+function updateDataTimeframeOptions(timeframes,managed){
+const select=document.getElementById('data-timeframe');
+if(!select)return;
+const supported=new Set((Array.isArray(timeframes)?timeframes:[]).map(value=>String(value||'').trim()).filter(Boolean));
+Array.from(select.options||[]).forEach(option=>{
+  option.disabled=Boolean(managed&&supported.size&&!supported.has(String(option.value||'')));
+});
+if(managed&&supported.size&&!supported.has(String(select.value||''))){
+  const fallback=Array.from(select.options||[]).find(option=>supported.has(String(option.value||'')));
+  if(fallback)select.value=fallback.value;
+}
+}
+function updateDataSourceControls(status){
+const managed=String(status?.source_type||'')==='managed_collector'||isManagedAlphaSource(status?.exchange);
+const capabilities=status?.capabilities||{};
+[
+  ['btn-integrity-repair',managed&&!capabilities.repair,'Alpha 数据由采集器自动补齐'],
+  ['btn-reconnect',managed&&!capabilities.exchange_reconnect,'Alpha 数据源不使用交易所连接器'],
+  ['btn-cross-validate',managed,'Alpha 标识不能与普通交易所交易对直接交叉验证'],
+].forEach(([id,disabled,title])=>{
+  const button=document.getElementById(id);
+  if(!button)return;
+  button.disabled=Boolean(disabled);
+  button.title=disabled?title:'';
+});
+}
+function renderDataSourceStatus(status){
+const el=document.getElementById('data-source-status');
+if(!el)return;
+const managed=String(status?.source_type||'')==='managed_collector'||isManagedAlphaSource(status?.exchange);
+const state=String(status?.state||'unavailable').toLowerCase();
+const stateLabel=status?.stale?'更新延迟':({ready:'正常',running:'采集中',degraded:'降级',failed:'失败',disabled:'已停用',unavailable:'不可用',not_started:'未启动'}[state]||state);
+const coverage=Array.isArray(status?.timeframe_coverage)?status.timeframe_coverage:[];
+const coverageText=coverage.map(row=>`${row.timeframe} ${Number(row.symbol_count||0)}币/${Number(row.rows||0).toLocaleString('zh-CN')}根`).join(' · ');
+const primary=managed
+  ?`Binance Alpha 后台采集 · ${stateLabel}`
+  :`${String(status?.exchange||'').toUpperCase()} 本地数据 · ${stateLabel}`;
+const detail=managed
+  ?`${Number(status?.symbol_count||0)} 个标的 · ${Number(status?.kline_rows||0).toLocaleString('zh-CN')} 根K线 · 最近成功 ${status?.last_success_at?fmtDateTime(status.last_success_at):'--'}`
+  :`${Number(status?.local_symbol_count||0)} 个本地币种 · 缺失数据可自动回源补齐`;
+el.innerHTML=`
+  <div class="data-source-status-head"><span class="status-badge">${esc(stateLabel)}</span><span>${esc(primary)}</span></div>
+  <div class="data-source-status-detail">${esc(status?.message||detail)}</div>
+  <div class="data-source-status-detail">${esc(detail)}${coverageText?`<br>${esc(coverageText)}`:''}</div>`;
+updateDataSourceControls(status);
+}
+async function loadDataSourceStatus(exchange){
+const ex=String(exchange||document.getElementById('data-exchange')?.value||'binance').trim().toLowerCase()||'binance';
+const status=await api(`/data/source/status?exchange=${encodeURIComponent(ex)}`,{timeoutMs:15000});
+if(String(document.getElementById('data-exchange')?.value||'').trim().toLowerCase()===ex){
+  renderDataSourceStatus(status);
+}
+if(isManagedAlphaSource(ex))renderManagedDataSources([status]);
+return status;
+}
+async function loadManagedDataSourceStatus(){
+const status=await api('/data/source/status?exchange=binance_alpha',{timeoutMs:15000});
+renderManagedDataSources([status]);
+return status;
 }
 function getSelectValues(id){
 const el=document.getElementById(id);
@@ -4445,6 +4528,25 @@ tableEl.addEventListener('click',async e=>{
   }
  });
 }
+function renderManagedDataSources(managedSources){
+const managedEl=document.getElementById('data-managed-sources');
+if(!managedEl)return;
+const sources=Array.isArray(managedSources)?managedSources:[];
+managedEl.innerHTML=!sources.length
+  ?'<div class="list-item"><span>后台托管数据源</span><span>暂无数据</span></div>'
+  :sources.map(source=>{
+    const state=String(source?.state||'--');
+    const statusText=source?.stale?'更新延迟':({ready:'正常',running:'采集中',degraded:'降级',failed:'失败',disabled:'已停用',not_started:'未启动'}[state]||state);
+    const timeframes=(Array.isArray(source?.timeframes)?source.timeframes:[]).join(' / ')||'--';
+    const retention=source?.retention||{};
+    const retentionText=retention.kline_days?`保留 K线 ≥${Number(retention.kline_days)}天且≥${Number(retention.kline_min_bars||0)}根 / 成交 ${Number(retention.trade_hours||0)}小时 / 深度 ${Number(retention.orderbook_hours||0)}小时`:'';
+    return `<div class="data-managed-source-row">
+      <div><strong>Binance Alpha</strong><div class="mini">后台采集 -> 统一数据 API</div></div>
+      <div>${esc(statusText)} · ${Number(source?.symbol_count||0)} 币 · ${Number(source?.kline_rows||0).toLocaleString('zh-CN')} 根<div class="mini">周期 ${esc(timeframes)}</div></div>
+      <div>${esc(source?.message||'--')}<div class="mini">最近成功 ${source?.last_success_at?esc(fmtDateTime(source.last_success_at)):'--'} · ${Number(source?.database_size_mb||0).toFixed(2)} MB${retentionText?` · ${esc(retentionText)}`:''}</div></div>
+    </div>`;
+  }).join('');
+}
 function renderDataStorageHealth(data){
 dataHealthState.last=data||null;
 const summaryEl=document.getElementById('data-storage-health-summary');
@@ -4472,6 +4574,8 @@ const exchanges=Array.isArray(data?.exchanges)?data.exchanges:[];
 if(exchangesEl){
   exchangesEl.innerHTML=exchanges.length?exchanges.map(row=>`<div class="list-item"><span>${esc(row.exchange)} ｜ 数据集 ${Number(row.dataset_count||0)} ｜ 币种 ${Number(row.symbol_count||0)} ｜ 问题 ${Number(row.issue_count||0)}</span><span>${esc(`${Number(row.size_mb||0).toFixed(2)} MB ｜ 最近 ${row.latest_modified_at?fmtDateTime(row.latest_modified_at):'--'}`)}</span></div>`).join(''):'<div class="list-item"><span>交易所</span><span>暂无数据</span></div>';
 }
+const managedSources=Array.isArray(data?.managed_sources)?data.managed_sources:[];
+renderManagedDataSources(managedSources);
 const rows=Array.isArray(data?.datasets)?data.datasets:[];
 if(tableEl){
   tableEl.innerHTML=!rows.length?'<div class="list-item"><span>明细</span><span>暂无数据</span></div>':`
@@ -4773,6 +4877,17 @@ try{
   const cachedAnalytics=(dataAnalyticsHealthState.last&&typeof dataAnalyticsHealthState.last==='object')?dataAnalyticsHealthState.last:null;
   if(analyticsNotesEl)analyticsNotesEl.textContent=cachedAnalytics?'正在刷新历史体检（先显示上次快照）...':'正在读取历史体检结果...';
   const {exchange,symbol}=getDataHealthSelection();
+  if(isManagedAlphaSource(exchange)){
+    const sourceStatus=await loadDataSourceStatus(exchange);
+    if(analyticsNotesEl)analyticsNotesEl.textContent='Binance Alpha 的 K线、成交与深度由专用后台采集器维护；普通交易所分析历史采集不适用于 Alpha 标识。';
+    if(!skipStorage){
+      const storageData=await api('/data/storage/health',{timeoutMs:45000});
+      renderDataStorageHealth(storageData);
+    }else if(notesEl){
+      notesEl.textContent=`Alpha 托管数据源: ${sourceStatus?.message||'状态已更新'}\n点击“刷新体检”可查看它与普通 Parquet 数据仓的统一统计。`;
+    }
+    return;
+  }
   const diagnostics=[];
   let analyticsHealthPayload=cachedAnalytics&&cachedAnalytics.exchange===exchange&&cachedAnalytics.symbol===symbol?cachedAnalytics:null;
   let analyticsStatusPayload=null;
@@ -5082,7 +5197,7 @@ const batchRedownloadBtn=document.getElementById('btn-batch-health-redownload');
 if(batchRedownloadBtn)batchRedownloadBtn.onclick=()=>runBatchDataHealthAction('redownload',batchRedownloadBtn);
 const dataExchange=document.getElementById('data-exchange');
 const downloadExchange=document.getElementById('download-exchange');
-if(dataExchange)dataExchange.onchange=async()=>{resetKlineChartForSwitch('正在切换交易所并加载新行情...');await loadDataSymbolOptions(dataExchange.value,['data-symbol']);scheduleDataChartReload(220);};
+if(dataExchange)dataExchange.onchange=async()=>{resetKlineChartForSwitch('正在切换数据源并加载新行情...');await loadDataSymbolOptions(dataExchange.value,['data-symbol']);scheduleDataChartReload(220);};
 if(downloadExchange)downloadExchange.onchange=()=>loadDataSymbolOptions(downloadExchange.value,['download-symbol']);
 const dataSymbol=document.getElementById('data-symbol');
 if(dataSymbol)dataSymbol.onchange=()=>{resetKlineChartForSwitch('正在切换币种并加载新行情...');scheduleDataChartReload(120);};
