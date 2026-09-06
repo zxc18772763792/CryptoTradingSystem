@@ -53,7 +53,7 @@ And it also:
 - keeps analytics-history collectors off unless you explicitly pass `-EnableAnalyticsHistory`
 - keeps the PM worker opt-in via `-StartPmWorker`
 - ignores `.env` `START_*` worker flags for managed startup decisions
-- defaults to `TRADING_MODE=live` with `MARKET_WS_MODE=strategy_primary`, fail-closed live reads, and the WS quality guard enabled
+- defaults to `TRADING_MODE=paper` with market WS disabled
 - keeps the AI autonomous agent separate from the default boot path
 
 Keep `START_NEWS_WORKER`, `START_NEWS_LLM_WORKER`, and `START_PM_WORKER` unset in local `.env` for the managed path; use the `web.bat` flags above so `status` and startup behavior stay aligned.
@@ -65,11 +65,11 @@ Important behavior while the service is already running:
 
 ## Managed Trading Mode Rule
 
-The managed path has one guarded live default and one explicit paper override:
+The managed path has one safe paper default and one explicit live override:
 
-- `.\web.bat` and `.\web.bat start` start in guarded `live + strategy_primary` mode and allow persisted live restore
-- `.\web.bat start -PaperMode` starts in `paper` mode and disables market WS authority
-- `-AllowPersistedLiveMode` remains as a compatibility alias for an explicit live request
+- `.\web.bat` and `.\web.bat start` start in `paper` mode and disable market WS authority
+- `.\web.bat start -PaperMode` remains an explicit paper/offline-WS startup path
+- `.\web.bat start -AllowPersistedLiveMode` is the explicit guarded `live + strategy_primary` startup path
 - changing between `paper` and `live` requires a clean restart: stop first, then start with the command for the mode you want
 
 Always confirm the effective mode with `.\web.bat status` after startup.
@@ -173,7 +173,7 @@ Check these fields before doing anything sensitive:
 - AI Agent `symbol_mode`
 - observed worker state for news, LLM, and PM workers
 
-Default managed restarts come up in guarded `live + strategy_primary`. Use `.\web.bat start -PaperMode` for paper. Treat any `mode=live` status as real state before changing strategies or credentials.
+Default managed restarts come up in `paper` mode with market WS disabled. Use `.\web.bat start -AllowPersistedLiveMode` for an explicit guarded `live + strategy_primary` startup. Treat any `mode=live` status as real state before changing strategies or credentials.
 
 ## Troubleshooting
 
@@ -223,7 +223,7 @@ Why this matters: console hosts (Windows Terminal, IDE and agent terminals) wrap
 Operational consequences:
 
 - the stack now survives the launching console or app closing; if web dies with the host, the task-hosted supervisor restarts it within seconds
-- the task has no time triggers: after a reboot, starting the system is still an explicit operator action (`.\web.bat start`), because a managed start can restore LIVE mode
+- the task has no time triggers: after a reboot, starting the system is still an explicit operator action (`.\web.bat start`); the default is safe paper mode, while live mode requires an explicit opt-in
 - `.\web.bat status` shows the supervisor process and the task state; `.\web.bat stop` still stops the supervisor first via the stop marker so an operator stop is never treated as a crash
 - if the scheduled-task launch fails, startup falls back to the old session-bound supervisor and prints a yellow warning that it will die with the console
 

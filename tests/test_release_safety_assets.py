@@ -67,19 +67,20 @@ def test_managed_start_checks_native_runtime_before_launch():
     assert "Paper startup may continue" in check
 
 
-def test_managed_start_defaults_to_live_ws_strategy_primary_with_paper_opt_out():
+def test_managed_start_defaults_to_paper_with_explicit_live_opt_in():
     web_ps = _read("scripts/web.ps1")
     start_web_ps = _read("scripts/start_web_ps.ps1")
     once = _read("_once.ps1")
     env_example = _read(".env.example")
 
     assert "[switch]$PaperMode" in web_ps
-    assert "$effectiveAllowPersistedLiveMode = -not $PaperMode.IsPresent" in web_ps
-    assert "[switch]$AllowPersistedLiveMode = $true" in start_web_ps
-    assert "[bool]$AllowPersistedLiveMode = $true" in once
+    assert "$effectiveAllowPersistedLiveMode = $AllowPersistedLiveMode.IsPresent -and (-not $PaperMode.IsPresent)" in web_ps
+    assert "[switch]$AllowPersistedLiveMode," in start_web_ps
+    assert "[bool]$AllowPersistedLiveMode = $false" in once
     assert 'Set-Item -Path Env:MARKET_WS_MODE -Value "strategy_primary"' in once
     assert 'Set-Item -Path Env:MARKET_WS_FAIL_CLOSED_FOR_LIVE -Value "1"' in once
     assert 'Set-Item -Path Env:MARKET_WS_QUALITY_GUARD_ENABLED -Value "1"' in once
-    assert "TRADING_MODE=live" in env_example
+    assert "TRADING_MODE=paper" in env_example
+    assert "ALLOW_PERSISTED_LIVE_MODE_START=false" in env_example
     assert "MARKET_WS_ENABLED=true" in env_example
     assert "MARKET_WS_MODE=strategy_primary" in env_example
