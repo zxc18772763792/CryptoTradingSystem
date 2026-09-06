@@ -126,8 +126,8 @@ Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (settings)" -Expected "False" -Act
 Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (.env.example)" -Expected "false" -Actual $checks[6].Example.ToLowerInvariant()
 Assert-Equal -Name "ANALYTICS_HISTORY_ENABLED (scripts/web.ps1)" -Expected "default off" -Actual $checks[6].WebPs
 
-Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (settings)" -Expected "True" -Actual $checks[7].Settings
-Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (.env.example)" -Expected "true" -Actual $checks[7].Example.ToLowerInvariant()
+Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (settings)" -Expected "False" -Actual $checks[7].Settings
+Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (.env.example)" -Expected "false" -Actual $checks[7].Example.ToLowerInvariant()
 Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (scripts/web.ps1)" -Expected "supported" -Actual $checks[7].WebPs
 Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (scripts/start_web_ps.ps1)" -Expected "supported" -Actual $checks[7].StartWebPs
 Assert-Equal -Name "ALLOW_PERSISTED_LIVE_MODE_START (_once.ps1)" -Expected "managed-guarded" -Actual $checks[7].OncePs

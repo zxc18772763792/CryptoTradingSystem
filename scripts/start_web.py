@@ -15,7 +15,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Start the managed Crypto Trading System web service."
     )
-    parser.add_argument("--mode", choices=("paper", "live"), default="live")
+    parser.add_argument("--mode", choices=("paper", "live"), default="paper")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--health-wait-sec", type=int, default=150)

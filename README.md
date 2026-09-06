@@ -90,7 +90,7 @@ For daily use, remember this small command family:
 .\web.bat stop -IncludeWorkers
 ```
 
-`.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and now defaults to guarded `live` mode with `MARKET_WS_MODE=strategy_primary`, fail-closed live reads, and the WS quality guard enabled. Use `-PaperMode` for an explicit paper/offline-WS startup.
+`.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and defaults to `paper` mode with market WS disabled. Use `-AllowPersistedLiveMode` only for an explicit guarded `live` + `strategy_primary` startup.
 
 When analytics-history is enabled, `.\web.bat status` may briefly show the service as `warming_up` while `/health` or `/api/status` finishes coming online. That is expected during heavier startup paths and is different from a true stopped state.
 
@@ -100,7 +100,7 @@ To start the service and explicitly request the AI autonomous agent too:
 .\web.bat start -StartAutonomousAgent
 ```
 
-To explicitly opt out of live mode:
+To explicitly request paper mode (the default):
 
 ```bat
 .\web.bat start -PaperMode
@@ -136,9 +136,9 @@ After startup, always verify the runtime mode and agent state with:
 
 Managed mode rule:
 
-- `.\web.bat` and `.\web.bat start` default to guarded `live + strategy_primary`
-- `.\web.bat start -PaperMode` is the explicit paper startup path and disables market WS authority
-- `-AllowPersistedLiveMode` remains accepted as a compatibility alias for an explicit live request
+- `.\web.bat` and `.\web.bat start` default to `paper` mode with market WS authority disabled
+- `.\web.bat start -PaperMode` remains an explicit paper/offline-WS startup path
+- `-AllowPersistedLiveMode` is the explicit opt-in for guarded `live + strategy_primary`
 - the autonomous agent does not start with the default boot path unless `AI_AUTONOMOUS_AGENT_AUTO_START=true` is present in the launching environment or you pass `-StartAutonomousAgent`
 
 For the full startup matrix, script responsibilities, and troubleshooting flow, see [STARTUP.md](STARTUP.md).

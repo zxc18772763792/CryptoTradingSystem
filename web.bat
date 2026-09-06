@@ -13,6 +13,7 @@ if "%~1"=="" (
   echo [INFO] One-click startup: ".\web.bat"
   echo [INFO] Effective command: ".\web.bat start -OpenBrowser"
   echo [INFO] Managed profile: web + news worker + news LLM worker
+  echo [INFO] Trading mode: PAPER by default; use -AllowPersistedLiveMode for explicit LIVE
   echo [INFO] Optional agent: ".\web.bat start -StartAutonomousAgent"
   echo [INFO] Help: ".\web.bat help"
   echo [INFO] Startup doc: "STARTUP.md"

@@ -346,6 +346,7 @@ function Show-Help {
     Write-Host "Common start variants:"
     Write-Host "  .\web.bat start -OpenBrowser"
     Write-Host "  .\web.bat start -PaperMode"
+    Write-Host "  .\web.bat start -AllowPersistedLiveMode"
     Write-Host "  .\web.bat start -StartAutonomousAgent"
     Write-Host "  .\web.bat start -NoNewsWorkers"
     Write-Host "  .\web.bat start -NoNewsLlmWorker"
@@ -357,8 +358,8 @@ function Show-Help {
     Write-Host ""
     Write-Host "Managed default profile:"
     Write-Host "  - '.\web.bat start' launches web + news worker + news LLM worker."
-    Write-Host "  - Managed start defaults to LIVE + MARKET_WS_MODE=strategy_primary."
-    Write-Host "  - Pass -PaperMode for an explicit paper/offline-WS startup."
+    Write-Host "  - Managed start defaults to PAPER mode with market WS disabled."
+    Write-Host "  - Pass -AllowPersistedLiveMode for an explicit LIVE + strategy_primary startup."
     Write-Host "  - Managed start ignores .env START_* worker flags and uses command-line flags."
     Write-Host "  - Analytics history stays off unless you pass -EnableAnalyticsHistory."
     Write-Host "  - PM worker remains opt-in via -StartPmWorker."
@@ -403,7 +404,7 @@ function Show-Status {
     Write-Host ("  Project root : {0}" -f $projectRoot)
     Write-Host ("  Port         : {0}" -f $PortNumber)
     Write-Host "  Start policy : default web + news engine (analytics-history disabled)"
-    Write-Host "  Live restore : default enabled with WS strategy_primary; -PaperMode opts out"
+    Write-Host "  Live restore : default disabled; -AllowPersistedLiveMode opts in"
     Write-Host "  Worker start : news workers auto-start by default; PM worker stays opt-in"
     $analyticsEnvValue = if ($envValues.ContainsKey("ANALYTICS_HISTORY_ENABLED")) { [string]$envValues["ANALYTICS_HISTORY_ENABLED"] } else { $null }
     $runtimeAnalyticsKnown = $false
@@ -671,10 +672,7 @@ switch ($Action) {
             $effectiveStartNewsLlmWorker = $true
         }
 
-        $effectiveAllowPersistedLiveMode = -not $PaperMode.IsPresent
-        if ($AllowPersistedLiveMode.IsPresent) {
-            $effectiveAllowPersistedLiveMode = $true
-        }
+        $effectiveAllowPersistedLiveMode = $AllowPersistedLiveMode.IsPresent -and (-not $PaperMode.IsPresent)
 
         & $startScript `
             -EnvName $EnvName `

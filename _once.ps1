@@ -4,7 +4,7 @@ param(
     [int]$Port = 8000,
     [bool]$OpenBrowser = $true,
     [int]$HealthWaitSec = 20,
-    [bool]$AllowPersistedLiveMode = $true,
+    [bool]$AllowPersistedLiveMode = $false,
     [bool]$StartAutonomousAgent = $false,
     [bool]$StartNewsWorker = $false,
     [bool]$StartNewsLlmWorker = $false,
@@ -475,9 +475,9 @@ if ($pidOnPort) {
             Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' to opt into analytics history collectors." -ForegroundColor Yellow
         }
         if ($AllowPersistedLiveMode) {
-            Write-Host "Managed start defaults to LIVE with MARKET_WS_MODE=strategy_primary and fail-closed quality guards." -ForegroundColor Yellow
+            Write-Host "Managed start uses explicit LIVE mode with MARKET_WS_MODE=strategy_primary and fail-closed quality guards." -ForegroundColor Yellow
         } else {
-            Write-Host "Managed start was explicitly forced to paper mode with market WS disabled." -ForegroundColor Yellow
+            Write-Host "Managed start uses PAPER mode with market WS disabled." -ForegroundColor Yellow
         }
         if ($requestedExternalWorkerLabels.Count) {
             Write-Host "Worker mix was not changed because the web service is already running." -ForegroundColor Yellow
@@ -515,9 +515,9 @@ if (-not $EnableAnalyticsHistory) {
     Write-Host "Use '.\web.bat start -EnableAnalyticsHistory' when you want analytics history collectors." -ForegroundColor Yellow
 }
 if ($AllowPersistedLiveMode) {
-    Write-Host "Managed start defaults to LIVE with MARKET_WS_MODE=strategy_primary and fail-closed quality guards." -ForegroundColor Yellow
+    Write-Host "Managed start uses explicit LIVE mode with MARKET_WS_MODE=strategy_primary and fail-closed quality guards." -ForegroundColor Yellow
 } else {
-    Write-Host "Managed start was explicitly forced to paper mode with market WS disabled." -ForegroundColor Yellow
+    Write-Host "Managed start uses PAPER mode with market WS disabled." -ForegroundColor Yellow
 }
 
 $startupStamp = Get-Date -Format "yyyyMMdd_HHmmss"

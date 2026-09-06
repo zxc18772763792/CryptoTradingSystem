@@ -4,7 +4,7 @@ param(
     [int]$Port = 8000,
     [int]$HealthWaitSec = 150,
     [switch]$OpenBrowser,
-    [switch]$AllowPersistedLiveMode = $true,
+    [switch]$AllowPersistedLiveMode,
     [switch]$StartAutonomousAgent,
     [switch]$StartNewsWorker,
     [switch]$StartNewsLlmWorker,
