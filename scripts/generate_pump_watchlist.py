@@ -61,9 +61,6 @@ COINGLASS_PACE_SEC = 6.8
 BINANCE_PACE_SEC = 0.25
 
 
-_ONCHAIN_DIR = PROJECT_ROOT / "data" / "research" / "onchain"
-
-
 def _fetch_top_onchain(
     bases: List[str],
     mcap_by_base: Dict[str, float],
@@ -125,18 +122,6 @@ def _fetch_top_onchain(
                 pass
     logger.info(f"onchain top-N enrichment: holders {len(holders)}/{len(bases)}, unlocks {len(unlocks)}/{len(bases)}")
     return holders, unlocks
-
-
-def _load_onchain_snapshot(kind: str) -> Dict[str, Dict[str, Any]]:
-    """Read the latest holder/unlock snapshot (context columns; may be absent)."""
-    path = _ONCHAIN_DIR / kind / "latest.json"
-    if not path.exists():
-        return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return {}
-    return dict(payload.get("rows") or {})
 
 
 def _get_json(url: str, params: Optional[Dict[str, Any]] = None, *, retries: int = 4) -> Any:
