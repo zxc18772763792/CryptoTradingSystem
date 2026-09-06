@@ -18588,6 +18588,11 @@ body.app-page:has(#altcoin-radar.active) .primary-tabs {
     padding: 5px;
 }
 
+body.app-page:has(#altcoin-radar.active) .page-header {
+    margin: 0 0 16px;
+    padding: 4px 0 18px;
+}
+
 body.app-page #altcoin-radar .ui-operating-mode-banner-content {
     display: flex;
     align-items: center;
