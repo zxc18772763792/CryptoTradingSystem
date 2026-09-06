@@ -2543,8 +2543,9 @@ async def get_binance_alpha_collector_status():
 
 
 # --- Pump-precursor weekly watchlist (model-ranked, research-only) -----------
-_PUMP_WATCHLIST_DIR = Path(__file__).resolve().parents[2] / "data" / "research" / "pump_watchlist"
-_PUMP_WATCHLIST_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "generate_pump_watchlist.py"
+# NOTE: this file lives at web/api/altcoin/__init__.py, so the repo root is parents[3].
+_PUMP_WATCHLIST_DIR = Path(__file__).resolve().parents[3] / "data" / "research" / "pump_watchlist"
+_PUMP_WATCHLIST_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "generate_pump_watchlist.py"
 _PUMP_WATCHLIST_STALE_DAYS = 8.0
 _pump_refresh_state: Dict[str, Any] = {"running": False, "started_at": None, "finished_at": None, "returncode": None, "error": None}
 _pump_refresh_lock = asyncio.Lock()
