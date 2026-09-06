@@ -12,4 +12,7 @@ echo [%date% %time%] pump watchlist weekly run exit %errorlevel% >> logs\pump_wa
 echo [%date% %time%] onchain feature snapshot start >> logs\pump_watchlist_weekly.log
 "%PYEXE%" -u scripts\snapshot_onchain_features.py >> logs\pump_watchlist_weekly.log 2>&1
 echo [%date% %time%] onchain feature snapshot exit %errorlevel% >> logs\pump_watchlist_weekly.log
+echo [%date% %time%] alpha fundamentals snapshot start >> logs\pump_watchlist_weekly.log
+"%PYEXE%" -u scripts\snapshot_alpha_fundamentals.py >> logs\pump_watchlist_weekly.log 2>&1
+echo [%date% %time%] alpha fundamentals snapshot exit %errorlevel% >> logs\pump_watchlist_weekly.log
 endlocal
