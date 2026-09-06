@@ -1788,12 +1788,21 @@ class CoinglassClient:
                 f"http_429:rate_limit_backoff_active_remaining={remaining:.1f}s"
             )
         headers = {"X-Api-Key": coinglass_api_key()}
-        base_url = (
-            _coinglass_spec_root_url()
-            if path.startswith("/api/v1/modules/")
-            else _coinglass_base_url()
-        )
-        url = f"{base_url}{path}"
+        is_spec = path.startswith("/api/v1/modules/")
+        base_url = _coinglass_spec_root_url() if is_spec else _coinglass_base_url()
+        request_path = path
+        # The vip2 relay serves non-versioned paths (/api/futures/..., /api/lsr/...)
+        # while the dataset manifests carry /v3 /v4 prefixes the old keystore relay
+        # required. Strip them when the relay uses the non-versioned scheme.
+        if (
+            not is_spec
+            and bool(getattr(settings, "COINGLASS_STRIP_API_VERSION", False))
+        ):
+            for _prefix in ("/v3/", "/v4/"):
+                if request_path.startswith(_prefix):
+                    request_path = "/" + request_path[len(_prefix):]
+                    break
+        url = f"{base_url}{request_path}"
         query_params = _sanitize_query_params(params)
         async with _request_lock():
             await _reserve_budget(manual=manual)
