@@ -2,20 +2,16 @@
 from __future__ import annotations
 
 import asyncio
-import copy
-import hashlib
 import json
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from config.database import (
@@ -38,11 +34,8 @@ from core.data.binance_alpha import (
     build_alpha_market_snapshots,
     load_alpha_token_catalog,
 )
-from core.data.alpha_market_data import is_alpha_symbol as is_collected_alpha_symbol
 from core.data.coinglass_registry import normalize_coinglass_symbol
 from core.research.altcoin_radar import (
-    TIMEFRAME_SECONDS,
-    VALID_TIMEFRAMES,
     build_altcoin_rows,
     build_detail_payload,
     sort_rows,
@@ -67,63 +60,88 @@ from web.api.data import (
     get_research_symbols,
 )
 
+# --- extracted submodules (re-exported to preserve the public + patch surface) ---
+from .constants import (  # noqa: E402
+    ALLOWED_MODES as ALLOWED_MODES,
+    ALLOWED_SORTS as ALLOWED_SORTS,
+    ALLOWED_UNIVERSE_SCOPES as ALLOWED_UNIVERSE_SCOPES,
+    ALLOWED_VIEWS as ALLOWED_VIEWS,
+    ALTCOIN_RULE_TYPES as ALTCOIN_RULE_TYPES,
+    DEFAULT_EXCHANGE as DEFAULT_EXCHANGE,
+    DEFAULT_LIMIT as DEFAULT_LIMIT,
+    DEFAULT_SORT as DEFAULT_SORT,
+    DEFAULT_TIMEFRAME as DEFAULT_TIMEFRAME,
+    DETAIL_LIVE_CHAIN_TIMEOUT_SEC as DETAIL_LIVE_CHAIN_TIMEOUT_SEC,
+    DETAIL_ONCHAIN_TIMEOUT_SEC as DETAIL_ONCHAIN_TIMEOUT_SEC,
+    MAX_EXPANDED_SIZE as MAX_EXPANDED_SIZE,
+    MAX_UNIVERSE_SIZE as MAX_UNIVERSE_SIZE,
+    TTL_BY_TIMEFRAME as TTL_BY_TIMEFRAME,
+    TTL_BY_VIEW as TTL_BY_VIEW,
+    _PUBLIC_MARKET_SNAPSHOT_TTL_SEC as _PUBLIC_MARKET_SNAPSHOT_TTL_SEC,
+    AltcoinAlertPresetRequest as AltcoinAlertPresetRequest,
+    AltcoinWatchlistMutationRequest as AltcoinWatchlistMutationRequest,
+)
+from .state import (  # noqa: E402
+    _ALTCOIN_SCAN_CACHE as _ALTCOIN_SCAN_CACHE,
+    _ALTCOIN_SCAN_LOCKS as _ALTCOIN_SCAN_LOCKS,
+    _ALTCOIN_SCAN_LOCKS_GUARD as _ALTCOIN_SCAN_LOCKS_GUARD,
+    _ALTCOIN_SCAN_REFRESH_TASKS as _ALTCOIN_SCAN_REFRESH_TASKS,
+    _PUBLIC_MARKET_SNAPSHOT_CACHE as _PUBLIC_MARKET_SNAPSHOT_CACHE,
+)
+from .helpers import (  # noqa: E402
+    _age_seconds_at as _age_seconds_at,
+    _binance_public_symbol_key as _binance_public_symbol_key,
+    _binance_timestamp_from_ticker as _binance_timestamp_from_ticker,
+    _build_binance_public_market_snapshot as _build_binance_public_market_snapshot,
+    _cache_ttl as _cache_ttl,
+    _clone_payload as _clone_payload,
+    _filter_fresh_market_frames as _filter_fresh_market_frames,
+    _hash_universe as _hash_universe,
+    _is_alpha_symbol as _is_alpha_symbol,
+    _is_fresh_market_snapshot as _is_fresh_market_snapshot,
+    _market_data_stale_cutoff_seconds as _market_data_stale_cutoff_seconds,
+    _market_frame_age_seconds as _market_frame_age_seconds,
+    _match_binance_public_ticker as _match_binance_public_ticker,
+    _needs_detail_chain_fallback as _needs_detail_chain_fallback,
+    _normalize_exchange as _normalize_exchange,
+    _normalize_mode as _normalize_mode,
+    _normalize_sort as _normalize_sort,
+    _normalize_symbols as _normalize_symbols,
+    _normalize_timeframe as _normalize_timeframe,
+    _normalize_universe_scope as _normalize_universe_scope,
+    _normalize_view as _normalize_view,
+    _pair_symbol_from_base as _pair_symbol_from_base,
+    _parse_symbols_param as _parse_symbols_param,
+    _resolve_requested_timeframe as _resolve_requested_timeframe,
+    _safe_float as _safe_float,
+    _serialize_community_snapshot as _serialize_community_snapshot,
+    _serialize_derivatives_snapshot as _serialize_derivatives_snapshot,
+    _serialize_micro_snapshot as _serialize_micro_snapshot,
+    _serialize_whale_snapshot as _serialize_whale_snapshot,
+    _should_overlay_coinglass_market_snapshot as _should_overlay_coinglass_market_snapshot,
+    _snapshot_age_seconds as _snapshot_age_seconds,
+    _utcnow as _utcnow,
+)
+from .cache import (  # noqa: E402
+    _ALTCOIN_SCAN_CACHE_MAX_ENTRIES as _ALTCOIN_SCAN_CACHE_MAX_ENTRIES,
+    _build_cached_scan_payload as _build_cached_scan_payload,
+    _cache_age_sec as _cache_age_sec,
+    _cache_key as _cache_key,
+    _cache_lock as _cache_lock,
+    _clear_altcoin_scan_cache as _clear_altcoin_scan_cache,
+    _evict_altcoin_scan_cache as _evict_altcoin_scan_cache,
+    _finalize_scan_payload as _finalize_scan_payload,
+    _should_cache_scan_payload as _should_cache_scan_payload,
+    build_altcoin_notification_config_key as build_altcoin_notification_config_key,
+)
+# --- end extracted submodules ---
+
+
 
 router = APIRouter()
 
-DEFAULT_EXCHANGE = "binance"
-DEFAULT_TIMEFRAME = "4h"
-# Budgets for the radar-detail external sources (onchain overview / live chain
-# context). Production incident: an unbounded chain call hung the whole detail
-# endpoint past the frontend's 60s budget, so the drawer never opened.
-DETAIL_ONCHAIN_TIMEOUT_SEC = 15.0
-DETAIL_LIVE_CHAIN_TIMEOUT_SEC = 10.0
-DEFAULT_LIMIT = 30
-DEFAULT_SORT = "priority"
-MAX_UNIVERSE_SIZE = 60
-MAX_EXPANDED_SIZE = 400
-TTL_BY_TIMEFRAME = {"1h": 120.0, "4h": 300.0, "1d": 900.0}
-# Phase 1: shorter cache for faster radar views
-TTL_BY_VIEW = {"15m": 30.0, "1h": 60.0, "4h": 300.0}
-ALLOWED_SORTS = {
-    "priority", "upside", "layout", "alert", "anomaly", "accumulation", "control", "chain", "heat",
-    # Phase 1 new sorts
-    "ignition", "continuation", "rank_jump", "crowding",
-    # Phase 2 new sorts
-    "narrative", "meme_rotation",
-}
-ALLOWED_MODES = {"perp", "narrative", "combined"}
-ALLOWED_VIEWS = {"15m", "1h", "4h"}
-ALLOWED_UNIVERSE_SCOPES = {"research", "expanded", "alpha", "watchlist"}
-ALTCOIN_RULE_TYPES = {
-    "altcoin_score_above",
-    "altcoin_rank_top_n",
-    "altcoin_ignition_cross_up",
-    "altcoin_rank_jump_top_n",
-    "altcoin_crowding_risk_spike",
-    "altcoin_narrative_heat_spike",
-}
-_ALTCOIN_SCAN_CACHE: Dict[str, Dict[str, Any]] = {}
-_ALTCOIN_SCAN_LOCKS: Dict[str, asyncio.Lock] = {}
-_ALTCOIN_SCAN_LOCKS_GUARD = threading.Lock()
-_ALTCOIN_SCAN_REFRESH_TASKS: Dict[str, asyncio.Task] = {}
-_PUBLIC_MARKET_SNAPSHOT_CACHE: Dict[str, Dict[str, Any]] = {}
-_PUBLIC_MARKET_SNAPSHOT_TTL_SEC = 45.0
 
 
-class AltcoinAlertPresetRequest(BaseModel):
-    preset: str
-    exchange: str = DEFAULT_EXCHANGE
-    timeframe: str = DEFAULT_TIMEFRAME
-    symbol: str
-    universe_symbols: List[str] = Field(default_factory=list)
-    channels: List[str] = Field(default_factory=lambda: ["feishu"])
-    mode: str = "combined"
-    view: str = ""
-    universe_scope: str = "research"
-
-
-class AltcoinWatchlistMutationRequest(BaseModel):
-    symbol: str
 
 
 def _preset_definition(preset: str) -> Tuple[str, str, float, str]:
@@ -170,231 +188,8 @@ def _alert_kind_from_rule(rule_type: str, score_key: str) -> str:
     return kind
 
 
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
 
 
-def _clone_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    return copy.deepcopy(dict(payload or {}))
-
-
-def _normalize_symbols(symbols: Iterable[str]) -> List[str]:
-    normalized: List[str] = []
-    seen = set()
-    for symbol in symbols:
-        text = normalize_altcoin_pair(symbol)
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        normalized.append(text)
-    return normalized
-
-
-def _is_alpha_symbol(symbol: str) -> bool:
-    """Return whether *symbol* is one of our stable Alpha directory pairs."""
-    return is_collected_alpha_symbol(normalize_altcoin_pair(symbol))
-
-
-def _parse_symbols_param(symbols: Optional[str]) -> List[str]:
-    if not symbols:
-        return []
-    parts = [part.strip() for part in str(symbols).replace(";", ",").split(",")]
-    return _normalize_symbols(parts)
-
-
-def _normalize_exchange(exchange: str) -> str:
-    text = str(exchange or DEFAULT_EXCHANGE).strip().lower()
-    return text or DEFAULT_EXCHANGE
-
-
-def _normalize_timeframe(timeframe: str) -> str:
-    tf = str(timeframe or DEFAULT_TIMEFRAME).strip().lower()
-    if tf not in VALID_TIMEFRAMES:
-        return DEFAULT_TIMEFRAME
-    return tf
-
-
-def _normalize_sort(sort_by: str) -> str:
-    text = str(sort_by or DEFAULT_SORT).strip().lower()
-    if text not in ALLOWED_SORTS:
-        return DEFAULT_SORT
-    return text
-
-
-def _normalize_mode(mode: str) -> str:
-    text = str(mode or "combined").strip().lower()
-    return text if text in ALLOWED_MODES else "combined"
-
-
-def _normalize_view(view: str) -> str:
-    text = str(view or "4h").strip().lower()
-    return text if text in ALLOWED_VIEWS else "4h"
-
-
-def _normalize_universe_scope(scope: str) -> str:
-    text = str(scope or "research").strip().lower()
-    return text if text in ALLOWED_UNIVERSE_SCOPES else "research"
-
-
-def _cache_ttl(timeframe: str, view: str = "") -> float:
-    if view and view in TTL_BY_VIEW:
-        return TTL_BY_VIEW[view]
-    return float(TTL_BY_TIMEFRAME.get(_normalize_timeframe(timeframe), TTL_BY_TIMEFRAME[DEFAULT_TIMEFRAME]))
-
-
-def _resolve_requested_timeframe(*, timeframe: str, view: str) -> str:
-    normalized_view = _normalize_view(view) if view else ""
-    if normalized_view:
-        return _normalize_timeframe(normalized_view)
-    return _normalize_timeframe(timeframe)
-
-
-def _hash_universe(symbols: Sequence[str]) -> str:
-    normalized = _normalize_symbols(symbols)
-    raw = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
-
-
-def build_altcoin_notification_config_key(
-    *,
-    exchange: str,
-    timeframe: str,
-    universe_symbols: Sequence[str],
-    exclude_retired: bool = True,
-    mode: str = "combined",
-    view: str = "",
-    universe_scope: str = "research",
-) -> str:
-    payload = {
-        "exchange": _normalize_exchange(exchange),
-        "timeframe": _normalize_timeframe(timeframe),
-        "universe_symbols": _normalize_symbols(universe_symbols),
-        "exclude_retired": bool(exclude_retired),
-        "mode": _normalize_mode(mode),
-        "view": _normalize_view(view) if view else "",
-        "universe_scope": _normalize_universe_scope(universe_scope),
-    }
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
-
-
-def _cache_key(
-    *,
-    exchange: str,
-    timeframe: str,
-    symbols: Sequence[str],
-    exclude_retired: bool,
-    mode: str = "combined",
-    view: str = "",
-    universe_scope: str = "research",
-) -> str:
-    universe_hash = _hash_universe(symbols)
-    return (
-        f"{_normalize_exchange(exchange)}"
-        f"|{_normalize_timeframe(timeframe)}"
-        f"|{universe_hash}"
-        f"|{bool(exclude_retired)}"
-        f"|{_normalize_mode(mode)}"
-        f"|{_normalize_view(view) if view else 'none'}"
-        f"|{_normalize_universe_scope(universe_scope)}"
-    )
-
-
-def _cache_lock(cache_key: str) -> asyncio.Lock:
-    with _ALTCOIN_SCAN_LOCKS_GUARD:
-        lock = _ALTCOIN_SCAN_LOCKS.get(cache_key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _ALTCOIN_SCAN_LOCKS[cache_key] = lock
-        return lock
-
-
-def _cache_age_sec(cached_entry: Optional[Mapping[str, Any]], now_ts: Optional[float] = None) -> float:
-    if not cached_entry:
-        return 0.0
-    current_ts = float(now_ts if now_ts is not None else time.time())
-    return max(0.0, current_ts - float(cached_entry.get("stored_at", 0.0)))
-
-
-def _build_cached_scan_payload(
-    *,
-    cached_entry: Mapping[str, Any],
-    cache_key: str,
-    ttl: float,
-    now_ts: Optional[float] = None,
-    stale: bool = False,
-    refreshing: bool = False,
-    served_mode: str = "cache_hit",
-    warnings: Optional[Sequence[str]] = None,
-) -> Dict[str, Any]:
-    payload = _clone_payload(cached_entry.get("payload") or {})
-    merged_warnings = [
-        str(item)
-        for item in list(payload.get("warnings") or []) + list(warnings or [])
-        if str(item or "").strip()
-    ]
-    payload["warnings"] = list(dict.fromkeys(merged_warnings))
-    payload["cache"] = {
-        "cache_key": cache_key,
-        "hit": True,
-        "age_sec": round(_cache_age_sec(cached_entry, now_ts), 3),
-        "ttl_sec": ttl,
-        "stale": bool(stale),
-        "refreshing": bool(refreshing),
-        "served_mode": str(served_mode or "cache_hit"),
-    }
-    return payload
-
-
-def _finalize_scan_payload(
-    *,
-    payload: Mapping[str, Any],
-    cache_key: str,
-    ttl: float,
-    mode: str,
-    view: str,
-    timeframe: str,
-    pre_warnings: Sequence[str],
-    cache_hit: bool,
-    age_sec: float = 0.0,
-    stale: bool = False,
-    refreshing: bool = False,
-    served_mode: str = "live_compute",
-) -> Dict[str, Any]:
-    final_payload = _clone_payload(payload)
-    final_payload["mode"] = _normalize_mode(mode)
-    final_payload["view"] = (_normalize_view(view) if view else "") or _normalize_timeframe(timeframe)
-    merged_warnings = [
-        str(item)
-        for item in list(pre_warnings or []) + list(final_payload.get("warnings") or [])
-        if str(item or "").strip()
-    ]
-    final_payload["warnings"] = list(dict.fromkeys(merged_warnings))
-    final_payload["cache"] = {
-        "cache_key": cache_key,
-        "hit": bool(cache_hit),
-        "age_sec": round(float(age_sec or 0.0), 3),
-        "ttl_sec": ttl,
-        "stale": bool(stale),
-        "refreshing": bool(refreshing),
-        "served_mode": str(served_mode or ("cache_hit" if cache_hit else "live_compute")),
-    }
-    return final_payload
-
-
-def _should_cache_scan_payload(payload: Mapping[str, Any]) -> bool:
-    rows = list(payload.get("rows") or [])
-    if not rows:
-        return False
-    for row in rows:
-        freshness = dict((row or {}).get("freshness") or {})
-        data_quality = dict((row or {}).get("data_quality") or {})
-        if bool(freshness.get("using_market_snapshot") or data_quality.get("using_market_snapshot")):
-            return True
-        market_freshness = _safe_float(data_quality.get("market_data_freshness"), 0.0)
-        if market_freshness >= 0.45:
-            return True
-    return False
 
 
 async def _refresh_altcoin_scan_cache(
@@ -505,130 +300,8 @@ def _ensure_altcoin_scan_refresh_task(
     return task
 
 
-def _clear_altcoin_scan_cache() -> None:
-    # Do NOT cancel in-flight refresh tasks: requests awaiting them via
-    # asyncio.shield would surface CancelledError as user-visible 500s (shield
-    # only protects against caller cancellation, not inner-task cancellation).
-    # Detaching them from the registry is enough — they finish, write a stale
-    # cache entry keyed by the old universe hash, and eviction reclaims it.
-    _ALTCOIN_SCAN_REFRESH_TASKS.clear()
-    _ALTCOIN_SCAN_CACHE.clear()
 
 
-_ALTCOIN_SCAN_CACHE_MAX_ENTRIES = 48
-
-
-def _evict_altcoin_scan_cache() -> None:
-    # Cache keys include the universe hash, so key churn (watchlist edits,
-    # symbol-set tweaks) grows the dict unboundedly on a long-lived process.
-    if len(_ALTCOIN_SCAN_CACHE) <= _ALTCOIN_SCAN_CACHE_MAX_ENTRIES:
-        return
-    oldest_first = sorted(
-        _ALTCOIN_SCAN_CACHE.items(), key=lambda kv: float((kv[1] or {}).get("stored_at", 0.0))
-    )
-    for key, _ in oldest_first[: len(_ALTCOIN_SCAN_CACHE) - _ALTCOIN_SCAN_CACHE_MAX_ENTRIES]:
-        _ALTCOIN_SCAN_CACHE.pop(key, None)
-    _ALTCOIN_SCAN_CACHE.clear()
-
-
-def _serialize_micro_snapshot(row: AnalyticsMicrostructureSnapshot) -> Dict[str, Any]:
-    payload = dict(row.payload or {})
-    return {
-        "exchange": row.exchange,
-        "symbol": row.symbol,
-        "timestamp": row.timestamp.replace(tzinfo=timezone.utc).isoformat() if row.timestamp else None,
-        "available": row.capture_status != "failed" and float(row.mid_price or 0.0) > 0.0,
-        "source_error": row.source_error,
-        "source_name": row.source_name,
-        "capture_status": row.capture_status,
-        "latency_ms": row.latency_ms,
-        "payload": payload,
-        "orderbook": {
-            "mid_price": float(row.mid_price or 0.0),
-            "spread_bps": float(row.spread_bps or 0.0),
-        },
-        "aggressor_flow": {
-            "imbalance": float(row.order_flow_imbalance or 0.0),
-            "buy_ratio": float(row.buy_ratio or 0.0),
-            "sell_ratio": float(row.sell_ratio or 0.0),
-        },
-        "funding_rate": {
-            "available": row.funding_rate is not None,
-            "funding_rate": row.funding_rate,
-        },
-        "spot_futures_basis": {
-            "available": row.basis_pct is not None,
-            "basis_pct": row.basis_pct,
-        },
-    }
-
-
-def _serialize_community_snapshot(row: AnalyticsCommunitySnapshot) -> Dict[str, Any]:
-    payload = dict(row.payload or {})
-    return {
-        "exchange": row.exchange,
-        "symbol": row.symbol,
-        "timestamp": row.timestamp.replace(tzinfo=timezone.utc).isoformat() if row.timestamp else None,
-        "source_error": row.source_error,
-        "source_name": row.source_name,
-        "capture_status": row.capture_status,
-        "latency_ms": row.latency_ms,
-        "payload": payload,
-        "flow_proxy": {
-            "imbalance": float(row.flow_imbalance or 0.0),
-            "buy_ratio": float(row.buy_ratio or 0.0),
-            "sell_ratio": float(row.sell_ratio or 0.0),
-        },
-        "announcements": list(payload.get("announcements") or []),
-        "security_alerts": payload.get("security_alerts") or {},
-        "twitter_watchlist": list(payload.get("twitter_watchlist") or []),
-    }
-
-
-def _serialize_whale_snapshot(row: AnalyticsWhaleSnapshot) -> Dict[str, Any]:
-    payload = dict(row.payload or {})
-    return {
-        "exchange": row.exchange,
-        "symbol": row.symbol,
-        "timestamp": row.timestamp.replace(tzinfo=timezone.utc).isoformat() if row.timestamp else None,
-        "available": row.capture_status != "failed",
-        "source_error": row.source_error,
-        "source_name": row.source_name,
-        "capture_status": row.capture_status,
-        "latency_ms": row.latency_ms,
-        "payload": payload,
-        "count": int(row.whale_count or 0),
-        "threshold_btc": payload.get("threshold_btc"),
-        "btc_price": payload.get("btc_price"),
-        "transactions": list(payload.get("transactions") or []),
-    }
-
-
-def _serialize_derivatives_snapshot(row: AnalyticsDerivativesSnapshot) -> Dict[str, Any]:
-    payload = dict(row.payload or {})
-    return {
-        "exchange": row.exchange,
-        "symbol": row.symbol,
-        "timestamp": row.timestamp.replace(tzinfo=timezone.utc).isoformat() if row.timestamp else None,
-        "capture_status": row.capture_status,
-        "source_error": row.source_error,
-        "source_name": row.source_name,
-        "latency_ms": row.latency_ms,
-        "payload": payload,
-        "oi_usd": row.oi_usd,
-        "oi_change_1h": row.oi_change_1h,
-        "oi_change_4h": row.oi_change_4h,
-        "oi_change_24h": row.oi_change_24h,
-        "funding_rate": row.funding_rate,
-        "long_short_ratio": row.long_short_ratio,
-        "basis_pct": row.basis_pct,
-        "taker_buy_sell_imbalance": row.taker_buy_sell_imbalance,
-        "crowding_score": row.crowding_score,
-        "squeeze_score": row.squeeze_score,
-        "distribution_score": row.distribution_score,
-        "orderbook_imbalance_score": row.orderbook_imbalance_score,
-        "depth_thinness_score": row.depth_thinness_score,
-    }
 
 
 async def _load_latest_snapshot_map(
@@ -749,212 +422,8 @@ async def _load_snapshot_maps(
     return micro, community, whale, derivatives
 
 
-def _snapshot_age_seconds(value: Any) -> Optional[float]:
-    return _age_seconds_at(value, now=_utcnow())
 
 
-def _age_seconds_at(value: Any, *, now: datetime) -> Optional[float]:
-    if not value:
-        return None
-    try:
-        ts = pd.Timestamp(value)
-    except Exception:
-        return None
-    if pd.isna(ts):
-        return None
-    if ts.tzinfo is None:
-        ts = ts.tz_localize(timezone.utc)
-    else:
-        ts = ts.tz_convert(timezone.utc)
-    return max(0.0, (now - ts.to_pydatetime()).total_seconds())
-
-
-def _safe_float(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except Exception:
-        return float(default)
-    if pd.isna(parsed):
-        return float(default)
-    return float(parsed)
-
-
-def _market_data_stale_cutoff_seconds(timeframe: str) -> float:
-    normalized = _normalize_timeframe(timeframe)
-    return float(TIMEFRAME_SECONDS.get(normalized, TIMEFRAME_SECONDS[DEFAULT_TIMEFRAME]) * 4.0)
-
-
-def _market_frame_age_seconds(frame: Any, *, now: datetime) -> Optional[float]:
-    if not isinstance(frame, pd.DataFrame) or frame.empty:
-        return None
-    try:
-        index = frame.sort_index().index
-        if len(index) == 0:
-            return None
-        return _age_seconds_at(index[-1], now=now)
-    except Exception:
-        return None
-
-
-def _is_fresh_market_snapshot(snapshot: Optional[Mapping[str, Any]], *, timeframe: str, now: datetime) -> bool:
-    if not snapshot:
-        return False
-    status = str(snapshot.get("capture_status") or "ok").strip().lower()
-    if status in {"failed", "error", "unavailable"}:
-        return False
-    if _safe_float(snapshot.get("current_price") or snapshot.get("last_price"), 0.0) <= 0:
-        return False
-    age_sec = _age_seconds_at(snapshot.get("timestamp"), now=now)
-    if age_sec is None:
-        return False
-    return age_sec <= _market_data_stale_cutoff_seconds(timeframe)
-
-
-def _filter_fresh_market_frames(
-    *,
-    frames: Mapping[str, Any],
-    market_snapshots: Mapping[str, Mapping[str, Any]],
-    timeframe: str,
-) -> Tuple[Dict[str, Any], List[str], List[str]]:
-    if not frames:
-        return {}, [], []
-
-    now = _utcnow()
-    stale_cutoff_sec = _market_data_stale_cutoff_seconds(timeframe)
-    snapshots_by_symbol = {
-        str(symbol or "").strip().upper(): snapshot
-        for symbol, snapshot in dict(market_snapshots or {}).items()
-        if str(symbol or "").strip()
-    }
-    kept: Dict[str, Any] = {}
-    dropped_with_snapshot: List[str] = []
-    dropped_without_snapshot: List[str] = []
-    for symbol, frame in dict(frames or {}).items():
-        normalized_symbol = str(symbol or "").strip().upper()
-        if not normalized_symbol:
-            continue
-        frame_age_sec = _market_frame_age_seconds(frame, now=now)
-        if frame_age_sec is not None and frame_age_sec > stale_cutoff_sec:
-            if _is_fresh_market_snapshot(snapshots_by_symbol.get(normalized_symbol), timeframe=timeframe, now=now):
-                dropped_with_snapshot.append(normalized_symbol)
-            else:
-                dropped_without_snapshot.append(normalized_symbol)
-            continue
-        kept[normalized_symbol] = frame
-    return kept, _normalize_symbols(dropped_with_snapshot), _normalize_symbols(dropped_without_snapshot)
-
-
-def _pair_symbol_from_base(base: str) -> str:
-    text = str(base or "").strip().upper()
-    return f"{text}/USDT" if text else ""
-
-
-def _binance_public_symbol_key(symbol: str) -> str:
-    base = normalize_coinglass_symbol(symbol)
-    return f"{base}USDT" if base else ""
-
-
-def _match_binance_public_ticker(
-    ticker_map: Mapping[str, Mapping[str, Any]],
-    symbol: str,
-) -> Tuple[Optional[Mapping[str, Any]], float, str]:
-    direct_key = _binance_public_symbol_key(symbol)
-    if not direct_key:
-        return None, 1.0, ""
-    direct = ticker_map.get(direct_key)
-    if direct:
-        return direct, 1.0, direct_key
-
-    candidates: List[Tuple[float, str, Mapping[str, Any]]] = []
-    for key, ticker in ticker_map.items():
-        key_text = str(key or "").strip().upper()
-        if not key_text.endswith(direct_key):
-            continue
-        prefix = key_text[: -len(direct_key)]
-        if not prefix.isdigit():
-            continue
-        multiplier = _safe_float(prefix, 1.0)
-        if multiplier <= 1:
-            continue
-        candidates.append((multiplier, key_text, ticker))
-    if not candidates:
-        return None, 1.0, ""
-    multiplier, matched_key, ticker = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
-    return ticker, multiplier, matched_key
-
-
-def _binance_timestamp_from_ticker(ticker: Mapping[str, Any]) -> str:
-    for key in ("closeTime", "time", "openTime"):
-        raw = ticker.get(key)
-        if raw in (None, ""):
-            continue
-        try:
-            numeric = float(raw)
-        except Exception:
-            continue
-        if numeric > 1_000_000_000_000:
-            numeric = numeric / 1000.0
-        return datetime.fromtimestamp(numeric, tz=timezone.utc).isoformat()
-    return _utcnow().isoformat()
-
-
-def _build_binance_public_market_snapshot(
-    *,
-    requested_symbol: str,
-    ticker: Mapping[str, Any],
-    divisor: float,
-    matched_symbol: str,
-    source_name: str,
-) -> Dict[str, Any]:
-    base = normalize_coinglass_symbol(requested_symbol)
-    symbol = _pair_symbol_from_base(base)
-    price_divisor = max(1.0, float(divisor or 1.0))
-
-    def _price(*keys: str) -> float:
-        for key in keys:
-            value = ticker.get(key)
-            if value not in (None, ""):
-                return _safe_float(value, 0.0) / price_divisor
-        return 0.0
-
-    last_price = _price("lastPrice", "last")
-    high_price = _price("highPrice", "high")
-    low_price = _price("lowPrice", "low")
-    bid_price = _price("bidPrice", "bid")
-    ask_price = _price("askPrice", "ask")
-    quote_volume = _safe_float(
-        ticker.get("quoteVolume")
-        or ticker.get("quote_volume")
-        or ticker.get("turnover")
-        or ticker.get("turnover_usd"),
-        0.0,
-    )
-    spread_bps = 0.0
-    mid = (bid_price + ask_price) / 2.0 if bid_price > 0 and ask_price > 0 else 0.0
-    if mid > 0 and ask_price >= bid_price:
-        spread_bps = ((ask_price - bid_price) / mid) * 10_000.0
-
-    return {
-        "symbol": symbol,
-        "raw_symbol": matched_symbol or str(ticker.get("symbol") or ""),
-        "base_symbol": base,
-        "exchange": "binance",
-        "timestamp": _binance_timestamp_from_ticker(ticker),
-        "source_name": source_name,
-        "capture_status": "ok",
-        "source_error": None,
-        "latency_ms": 0,
-        "current_price": last_price,
-        "high_price_24h": high_price,
-        "low_price_24h": low_price,
-        "bid_price": bid_price,
-        "ask_price": ask_price,
-        "spread_bps": spread_bps,
-        "quote_volume_24h": quote_volume,
-        "base_volume_24h": _safe_float(ticker.get("volume") or ticker.get("baseVolume"), 0.0),
-        "price_change_percent_24h": _safe_float(ticker.get("priceChangePercent"), 0.0),
-        "price_change_abs_24h": _safe_float(ticker.get("priceChange"), 0.0) / price_divisor,
-    }
 
 
 async def _fetch_binance_public_tickers(url: str) -> List[Dict[str, Any]]:
@@ -1036,24 +505,6 @@ async def _load_exchange_public_market_snapshots(
     return out
 
 
-def _should_overlay_coinglass_market_snapshot(snapshot: Optional[Mapping[str, Any]]) -> bool:
-    if not snapshot:
-        return True
-    capture_status = str(snapshot.get("capture_status") or "").strip().lower()
-    if capture_status and capture_status not in {"ok", "success"}:
-        return True
-    age_sec = _snapshot_age_seconds(snapshot.get("timestamp"))
-    if age_sec is None:
-        return True
-    return age_sec > 1800.0
-
-
-def _needs_detail_chain_fallback(row: Optional[Mapping[str, Any]]) -> bool:
-    percentiles = (((row or {}).get("metrics") or {}).get("percentiles") or {})
-    return any(
-        percentiles.get(key) is None
-        for key in ("community_flow", "announcements", "funding_basis", "whale_context")
-    )
 
 
 async def _load_detail_live_chain_context(
