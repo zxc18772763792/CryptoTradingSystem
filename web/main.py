@@ -143,6 +143,10 @@ _COINGLASS_WORKER_ENABLED = _env_bool(
     "COINGLASS_WORKER_ENABLED",
     bool(getattr(settings, "COINGLASS_WORKER_ENABLED", True)),
 )
+_ALPHA_COLLECTOR_ENABLED = _env_bool(
+    "BINANCE_ALPHA_COLLECTOR_ENABLED",
+    bool(getattr(settings, "BINANCE_ALPHA_COLLECTOR_ENABLED", True)),
+)
 _EXCHANGE_WATCHDOG_ENABLED = _env_bool(
     "EXCHANGE_WATCHDOG_ENABLED",
     bool(getattr(settings, "EXCHANGE_WATCHDOG_ENABLED", True)),
@@ -1761,6 +1765,20 @@ async def _coinglass_worker(stop_event: asyncio.Event) -> None:
             await asyncio.sleep(1)
 
 
+async def _binance_alpha_collector_worker(stop_event: asyncio.Event) -> None:
+    """Persist Binance Alpha directory and market data for radar research."""
+    from core.data.binance_alpha_collector import BinanceAlphaCollector
+
+    collector = BinanceAlphaCollector()
+    await collector.run(
+        stop_event,
+        heartbeat=lambda success: _touch_runtime_task(
+            "binance_alpha_collector",
+            success=bool(success),
+        ),
+    )
+
+
 async def _exchange_watchdog_worker(stop_event: asyncio.Event) -> None:
     """Periodically health-check all exchanges and reconnect any that have dropped.
 
@@ -2071,6 +2089,11 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         factories["coinglass"] = {
             "factory": lambda stop_event: _coinglass_worker(stop_event),
             "restart_on_failure": False,
+        }
+    if _ALPHA_COLLECTOR_ENABLED and bool(getattr(settings, "BINANCE_ALPHA_ENABLED", True)):
+        factories["binance_alpha_collector"] = {
+            "factory": lambda stop_event: _binance_alpha_collector_worker(stop_event),
+            "restart_on_failure": True,
         }
     if _EXCHANGE_WATCHDOG_ENABLED:
         factories["exchange_watchdog"] = {

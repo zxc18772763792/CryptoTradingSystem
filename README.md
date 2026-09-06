@@ -94,6 +94,8 @@ For daily use, remember this small command family:
 
 When analytics-history is enabled, `.\web.bat status` may briefly show the service as `warming_up` while `/health` or `/api/status` finishes coming online. That is expected during heavier startup paths and is different from a true stopped state.
 
+The Data tab exposes `Binance Alpha (background collector)` as a managed source. Its symbols, ticker snapshots, K-lines, integrity checks, replay input, storage health, and radar factor input all read the same collector-owned SQLite database. Alpha IDs never fall through to normal spot exchange download or repair paths. Retention is bounded by `BINANCE_ALPHA_COLLECTOR_*_RETENTION_*`; K-lines keep both the configured day window and at least `BINANCE_ALPHA_COLLECTOR_KLINE_MIN_BARS` per symbol/timeframe, while raw catalog JSONL segments rotate at `BINANCE_ALPHA_HISTORY_MAX_MB`.
+
 To start the service and explicitly request the AI autonomous agent too:
 
 ```bat

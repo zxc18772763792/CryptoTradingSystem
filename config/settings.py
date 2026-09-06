@@ -72,6 +72,38 @@ class Settings(BaseSettings):
     COINGLASS_INCLUDE_STRATEGIES: bool = False
     COINGLASS_LIVE_GATING_ENABLED: bool = False
     COINGLASS_WORKER_ENABLED: bool = True
+    # Binance Alpha is a public discovery feed used by the altcoin radar.
+    # It never enables trading and can be disabled when outbound access is not
+    # desired; the radar will continue using its normal local/spot universe.
+    BINANCE_ALPHA_ENABLED: bool = True
+    BINANCE_ALPHA_TIMEOUT_SEC: float = 10.0
+    # Persistent Alpha research collector.  The worker stores catalog
+    # snapshots, incremental klines, sampled aggregated trades, and order-book
+    # snapshots in data/research/binance_alpha/alpha_market.db.
+    BINANCE_ALPHA_COLLECTOR_ENABLED: bool = True
+    BINANCE_ALPHA_COLLECTOR_INTERVAL_SEC: int = 60
+    BINANCE_ALPHA_COLLECTOR_CATALOG_INTERVAL_SEC: int = 300
+    BINANCE_ALPHA_COLLECTOR_MAX_TOKENS: int = 400
+    BINANCE_ALPHA_COLLECTOR_CONCURRENCY: int = 8
+    BINANCE_ALPHA_COLLECTOR_TIMEOUT_SEC: float = 10.0
+    BINANCE_ALPHA_COLLECTOR_KLINE_LIMIT: int = 300
+    BINANCE_ALPHA_COLLECTOR_INCREMENTAL_KLINE_LIMIT: int = 50
+    BINANCE_ALPHA_COLLECTOR_KLINE_INTERVALS: str = "1m,5m,15m,1h,4h,1d"
+    BINANCE_ALPHA_COLLECTOR_AUX_ENABLED: bool = True
+    BINANCE_ALPHA_COLLECTOR_AUX_INTERVAL_SEC: int = 60
+    BINANCE_ALPHA_COLLECTOR_AUX_TOP_N: int = 60
+    BINANCE_ALPHA_COLLECTOR_TRADES_LIMIT: int = 1000
+    BINANCE_ALPHA_COLLECTOR_ORDERBOOK_LIMIT: int = 20
+    BINANCE_ALPHA_COLLECTOR_ERROR_BACKOFF_SEC: int = 900
+    BINANCE_ALPHA_COLLECTOR_STARTUP_DELAY_SEC: int = 15
+    BINANCE_ALPHA_COLLECTOR_PRUNE_INTERVAL_SEC: int = 3600
+    BINANCE_ALPHA_COLLECTOR_KLINE_RETENTION_DAYS: int = 14
+    BINANCE_ALPHA_COLLECTOR_KLINE_MIN_BARS: int = 1200
+    BINANCE_ALPHA_COLLECTOR_TRADE_RETENTION_HOURS: int = 6
+    BINANCE_ALPHA_COLLECTOR_ORDERBOOK_RETENTION_HOURS: int = 24
+    BINANCE_ALPHA_COLLECTOR_MARKET_RETENTION_HOURS: int = 24
+    BINANCE_ALPHA_COLLECTOR_RUN_RETENTION_DAYS: int = 30
+    BINANCE_ALPHA_HISTORY_MAX_MB: int = 256
     PUBLIC_MACRO_WORKERS_ENABLED: bool = False
     PREMIUM_EXTERNAL_WORKERS_ENABLED: bool = False
 

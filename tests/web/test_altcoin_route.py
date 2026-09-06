@@ -13,6 +13,32 @@ from fastapi.testclient import TestClient
 from web.api import altcoin as altcoin_api
 
 
+def test_alpha_symbol_detection_requires_numeric_collector_id():
+    assert altcoin_api._is_alpha_symbol("ALPHA175/USDT") is True
+    assert altcoin_api._is_alpha_symbol("ALPHA_175USDC") is True
+    assert altcoin_api._is_alpha_symbol("ALPHA/USDT") is False
+    assert altcoin_api._is_alpha_symbol("ALPHABET/USDT") is False
+
+
+def test_public_exchange_snapshot_loader_skips_alpha_symbols(monkeypatch):
+    calls = []
+
+    async def forbidden_fetch(url):
+        calls.append(url)
+        raise AssertionError("Alpha symbols must not reach ordinary Binance tickers")
+
+    monkeypatch.setattr(altcoin_api, "_fetch_binance_public_tickers", forbidden_fetch)
+    result = asyncio.run(
+        altcoin_api._load_exchange_public_market_snapshots(
+            exchange="binance",
+            symbols=["ALPHA_175USDC"],
+        )
+    )
+
+    assert result == {}
+    assert calls == []
+
+
 def _ops_headers() -> dict[str, str]:
     return {"X-OPS-TOKEN": "test-token", "X-OPS-CALLER": "pytest"}
 
@@ -845,6 +871,103 @@ def test_compute_scan_payload_uses_public_ticker_fallback_when_coinglass_unavail
     assert any("exchange public ticker" in warning for warning in payload["warnings"])
     assert not any("local K empty" in warning for warning in payload["warnings"])
     assert any("using live market snapshots instead" in warning for warning in payload["warnings"])
+
+
+def test_compute_scan_payload_preserves_alpha_catalog_capture_time(monkeypatch):
+    symbol = "ALPHA175/USDT"
+    captured = {}
+
+    async def fake_load_market_frames(**kwargs):
+        return {}, []
+
+    async def fake_load_alpha_token_catalog(**kwargs):
+        return {
+            "tokens": [{"alphaId": "ALPHA_175", "price": "1.5"}],
+            "updated_at": "2026-09-05T00:00:00+00:00",
+            "stale": True,
+        }
+
+    def fake_build_alpha_market_snapshots(tokens, *, timestamp=None):
+        captured["tokens"] = tokens
+        captured["timestamp"] = timestamp
+        return {
+            symbol: {
+                "symbol": symbol,
+                "timestamp": timestamp,
+                "source_name": "binance_alpha",
+                "current_price": 1.5,
+            }
+        }
+
+    async def fake_snapshot_maps(**kwargs):
+        return {}, {}, {}, {}
+
+    async def fake_rules():
+        return []
+
+    def fake_build_rows(**kwargs):
+        return [{"symbol": symbol, "tags": []}]
+
+    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api, "load_alpha_token_catalog", fake_load_alpha_token_catalog)
+    monkeypatch.setattr(altcoin_api, "build_alpha_market_snapshots", fake_build_alpha_market_snapshots)
+    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_rules)
+    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_rows)
+
+    payload = asyncio.run(
+        altcoin_api._compute_scan_payload(
+            exchange="binance",
+            timeframe="1h",
+            symbols=[symbol],
+            exclude_retired=True,
+            refresh=False,
+            universe_scope="alpha",
+            resolved_universe=([symbol], [symbol], [], []),
+        )
+    )
+
+    assert payload["symbols_used"] == [symbol]
+    assert captured["timestamp"] == "2026-09-05T00:00:00+00:00"
+
+
+def test_compute_scan_payload_never_falls_back_to_exchange_for_alpha(monkeypatch):
+    symbol = "ALPHA175/USDT"
+    public_calls = []
+
+    async def fake_load_market_frames(**kwargs):
+        return {}, []
+
+    async def fake_load_alpha_token_catalog(**kwargs):
+        return {
+            "tokens": [{"alphaId": "ALPHA_175", "price": "0"}],
+            "updated_at": "2026-09-05T00:00:00+00:00",
+            "stale": True,
+        }
+
+    async def fake_public_snapshots(**kwargs):
+        public_calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api, "load_alpha_token_catalog", fake_load_alpha_token_catalog)
+    monkeypatch.setattr(altcoin_api, "build_alpha_market_snapshots", lambda *args, **kwargs: {})
+    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_public_snapshots)
+
+    payload = asyncio.run(
+        altcoin_api._compute_scan_payload(
+            exchange="binance",
+            timeframe="1h",
+            symbols=[symbol],
+            exclude_retired=True,
+            refresh=False,
+            universe_scope="alpha",
+            resolved_universe=([symbol], [symbol], [], []),
+        )
+    )
+
+    assert public_calls == []
+    assert payload["symbols_used"] == []
 
 
 def test_compute_scan_payload_excludes_stale_frames_from_factor_inputs(monkeypatch):

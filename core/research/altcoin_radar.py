@@ -472,6 +472,58 @@ def _market_snapshot_metrics(
     }
 
 
+def _alpha_quality_score(context: Mapping[str, Any]) -> float:
+    """Build a bounded Alpha quality/optionality score from public metadata.
+
+    This is deliberately not a prediction model.  It rewards usable liquidity,
+    real holder/activity breadth, and moderate positive momentum while keeping
+    the score below 1.0.  Risk controls still come from ``risk_penalty`` and
+    the UI labels the result as a heuristic.
+    """
+    if not context:
+        return 0.0
+    market_cap = max(_to_float(context.get("market_cap_usd"), 0.0), 0.0)
+    liquidity = max(_to_float(context.get("liquidity_usd"), 0.0), 0.0)
+    holders = max(_to_float(context.get("holders"), 0.0), 0.0)
+    count_24h = max(_to_float(context.get("count_24h"), 0.0), 0.0)
+    momentum_pct = _to_float(context.get("percent_change_24h"), 0.0)
+    liquidity_ratio = liquidity / max(market_cap, 1.0) if market_cap > 0 else 0.0
+    liquidity_component = _clamp01(liquidity_ratio / 0.35)
+    holder_component = _clamp01(math.log10(holders + 1.0) / 5.0)
+    activity_component = _clamp01(math.log10(count_24h + 1.0) / 4.0)
+    momentum_component = _clamp01((momentum_pct + 8.0) / 28.0)
+    supply_ratio = context.get("circulating_ratio")
+    supply_component = _clamp01(_to_float(supply_ratio, 0.5)) if supply_ratio is not None else 0.5
+    hot_component = 1.0 if bool(context.get("hot_tag")) else 0.0
+    return _clamp01(
+        liquidity_component * 0.28
+        + holder_component * 0.20
+        + activity_component * 0.18
+        + momentum_component * 0.16
+        + supply_component * 0.10
+        + hot_component * 0.08
+    )
+
+
+def _upside_score(row: Mapping[str, Any]) -> float:
+    """Rank asymmetric-upside candidates without presenting certainty."""
+    alpha_quality = _to_float(row.get("alpha_quality_score"), 0.0)
+    signal = (
+        _to_float(row.get("layout_score"), 0.0) * 0.22
+        + _to_float(row.get("alert_score"), 0.0) * 0.16
+        + _to_float(row.get("anomaly_score"), 0.0) * 0.12
+        + _to_float(row.get("accumulation_score"), 0.0) * 0.14
+        + _to_float(row.get("ignition_score"), 0.0) * 0.14
+        + _to_float(row.get("continuation_score"), 0.0) * 0.10
+        + _to_float(row.get("narrative_heat_score"), 0.0) * 0.07
+        + _to_float(row.get("flow_confirmation_score"), 0.0) * 0.05
+    )
+    if bool(row.get("is_alpha")):
+        signal += alpha_quality * 0.10
+    risk = _to_float(row.get("risk_penalty"), 0.0)
+    return _clamp01(signal - risk * 0.48)
+
+
 def _normalize_symbols(symbols: Sequence[str]) -> List[str]:
     normalized: List[str] = []
     seen = set()
@@ -545,6 +597,8 @@ def _sort_key_for_row(row: Mapping[str, Any], sort_by: str) -> float:
         return _to_float(row.get("narrative_heat_score"), 0.0)
     if normalized == "meme_rotation":
         return _to_float(row.get("meme_rotation_score"), 0.0)
+    if normalized == "upside":
+        return _to_float(row.get("upside_score"), 0.0)
     if normalized == "chain":
         return _to_float(row.get("chain_confirmation_score"), 0.0)
     if normalized == "heat":
@@ -576,6 +630,7 @@ def _priority_score(row: Mapping[str, Any]) -> float:
         + _to_float(row.get("narrative_heat_score"), 0.0) * 0.08
         + _to_float(row.get("derivatives_heat_score"), 0.0) * 0.08
         + (0.04 if derivatives_present else 0.0)
+        + _to_float(row.get("upside_score"), 0.0) * 0.06
     )
     if degraded:
         score *= 0.75
@@ -583,6 +638,11 @@ def _priority_score(row: Mapping[str, Any]) -> float:
 
 
 def _next_best_action(row: Mapping[str, Any]) -> str:
+    if (
+        _to_float(row.get("upside_score"), 0.0) >= 0.72
+        and _to_float(row.get("risk_penalty"), 0.0) < 0.35
+    ):
+        return "generate_research_proposal"
     if _priority_score(row) >= 0.68:
         return "generate_research_proposal"
     if _to_float(row.get("crowding_late_score"), 0.0) >= 0.70:
@@ -609,6 +669,7 @@ def sort_rows(rows: Sequence[Mapping[str, Any]], sort_by: str = "layout") -> Lis
         row.setdefault("scores", {})
         if isinstance(row["scores"], dict):
             row["scores"]["priority"] = round(_priority_score(row), 6)
+            row["scores"]["upside"] = round(_to_float(row.get("upside_score"), 0.0), 6)
         row["priority_score"] = round(_priority_score(row), 6)
         row["next_best_action"] = _next_best_action(row)
         out.append(row)
@@ -642,12 +703,21 @@ def summarize_rows(
             for row in ordered
             if row.get("signal_state") in {STATE_CONTROL_TRACK, STATE_CONTROL_WARN}
         ),
+        "alpha_count": sum(1 for row in ordered if row.get("is_alpha")),
+        "upside_count": sum(
+            1
+            for row in ordered
+            if _to_float(row.get("upside_score"), 0.0) >= 0.70
+            and _to_float(row.get("risk_penalty"), 0.0) < 0.35
+        ),
         "degraded_count": degraded_count,
         "leader": {
             "symbol": leader.get("symbol"),
             "signal_state": leader.get("signal_state"),
             "layout_score": leader.get("layout_score"),
             "alert_score": leader.get("alert_score"),
+            "upside_score": leader.get("upside_score"),
+            "is_alpha": bool(leader.get("is_alpha")),
         }
         if leader
         else None,
@@ -779,6 +849,9 @@ def build_altcoin_rows(
         frame = market_frame_map.get(normalized_symbol)
         df = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
         market_snapshot = dict(market_snapshot_map.get(normalized_symbol) or {})
+        alpha_context = dict(market_snapshot.get("alpha_context") or {})
+        is_alpha = bool(alpha_context) or str(market_snapshot.get("source_name") or "").strip() == "binance_alpha"
+        alpha_quality_score = _alpha_quality_score(alpha_context) if is_alpha else 0.0
         if (df.empty or "close" not in df.columns) and not market_snapshot:
             continue
         if not df.empty and "close" in df.columns:
@@ -1088,7 +1161,14 @@ def build_altcoin_rows(
                     or market_snapshot.get("market_cap_usd"),
                     0.0,
                 ),
+                "alpha_quality_score": alpha_quality_score,
+                "alpha_percent_change_24h": _to_float(alpha_context.get("percent_change_24h"), 0.0),
+                "alpha_liquidity_usd": _to_float(alpha_context.get("liquidity_usd"), 0.0),
+                "alpha_holders": _to_float(alpha_context.get("holders"), 0.0),
+                "alpha_volume_24h_usd": _to_float(alpha_context.get("volume_24h_usd"), 0.0),
             },
+            "alpha_context": alpha_context,
+            "is_alpha": is_alpha,
             "freshness": {
                 "as_of": market_as_of,
                 "market_data_age_sec": None if market_age_sec is None else round(market_age_sec, 2),
@@ -1394,6 +1474,9 @@ def build_altcoin_rows(
             # Phase 2 new scores
             "narrative_heat_score": narrative_heat_score,
             "meme_rotation_score": meme_rotation_score,
+            "alpha_quality_score": _to_float(item["metrics_raw"].get("alpha_quality_score"), 0.0),
+            "is_alpha": bool(item.get("is_alpha")),
+            "alpha_context": dict(item.get("alpha_context") or {}),
             "sector": sym_sector,
             "in_watchlist": in_watchlist,
             "alt_eligible": bool(alt_eligible),
@@ -1411,6 +1494,7 @@ def build_altcoin_rows(
             "sparkline": item["sparkline"],
             "has_alert_rule": bool(item["has_alert_rule"]),
         }
+        row["upside_score"] = _round4(_upside_score(row))
         row["signal_state"] = _signal_state_for_row(row)
         degraded = bool(row["data_quality"].get("degraded_reason"))
         row["tags"] = _state_tags(
@@ -1437,6 +1521,10 @@ def build_altcoin_rows(
             extra_tags.append("Derivatives Stale")
         if "derivatives_missing" in row.get("data_quality", {}).get("degraded_reason", []):
             extra_tags.append("Derivatives Missing")
+        if row.get("is_alpha"):
+            extra_tags.append("Binance Alpha")
+            if row.get("alpha_context", {}).get("hot_tag"):
+                extra_tags.append("Alpha Hot")
         if not alt_eligible:
             extra_tags.append("Benchmark Excluded")
         for tag in extra_tags:
@@ -1466,6 +1554,15 @@ def build_altcoin_rows(
             proxy_reasons.append("Crowding risk is elevated, so any chase entry should stay size-aware.")
         if pct["liquidity_trap"] is not None and pct["liquidity_trap"] >= 0.70:
             proxy_reasons.append("Liquidity trap score is high, so failed breakouts can unwind quickly.")
+        if row.get("is_alpha"):
+            alpha_context = row.get("alpha_context") or {}
+            alpha_label = alpha_context.get("display_symbol") or alpha_context.get("alpha_id") or row.get("symbol")
+            proxy_reasons.insert(
+                0,
+                f"Binance Alpha 目录候选：{alpha_label}；Alpha 上行分仅作筛选线索",
+            )
+            if alpha_context.get("hot_tag"):
+                proxy_reasons.append("Alpha Hot 标签存在，但仍需验证流动性与价格路径")
         if not proxy_reasons:
             proxy_reasons.append("代理行为证据一般，当前更多作为待跟踪候选")
 
@@ -1822,6 +1919,7 @@ def build_detail_payload(
         "engine": "代理行为引擎",
         "dominant_sort": sort_by,
         "scores": {
+            "upside": selected.get("upside_score"),
             "layout": selected.get("layout_score"),
             "alert": selected.get("alert_score"),
             "anomaly": selected.get("anomaly_score"),

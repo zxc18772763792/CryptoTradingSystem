@@ -1,9 +1,10 @@
 """Universe scope management for the altcoin radar.
 
-Three tiers
+Four tiers
 -----------
-research   : current research symbol pool (≤30, default)
-expanded   : up to ~100 symbols (research + CoinGlass top + active)
+research   : current research symbol pool (≤60, default)
+expanded   : up to ~400 symbols (research + CoinGlass top + active + Alpha)
+alpha      : Binance Alpha discovery universe (up to ~400 active tokens)
 watchlist  : manually curated narrative / meme watchlist
 
 The module never fetches data itself; callers supply the raw symbol lists
@@ -153,8 +154,10 @@ def normalize_altcoin_pair(symbol: object) -> str:
         text = text.split("/", 1)[0]
     else:
         suffixes = (
-            "-USDT-SWAP", "-USD-SWAP", "_USDT", "_USD",
-            "-USDT", "-USD", "USDT", "PERP",
+            "-USDT-SWAP", "-USDC-SWAP", "-USD-SWAP",
+            "_USDT", "_USDC", "_USD",
+            "-USDT", "-USDC", "-USD",
+            "USDT", "USDC", "PERP",
         )
         for suffix in suffixes:
             if text.endswith(suffix) and len(text) > len(suffix):
@@ -272,7 +275,7 @@ SECTOR_MAP: Dict[str, str] = {
     "VANA/USDT": "ai",
 }
 
-MAX_EXPANDED = 100
+MAX_EXPANDED = 400
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
@@ -325,21 +328,24 @@ def resolve_universe_scope(
     research_symbols: Sequence[str],
     coinglass_symbols: Optional[Sequence[str]] = None,
     extra_active: Optional[Sequence[str]] = None,
+    alpha_symbols: Optional[Sequence[str]] = None,
 ) -> List[str]:
     """Return symbol list for the given universe scope.
 
     Parameters
     ----------
-    scope            : "research" | "expanded" | "watchlist"
+    scope            : "research" | "expanded" | "alpha" | "watchlist"
     research_symbols : symbols from the existing research pool
     coinglass_symbols: symbols returned by CoinGlass top-N list
     extra_active     : any extra symbols discovered as active (volume/volatility)
+    alpha_symbols    : active pairs from Binance Alpha's public token directory
     """
     s = str(scope or "research").strip().lower()
 
     research = _normalize(research_symbols)
     cg = _normalize(coinglass_symbols or [])
     active = _normalize(extra_active or [])
+    alpha = _normalize(alpha_symbols or [])
     watch = get_watchlist_symbols()
 
     if s == "watchlist":
@@ -347,9 +353,12 @@ def resolve_universe_scope(
         combined = _normalize(watch + research)
         return combined[:MAX_EXPANDED]
 
+    if s == "alpha":
+        return alpha[:MAX_EXPANDED]
+
     if s == "expanded":
-        # Merge: research first (priority), then CoinGlass, then active, then watchlist
-        combined = _normalize(research + cg + active + watch)
+        # Merge: established research first, then live/Alpha discovery sources.
+        combined = _normalize(research + cg + active + alpha + watch)
         return combined[:MAX_EXPANDED]
 
     # Default: "research"
@@ -423,6 +432,7 @@ def universe_meta(
     used = _normalize(symbols_used)
     watchlist_set = {w.upper() for w in get_watchlist_symbols()}
     watchlist_hits = [s for s in used if s in watchlist_set]
+    alpha_hits = [s for s in used if s.split("/", 1)[0].startswith("ALPHA")]
     sectors: Dict[str, int] = {}
     board_membership: Dict[str, str] = {}
     for s in used:
@@ -435,6 +445,8 @@ def universe_meta(
         "symbols_count": len(used),
         "watchlist_hits": watchlist_hits,
         "watchlist_hit_count": len(watchlist_hits),
+        "alpha_hits": alpha_hits,
+        "alpha_count": len(alpha_hits),
         "sectors": sectors,
         "board_membership": board_membership,
         "watchlist_storage": str(_watchlist_storage_path()),

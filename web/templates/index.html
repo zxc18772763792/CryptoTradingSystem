@@ -714,11 +714,12 @@
                         <h3>行情查看</h3>
                         <form id="data-form" class="form">
                             <div class="form-group">
-                                <label>交易所</label>
+                                <label>数据源</label>
                                 <select id="data-exchange">
                                     <option value="gate">Gate.io</option>
                                     <option value="binance" selected>Binance</option>
                                     <option value="okx">OKX</option>
+                                    <option value="binance_alpha">Binance Alpha（后台采集）</option>
                                 </select>
                             </div>
                             <div class="form-group">
@@ -757,6 +758,12 @@
                             </div>
                             <button type="submit" class="btn btn-primary">加载行情</button>
                         </form>
+                        <div id="data-source-status" class="data-source-status" aria-live="polite">
+                            <div class="data-source-status-head">
+                                <span class="status-badge">数据源状态</span>
+                                <span>正在读取...</span>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="card wide">
@@ -849,6 +856,9 @@
                             </div>
                         </div>
                         <div class="form-help">刷新体检会重新扫描数据仓；批量补全问题项会修复缺口和重复时间轴；批量重拉损坏项会对损坏文件重新从交易所拉取原始历史数据。</div>
+                        <div id="data-managed-sources" class="data-managed-sources">
+                            <div class="list-item"><span>后台托管数据源</span><span>正在读取...</span></div>
+                        </div>
                         <div class="section-title">完整性检查 / 交叉验证 / 行情重连</div>
                         <div class="form-row">
                             <div class="form-group">
@@ -2459,6 +2469,7 @@
                                             <label>排序模式</label>
                                             <select id="altcoin-radar-sort">
                                                 <option value="priority" selected>综合优先</option>
+                                                <option value="upside">潜在上行（目标）</option>
                                                 <option value="layout">布局优先</option>
                                                 <option value="alert">异动优先</option>
                                                 <option value="control">高控盘优先</option>
@@ -2485,13 +2496,15 @@
                                                 <option value="rank_jump">仅跃升候选</option>
                                                 <option value="narrative_ignition">仅叙事点火</option>
                                                 <option value="watchlist">仅Watchlist</option>
+                                                <option value="alpha">仅 Binance Alpha</option>
                                             </select>
                                         </div>
                                         <div class="form-group">
                                             <label>扫描范围</label>
                                             <select id="altcoin-radar-universe-scope">
                                                 <option value="research" selected>研究清单（使用下方多选）</option>
-                                                <option value="expanded">扩展扫描（自动补齐 ~100）</option>
+                                                <option value="expanded">扩展扫描（自动补齐 ~400）</option>
+                                                <option value="alpha">Binance Alpha 目录（最多约400）</option>
                                                 <option value="watchlist">Watchlist 收藏列表</option>
                                             </select>
                                         </div>
@@ -2530,9 +2543,9 @@
                                 </summary>
                                 <div class="altcoin-radar-library-grid">
                                     <section class="research-config-section altcoin-radar-universe-group" id="altcoin-radar-custom-universe-group">
-                                        <div class="research-config-title">研究清单成分 <span class="u-subnote">(按住Ctrl多选，默认最多 30 个)</span></div>
+                                        <div class="research-config-title">研究清单成分 <span class="u-subnote">(按住Ctrl多选，默认最多 60 个)</span></div>
                                         <div class="research-control-notes" id="altcoin-radar-custom-universe-note">
-                                            仅在 `扫描范围 = 研究清单（使用下方多选）` 时生效。
+                                            仅在 `扫描范围 = 研究清单（使用下方多选）` 时生效；Alpha 目录会自动同步并保留本地快照。
                                         </div>
                                         <div class="form-group">
                                             <select id="altcoin-radar-universe" multiple size="12">
@@ -2693,6 +2706,7 @@
                                         <tr>
                                             <th>排名</th>
                                             <th>币种</th>
+                                            <th title="量价、异动、叙事和风险惩罚的综合上行筛选分，不代表收益承诺">潜在上行</th>
                                             <th>布局分</th>
                                             <th>异动分</th>
                                             <th>吸筹分</th>
@@ -2707,7 +2721,7 @@
                                     </thead>
                                     <tbody id="altcoin-radar-ranking-body">
                                         <tr>
-                                            <td colspan="12" class="altcoin-radar-empty">等待扫描结果...</td>
+                                            <td colspan="13" class="altcoin-radar-empty">等待扫描结果...</td>
                                         </tr>
                                     </tbody>
                                 </table>

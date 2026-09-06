@@ -161,3 +161,27 @@ def test_symbol_formats_share_one_canonical_pair():
 
     assert normalized == ["TAG/USDT"]
     assert universe.normalize_altcoin_pair("PYUSD") == "PYUSD/USDT"
+
+
+def test_alpha_scope_and_expanded_scope_include_alpha_pairs(tmp_path, monkeypatch):
+    storage = tmp_path / "altcoin_watchlist.json"
+    monkeypatch.setattr(universe, "_WATCHLIST_STORAGE_PATH", storage)
+    alpha = ["ALPHA175/USDT", "ALPHA001/USDT"]
+
+    assert universe.resolve_universe_scope(
+        "alpha",
+        research_symbols=["LINK/USDT"],
+        alpha_symbols=alpha,
+    ) == alpha
+    expanded = universe.resolve_universe_scope(
+        "expanded",
+        research_symbols=["LINK/USDT"],
+        alpha_symbols=alpha,
+    )
+    assert expanded[:3] == ["LINK/USDT", "ALPHA175/USDT", "ALPHA001/USDT"]
+
+
+def test_alpha_official_quote_forms_share_one_canonical_pair():
+    assert universe.normalize_altcoin_pair("ALPHA_175USDT") == "ALPHA175/USDT"
+    assert universe.normalize_altcoin_pair("ALPHA_175USDC") == "ALPHA175/USDT"
+    assert universe.normalize_altcoin_pair("ALPHA_175/USDC") == "ALPHA175/USDT"

@@ -31,6 +31,14 @@ from core.data.coinglass_altcoin import (
     is_alt_candidate_symbol,
     load_coinglass_market_snapshots,
 )
+from core.data.binance_alpha import (
+    alpha_catalog_meta,
+    alpha_pair_from_id,
+    alpha_symbols,
+    build_alpha_market_snapshots,
+    load_alpha_token_catalog,
+)
+from core.data.alpha_market_data import is_alpha_symbol as is_collected_alpha_symbol
 from core.data.coinglass_registry import normalize_coinglass_symbol
 from core.research.altcoin_radar import (
     TIMEFRAME_SECONDS,
@@ -71,13 +79,13 @@ DETAIL_ONCHAIN_TIMEOUT_SEC = 15.0
 DETAIL_LIVE_CHAIN_TIMEOUT_SEC = 10.0
 DEFAULT_LIMIT = 30
 DEFAULT_SORT = "priority"
-MAX_UNIVERSE_SIZE = 30
-MAX_EXPANDED_SIZE = 100
+MAX_UNIVERSE_SIZE = 60
+MAX_EXPANDED_SIZE = 400
 TTL_BY_TIMEFRAME = {"1h": 120.0, "4h": 300.0, "1d": 900.0}
 # Phase 1: shorter cache for faster radar views
 TTL_BY_VIEW = {"15m": 30.0, "1h": 60.0, "4h": 300.0}
 ALLOWED_SORTS = {
-    "priority", "layout", "alert", "anomaly", "accumulation", "control", "chain", "heat",
+    "priority", "upside", "layout", "alert", "anomaly", "accumulation", "control", "chain", "heat",
     # Phase 1 new sorts
     "ignition", "continuation", "rank_jump", "crowding",
     # Phase 2 new sorts
@@ -85,7 +93,7 @@ ALLOWED_SORTS = {
 }
 ALLOWED_MODES = {"perp", "narrative", "combined"}
 ALLOWED_VIEWS = {"15m", "1h", "4h"}
-ALLOWED_UNIVERSE_SCOPES = {"research", "expanded", "watchlist"}
+ALLOWED_UNIVERSE_SCOPES = {"research", "expanded", "alpha", "watchlist"}
 ALTCOIN_RULE_TYPES = {
     "altcoin_score_above",
     "altcoin_rank_top_n",
@@ -180,6 +188,11 @@ def _normalize_symbols(symbols: Iterable[str]) -> List[str]:
         seen.add(text)
         normalized.append(text)
     return normalized
+
+
+def _is_alpha_symbol(symbol: str) -> bool:
+    """Return whether *symbol* is one of our stable Alpha directory pairs."""
+    return is_collected_alpha_symbol(normalize_altcoin_pair(symbol))
 
 
 def _parse_symbols_param(symbols: Optional[str]) -> List[str]:
@@ -962,7 +975,11 @@ async def _load_exchange_public_market_snapshots(
     symbols: Sequence[str],
 ) -> Dict[str, Dict[str, Any]]:
     normalized_exchange = _normalize_exchange(exchange)
-    requested = _normalize_symbols(symbols)
+    # Alpha pairs are synthetic collector identifiers and are never valid
+    # inputs for the ordinary Binance spot/futures ticker endpoints. Keep this
+    # guard here as well as at individual call sites so a future fallback path
+    # cannot accidentally cross the source boundary.
+    requested = [symbol for symbol in _normalize_symbols(symbols) if not _is_alpha_symbol(symbol)]
     if normalized_exchange != "binance" or not requested:
         return {}
 
@@ -1095,17 +1112,32 @@ async def _resolve_universe(
     symbols: Sequence[str],
     exclude_retired: bool,
     universe_scope: str = "research",
+    refresh: bool = False,
 ) -> Tuple[List[str], List[str], List[str], List[str]]:
     scope = _normalize_universe_scope(universe_scope)
-    # Watchlist scope must be able to hold the whole user watchlist (80+
-    # entries): capping it at MAX_UNIVERSE_SIZE silently dropped everything
-    # past the first 30, so tail entries were never scanned in watchlist view.
-    cap = MAX_EXPANDED_SIZE if scope in {"expanded", "watchlist"} else MAX_UNIVERSE_SIZE
+    # Discovery scopes are intentionally larger than the hand-curated research
+    # scope.  Alpha can contain hundreds of low-cap tokens, so keep a bounded
+    # top slice rather than turning every dashboard refresh into an unbounded
+    # network/data scan.
+    cap = MAX_EXPANDED_SIZE if scope in {"expanded", "alpha", "watchlist"} else MAX_UNIVERSE_SIZE
 
     explicit_requested = _normalize_symbols(symbols)
     requested = list(explicit_requested)
     fallback_warning = ""
     truncation_warning = ""
+    alpha_pool: List[str] = []
+    alpha_warning = ""
+    if scope in {"expanded", "alpha"} and not explicit_requested:
+        try:
+            alpha_payload = await load_alpha_token_catalog(refresh=refresh)
+            alpha_pool = _normalize_symbols(alpha_symbols(alpha_payload.get("tokens") or []))
+            alpha_warning = str(alpha_payload.get("warning") or "").strip()
+            if len(alpha_pool) > cap:
+                truncation_warning = (
+                    f"Binance Alpha 当前 {len(alpha_pool)} 个活跃候选，单次雷达扫描上限为 {cap}，只扫描前 {cap} 个。"
+                )
+        except Exception as exc:
+            alpha_warning = f"Binance Alpha universe unavailable: {type(exc).__name__}"
 
     # Watchlist scope without explicit symbols scans the stored watchlist.
     if scope == "watchlist" and not requested:
@@ -1115,13 +1147,18 @@ async def _resolve_universe(
             truncation_warning = (
                 f"Watchlist 共 {len(watchlist_symbols)} 个，超出扫描上限 {cap}，只扫描前 {cap} 个。"
             )
+    elif scope == "alpha" and not requested:
+        requested = alpha_pool[:cap]
+        if not requested:
+            fallback_warning = "Binance Alpha 当前没有可用候选，已回退到 research universe 默认币池。"
     elif scope == "expanded" and not requested:
-        # Load research + watchlist
+        # Load research + Alpha + watchlist.
         research_symbols = await get_research_symbols(exchange=exchange, include_major=False)
         base = _normalize_symbols((research_symbols.get("symbols") or []))
         requested = resolve_universe_scope(
             scope,
             research_symbols=base,
+            alpha_symbols=alpha_pool,
         )[:cap]
     elif not requested:
         research_symbols = await get_research_symbols(exchange=exchange, include_major=False)
@@ -1150,11 +1187,15 @@ async def _resolve_universe(
             fallback_warning = "当前 Watchlist 候选不可用，已回退到 research universe 默认币池。"
         elif scope == "expanded":
             fallback_warning = "当前扩展扫描候选不可用，已回退到 research universe 默认币池。"
+        elif scope == "alpha":
+            fallback_warning = "当前 Alpha 候选不可用，已回退到 research universe 默认币池。"
     warnings: List[str] = []
     if truncation_warning:
         warnings.append(truncation_warning)
     if fallback_warning:
         warnings.append(fallback_warning)
+    if alpha_warning:
+        warnings.append(alpha_warning)
     return requested[:cap], filtered, excluded_retired, warnings
 
 
@@ -1338,13 +1379,24 @@ async def _compute_scan_payload(
         excluded_retired_symbols = _normalize_symbols(excluded_retired_symbols)
         warnings = [str(item) for item in (warnings or []) if str(item or "").strip()]
 
-    frame_result, market_snapshot_result = await asyncio.gather(
-        _load_market_frames(exchange=exchange, timeframe=timeframe, symbols=symbols_used),
+    alpha_needed = _normalize_universe_scope(universe_scope) in {"expanded", "alpha"} or any(
+        _is_alpha_symbol(symbol) for symbol in symbols_used
+    )
+    alpha_task = load_alpha_token_catalog(refresh=refresh) if alpha_needed else asyncio.sleep(0, result={})
+    coinglass_symbols = [symbol for symbol in symbols_used if not _is_alpha_symbol(symbol)]
+    market_snapshot_task = (
         load_coinglass_market_snapshots(
             exchange=exchange,
-            symbols=symbols_used,
+            symbols=coinglass_symbols,
             refresh=refresh,
-        ),
+        )
+        if coinglass_symbols
+        else asyncio.sleep(0, result={})
+    )
+    frame_result, market_snapshot_result, alpha_result = await asyncio.gather(
+        _load_market_frames(exchange=exchange, timeframe=timeframe, symbols=symbols_used),
+        market_snapshot_task,
+        alpha_task,
         return_exceptions=True,
     )
     if isinstance(frame_result, Exception):
@@ -1359,7 +1411,40 @@ async def _compute_scan_payload(
     else:
         market_snapshots = market_snapshot_result
 
-    fallback_targets = [symbol for symbol in symbols_used if symbol not in (market_snapshots or {})]
+    alpha_payload: Dict[str, Any] = {}
+    if isinstance(alpha_result, Exception):
+        if alpha_needed:
+            warnings.append(f"Binance Alpha catalog unavailable: {type(alpha_result).__name__}")
+    elif isinstance(alpha_result, Mapping):
+        alpha_payload = dict(alpha_result)
+        alpha_warning = str(alpha_payload.get("warning") or "").strip()
+        if alpha_warning:
+            warnings.append(alpha_warning)
+        try:
+            alpha_snapshots = build_alpha_market_snapshots(
+                alpha_payload.get("tokens") or [],
+                timestamp=str(alpha_payload.get("updated_at") or "").strip() or None,
+            )
+        except Exception as exc:
+            alpha_snapshots = {}
+            warnings.append(f"Binance Alpha snapshot mapping failed: {type(exc).__name__}")
+        allowed_alpha_symbols = set(symbols_used)
+        for symbol, snapshot in alpha_snapshots.items():
+            if symbol not in allowed_alpha_symbols:
+                continue
+            # Alpha IDs are unique and must not be replaced by a same-named
+            # spot/futures symbol from another provider.
+            market_snapshots[symbol] = snapshot
+
+    # Alpha pairs are synthetic identifiers backed exclusively by the
+    # collector-owned SQLite store.  If a catalog snapshot is temporarily
+    # missing, leave the row degraded rather than sending the identifier to a
+    # normal Binance spot/futures ticker fallback.
+    fallback_targets = [
+        symbol
+        for symbol in symbols_used
+        if symbol not in (market_snapshots or {}) and not _is_alpha_symbol(symbol)
+    ]
     if fallback_targets:
         try:
             public_snapshots = await _load_exchange_public_market_snapshots(
@@ -1433,6 +1518,7 @@ async def _compute_scan_payload(
             "rows": [],
             "generated_at": _utcnow().isoformat(),
             "universe_meta": universe_meta([], universe_scope),
+            "alpha_meta": alpha_catalog_meta(alpha_payload) if alpha_needed else {},
         }
 
     factor_symbols = _normalize_symbols(frames.keys())
@@ -1528,6 +1614,7 @@ async def _compute_scan_payload(
         "rows": rows,
         "generated_at": _utcnow().isoformat(),
         "universe_meta": universe_meta(symbols_used, universe_scope),
+        "alpha_meta": alpha_catalog_meta(alpha_payload) if alpha_needed else {},
     }
 
 
@@ -1554,6 +1641,7 @@ async def get_altcoin_scan_snapshot(
         symbols=normalized_symbols,
         exclude_retired=exclude_retired,
         universe_scope=normalized_scope,
+        refresh=refresh,
     )
     cache_key = _cache_key(
         exchange=normalized_exchange,
@@ -1714,12 +1802,14 @@ def _build_scan_response(
     response["mode"] = _normalize_mode(mode)
     response["view"] = scan_payload.get("view") or str(scan_payload.get("timeframe") or DEFAULT_TIMEFRAME)
     response["universe_meta"] = scan_payload.get("universe_meta") or {}
+    response["alpha_meta"] = scan_payload.get("alpha_meta") or {}
     response["scan_meta"] = {
         **response.get("scan_meta", {}),
         "generated_at": scan_payload.get("generated_at"),
         "cache": scan_payload.get("cache") or {},
         "row_count_before_limit": len(rows),
         "limit": max(1, min(int(limit or DEFAULT_LIMIT), cap)),
+        "alpha_meta": scan_payload.get("alpha_meta") or {},
     }
     return response
 
@@ -2332,18 +2422,19 @@ async def get_altcoin_radar_watchlist():
     # exchange's live tickers (TTL-cached; multiplier-aware, e.g. 1000PEPE):
     # a watchlist entry with no spot AND no futures ticker is delisted.
     unlisted_symbols: List[str] = []
+    normalized_watch = _normalize_symbols(symbols)
+    exchange_watch = [symbol for symbol in normalized_watch if not _is_alpha_symbol(symbol)]
     try:
         live_map = await asyncio.wait_for(
             _load_exchange_public_market_snapshots(
                 exchange=DEFAULT_EXCHANGE,
-                symbols=list(symbols),
+                symbols=exchange_watch,
             ),
             timeout=8.0,
         )
-        normalized_watch = _normalize_symbols(symbols)
         unlisted_symbols = [
             symbol
-            for symbol in normalized_watch
+            for symbol in exchange_watch
             if symbol not in live_map
             or _safe_float(
                 (live_map.get(symbol) or {}).get("current_price")
@@ -2364,6 +2455,91 @@ async def get_altcoin_radar_watchlist():
         "meta": universe_meta(symbols, "watchlist"),
         "ts": _utcnow().isoformat(),
     }
+
+
+@router.get("/radar/universe")
+async def get_altcoin_radar_universe(
+    exchange: str = DEFAULT_EXCHANGE,
+    refresh: bool = False,
+):
+    """Return the radar's merged research + Alpha directory for the UI.
+
+    This endpoint is intentionally read-only.  Alpha metadata is cached to
+    disk by ``core.data.binance_alpha`` and the response only returns compact
+    labels, while the raw snapshots remain available locally for research.
+    """
+    research_task = get_research_symbols(exchange=exchange, include_major=False)
+    alpha_task = load_alpha_token_catalog(refresh=bool(refresh))
+    research_result, alpha_result = await asyncio.gather(
+        research_task,
+        alpha_task,
+        return_exceptions=True,
+    )
+
+    warnings: List[str] = []
+    research_symbols: List[str] = []
+    if isinstance(research_result, Mapping):
+        research_symbols = _normalize_symbols(research_result.get("symbols") or [])
+    else:
+        warnings.append(f"research universe unavailable: {type(research_result).__name__}")
+
+    alpha_payload: Dict[str, Any] = {}
+    if isinstance(alpha_result, Mapping):
+        alpha_payload = dict(alpha_result)
+    else:
+        warnings.append(f"Binance Alpha catalog unavailable: {type(alpha_result).__name__}")
+    alpha_tokens = list(alpha_payload.get("tokens") or [])
+    alpha_pool = _normalize_symbols(alpha_symbols(alpha_tokens))
+    alpha_meta = alpha_catalog_meta(alpha_payload)
+    if alpha_meta.get("warning"):
+        warnings.append(str(alpha_meta["warning"]))
+
+    watchlist = _normalize_symbols(get_watchlist_symbols())
+    if len(alpha_pool) > MAX_EXPANDED_SIZE:
+        warnings.append(
+            f"Binance Alpha 当前 {len(alpha_pool)} 个活跃候选，单次雷达扫描上限为 {MAX_EXPANDED_SIZE}。"
+        )
+    merged = _normalize_symbols(research_symbols + alpha_pool + watchlist)
+    merged = merged[:MAX_EXPANDED_SIZE]
+    compact_labels: Dict[str, Dict[str, Any]] = {}
+    for token in alpha_tokens:
+        if not isinstance(token, Mapping):
+            continue
+        pair = alpha_pair_from_id(token.get("alphaId"))
+        if not pair:
+            continue
+        compact_labels[pair] = {
+            "display_symbol": str(token.get("symbol") or "").strip(),
+            "name": str(token.get("name") or "").strip(),
+            "alpha_id": str(token.get("alphaId") or "").strip(),
+            "chain_name": str(token.get("chainName") or "").strip(),
+            "hot_tag": str(token.get("hotTag") or "").strip().lower() in {"1", "true", "yes", "y", "on"},
+        }
+
+    return {
+        "exchange": _normalize_exchange(exchange),
+        "symbols": merged,
+        "count": len(merged),
+        "default_count": min(MAX_UNIVERSE_SIZE, len(merged)),
+        "max_scan_count": MAX_EXPANDED_SIZE,
+        "research_count": len(research_symbols),
+        "alpha_symbols": alpha_pool[:MAX_EXPANDED_SIZE],
+        "alpha_count": len(alpha_pool),
+        "alpha_meta": alpha_meta,
+        "symbol_meta": compact_labels,
+        "watchlist_count": len(watchlist),
+        "source": "research_plus_binance_alpha",
+        "warnings": list(dict.fromkeys(warnings)),
+        "updated_at": _utcnow().isoformat(),
+    }
+
+
+@router.get("/radar/collector")
+async def get_binance_alpha_collector_status():
+    """Return persisted Binance Alpha collector health and coverage stats."""
+    from core.data.binance_alpha_collector import load_collector_status  # noqa: PLC0415
+
+    return load_collector_status()
 
 
 # --- Pump-precursor weekly watchlist (model-ranked, research-only) -----------
