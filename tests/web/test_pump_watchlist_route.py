@@ -17,7 +17,7 @@ def _client() -> TestClient:
 
 
 def test_pump_watchlist_reports_missing_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(altcoin_api, "_PUMP_WATCHLIST_DIR", tmp_path)
+    monkeypatch.setattr(altcoin_api.pump, "_PUMP_WATCHLIST_DIR", tmp_path)
     response = _client().get("/api/altcoin/radar/pump-watchlist")
     assert response.status_code == 200
     payload = response.json()
@@ -26,7 +26,7 @@ def test_pump_watchlist_reports_missing_file(monkeypatch, tmp_path):
 
 
 def test_pump_watchlist_serves_fresh_payload(monkeypatch, tmp_path):
-    monkeypatch.setattr(altcoin_api, "_PUMP_WATCHLIST_DIR", tmp_path)
+    monkeypatch.setattr(altcoin_api.pump, "_PUMP_WATCHLIST_DIR", tmp_path)
     generated = datetime.now(timezone.utc) - timedelta(days=1)
     (tmp_path / "latest.json").write_text(
         json.dumps(
@@ -46,7 +46,7 @@ def test_pump_watchlist_serves_fresh_payload(monkeypatch, tmp_path):
 
 
 def test_pump_watchlist_flags_stale_payload(monkeypatch, tmp_path):
-    monkeypatch.setattr(altcoin_api, "_PUMP_WATCHLIST_DIR", tmp_path)
+    monkeypatch.setattr(altcoin_api.pump, "_PUMP_WATCHLIST_DIR", tmp_path)
     generated = datetime.now(timezone.utc) - timedelta(days=12)
     (tmp_path / "latest.json").write_text(
         json.dumps({"generated_at": generated.isoformat(), "top": []}),

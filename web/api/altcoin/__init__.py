@@ -2,11 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import sys
 import time
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
@@ -1995,154 +1991,6 @@ async def get_binance_alpha_collector_status():
 
 # --- Pump-precursor weekly watchlist (model-ranked, research-only) -----------
 # NOTE: this file lives at web/api/altcoin/__init__.py, so the repo root is parents[3].
-_PUMP_WATCHLIST_DIR = Path(__file__).resolve().parents[3] / "data" / "research" / "pump_watchlist"
-_PUMP_WATCHLIST_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "generate_pump_watchlist.py"
-_PUMP_WATCHLIST_STALE_DAYS = 8.0
-_pump_refresh_state: Dict[str, Any] = {"running": False, "started_at": None, "finished_at": None, "returncode": None, "error": None}
-_pump_refresh_lock = asyncio.Lock()
-
-
-@router.get("/radar/pump-watchlist")
-async def get_pump_precursor_watchlist():
-    path = _PUMP_WATCHLIST_DIR / "latest.json"
-    if not path.exists():
-        return {
-            "available": False,
-            "reason": "not_generated",
-            "hint": "python scripts/generate_pump_watchlist.py",
-            "refresh": dict(_pump_refresh_state),
-            "ts": _utcnow().isoformat(),
-        }
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "available": False,
-            "reason": f"unreadable:{str(exc)[:80]}",
-            "refresh": dict(_pump_refresh_state),
-            "ts": _utcnow().isoformat(),
-        }
-    age_days: Optional[float] = None
-    try:
-        generated = datetime.fromisoformat(str(payload.get("generated_at")))
-        if generated.tzinfo is None:
-            generated = generated.replace(tzinfo=timezone.utc)
-        age_days = (_utcnow() - generated).total_seconds() / 86400.0
-    except Exception:
-        age_days = None
-    return {
-        "available": True,
-        "stale": bool(age_days is not None and age_days > _PUMP_WATCHLIST_STALE_DAYS),
-        "age_days": None if age_days is None else round(age_days, 2),
-        "refresh": dict(_pump_refresh_state),
-        "data": payload,
-        "ts": _utcnow().isoformat(),
-    }
-
-
-async def _run_pump_watchlist_refresh() -> None:
-    _pump_refresh_state.update(
-        {"running": True, "started_at": _utcnow().isoformat(), "finished_at": None, "returncode": None, "error": None}
-    )
-    try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            str(_PUMP_WATCHLIST_SCRIPT),
-            cwd=str(_PUMP_WATCHLIST_SCRIPT.parents[1]),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        returncode = await process.wait()
-        _pump_refresh_state.update({"returncode": int(returncode)})
-        if returncode != 0:
-            _pump_refresh_state.update({"error": f"exit_{returncode}"})
-    except Exception as exc:  # noqa: BLE001
-        _pump_refresh_state.update({"error": str(exc)[:160]})
-    finally:
-        _pump_refresh_state.update({"running": False, "finished_at": _utcnow().isoformat()})
-
-
-@router.post(
-    "/radar/pump-watchlist/refresh",
-    dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))],
-)
-async def refresh_pump_precursor_watchlist():
-    async with _pump_refresh_lock:
-        if _pump_refresh_state.get("running"):
-            return {"success": False, "reason": "already_running", "refresh": dict(_pump_refresh_state)}
-        asyncio.create_task(_run_pump_watchlist_refresh())
-        return {"success": True, "reason": "started", "refresh": dict(_pump_refresh_state)}
-
-
-# --- LSR crowding + KOL consensus (positioning/macro context, not predictions) ---
-
-@router.get("/radar/lsr-crowding")
-async def get_lsr_crowding(mode: str = "trader", limit: int = 40):
-    """Current long/short-ratio crowding ranking (most crowded first). Positioning,
-    NOT a takeoff signal — for the real-time scan's crowding/risk dimension."""
-    from core.data.coinglass_lsr import crowding_label, fetch_lsr_ranking
-
-    normalized_mode = "whale" if str(mode or "").lower() == "whale" else "trader"
-    result = await asyncio.wait_for(
-        fetch_lsr_ranking(mode=normalized_mode, limit=max(5, min(int(limit or 40), 100))),
-        timeout=15.0,
-    )
-    rows = []
-    for row in result.get("rows") or []:
-        ratio = _safe_float(row.get("ratio"), 0.0)
-        rows.append(
-            {
-                "symbol": str(row.get("symbol") or ""),
-                "ratio": round(ratio, 3),
-                "ratio_pct": row.get("ratio_pct"),
-                "whale_ratio": _safe_float(row.get("whale_ratio"), 0.0),
-                "delta_2m_pct": row.get("delta_2m_pct"),
-                "delta_30m_pct": row.get("delta_30m_pct"),
-                "delta_4h_pct": row.get("delta_4h_pct"),
-                "crowding": crowding_label(ratio),
-                "oi_mcap_ratio": _safe_float(row.get("oi_mcap_ratio"), 0.0),
-            }
-        )
-    return {
-        "available": bool(result.get("available")),
-        "mode": normalized_mode,
-        "error": result.get("error"),
-        "rows": rows,
-        "note": "多空持仓拥挤度（仓位，非预测）；比值越极端越拥挤，回撤/挤压风险越高。",
-        "ts": _utcnow().isoformat(),
-    }
-
-
-@router.get("/radar/kol-consensus")
-async def get_kol_consensus():
-    """KOL consensus for the 5 majors (BTC/ETH/SOL/DOGE/BNB) + an aggregate risk
-    tone. A macro / risk-regime read, NOT an altcoin discovery signal."""
-    from core.data.coinglass_lsr import fetch_kol_consensus
-
-    result = await asyncio.wait_for(fetch_kol_consensus(), timeout=15.0)
-    rows = []
-    for row in result.get("rows") or []:
-        rows.append(
-            {
-                "symbol": str(row.get("display_symbol") or row.get("symbol") or ""),
-                "decision": str(row.get("decision") or "neutral"),
-                "decision_label": str(row.get("decision_label") or "中性"),
-                "confidence": round(_safe_float(row.get("confidence"), 0.0), 3),
-                "bias": round(_safe_float(row.get("trust_adjusted_bias"), 0.0), 4),
-                "snapshot_date": row.get("snapshot_date"),
-                "snapshot_age_hours": row.get("snapshot_age_hours"),
-            }
-        )
-    return {
-        "available": bool(result.get("available")),
-        "error": result.get("error"),
-        "risk_tone": result.get("risk_tone"),
-        "rows": rows,
-        "coverage": "BTC/ETH/SOL/DOGE/BNB",
-        "note": "KOL 共识仅覆盖 5 大币，是大盘方向/风险体制参考，不是山寨选币信号。",
-        "ts": _utcnow().isoformat(),
-    }
-
 
 @router.post("/radar/watchlist", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def add_altcoin_radar_watchlist_symbol(request: AltcoinWatchlistMutationRequest):
@@ -2174,3 +2022,9 @@ async def remove_altcoin_radar_watchlist_symbol(symbol: str):
         "count": len(symbols),
         "meta": universe_meta(symbols, "watchlist"),
     }
+
+# --- feature route clusters (own sub-routers, merged into the package router) ---
+from . import pump as pump  # noqa: E402
+from . import signals as signals  # noqa: E402
+router.include_router(pump.router)
+router.include_router(signals.router)
