@@ -17,7 +17,6 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from loguru import logger
 
 from core.data.coinglass_lsr import KOL_SYMBOLS, get_cached_kol_symbol
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase

@@ -938,9 +938,7 @@ def build_altcoin_rows(
             sparkline = close.tail(36).tolist()
         positive_return_burst = max(recent_return_1, recent_return_3, recent_return_6, 0.0)
         absolute_return_burst = max(abs(recent_return_1), abs(recent_return_3), abs(recent_return_6))
-        micro_payload = _snapshot_payload(micro)
         community_payload = _snapshot_payload(community)
-        whale_payload = _snapshot_payload(whale)
         derivatives_payload = _snapshot_payload(derivatives)
         derivatives_labels = [
             str(item).strip()
