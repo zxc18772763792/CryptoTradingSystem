@@ -2583,6 +2583,47 @@
                     </aside>
 
                     <div class="research-main altcoin-radar-center">
+                        <div class="card altcoin-radar-table-card altcoin-radar-headline-card" id="pump-watchlist-card">
+                            <div class="research-lab-header">
+                                <div>
+                                    <h3>本周起飞候选 · 周度模型</h3>
+                                    <div class="research-control-notes">横截面拉盘前兆模型每周挑出最可能起飞的 15 个币——这是全雷达唯一经过走查 + 对抗验证的信号，且越靠尾部越准（+300% 时约 3.4×）。这是"本周该盯哪些"的观察名单。</div>
+                                </div>
+                                <div class="inline-actions">
+                                    <span id="pump-watchlist-note" class="altcoin-radar-inline-note">加载中...</span>
+                                    <button class="btn btn-sm" id="btn-pump-watchlist-refresh" title="重新生成需抓取全宇宙数据，约 15 分钟；依赖 Coinglass 市值/OI 数据源">重新生成</button>
+                                </div>
+                            </div>
+                            <div class="altcoin-radar-warning-list">
+                                <div class="altcoin-radar-warning">诚实边际：周度信号（非实时 / 非日内择时）· 真实提升 ~1.9× 事件级（非 2.7× 行级）· 精度约 20%（多数不涨，靠尾部赔率）· 集中在妖币潮，静默期更薄 · 赢家是微盘、容量约 $1–2M/周 · 用法：现货小仓、无杠杆、分批止盈。这是观察名单，不是买入信号。</div>
+                            </div>
+                            <div class="table-container altcoin-radar-table-scroll">
+                                <table class="altcoin-radar-table">
+                                    <thead>
+                                        <tr>
+                                            <th>#</th>
+                                            <th>币种</th>
+                                            <th title="模型输出的横截面起飞概率分（0–1），仅用于同周排序，不是收益承诺">起飞分</th>
+                                            <th>主驱动</th>
+                                            <th>市值</th>
+                                            <th>OI/市值</th>
+                                            <th>30日波动</th>
+                                            <th>30日涨幅</th>
+                                            <th>7日费率</th>
+                                            <th>惯犯</th>
+                                            <th title="前 10 大地址持仓占比（GeckoTerminal，越高越集中/高控盘）">前10持仓</th>
+                                            <th title="未来 30 天解锁量占市值比（DefiLlama，无表为—）">30日解锁</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="pump-watchlist-body">
+                                        <tr>
+                                            <td colspan="12" class="altcoin-radar-empty">等待名单数据...</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
                         <div class="research-top-grid altcoin-radar-top-grid">
                             <div class="card altcoin-radar-summary-card">
                                 <div class="research-lab-header">
@@ -2636,49 +2677,11 @@
                             </div>
                         </div>
 
-                        <div class="card altcoin-radar-table-card" id="pump-watchlist-card">
-                            <div class="research-lab-header">
-                                <div>
-                                    <h3>周度伏击名单（模型）</h3>
-                                    <div class="research-control-notes">拉盘前兆模型的横截面 Top 15：验证过的是相对命中率提升（~2.7×），仅作观察名单，不是交易信号；纪律见回测报告第 9 节。</div>
-                                </div>
-                                <div class="inline-actions">
-                                    <span id="pump-watchlist-note" class="altcoin-radar-inline-note">加载中...</span>
-                                    <button class="btn btn-sm" id="btn-pump-watchlist-refresh" title="重新生成需要抓取全宇宙数据，约 15 分钟">重新生成</button>
-                                </div>
-                            </div>
-                            <div class="table-container altcoin-radar-table-scroll">
-                                <table class="altcoin-radar-table">
-                                    <thead>
-                                        <tr>
-                                            <th>#</th>
-                                            <th>币种</th>
-                                            <th>评分</th>
-                                            <th>主驱动</th>
-                                            <th>市值</th>
-                                            <th>OI/市值</th>
-                                            <th>30日波动</th>
-                                            <th>30日涨幅</th>
-                                            <th>7日费率</th>
-                                            <th>惯犯</th>
-                                            <th title="前 10 大地址持仓占比（GeckoTerminal，越高越集中/高控盘）">前10持仓</th>
-                                            <th title="未来 30 天解锁量占市值比（DefiLlama，无表为—）">30日解锁</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="pump-watchlist-body">
-                                        <tr>
-                                            <td colspan="12" class="altcoin-radar-empty">等待名单数据...</td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
                         <div class="card altcoin-radar-table-card">
                             <div class="research-lab-header">
                                 <div>
-                                    <h3>候选榜单</h3>
-                                    <div class="research-control-notes">点击任一行，右侧会拆开“代理行为引擎”和“链上 / 外生确认引擎”的理由。</div>
+                                    <h3>现在在动的 · 实时扫描（仅描述当下，非预测）</h3>
+                                    <div class="research-control-notes">辅助上下文：这一榜按量价/异动/控盘打分，只告诉你此刻哪些币在动——日内“点火/起飞”择时经回测证伪，不作为起飞预测；真正的起飞候选看上方周度模型。点击任一行看拆解。</div>
                                 </div>
                                 <div class="inline-actions">
                                     <span id="altcoin-radar-table-note" class="altcoin-radar-inline-note">等待扫描结果...</span>

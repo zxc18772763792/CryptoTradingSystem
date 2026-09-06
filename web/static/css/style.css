@@ -13886,6 +13886,11 @@ input[type="radio"] {
     overflow: hidden;
 }
 
+#altcoin-radar .altcoin-radar-headline-card {
+    border: 1px solid rgba(var(--accent-rgb), 0.5);
+    box-shadow: inset 3px 0 0 0 var(--accent);
+}
+
 #altcoin-radar .altcoin-radar-table-scroll {
     flex: 1 1 auto;
     min-height: 0;
