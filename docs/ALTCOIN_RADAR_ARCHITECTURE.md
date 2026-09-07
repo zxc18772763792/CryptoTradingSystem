@@ -120,7 +120,8 @@ mode 过滤 → 排序 → 限量。缓存 key = exchange+tf+宇宙哈希+mode+v
 - **持仓/解锁覆盖**:原生链币(无 DEX 合约)、不在 GeckoTerminal 的币 → 空;meme 币无 vesting → 解锁空(如实,非 bug)。
 - **`web/api/altcoin.py` 已拆包**(2.7k 行 → `web/api/altcoin/` 11 个内聚模块,行为不变,测试按新家 patch)。
 - **`core/research/altcoin_radar.py` 已拆**(2.15k 行 → 主文件 ~1k + `altcoin_radar_metrics`/`_ranking`/`_detail` 三个 sibling,整函数搬迁、re-export 公开 API,行为不变,零改测试)。
-  - **剩余债:`build_altcoin_rows`(~930 行)仍是单函数巨物**,两个逐币循环(原始指标提取 + 百分位打分/状态机)共享大量局部状态。拆它属于**结构性重构而非搬迁**(要把闭包变量串成参数),不易做到逐字节等价、验证成本高,故**本轮不动**;若要拆需单独一轮 + 显式确认。
+- **`build_altcoin_rows` 已拆**(原 ~930 行单函数 → ~170 行编排器 + `_build_symbol_interim`(pass1:原始指标+interim)+ `_score_symbol_row`(pass2:百分位→打分行)。逐字节搬迁(仅 dedent + `continue`→`return` / `rows.append(row)`→`return row`);用 8 币金标准(golden-master)验证前后输出逐字节一致(屏蔽事件的墙钟时间戳后)。
+  - **⚠ 已知潜伏 bug(拆分中如实保留,未改)**:pass2 的顶层 `row["squeeze_score"]` 与 `alert_score` 的 squeeze 项用的是**从 pass1 最后一个币泄漏下来的 `squeeze_signal`**(所有行同值),不是每币值。单币调用看不出;多币扫描下每行顶层 squeeze_score 都是最后一个币的值。已串成显式参数保持行为一致——**值得单独修**(改成 `item["metrics_raw"]["squeeze_score"]` 或 `pct` 派生;会改多币生产输出,需另跑金标准)。
   - `web/static/js/altcoin_radar.js`（~2.6k 行)— 单个 IIFE 闭包共享状态,无打包器;高风险低收益,**暂不拆**。
 
 ## 8. 测试
