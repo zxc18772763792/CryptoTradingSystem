@@ -1,6 +1,6 @@
 # 山寨雷达 — 代码架构与地图
 
-更新：2026-09-06
+更新：2026-09-07
 用途：把多轮迭代积累下来的山寨雷达系统"整理"成一张可维护的地图——每个文件干什么、
 数据怎么流、依赖什么、哪些验证过哪些没有。看这一份就知道全貌。
 
@@ -27,18 +27,26 @@
 
 ## 2. 运行时代码地图(雷达页真正跑的东西)
 
-### 后端 API — `web/api/altcoin.py`（~2.7k 行）
-路由(前缀 `/api/altcoin`):
-- `GET /radar/scan` — 实时扫描主入口。宇宙解析(scope) → 缓存(单飞) → `_compute_scan_payload`
-  (本地 K 线 + coins-markets 快照 + 因子/相关性/微结构/衍生品) → `build_altcoin_rows` →
-  mode 过滤 → 排序 → 限量。缓存 key = exchange+tf+宇宙哈希+mode+view+scope;TTL 15m→30s/1h→60s/4h→300s;上限 48 条(会淘汰)。
-- `GET /radar/events` — 事件时间线(内存缓存,见 events 模块)。
-- `GET /radar/detail` — 单币检视器拆解(链上/外生确认,15s/10s 预算)。
-- `GET /radar/watchlist` + `POST`/`DELETE` — 用户收藏币池(会标 retired/unlisted)。
-- `GET /radar/pump-watchlist` + `POST .../refresh` — **周度模型名单**(读 latest.json,带过期标记;refresh 触发子进程重生成)。
-- `GET /radar/lsr-crowding` — LSR 拥挤度排行。
-- `GET /radar/kol-consensus` — 5 大币 KOL 共识 + 风险体制。
-- `POST /radar/{symbol}/research-proposal`、`POST /alerts/preset` — 带入研究工坊 / 建预警。
+### 后端 API — `web/api/altcoin/` 包（原 2.7k 行单文件,已按内聚拆分）
+原 `web/api/altcoin.py` 已重构为一个包。`__init__.py`(~140 行)是**薄装配层**:
+把各子路由并进一个 `router`,并**原样再导出**公开 + monkeypatch 接口(`altcoin_api.<name>`),
+所以 `from web.api.altcoin import ...` / `import web.api.altcoin as alt` 的旧接口一字不变。
+
+子模块(测试按各自归属模块 patch,如 `altcoin_api.scan._resolve_universe`、`altcoin_api.detail.get_onchain_overview`):
+- `constants.py` / `state.py` — 常量+请求模型 / 进程内可变缓存(单例,按引用共享)。
+- `helpers.py` — 纯函数:归一化、快照序列化、行情新鲜度、Binance 公共行情构造、告警预设查表。
+- `cache.py` — 扫描缓存键 + 单飞载荷装配 + 淘汰。
+- `scan.py`(~1.35k 行,不可再分的热路径引擎)— 宇宙解析 / 行情+快照加载 / 告警规则匹配 /
+  `_compute_scan_payload` / 缓存快照 `get_altcoin_scan_snapshot` / 通知上下文 + `GET /radar/scan`、`GET /radar/events`、`warm_default_scan_cache`。
+- `detail.py` — `GET /radar/detail` + `POST /radar/{symbol}/research-proposal`(链上/外生确认,15s/10s 预算)。
+- `alerts.py` — `POST`/`DELETE /alerts/preset`。
+- `universe.py` — `GET /radar/watchlist`(+`POST`/`DELETE`)、`GET /radar/universe`、`GET /radar/collector`。
+- `pump.py` — `GET /radar/pump-watchlist` + `POST .../refresh`(**周度模型名单**,读 latest.json,refresh 触发子进程)。
+- `signals.py` — `GET /radar/lsr-crowding`、`GET /radar/kol-consensus`。
+
+扫描主入口 `GET /radar/scan`:宇宙解析(scope) → 缓存(单飞) → `_compute_scan_payload`
+(本地 K 线 + coins-markets 快照 + 因子/相关性/微结构/衍生品) → `build_altcoin_rows` →
+mode 过滤 → 排序 → 限量。缓存 key = exchange+tf+宇宙哈希+mode+view+scope;TTL 15m→30s/1h→60s/4h→300s;上限 48 条(会淘汰)。
 
 ### 核心评分 — `core/research/altcoin_radar.py`（~2.2k 行）
 - `build_altcoin_rows(...)` — 每币算所有分(布局/异动/吸筹/控盘/点火/跃升/叙事),定状态机
@@ -109,12 +117,17 @@
 - **KOL 只 5 大币**:是大盘风险体制信号,不是山寨选币。
 - **事件历史是内存**:web 重启即清零,跃升分需 ~15 分钟重建;多 worker 会各持一份(当前单进程无碍)。
 - **持仓/解锁覆盖**:原生链币(无 DEX 合约)、不在 GeckoTerminal 的币 → 空;meme 币无 vesting → 解锁空(如实,非 bug)。
-- **altcoin.py / altcoin_radar.py / altcoin_radar.js 各 2k+ 行**:功能密集但未拆分;当前可维护,若继续膨胀可考虑按"实时扫描 / 周度名单 / 上下文信号"三块拆。
+- **`web/api/altcoin.py` 已拆包**(2.7k 行 → `web/api/altcoin/` 11 个内聚模块,行为不变,测试按新家 patch)。剩下两块仍是巨文件:
+  - `core/research/altcoin_radar.py`（~2.2k 行,核心评分)— 大多是纯函数,内聚度高;可作为下一阶段按"打分算子 / 状态机 / 排序摘要 / detail 载荷"拆,但被 `scan.py` 和测试直接引用,拆时同样要保持 monkeypatch 归属。
+  - `web/static/js/altcoin_radar.js`（~2.6k 行)— 单个 IIFE 闭包共享状态,无打包器;高风险低收益,**暂不拆**。
 
 ## 8. 测试
 
 `tests/test_altcoin_radar_*`、`tests/web/test_altcoin_route.py`、`test_pump_watchlist_route.py`、
 `test_kol_lsr.py`、`test_oi_mcap_ambush_strategies.py`、`test_pump_precursor.py`、
-`test_strategy_library_and_factors.py`(改雷达代码后跑这批,当前 96 通过)。
+`test_strategy_library_and_factors.py`(改雷达代码后跑这批)。
+拆包后测试按名字**新归属模块** patch:`altcoin_api.scan.*`(扫描热路径/`_resolve_universe`/`_compute_scan_payload`)、
+`altcoin_api.detail.*`(detail/on-chain)、`altcoin_api.universe.*`(watchlist/universe 路由)、`altcoin_api.pump._PUMP_WATCHLIST_DIR`;
+`altcoin_api.notification_manager` 仍在包根(patch 的是共享单例的方法,跨模块生效)。
 
 *研究/工程记录,不构成投资建议。*
