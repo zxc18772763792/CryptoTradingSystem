@@ -348,7 +348,7 @@ def test_altcoin_radar_research_proposal_endpoint(monkeypatch):
             metadata=kwargs["metadata"],
         )
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_radar_detail", fake_get_altcoin_radar_detail)
+    monkeypatch.setattr(altcoin_api.detail, "get_altcoin_radar_detail", fake_get_altcoin_radar_detail)
     monkeypatch.setattr(orchestrator_module, "create_manual_proposal", fake_create_manual_proposal)
     monkeypatch.setenv("OPS_TOKEN", "test-token")
 
@@ -400,7 +400,7 @@ def test_altcoin_detail_route_returns_selected_row(monkeypatch):
         return {"context": "ok", "symbol": kwargs["symbol"]}
 
     monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
-    monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
+    monkeypatch.setattr(altcoin_api.detail, "get_onchain_overview", fake_get_onchain_overview)
 
     response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&symbols=AAA/USDT,BBB/USDT")
     assert response.status_code == 200
@@ -434,7 +434,7 @@ def test_altcoin_detail_route_accepts_view_and_mode(monkeypatch):
         return {"context": "ok", "symbol": kwargs["symbol"]}
 
     monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
-    monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
+    monkeypatch.setattr(altcoin_api.detail, "get_onchain_overview", fake_get_onchain_overview)
 
     response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&view=15m&mode=perp&universe_scope=watchlist")
     assert response.status_code == 200
@@ -531,8 +531,8 @@ def test_altcoin_detail_route_backfills_missing_chain_percentiles(monkeypatch):
         )
 
     monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
-    monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
-    monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_load_detail_live_chain_context)
+    monkeypatch.setattr(altcoin_api.detail, "get_onchain_overview", fake_get_onchain_overview)
+    monkeypatch.setattr(altcoin_api.detail, "_load_detail_live_chain_context", fake_load_detail_live_chain_context)
 
     response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&symbols=AAA/USDT,BBB/USDT")
     assert response.status_code == 200
@@ -1831,9 +1831,9 @@ def test_altcoin_radar_watchlist_routes(monkeypatch):
         state["symbols"] = [item for item in state["symbols"] if item != symbol]
         return list(state["symbols"])
 
-    monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", fake_get_watchlist_symbols)
-    monkeypatch.setattr(altcoin_api, "add_watchlist_symbol", fake_add_watchlist_symbol)
-    monkeypatch.setattr(altcoin_api, "remove_watchlist_symbol", fake_remove_watchlist_symbol)
+    monkeypatch.setattr(altcoin_api.universe, "get_watchlist_symbols", fake_get_watchlist_symbols)
+    monkeypatch.setattr(altcoin_api.universe, "add_watchlist_symbol", fake_add_watchlist_symbol)
+    monkeypatch.setattr(altcoin_api.universe, "remove_watchlist_symbol", fake_remove_watchlist_symbol)
     monkeypatch.setenv("OPS_TOKEN", "test-token")
 
     resp_get = client.get("/api/altcoin/radar/watchlist")
@@ -1870,8 +1870,8 @@ def test_altcoin_detail_unknown_symbol_fast_404(monkeypatch):
         return ({}, {})
 
     monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
-    monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
-    monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_live_chain)
+    monkeypatch.setattr(altcoin_api.detail, "get_onchain_overview", fake_get_onchain_overview)
+    monkeypatch.setattr(altcoin_api.detail, "_load_detail_live_chain_context", fake_live_chain)
 
     response = client.get("/api/altcoin/radar/detail?symbol=NOPE/USDT")
     assert response.status_code == 404
@@ -1897,10 +1897,10 @@ def test_altcoin_detail_degrades_when_onchain_hangs(monkeypatch):
     async def fake_live_chain(**kwargs):
         return ({}, {})
 
-    monkeypatch.setattr(altcoin_api, "DETAIL_ONCHAIN_TIMEOUT_SEC", 0.2)
+    monkeypatch.setattr(altcoin_api.detail, "DETAIL_ONCHAIN_TIMEOUT_SEC", 0.2)
     monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
-    monkeypatch.setattr(altcoin_api, "get_onchain_overview", hanging_onchain)
-    monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_live_chain)
+    monkeypatch.setattr(altcoin_api.detail, "get_onchain_overview", hanging_onchain)
+    monkeypatch.setattr(altcoin_api.detail, "_load_detail_live_chain_context", fake_live_chain)
 
     started = time.monotonic()
     response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&symbols=AAA/USDT")
@@ -1918,9 +1918,9 @@ def test_altcoin_watchlist_reports_retired_and_unlisted_symbols(monkeypatch):
     app.include_router(altcoin_api.router, prefix="/api/altcoin")
     client = TestClient(app)
 
-    monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", lambda: ["ORDI/USDT", "PEPE/USDT", "DEADCOIN/USDT"])
+    monkeypatch.setattr(altcoin_api.universe, "get_watchlist_symbols", lambda: ["ORDI/USDT", "PEPE/USDT", "DEADCOIN/USDT"])
     monkeypatch.setattr(
-        altcoin_api,
+        altcoin_api.universe,
         "_research_retired_filter",
         lambda exchange, timeframe, requested, exclude: (
             [s for s in requested if s != "ORDI/USDT"],
