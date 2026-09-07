@@ -48,12 +48,13 @@
 (本地 K 线 + coins-markets 快照 + 因子/相关性/微结构/衍生品) → `build_altcoin_rows` →
 mode 过滤 → 排序 → 限量。缓存 key = exchange+tf+宇宙哈希+mode+view+scope;TTL 15m→30s/1h→60s/4h→300s;上限 48 条(会淘汰)。
 
-### 核心评分 — `core/research/altcoin_radar.py`（~2.2k 行）
-- `build_altcoin_rows(...)` — 每币算所有分(布局/异动/吸筹/控盘/点火/跃升/叙事),定状态机
-  (派发风险>高控盘警戒>布局吸筹>异动启动>高控盘跟踪),打标签,算事件。
-- `sort_rows` / `summarize_rows` — 排序(priority/layout/alert/ignition/crowding/narrative…)+ 摘要。
-- `build_detail_payload` — 检视器详情。
-- 辅助算子:`_snapshot_payload`(纯取 payload)、`_freshness_score`、ret/vol/atr 等。
+### 核心评分 — `core/research/altcoin_radar.py`（~1k 行,已按内聚拆出 3 个 sibling）
+- `build_altcoin_rows(...)`(留在本文件,~930 行的核心行构建器)— 每币算所有分(布局/异动/吸筹/控盘/点火/跃升/叙事),定状态机
+  (派发风险>高控盘警戒>布局吸筹>异动启动>高控盘跟踪),打标签,算事件。本文件只保留它 + 常量,其余按整函数搬到 sibling 并 re-export 公开 API。
+- `altcoin_radar_metrics.py` — 常量(VALID_TIMEFRAMES/TIMEFRAME_SECONDS/STATE_*)、纯数值/序列算子(ret/vol/atr/吸收/突破…)、逐信号取值器、market-snapshot 指标构造。
+- `altcoin_radar_ranking.py` — 百分位/加权、排序键、优先级打分、**`sort_rows`/`summarize_rows`(公开)**、状态机标签 `_signal_state_for_row`/`_state_tags`。
+- `altcoin_radar_detail.py` — **`build_detail_payload`(公开)** + 检视器详情辅助(sparkline/top drivers/链上百分位回填/行动计划)。
+- 公开 API(被 `web/api/altcoin` 的 scan/detail/helpers 与测试引用):`build_altcoin_rows`、`sort_rows`、`summarize_rows`、`build_detail_payload`、`TIMEFRAME_SECONDS`、`VALID_TIMEFRAMES` — 全部从 `altcoin_radar.py` re-export,导入路径不变。**本模块无 monkeypatch 耦合**(测试只 import+调用,不 patch),故拆分零改测试。
 - **排名/点火历史按 timeframe 分键**(见 events 模块),避免 15m/4h 交替产生幻影事件。
 
 ### 信号子模块
@@ -117,8 +118,9 @@ mode 过滤 → 排序 → 限量。缓存 key = exchange+tf+宇宙哈希+mode+v
 - **KOL 只 5 大币**:是大盘风险体制信号,不是山寨选币。
 - **事件历史是内存**:web 重启即清零,跃升分需 ~15 分钟重建;多 worker 会各持一份(当前单进程无碍)。
 - **持仓/解锁覆盖**:原生链币(无 DEX 合约)、不在 GeckoTerminal 的币 → 空;meme 币无 vesting → 解锁空(如实,非 bug)。
-- **`web/api/altcoin.py` 已拆包**(2.7k 行 → `web/api/altcoin/` 11 个内聚模块,行为不变,测试按新家 patch)。剩下两块仍是巨文件:
-  - `core/research/altcoin_radar.py`（~2.2k 行,核心评分)— 大多是纯函数,内聚度高;可作为下一阶段按"打分算子 / 状态机 / 排序摘要 / detail 载荷"拆,但被 `scan.py` 和测试直接引用,拆时同样要保持 monkeypatch 归属。
+- **`web/api/altcoin.py` 已拆包**(2.7k 行 → `web/api/altcoin/` 11 个内聚模块,行为不变,测试按新家 patch)。
+- **`core/research/altcoin_radar.py` 已拆**(2.15k 行 → 主文件 ~1k + `altcoin_radar_metrics`/`_ranking`/`_detail` 三个 sibling,整函数搬迁、re-export 公开 API,行为不变,零改测试)。
+  - **剩余债:`build_altcoin_rows`(~930 行)仍是单函数巨物**,两个逐币循环(原始指标提取 + 百分位打分/状态机)共享大量局部状态。拆它属于**结构性重构而非搬迁**(要把闭包变量串成参数),不易做到逐字节等价、验证成本高,故**本轮不动**;若要拆需单独一轮 + 显式确认。
   - `web/static/js/altcoin_radar.js`（~2.6k 行)— 单个 IIFE 闭包共享状态,无打包器;高风险低收益,**暂不拆**。
 
 ## 8. 测试
