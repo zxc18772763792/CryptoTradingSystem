@@ -27,7 +27,7 @@ def test_public_exchange_snapshot_loader_skips_alpha_symbols(monkeypatch):
         calls.append(url)
         raise AssertionError("Alpha symbols must not reach ordinary Binance tickers")
 
-    monkeypatch.setattr(altcoin_api, "_fetch_binance_public_tickers", forbidden_fetch)
+    monkeypatch.setattr(altcoin_api.scan, "_fetch_binance_public_tickers", forbidden_fetch)
     result = asyncio.run(
         altcoin_api._load_exchange_public_market_snapshots(
             exchange="binance",
@@ -264,7 +264,7 @@ def test_altcoin_scan_route_sorts_and_limits(monkeypatch):
     async def fake_get_altcoin_scan_snapshot(**kwargs):
         return _scan_payload()
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
 
     response = client.get("/api/altcoin/radar/scan?sort_by=alert&limit=1&symbols=AAA/USDT,BBB/USDT")
     assert response.status_code == 200
@@ -292,7 +292,7 @@ def test_altcoin_scan_route_dedupes_symbol_formats_and_tags(monkeypatch):
         assert kwargs["symbols"] == ["AAA/USDT", "BBB/USDT"]
         return scan_payload
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
 
     response = client.get(
         "/api/altcoin/radar/scan?sort_by=priority&limit=30&symbols=AAAUSDT,AAA-USDT,BBB/USDT"
@@ -376,7 +376,7 @@ def test_altcoin_scan_route_uses_view_to_override_timeframe(monkeypatch):
         captured.update(kwargs)
         return _scan_payload()
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
 
     response = client.get("/api/altcoin/radar/scan?view=15m&timeframe=4h&mode=perp&universe_scope=expanded")
     assert response.status_code == 200
@@ -399,7 +399,7 @@ def test_altcoin_detail_route_returns_selected_row(monkeypatch):
         captured_onchain.update(kwargs)
         return {"context": "ok", "symbol": kwargs["symbol"]}
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
 
     response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&symbols=AAA/USDT,BBB/USDT")
@@ -433,7 +433,7 @@ def test_altcoin_detail_route_accepts_view_and_mode(monkeypatch):
     async def fake_get_onchain_overview(**kwargs):
         return {"context": "ok", "symbol": kwargs["symbol"]}
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
 
     response = client.get("/api/altcoin/radar/detail?symbol=AAA/USDT&view=15m&mode=perp&universe_scope=watchlist")
@@ -445,12 +445,12 @@ def test_altcoin_detail_route_accepts_view_and_mode(monkeypatch):
 
 
 def test_resolve_universe_watchlist_scope_without_symbols_does_not_warn(monkeypatch):
-    monkeypatch.setattr(altcoin_api, "get_watchlist_symbols", lambda: ["ORDI/USDT", "PEPE/USDT"])
+    monkeypatch.setattr(altcoin_api.scan, "get_watchlist_symbols", lambda: ["ORDI/USDT", "PEPE/USDT"])
 
     def fake_retired_filter(**kwargs):
         return list(kwargs["requested"]), []
 
-    monkeypatch.setattr(altcoin_api, "_research_retired_filter", fake_retired_filter)
+    monkeypatch.setattr(altcoin_api.scan, "_research_retired_filter", fake_retired_filter)
 
     requested, filtered, excluded_retired, warnings = asyncio.run(
         altcoin_api._resolve_universe(
@@ -479,8 +479,8 @@ def test_resolve_universe_warns_only_when_explicit_symbols_fallback(monkeypatch)
             return [], ["BAD/USDT"]
         return requested, []
 
-    monkeypatch.setattr(altcoin_api, "get_research_symbols", fake_get_research_symbols)
-    monkeypatch.setattr(altcoin_api, "_research_retired_filter", fake_retired_filter)
+    monkeypatch.setattr(altcoin_api.scan, "get_research_symbols", fake_get_research_symbols)
+    monkeypatch.setattr(altcoin_api.scan, "_research_retired_filter", fake_retired_filter)
 
     requested, filtered, excluded_retired, warnings = asyncio.run(
         altcoin_api._resolve_universe(
@@ -530,7 +530,7 @@ def test_altcoin_detail_route_backfills_missing_chain_percentiles(monkeypatch):
             },
         )
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
     monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_load_detail_live_chain_context)
 
@@ -584,7 +584,7 @@ def test_build_altcoin_notification_context_filters_benchmark_rows(monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
 
     context = asyncio.run(
         altcoin_api.build_altcoin_notification_context(
@@ -628,7 +628,7 @@ def test_build_altcoin_notification_context_includes_event_driven_rule_types(mon
             ],
         }
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
 
     context = asyncio.run(
         altcoin_api.build_altcoin_notification_context(
@@ -768,14 +768,14 @@ def test_compute_scan_payload_exposes_contextual_alert_rules(monkeypatch):
             {"symbol": "WIF/USDT", "tags": []},
         ]
 
-    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
-    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
-    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
-    monkeypatch.setattr(altcoin_api, "get_factor_library", fake_factor_library)
-    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fake_multi_assets_overview)
-    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
-    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
-    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_altcoin_rows)
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api.scan, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "get_factor_library", fake_factor_library)
+    monkeypatch.setattr(altcoin_api.scan, "get_multi_assets_overview", fake_multi_assets_overview)
+    monkeypatch.setattr(altcoin_api.scan, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api.scan, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
+    monkeypatch.setattr(altcoin_api.scan, "build_altcoin_rows", fake_build_altcoin_rows)
 
     payload = asyncio.run(
         altcoin_api._compute_scan_payload(
@@ -841,15 +841,15 @@ def test_compute_scan_payload_uses_public_ticker_fallback_when_coinglass_unavail
         captured.update(kwargs)
         return [{"symbol": "AAA/USDT", "tags": [], "data_quality": {"degraded_reason": []}}]
 
-    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
-    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
-    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
-    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_public_snapshots)
-    monkeypatch.setattr(altcoin_api, "get_factor_library", fake_factor_library)
-    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fake_multi_assets_overview)
-    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
-    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
-    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_altcoin_rows)
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api.scan, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "_load_exchange_public_market_snapshots", fake_public_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "get_factor_library", fake_factor_library)
+    monkeypatch.setattr(altcoin_api.scan, "get_multi_assets_overview", fake_multi_assets_overview)
+    monkeypatch.setattr(altcoin_api.scan, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api.scan, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
+    monkeypatch.setattr(altcoin_api.scan, "build_altcoin_rows", fake_build_altcoin_rows)
 
     payload = asyncio.run(
         altcoin_api._compute_scan_payload(
@@ -908,12 +908,12 @@ def test_compute_scan_payload_preserves_alpha_catalog_capture_time(monkeypatch):
     def fake_build_rows(**kwargs):
         return [{"symbol": symbol, "tags": []}]
 
-    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
-    monkeypatch.setattr(altcoin_api, "load_alpha_token_catalog", fake_load_alpha_token_catalog)
-    monkeypatch.setattr(altcoin_api, "build_alpha_market_snapshots", fake_build_alpha_market_snapshots)
-    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
-    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_rules)
-    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_rows)
+    monkeypatch.setattr(altcoin_api.scan, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api.scan, "load_alpha_token_catalog", fake_load_alpha_token_catalog)
+    monkeypatch.setattr(altcoin_api.scan, "build_alpha_market_snapshots", fake_build_alpha_market_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api.scan, "_load_active_altcoin_rules", fake_rules)
+    monkeypatch.setattr(altcoin_api.scan, "build_altcoin_rows", fake_build_rows)
 
     payload = asyncio.run(
         altcoin_api._compute_scan_payload(
@@ -949,10 +949,10 @@ def test_compute_scan_payload_never_falls_back_to_exchange_for_alpha(monkeypatch
         public_calls.append(kwargs)
         return {}
 
-    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
-    monkeypatch.setattr(altcoin_api, "load_alpha_token_catalog", fake_load_alpha_token_catalog)
-    monkeypatch.setattr(altcoin_api, "build_alpha_market_snapshots", lambda *args, **kwargs: {})
-    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_public_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api.scan, "load_alpha_token_catalog", fake_load_alpha_token_catalog)
+    monkeypatch.setattr(altcoin_api.scan, "build_alpha_market_snapshots", lambda *args, **kwargs: {})
+    monkeypatch.setattr(altcoin_api.scan, "_load_exchange_public_market_snapshots", fake_public_snapshots)
 
     payload = asyncio.run(
         altcoin_api._compute_scan_payload(
@@ -1029,15 +1029,15 @@ def test_compute_scan_payload_excludes_stale_frames_from_factor_inputs(monkeypat
             {"symbol": "BBB/USDT", "tags": [], "data_quality": {"degraded_reason": []}},
         ]
 
-    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
-    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
-    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
-    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_public_snapshots)
-    monkeypatch.setattr(altcoin_api, "get_factor_library", fake_factor_library)
-    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fake_multi_assets_overview)
-    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
-    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
-    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_altcoin_rows)
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api.scan, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "_load_exchange_public_market_snapshots", fake_public_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "get_factor_library", fake_factor_library)
+    monkeypatch.setattr(altcoin_api.scan, "get_multi_assets_overview", fake_multi_assets_overview)
+    monkeypatch.setattr(altcoin_api.scan, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api.scan, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
+    monkeypatch.setattr(altcoin_api.scan, "build_altcoin_rows", fake_build_altcoin_rows)
 
     payload = asyncio.run(
         altcoin_api._compute_scan_payload(
@@ -1083,13 +1083,13 @@ def test_compute_scan_payload_drops_stale_frames_without_market_snapshot(monkeyp
     async def fail_if_called(**kwargs):
         raise AssertionError("stale-only scan should not compute dependent payloads")
 
-    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
-    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
-    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
-    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_public_snapshots)
-    monkeypatch.setattr(altcoin_api, "get_factor_library", fail_if_called)
-    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fail_if_called)
-    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fail_if_called)
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api.scan, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "_load_exchange_public_market_snapshots", fake_public_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "get_factor_library", fail_if_called)
+    monkeypatch.setattr(altcoin_api.scan, "get_multi_assets_overview", fail_if_called)
+    monkeypatch.setattr(altcoin_api.scan, "_load_snapshot_maps", fail_if_called)
 
     payload = asyncio.run(
         altcoin_api._compute_scan_payload(
@@ -1141,14 +1141,14 @@ def test_get_altcoin_scan_snapshot_resolves_universe_only_once(monkeypatch):
     def fake_build_altcoin_rows(**kwargs):
         return [{"symbol": "AAA/USDT", "tags": [], "data_quality": {}}]
 
-    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
-    monkeypatch.setattr(altcoin_api, "_load_market_frames", fake_load_market_frames)
-    monkeypatch.setattr(altcoin_api, "load_coinglass_market_snapshots", fake_market_snapshots)
-    monkeypatch.setattr(altcoin_api, "get_factor_library", fake_factor_library)
-    monkeypatch.setattr(altcoin_api, "get_multi_assets_overview", fake_multi_assets_overview)
-    monkeypatch.setattr(altcoin_api, "_load_snapshot_maps", fake_snapshot_maps)
-    monkeypatch.setattr(altcoin_api, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
-    monkeypatch.setattr(altcoin_api, "build_altcoin_rows", fake_build_altcoin_rows)
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_load_market_frames", fake_load_market_frames)
+    monkeypatch.setattr(altcoin_api.scan, "load_coinglass_market_snapshots", fake_market_snapshots)
+    monkeypatch.setattr(altcoin_api.scan, "get_factor_library", fake_factor_library)
+    monkeypatch.setattr(altcoin_api.scan, "get_multi_assets_overview", fake_multi_assets_overview)
+    monkeypatch.setattr(altcoin_api.scan, "_load_snapshot_maps", fake_snapshot_maps)
+    monkeypatch.setattr(altcoin_api.scan, "_load_active_altcoin_rules", fake_load_active_altcoin_rules)
+    monkeypatch.setattr(altcoin_api.scan, "build_altcoin_rows", fake_build_altcoin_rows)
 
     payload = asyncio.run(
         altcoin_api.get_altcoin_scan_snapshot(
@@ -1204,8 +1204,8 @@ def test_get_altcoin_scan_snapshot_serves_stale_cache_while_refreshing(monkeypat
             "universe_meta": {},
         }
 
-    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
-    monkeypatch.setattr(altcoin_api, "_compute_scan_payload", fake_compute_scan_payload)
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_compute_scan_payload", fake_compute_scan_payload)
 
     cache_key = altcoin_api._cache_key(
         exchange="binance",
@@ -1296,8 +1296,8 @@ def test_get_altcoin_scan_snapshot_force_refresh_awaits_new_payload(monkeypatch)
             "universe_meta": {},
         }
 
-    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
-    monkeypatch.setattr(altcoin_api, "_compute_scan_payload", fake_compute_scan_payload)
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_compute_scan_payload", fake_compute_scan_payload)
 
     cache_key = altcoin_api._cache_key(
         exchange="binance",
@@ -1373,8 +1373,8 @@ def test_get_altcoin_scan_snapshot_does_not_cache_all_stale_market_data(monkeypa
             "universe_meta": {},
         }
 
-    monkeypatch.setattr(altcoin_api, "_resolve_universe", fake_resolve_universe)
-    monkeypatch.setattr(altcoin_api, "_compute_scan_payload", fake_compute_scan_payload)
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_compute_scan_payload", fake_compute_scan_payload)
 
     async def runner():
         first = await altcoin_api.get_altcoin_scan_snapshot(
@@ -1425,7 +1425,7 @@ def test_create_altcoin_alert_preset_rejects_benchmark_symbol(monkeypatch):
             ]
         }
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
 
     response = client.post(
         "/api/altcoin/alerts/preset",
@@ -1466,7 +1466,7 @@ def test_create_altcoin_alert_preset_supports_phase1_event_presets(monkeypatch):
     async def fake_add_rule(**kwargs):
         return kwargs
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     monkeypatch.setattr(altcoin_api.notification_manager, "list_rules", fake_list_rules)
     monkeypatch.setattr(altcoin_api.notification_manager, "add_rule", fake_add_rule)
 
@@ -1511,7 +1511,7 @@ def test_create_altcoin_alert_preset_supports_narrative_event_preset(monkeypatch
     async def fake_add_rule(**kwargs):
         return kwargs
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     monkeypatch.setattr(altcoin_api.notification_manager, "list_rules", fake_list_rules)
     monkeypatch.setattr(altcoin_api.notification_manager, "add_rule", fake_add_rule)
 
@@ -1572,7 +1572,7 @@ def test_create_altcoin_alert_preset_dedupe_respects_config_key(monkeypatch):
         added_rules.append(kwargs)
         return {"id": "r-new", **kwargs}
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     monkeypatch.setattr(altcoin_api.notification_manager, "list_rules", fake_list_rules)
     monkeypatch.setattr(altcoin_api.notification_manager, "add_rule", fake_add_rule)
 
@@ -1869,7 +1869,7 @@ def test_altcoin_detail_unknown_symbol_fast_404(monkeypatch):
         external_calls["live_chain"] = True
         return ({}, {})
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     monkeypatch.setattr(altcoin_api, "get_onchain_overview", fake_get_onchain_overview)
     monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_live_chain)
 
@@ -1898,7 +1898,7 @@ def test_altcoin_detail_degrades_when_onchain_hangs(monkeypatch):
         return ({}, {})
 
     monkeypatch.setattr(altcoin_api, "DETAIL_ONCHAIN_TIMEOUT_SEC", 0.2)
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     monkeypatch.setattr(altcoin_api, "get_onchain_overview", hanging_onchain)
     monkeypatch.setattr(altcoin_api, "_load_detail_live_chain_context", fake_live_chain)
 
@@ -1935,7 +1935,7 @@ def test_altcoin_watchlist_reports_retired_and_unlisted_symbols(monkeypatch):
             "PEPE/USDT": {"current_price": 0.00001},
         }
 
-    monkeypatch.setattr(altcoin_api, "_load_exchange_public_market_snapshots", fake_live_map)
+    monkeypatch.setattr(altcoin_api.scan, "_load_exchange_public_market_snapshots", fake_live_map)
 
     response = client.get("/api/altcoin/radar/watchlist")
     assert response.status_code == 200
@@ -1955,7 +1955,7 @@ def test_warm_default_scan_cache_uses_default_combo(monkeypatch):
         captured.update(kwargs)
         return {"rows": []}
 
-    monkeypatch.setattr(altcoin_api, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
+    monkeypatch.setattr(altcoin_api.scan, "get_altcoin_scan_snapshot", fake_get_altcoin_scan_snapshot)
     asyncio.run(altcoin_api.warm_default_scan_cache())
 
     assert captured["exchange"] == altcoin_api.DEFAULT_EXCHANGE

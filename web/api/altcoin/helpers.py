@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
+from fastapi import HTTPException
 
 from config.database import (
     AnalyticsCommunitySnapshot,
@@ -450,3 +451,48 @@ def _needs_detail_chain_fallback(row: Optional[Mapping[str, Any]]) -> bool:
         percentiles.get(key) is None
         for key in ("community_flow", "announcements", "funding_basis", "whale_context")
     )
+
+
+# --- alert preset lookups (pure; shared by the scan pipeline and alert routes) ---
+def _preset_definition(preset: str) -> Tuple[str, str, float, str]:
+    text = str(preset or "").strip()
+    if text == "点火预警":
+        return "altcoin_ignition_cross_up", "ignition", 0.60, "anomaly"
+    if text == "跃升预警":
+        return "altcoin_rank_jump_top_n", "rank_jump", 0.30, "accumulation"
+    if text == "拥挤预警":
+        return "altcoin_crowding_risk_spike", "crowding", 0.65, "control"
+    if text == "叙事预警":
+        return "altcoin_narrative_heat_spike", "narrative", 0.55, "narrative"
+    if text == "异动预警":
+        return "altcoin_score_above", "anomaly", 0.72, "legacy_anomaly"
+    if text == "吸筹预警":
+        return "altcoin_score_above", "accumulation", 0.68, "legacy_accumulation"
+    if text == "高控盘预警":
+        return "altcoin_score_above", "control", 0.70, "legacy_control"
+    raise HTTPException(status_code=400, detail="unsupported preset")
+
+
+def _preset_label_from_rule(rule_type: str, score_key: str) -> str:
+    normalized_type = str(rule_type or "").strip()
+    normalized_key = str(score_key or "").strip().lower()
+    if normalized_type == "altcoin_ignition_cross_up" or normalized_key == "ignition":
+        return "点火预警"
+    if normalized_type == "altcoin_rank_jump_top_n" or normalized_key == "rank_jump":
+        return "跃升预警"
+    if normalized_type == "altcoin_crowding_risk_spike" or normalized_key == "crowding":
+        return "拥挤预警"
+    if normalized_type == "altcoin_narrative_heat_spike" or normalized_key == "narrative":
+        return "叙事预警"
+    if normalized_key == "anomaly":
+        return "异动预警"
+    if normalized_key == "accumulation":
+        return "吸筹预警"
+    if normalized_key == "control":
+        return "高控盘预警"
+    return "山寨预警"
+
+
+def _alert_kind_from_rule(rule_type: str, score_key: str) -> str:
+    _, _, _, kind = _preset_definition(_preset_label_from_rule(rule_type, score_key))
+    return kind
