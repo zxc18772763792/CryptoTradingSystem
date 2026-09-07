@@ -96,13 +96,10 @@ def _build_symbol_interim(
     """One symbol pass 1: compute raw metric components + the interim entry.
 
     Mutates the shared ``raw_components`` and ``interim`` dicts (keyed by symbol).
-    Extracted verbatim from build_altcoin_rows' first per-symbol loop; a skip
-    (was ``continue``) is a bare ``return``.
-
-    Returns the per-symbol ``squeeze_signal`` so the caller can replicate the
-    original's LEAKED loop variable: build_altcoin_rows' second loop used the
-    squeeze_signal left over from the last pass-1 symbol for EVERY row's top-
-    level squeeze_score and alert_score term (a latent quirk, preserved as-is).
+    Extracted from build_altcoin_rows' first per-symbol loop; a skip (was
+    ``continue``) is a bare ``return``. The per-symbol squeeze_signal it computes
+    is stored in ``interim[sym]["metrics_raw"]["squeeze_score"]`` and read back
+    per-symbol in pass 2.
     """
     if not normalized_symbol:
         return
@@ -538,16 +535,18 @@ def _build_symbol_interim(
         "sparkline": sparkline,
         "has_alert_rule": normalized_symbol in alerted,
     }
-    return squeeze_signal
 
 
-def _score_symbol_row(symbol, *, item, pct, _watchlist_set, squeeze_signal):
+def _score_symbol_row(symbol, *, item, pct, _watchlist_set):
     """One symbol pass 2: turn percentiles + interim into a scored row.
 
-    Extracted verbatim from build_altcoin_rows' second per-symbol loop; the
-    final ``rows.append(row)`` is a ``return row``. ``squeeze_signal`` is the
-    leaked last-pass-1 value the original loop referenced (see _build_symbol_interim).
+    Extracted from build_altcoin_rows' second per-symbol loop; the final
+    ``rows.append(row)`` is a ``return row``. ``squeeze_signal`` is this symbol's
+    own pass-1 value (metrics_raw["squeeze_score"]) — fixing an earlier leak where
+    the last pass-1 symbol's value was reused for every row's squeeze_score /
+    alert_score term.
     """
+    squeeze_signal = _to_float(item["metrics_raw"].get("squeeze_score"), 0.0)
     anomaly_score = _weighted_score(
         {
             "return_shock": pct["return_shock"],
@@ -973,11 +972,8 @@ def build_altcoin_rows(
 
     interim: Dict[str, Dict[str, Any]] = {}
     all_symbols = _normalize_symbols(list(market_frame_map.keys()) + list(market_snapshot_map.keys()))
-    # squeeze_signal replicates the original leaked loop var: the last pass-1
-    # symbol's value, reused for every row in pass 2 (see helpers' docstrings).
-    squeeze_signal = 0.0
     for normalized_symbol in all_symbols:
-        _sq = _build_symbol_interim(
+        _build_symbol_interim(
             normalized_symbol,
             market_frame_map=market_frame_map,
             market_snapshot_map=market_snapshot_map,
@@ -995,8 +991,6 @@ def build_altcoin_rows(
             raw_components=raw_components,
             interim=interim,
         )
-        if _sq is not None:
-            squeeze_signal = _sq
 
     percentile_map = {key: _series_percentiles(values) for key, values in raw_components.items()}
     rows: List[Dict[str, Any]] = []
@@ -1005,7 +999,7 @@ def build_altcoin_rows(
         pct = {name: percentile_map[name].get(symbol) for name in percentile_map}
         rows.append(
             _score_symbol_row(
-                symbol, item=item, pct=pct, _watchlist_set=_watchlist_set, squeeze_signal=squeeze_signal
+                symbol, item=item, pct=pct, _watchlist_set=_watchlist_set
             )
         )
 
