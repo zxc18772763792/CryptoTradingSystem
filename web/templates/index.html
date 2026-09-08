@@ -1647,6 +1647,33 @@
                     </div>
                 </div>
 
+                <section class="ai-iteration-cockpit card" id="ai-iteration-cockpit" aria-live="polite">
+                    <div class="ai-iteration-cockpit-head">
+                        <div>
+                            <div class="ai-iteration-kicker">自主多轮迭代研究</div>
+                            <h2>让 AI 根据每轮验证结果继续改进假设</h2>
+                            <p>系统会在预算内生成新假设、排队回测并淘汰重复方案；不会自动进入 Live。</p>
+                        </div>
+                        <div class="ai-iteration-actions">
+                            <button class="btn btn-primary btn-sm" id="ai-iteration-start-btn">启动自主迭代</button>
+                            <button class="btn btn-sm" id="ai-iteration-toggle-btn">加载状态</button>
+                        </div>
+                    </div>
+                    <div class="ai-iteration-status-row">
+                        <span class="ai-iteration-status-dot" id="ai-iteration-status-dot"></span>
+                        <strong id="ai-iteration-status">正在读取状态…</strong>
+                        <span id="ai-iteration-status-detail">—</span>
+                        <span class="ai-iteration-next" id="ai-iteration-next">—</span>
+                    </div>
+                    <div class="ai-iteration-metrics">
+                        <div><span>今日轮次</span><strong id="ai-iteration-rounds">—</strong></div>
+                        <div><span>最大轮次/日</span><strong id="ai-iteration-max-rounds">—</strong></div>
+                        <div><span>回测预算/轮</span><strong id="ai-iteration-budget">—</strong></div>
+                        <div><span>最近产物</span><strong id="ai-iteration-last-output">—</strong></div>
+                    </div>
+                    <div class="ai-iteration-history" id="ai-iteration-history"><span>暂无轮次记录</span></div>
+                </section>
+
                 <div class="ai-workspace-stack">
                     <section class="ai-workspace-section ai-workspace-section-research">
                         <div class="ai-workspace-section-head">

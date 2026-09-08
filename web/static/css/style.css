@@ -17703,6 +17703,39 @@ body:has(#ai-agent.active) .container {
     }
 }
 
+/* Autonomous research cockpit: the persistent multi-round loop is a first-class workflow. */
+#ai-research .ai-iteration-cockpit {
+    margin: 0 0 16px;
+    padding: 18px 20px;
+    border: 1px solid rgba(64, 164, 235, .32);
+    background: linear-gradient(135deg, rgba(18, 48, 78, .92), rgba(11, 28, 48, .96));
+}
+#ai-research .ai-iteration-cockpit-head { display:flex; align-items:flex-start; gap:20px; justify-content:space-between; }
+#ai-research .ai-iteration-kicker { color:var(--accent-soft); font-size:11px; letter-spacing:.08em; text-transform:uppercase; }
+#ai-research .ai-iteration-cockpit h2 { margin:4px 0 3px; font-size:18px; }
+#ai-research .ai-iteration-cockpit p { margin:0; color:var(--text-sub); font-size:12px; }
+#ai-research .ai-iteration-actions { display:flex; gap:8px; flex-shrink:0; }
+#ai-research .ai-iteration-status-row { display:flex; align-items:center; gap:8px; margin-top:16px; padding:10px 12px; border-radius:7px; background:rgba(4, 14, 26, .58); font-size:12px; }
+#ai-research .ai-iteration-status-dot { width:8px; height:8px; border-radius:50%; background:var(--text-faint); }
+#ai-research .ai-iteration-status-dot.is-running { background:var(--positive); box-shadow:0 0 0 4px rgba(32,191,120,.14); }
+#ai-research .ai-iteration-status-dot.is-paused { background:var(--warning); }
+#ai-research .ai-iteration-status-dot.is-error { background:var(--negative); }
+#ai-research .ai-iteration-status-row span { color:var(--text-sub); }
+#ai-research .ai-iteration-next { margin-left:auto; color:var(--accent-soft)!important; }
+#ai-research .ai-iteration-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-top:10px; }
+#ai-research .ai-iteration-metrics > div { padding:9px 10px; background:rgba(4, 14, 26, .42); border-radius:6px; }
+#ai-research .ai-iteration-metrics span { display:block; color:var(--text-faint); font-size:10px; }
+#ai-research .ai-iteration-metrics strong { display:block; margin-top:3px; font-size:14px; }
+#ai-research .ai-iteration-history { display:flex; gap:7px; overflow:auto; margin-top:10px; color:var(--text-faint); font-size:11px; }
+#ai-research .ai-iteration-history > div { min-width:150px; padding:8px 10px; background:rgba(4,14,26,.4); border:1px solid var(--card-border); border-radius:6px; }
+#ai-research .ai-iteration-history b { display:block; color:var(--text-main); font-size:11px; margin-bottom:3px; }
+@media (max-width: 760px) {
+    #ai-research .ai-iteration-cockpit-head { display:block; }
+    #ai-research .ai-iteration-actions { margin-top:12px; }
+    #ai-research .ai-iteration-metrics { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    #ai-research .ai-iteration-next { display:none; }
+}
+
 /* ===== Research workshop final 100% desktop pass =====
    Keep the existing IDs and layout hooks used by research_workbench.js while
    making the first viewport useful at Chrome's default zoom. */

@@ -5986,6 +5986,10 @@ ${confirmHint}`,
     /* one-click 自动研究 */
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
       withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 执行失败: ${err.message}`, true)));
+    document.getElementById('ai-iteration-start-btn')?.addEventListener('click', () =>
+      toggleAutonomousResearchLoop(true).catch(err => notify(`启动自主迭代失败: ${err.message}`, true)));
+    document.getElementById('ai-iteration-toggle-btn')?.addEventListener('click', () =>
+      toggleAutonomousResearchLoop().catch(err => notify(`更新自主迭代状态失败: ${err.message}`, true)));
 
     /* Pending human approval queue events */
     document.getElementById('ai-approval-list')?.addEventListener('click', e => {
@@ -6193,6 +6197,7 @@ ${confirmHint}`,
       state.refreshTimer = setInterval(() => {
         if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
         refreshWorkbench().catch(() => {});
+        refreshAutonomousResearchCockpit().catch(() => {});
       }, REFRESH_INTERVAL_MS);
     }
 
@@ -6317,8 +6322,7 @@ ${confirmHint}`,
           ${advisoryCount ? `<span>提示=${advisoryCount}</span>` : ''}
         </div>
         <div style="margin-top:6px;">更新于 ${esc(data?.generated_at || '--')} · 自动替代任务使用规则模板；研究循环使用 LLM 假设与候选反馈。</div>
-        ${researchLoop ? `<div style="margin-top:8px;">研究循环：${researchLoop.config.enabled ? '已启用' : '已暂停'} · ${esc(researchLoop.status)} · 今日 ${researchLoop.attempts_today}/${researchLoop.config.max_rounds_per_day} 轮 · 间隔 ${Math.round(researchLoop.config.interval_seconds / 60)} 分钟 · 每轮最多 ${researchLoop.config.max_backtest_runs} 次回测
-          <button id="ai-research-loop-toggle">${researchLoop.config.enabled ? '暂停研究循环' : '启用研究循环'}</button>
+        ${researchLoop ? `<div style="margin-top:8px;">研究循环状态：${researchLoop.config.enabled ? '已启用' : '已暂停'} · ${esc(researchLoop.status)} · 今日 ${researchLoop.attempts_today}/${researchLoop.config.max_rounds_per_day} 轮 · 间隔 ${Math.round(researchLoop.config.interval_seconds / 60)} 分钟 · 每轮最多 ${researchLoop.config.max_backtest_runs} 次回测
           <div>下一轮：${esc(researchLoop.next_run_at || '等待调度')} · 自动生成提案并回测；候选部署由你确认。</div>
           ${researchLoop.last_error ? `<div style="color:#f59e0b;">最近失败：${esc(researchLoop.last_error)}</div>` : ''}
           ${researchLoop.rounds?.length ? `<div>最近一轮：${esc(researchLoop.rounds[researchLoop.rounds.length - 1].status)} · ${esc(researchLoop.rounds[researchLoop.rounds.length - 1].proposal_id || '')}</div>` : ''}
@@ -6328,17 +6332,6 @@ ${confirmHint}`,
           <div>表示运行配置或数据源健康异常，不是失败策略数量。</div>
           ${degradations.map(item => `<div style="padding:5px 0;border-top:1px solid #263a56;">${esc(item.source_label || item.label || '--')} · ${esc(item.health || item.severity || 'warn')}${item.configured === false ? ' · 未配置或未启用' : ''}${item.support_level === 'optional' || item.support_level === 'enhancement' ? ' · 可选增强源' : ''}<br>${esc(item.detail || '暂无详情')}${item.last_updated ? `<br>数据时间：${esc(item.last_updated)}` : ''}${item.recommendation ? `<br>处理建议：${esc(item.recommendation)}` : ''}<br><small>${esc(item.code || '--')}</small></div>`).join('') || '<div>暂无降级。</div>'}
         </details>`;
-      banner.querySelector('#ai-research-loop-toggle')?.addEventListener('click', async (event) => {
-        event.target.disabled = true;
-        try {
-          await aiApi('/research-loop', { method: 'PATCH', body: JSON.stringify({enabled: !researchLoop.config.enabled}) });
-          state.operatingModeLoadedAt = 0;
-          await refreshOperatingModeBanner({force: true});
-        } catch (err) {
-          notify(`研究循环设置失败：${err.message}`, true);
-          event.target.disabled = false;
-        }
-      });
       return data;
     })()
       .catch((err) => {
@@ -6363,6 +6356,73 @@ ${confirmHint}`,
       });
     state.operatingModeInFlight = task;
     return task;
+  }
+
+  function renderAutonomousResearchCockpit(payload) {
+    const root = document.getElementById('ai-iteration-cockpit');
+    if (!root) return;
+    const config = payload?.config || {};
+    const status = String(payload?.status || (config.enabled ? 'waiting' : 'paused')).trim();
+    const enabled = !!config.enabled;
+    const statusMap = {
+      waiting: ['已启用 · 等待下一轮', 'is-running'], generating: ['正在生成研究假设', 'is-running'],
+      waiting_for_research: ['等待当前回测完成', 'is-running'], daily_budget_reached: ['今日预算已用完', 'is-paused'],
+      paused: ['已暂停', 'is-paused'], retry_scheduled: ['本轮失败 · 已安排重试', 'is-error'], interrupted: ['上次运行中断', 'is-error'],
+    };
+    const [label, tone] = statusMap[status] || [status || '未知状态', enabled ? 'is-running' : 'is-paused'];
+    const dot = document.getElementById('ai-iteration-status-dot');
+    if (dot) dot.className = `ai-iteration-status-dot ${tone}`;
+    const statusEl = document.getElementById('ai-iteration-status');
+    if (statusEl) statusEl.textContent = label;
+    const detail = document.getElementById('ai-iteration-status-detail');
+    if (detail) detail.textContent = payload?.last_error ? `原因：${payload.last_error}` : `间隔 ${Math.round(Number(config.interval_seconds || 3600) / 60)} 分钟`;
+    const next = document.getElementById('ai-iteration-next');
+    if (next) next.textContent = payload?.next_run_at ? `下一轮：${fmtTs(payload.next_run_at)}` : '';
+    const rounds = Array.isArray(payload?.rounds) ? payload.rounds : [];
+    const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
+    setText('ai-iteration-rounds', `${Number(payload?.attempts_today || 0)} 轮`);
+    setText('ai-iteration-max-rounds', `${Number(config.max_rounds_per_day || 0)} 轮`);
+    setText('ai-iteration-budget', `${Number(config.max_backtest_runs || 0)} 次`);
+    const latest = rounds[rounds.length - 1];
+    setText('ai-iteration-last-output', latest?.proposal_id ? String(latest.proposal_id).slice(-10) : '暂无');
+    const history = document.getElementById('ai-iteration-history');
+    if (history) history.innerHTML = rounds.length ? rounds.slice(-5).map((row, index) => {
+      const roundStatus = String(row?.status || 'unknown');
+      const title = row?.proposal_id ? `已生成提案 · ${String(row.proposal_id).slice(-8)}` : roundStatus;
+      return `<div><b>第 ${Math.max(1, rounds.length - 4 + index)} 轮</b><span>${esc(title)}</span></div>`;
+    }).join('') : '<span>暂无轮次记录</span>';
+    const toggle = document.getElementById('ai-iteration-toggle-btn');
+    if (toggle) toggle.textContent = enabled ? '暂停研究循环' : '启用研究循环';
+    const start = document.getElementById('ai-iteration-start-btn');
+    if (start) start.textContent = enabled ? '查看迭代任务' : '启动自主迭代';
+  }
+
+  async function refreshAutonomousResearchCockpit() {
+    const root = document.getElementById('ai-iteration-cockpit');
+    if (!root) return;
+    try {
+      const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
+      renderAutonomousResearchCockpit(payload);
+    } catch (err) {
+      const status = document.getElementById('ai-iteration-status');
+      if (status) status.textContent = '研究循环状态不可用';
+      const detail = document.getElementById('ai-iteration-status-detail');
+      if (detail) detail.textContent = err?.message || '稍后重试';
+    }
+  }
+
+  async function toggleAutonomousResearchLoop(forceEnabled) {
+    const button = document.getElementById('ai-iteration-toggle-btn');
+    if (button) button.disabled = true;
+    try {
+      const current = await aiApi('/research-loop', { timeoutMs: 12000 });
+      const enabled = typeof forceEnabled === 'boolean' ? forceEnabled : !current?.config?.enabled;
+      const payload = await aiApi('/research-loop', { method: 'PATCH', body: JSON.stringify({ enabled }), timeoutMs: 15000 });
+      renderAutonomousResearchCockpit(payload);
+      notify(enabled ? '自主迭代已启用' : '自主迭代已暂停');
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
 
   async function refreshWorkQueuePanel(options = {}) {
@@ -6425,6 +6485,7 @@ ${confirmHint}`,
     updatePlannerModeHint();
     normalizeDomText(document.getElementById('ai-research'));
     refreshOperatingModeBanner().catch(() => {});
+    refreshAutonomousResearchCockpit().catch(() => {});
     refreshWorkQueuePanel().catch(() => {});
     if (isAiResearchActive() && canRunAiPolling()) {
       refreshWorkbench().catch(err => console.error('AI研究初始化失败', err));
