@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import importlib
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 root_str = str(ROOT)
 if root_str not in sys.path:
     sys.path.insert(0, root_str)
+
+# Engines and persistence singletons can be imported during test collection,
+# before any fixture runs. Bind them to disposable databases at import time.
+_TEST_SESSION_ROOT = Path(tempfile.mkdtemp(prefix="crypto-pytest-"))
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///{(_TEST_SESSION_ROOT / 'trading.db').as_posix()}"
+os.environ["NEWS_DATABASE_URL"] = f"sqlite+aiosqlite:///{(_TEST_SESSION_ROOT / 'news.db').as_posix()}"
+os.environ["DATA_STORAGE_PATH"] = str(_TEST_SESSION_ROOT / "historical")
+os.environ["CACHE_PATH"] = str(_TEST_SESSION_ROOT / "cache")
 
 from config.settings import settings
 
@@ -23,7 +32,12 @@ os.environ.setdefault(
 @pytest.fixture(autouse=True)
 def _isolate_runtime_side_effect_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     original_base_dir = settings.BASE_DIR
+    # Research registries, reports and latest.json resolve beside historical data.
+    # A mocked app without explicit registry paths must never fall back to real data.
+    monkeypatch.setattr(settings, "DATA_STORAGE_PATH", tmp_path / "data" / "historical")
     monkeypatch.setattr(settings, "CACHE_PATH", tmp_path / "cache", raising=False)
+    from core.observability import score_calibration
+    monkeypatch.setattr(score_calibration, "DEFAULT_PRIOR_PATH", tmp_path / "priors.json")
     monkeypatch.setenv(
         "GATE_COUNTERFACTUAL_AUDIT_PATH",
         str(tmp_path / "runtime_audit" / "gate_counterfactuals.jsonl"),

@@ -90,14 +90,14 @@ class ResearchScheduler:
 
         from core.research.orchestrator import (
             ensure_ai_research_runtime_state,
-            list_proposals,
             run_proposal,
         )
 
         app = self._app
         ensure_ai_research_runtime_state(app)
 
-        all_proposals = list_proposals(app, limit=50)
+        # Old queued jobs must not be starved by newer drafts in the UI's top 50.
+        all_proposals = app.state.ai_proposal_registry.list(limit=None)
         queued = [p for p in all_proposals if p.status == "research_queued"]
         if not queued:
             return

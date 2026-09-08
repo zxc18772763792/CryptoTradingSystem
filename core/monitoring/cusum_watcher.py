@@ -415,11 +415,20 @@ def _activate_reserve_replacement(
 
 
 def _auto_draft_replacement(app: Any, candidate: Any, decay_result: Dict[str, Any]) -> None:
-    """Auto-create a draft replacement proposal after decay demotion (best-effort, non-fatal)."""
+    """Queue one bounded template research job per decayed candidate, without deployment."""
     try:
-        from core.research.orchestrator import create_manual_proposal  # noqa: PLC0415
-        symbol = (getattr(candidate, "symbols", None) or ["BTC/USDT"])[0]
-        timeframes = getattr(candidate, "timeframes", None) or ["15m", "1h"]
+        from core.research.orchestrator import create_manual_proposal, ensure_ai_research_runtime_state
+        from core.deployment.promotion_engine import transition_proposal
+
+        ensure_ai_research_runtime_state(app)
+        # This function contains no await; repeated watcher ticks cannot create
+        # another proposal for the same candidate, even after a failed research run.
+        for proposal in app.state.ai_proposal_registry.list(limit=None):
+            meta = proposal.metadata or {}
+            if meta.get("created_by") == "cusum_auto" and meta.get("parent_candidate_id") == candidate.candidate_id:
+                return
+        symbol = getattr(candidate, "symbol", None) or "BTC/USDT"
+        timeframes = [getattr(candidate, "timeframe", None) or "15m"]
         decay_pct = decay_result.get("decay_pct", 0)
         thesis = (
             f"替代策略研究（自动生成）：{candidate.strategy} 在 {symbol} 上触发 CUSUM 衰减"
@@ -433,17 +442,29 @@ def _auto_draft_replacement(app: Any, candidate: Any, decay_result: Dict[str, An
             timeframes=timeframes,
             market_regime="mixed",
             strategy_templates=[],
-            source="cusum_auto",
+            source="rule",
             expected_holding_period="1d",
             risk_hypothesis="",
             invalidation_rules=[],
             required_features=[],
             parameter_space={},
             notes=[f"由 CUSUM 衰减自动生成，原候选: {candidate.candidate_id}"],
-            metadata={"parent_candidate_id": candidate.candidate_id, "auto_generated": True},
+            metadata={
+                "parent_candidate_id": candidate.candidate_id,
+                "auto_generated": True,
+                "last_research_request": {"symbol": symbol, "timeframes": timeframes, "days": 30},
+            },
         )
+        transition_proposal(
+            new_proposal,
+            to_state="research_queued",
+            lifecycle_registry=app.state.ai_lifecycle_registry,
+            actor="cusum_auto",
+            reason="decay replacement queued for template backtesting",
+        )
+        app.state.ai_proposal_registry.save(new_proposal)
         logger.info(
-            f"cusum_watcher: auto-drafted replacement proposal {new_proposal.proposal_id} "
+            f"cusum_watcher: queued replacement proposal {new_proposal.proposal_id} "
             f"for {candidate.candidate_id}"
         )
     except Exception as exc:

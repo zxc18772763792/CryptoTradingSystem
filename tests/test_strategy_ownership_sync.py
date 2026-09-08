@@ -68,6 +68,9 @@ def test_build_payload_preserves_strategy_metadata():
 
 def test_restore_strategies_from_db_passes_metadata(monkeypatch):
     from core.strategies import persistence
+    monkeypatch.setattr("core.research.experiment_registry.CandidateRegistry.list", lambda self, limit=None: [
+        SimpleNamespace(candidate_id="cand-restore", proposal_id="prop-restore", experiment_id=None, status="paper_running"),
+    ])
 
     row = SimpleNamespace(
         name="restored_ai_strategy",
@@ -243,6 +246,9 @@ def test_restore_strategies_from_db_starts_one_ai_research_duplicate(monkeypatch
     from datetime import datetime, timezone
 
     from core.strategies import persistence
+    monkeypatch.setattr("core.research.experiment_registry.CandidateRegistry.list", lambda self, limit=None: [
+        SimpleNamespace(candidate_id="cand-duplicate", proposal_id="prop-duplicate", experiment_id="exp-duplicate", status="paper_running"),
+    ])
 
     fingerprint = "ai_research|paper|champion|binance|mastrategy|btc/usdt|15m"
 
@@ -263,6 +269,9 @@ def test_restore_strategies_from_db_starts_one_ai_research_duplicate(monkeypatch
                     "search_role": "champion",
                     "runtime_mode": "paper",
                     "runtime_fingerprint": fingerprint,
+                    "candidate_id": "cand-duplicate",
+                    "proposal_id": "prop-duplicate",
+                    "experiment_id": "exp-duplicate",
                 },
             },
             is_active=True,

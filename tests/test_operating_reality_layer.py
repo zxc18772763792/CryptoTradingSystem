@@ -50,6 +50,8 @@ def test_operating_mode_surfaces_provider_fallback_and_derivatives_shadow(monkey
     assert "provider_fallback" in codes
     assert "derivatives_shadow_only" in codes
     assert "autonomous_allow_live_false" in codes
+    assert snapshot["research_planner"]["configured_model"] == module.settings.OPENAI_MODEL
+    assert snapshot["research_planner"]["autonomous_loop"] is False
 
 
 def test_operating_mode_reads_mapping_source_health():

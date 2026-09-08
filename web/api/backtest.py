@@ -69,6 +69,10 @@ def _compute_backend_status(requested: str = "auto") -> Dict[str, Any]:
     return {"requested": req if req in {"auto", "cpu", "gpu"} else "auto", "selected": selected, "available": devices, "gpu_name": gpu_name, "fallback": req == "gpu" and selected != "gpu"}
 
 
+def _resolve_compute_backend(requested: str = "auto") -> str:
+    return str(_compute_backend_status(requested).get("selected") or "cpu")
+
+
 @router.get("/runtime")
 async def backtest_runtime_status():
     return {"compute": _compute_backend_status("auto")}
@@ -913,9 +917,17 @@ def _safe_bar_returns(close: pd.Series, timeframe: str) -> tuple[pd.Series, floa
     return clipped, anomaly_ratio, clip_limit
 
 
-def _safe_equity_curve(returns: pd.Series, initial_capital: float) -> pd.Series:
+def _safe_equity_curve(returns: pd.Series, initial_capital: float, compute_backend: str = "cpu") -> pd.Series:
     safe = pd.to_numeric(returns, errors="coerce").replace([np.inf, -np.inf], np.nan).fillna(0.0)
     safe = safe.clip(lower=-0.95, upper=5.0)
+    if compute_backend == "gpu":
+        try:
+            import cupy as cp
+            values = cp.asarray(safe.to_numpy(dtype=np.float64))
+            log_curve = cp.clip(cp.cumsum(cp.log1p(values)), -50.0, 20.0)
+            return pd.Series(cp.asnumpy(cp.exp(log_curve) * float(initial_capital)), index=returns.index)
+        except Exception:
+            pass
     log_curve = np.log1p(safe).cumsum().clip(lower=-50.0, upper=20.0)
     return pd.Series(np.exp(log_curve) * float(initial_capital), index=returns.index)
 
@@ -3936,6 +3948,7 @@ def _run_backtest_core(
     exit_overrides: Optional[Dict[str, Any]] = None,
     include_trade_log: bool = False,
     precomputed_position: Optional[pd.Series] = None,
+    compute_backend: str = "cpu",
 ) -> Dict[str, Any]:
     if not is_strategy_backtest_supported(strategy):
         info = get_backtest_strategy_info(strategy)
@@ -4104,8 +4117,9 @@ def _run_backtest_core(
     strategy_returns = (gross_returns - trade_cost).clip(lower=-0.95, upper=clip_limit)
     gross_returns = gross_returns.clip(lower=-0.95, upper=clip_limit)
 
-    equity = _safe_equity_curve(strategy_returns, initial_capital)
-    gross_equity = _safe_equity_curve(gross_returns, initial_capital)
+    selected_compute_backend = _resolve_compute_backend(compute_backend)
+    equity = _safe_equity_curve(strategy_returns, initial_capital, selected_compute_backend)
+    gross_equity = _safe_equity_curve(gross_returns, initial_capital, selected_compute_backend)
     final_capital = float(equity.iloc[-1])
     total_return = (final_capital / initial_capital - 1) * 100
     gross_final_capital = float(gross_equity.iloc[-1])
@@ -4159,6 +4173,8 @@ def _run_backtest_core(
         "anomaly_bar_ratio": round(float(anomaly_ratio), 6),
         "return_clip_limit": round(float(clip_limit), 6),
         "quality_flag": quality_flag,
+        "compute_backend": selected_compute_backend,
+        "compute_acceleration": "equity_curve_compounding" if selected_compute_backend == "gpu" else "cpu",
         "recommended_min_bars": int(_strategy_recommended_min_bars(strategy, timeframe, params=merged_params)),
         "zero_trade_reason": "",
         "use_stop_take": bool(protective_enabled),
@@ -4777,6 +4793,7 @@ async def run_backtest(
         stop_loss_pct=stop_loss_pct,
         take_profit_pct=take_profit_pct,
         exit_template=_engine_exit_template(requested_exit_template),
+        compute_backend=compute_backend,
     )
 
     _apply_exit_template_metadata(result, requested_exit_template)
