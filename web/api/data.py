@@ -12,7 +12,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional
-from uuid import uuid4
 
 import httpx
 import numpy as np
@@ -39,6 +38,7 @@ from core.data import (
     download_binance_1s_daily_archive,
 )
 from core.data.data_storage import _normalize_parquet_frame_index
+from core.exchanges import Kline
 from core.data.alpha_market_data import (
     ALPHA_DATA_SOURCE,
     get_alpha_coverage,
@@ -1320,40 +1320,69 @@ def _parquet_path(exchange: str, symbol: str, timeframe: str) -> Path:
 
 
 async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
+    """Persist only the touched daily partitions.
+
+    The prior API-specific writer rewrote the whole legacy parquet file on
+    every live refresh. That made a small ticker update increasingly expensive
+    as history grew and contended with chart readers. DataStorage already owns
+    an atomic, lock-protected daily-partition writer, so keep all new writes on
+    that path.
+    """
     if df.empty:
         return
 
-    target = _parquet_path(exchange, symbol, timeframe)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    normalized = _normalize_kline_frame_for_compare(df)
+    required_columns = {"open", "high", "low", "close"}
+    if normalized.empty or not required_columns.issubset(normalized.columns):
+        return
+    volumes = normalized["volume"] if "volume" in normalized.columns else 0.0
+    klines = [
+        Kline(
+            exchange=exchange,
+            symbol=symbol,
+            timeframe=timeframe,
+            timestamp=pd.Timestamp(timestamp).to_pydatetime(),
+            open=float(open_price),
+            high=float(high_price),
+            low=float(low_price),
+            close=float(close_price),
+            volume=float(volume),
+        )
+        for timestamp, open_price, high_price, low_price, close_price, volume in zip(
+            normalized.index,
+            normalized["open"].to_numpy(copy=False),
+            normalized["high"].to_numpy(copy=False),
+            normalized["low"].to_numpy(copy=False),
+            normalized["close"].to_numpy(copy=False),
+            volumes if isinstance(volumes, pd.Series) else [volumes] * len(normalized),
+        )
+    ]
+    await data_storage.save_klines_to_parquet(klines, exchange, symbol, timeframe)
 
-    def _merge_and_write() -> None:
-        # Runs on a worker thread: the read/concat/write is synchronous disk IO
-        # (large 1m/1s history files) and must not block the event loop, which
-        # would stall API/WS traffic for ALL clients during a chart refresh.
-        merged = _normalize_kline_frame_for_compare(df)
-        merged = merged.sort_index()
-        for symbol_root in candidate_symbol_dirs(Path(settings.DATA_STORAGE_PATH), exchange, symbol):
-            existing_path = symbol_root / f"{timeframe}.parquet"
-            if not existing_path.exists():
-                continue
-            existing = pd.read_parquet(existing_path)
-            existing = _normalize_kline_frame_for_compare(existing)
-            merged = pd.concat([existing, merged])
-        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-        # Atomic publish so a concurrent reader never sees a half-written file.
-        tmp_path = target.with_name(f"{target.name}.{uuid4().hex}.tmp")
-        try:
-            merged.to_parquet(tmp_path)
-            os.replace(tmp_path, target)
-        except Exception:
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except OSError:
-                pass
-            raise
 
-    await asyncio.to_thread(_merge_and_write)
+def _serialize_kline_frame(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """Convert chart data without allocating a pandas Series for every row."""
+    if df.empty:
+        return []
+    volumes = df["volume"].to_numpy(copy=False) if "volume" in df.columns else np.zeros(len(df))
+    return [
+        {
+            "timestamp": _to_utc_iso(timestamp),
+            "open": float(open_price),
+            "high": float(high_price),
+            "low": float(low_price),
+            "close": float(close_price),
+            "volume": float(volume),
+        }
+        for timestamp, open_price, high_price, low_price, close_price, volume in zip(
+            df.index,
+            df["open"].to_numpy(copy=False),
+            df["high"].to_numpy(copy=False),
+            df["low"].to_numpy(copy=False),
+            df["close"].to_numpy(copy=False),
+            volumes,
+        )
+    ]
 
 
 async def _safe_exchange_call(
@@ -3771,17 +3800,7 @@ async def get_klines(
             "source": "binance_alpha_collector",
             "source_type": "collector_sqlite",
             "managed": True,
-            "data": [
-                {
-                    "timestamp": _to_utc_iso(idx),
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": float(row.get("volume", 0.0)),
-                }
-                for idx, row in alpha_df.iterrows()
-            ],
+            "data": _serialize_kline_frame(alpha_df),
             **(
                 {"message": "Alpha 采集库中暂无该标的或周期的数据"}
                 if alpha_df.empty
@@ -4001,17 +4020,7 @@ async def get_klines(
         "actual_exchange": actual_exchange,
         "symbol": symbol,
         "timeframe": timeframe,
-        "data": [
-            {
-                "timestamp": _to_utc_iso(idx),
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "volume": float(row.get("volume", 0.0)),
-            }
-            for idx, row in df.iterrows()
-        ],
+        "data": _serialize_kline_frame(df),
     }
 
 

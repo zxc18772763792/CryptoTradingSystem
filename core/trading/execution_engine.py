@@ -6858,12 +6858,16 @@ class ExecutionEngine:
         self._paper_total_fees_usd = 0.0
         self._paper_fee_applied_orders.clear()
         if self._current_trading_mode() == "paper":
-            report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
-            if report_eq > 0:
-                self._paper_equity_anchor = max(
-                    report_eq,
-                    float(getattr(settings, "PAPER_INITIAL_EQUITY", 10000.0) or 10000.0),
-                )
+            # A paper reset is an explicit new-account operation. Do not carry
+            # the previous risk/equity snapshot into the new virtual account;
+            # otherwise "模拟盘清零" leaves the old balance intact.
+            initial_equity = float(
+                getattr(settings, "PAPER_INITIAL_EQUITY", 10000.0) or 10000.0
+            )
+            self._paper_equity_anchor = initial_equity
+            self._cached_equity = initial_equity
+            self._equity_updated_at = datetime.now(timezone.utc)
+            risk_manager.update_equity(initial_equity)
         return {
             "conditional_orders_cleared": conditional_count,
             "queued_signals_cleared": queue_cleared,

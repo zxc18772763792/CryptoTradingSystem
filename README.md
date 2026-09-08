@@ -30,13 +30,13 @@ See [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md) for a more detail
 
 ## Quick Start
 
-### 1. Create a Python environment
+### 1. Prepare the project-local Python environment
 
 ```powershell
-conda create -n crypto_trading python=3.11 -y
-conda activate crypto_trading
-pip install -r requirements.txt
+.\scripts\setup_local_env.ps1
 ```
+
+The setup script uses `F:\9_Crypto\.conda\miniforge3\envs\crypto_trading` when present, otherwise it creates `.venv` inside this project. It never searches or installs into a user/global environment.
 
 ### 2. Configure local secrets
 
@@ -90,7 +90,7 @@ For daily use, remember this small command family:
 .\web.bat stop -IncludeWorkers
 ```
 
-`.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and defaults to `paper` mode with market WS disabled. Use `-AllowPersistedLiveMode` only for an explicit guarded `live` + `strategy_primary` startup.
+`.\web.bat start` uses the same managed profile but does not force the browser open. Managed startup ignores `.env` worker auto-start flags, starts the news engine by default, keeps analytics-history collectors off unless you explicitly opt in, and defaults to `paper` mode with market WS as the primary market-data source and REST as a quality-guarded fallback. Use `-AllowPersistedLiveMode` only for an explicit guarded `live` + `strategy_primary` startup.
 
 When analytics-history is enabled, `.\web.bat status` may briefly show the service as `warming_up` while `/health` or `/api/status` finishes coming online. That is expected during heavier startup paths and is different from a true stopped state.
 
@@ -138,8 +138,8 @@ After startup, always verify the runtime mode and agent state with:
 
 Managed mode rule:
 
-- `.\web.bat` and `.\web.bat start` default to `paper` mode with market WS authority disabled
-- `.\web.bat start -PaperMode` remains an explicit paper/offline-WS startup path
+- `.\web.bat` and `.\web.bat start` default to `paper` mode with `MARKET_WS_MODE=strategy_primary`
+- `.\web.bat start -PaperMode` remains an explicit paper startup path with the same WS-primary behavior
 - `-AllowPersistedLiveMode` is the explicit opt-in for guarded `live + strategy_primary`
 - the autonomous agent does not start with the default boot path unless `AI_AUTONOMOUS_AGENT_AUTO_START=true` is present in the launching environment or you pass `-StartAutonomousAgent`
 

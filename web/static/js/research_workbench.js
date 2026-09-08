@@ -1886,17 +1886,19 @@
     if (!el) return;
     el.onclick = async () => {
       const origHtml = el.innerHTML;
-      try {
-        el.disabled = true;
-        el.classList.add('btn-loading');
+        try {
+          el.disabled = true;
+          el.setAttribute('aria-busy', 'true');
+          el.classList.add('btn-loading');
         el.innerHTML = '<span class="btn-spinner"></span> 加载中';
         await handler();
       } catch (err) {
         if (typeof window.notify === 'function') window.notify(`高级研究失败: ${err.message || err}`, true);
         setDebug(`research.workbench.error.${id}`, String(err?.message || err));
-      } finally {
-        el.disabled = false;
-        el.classList.remove('btn-loading');
+        } finally {
+          el.disabled = false;
+          el.removeAttribute('aria-busy');
+          el.classList.remove('btn-loading');
         el.innerHTML = origHtml;
       }
     };
@@ -2033,14 +2035,33 @@
     const nav = q('research-section-nav');
     if (!nav || nav.dataset.bound === '1') return;
     nav.dataset.bound = '1';
+    const links = Array.from(nav.querySelectorAll('[data-research-jump]'));
+    const targets = links
+      .map((link) => document.querySelector(link.getAttribute('href')))
+      .filter(Boolean);
+    const setCurrent = (target) => {
+      const id = target?.id;
+      links.forEach((item) => {
+        const active = item.getAttribute('href') === `#${id}`;
+        if (active) item.setAttribute('aria-current', 'true');
+        else item.removeAttribute('aria-current');
+      });
+    };
     nav.addEventListener('click', (event) => {
       const link = event.target.closest('[data-research-jump]');
       if (!link || !nav.contains(link)) return;
-      nav.querySelectorAll('[data-research-jump]').forEach((item) => {
-        if (item === link) item.setAttribute('aria-current', 'true');
-        else item.removeAttribute('aria-current');
-      });
+      setCurrent(document.querySelector(link.getAttribute('href')));
     });
+    if (targets.length && typeof IntersectionObserver !== 'undefined') {
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top);
+        if (visible[0]) setCurrent(visible[0].target);
+      }, { rootMargin: '-92px 0px -58% 0px', threshold: [0, 0.15] });
+      targets.forEach((target) => observer.observe(target));
+      state.navigationObserver = observer;
+    }
   }
 
   function watchProgrammaticConfigChanges() {

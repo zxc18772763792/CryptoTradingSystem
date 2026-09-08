@@ -17,6 +17,7 @@ if "%~1"=="" (
   echo [INFO] Optional agent: ".\web.bat start -StartAutonomousAgent"
   echo [INFO] Help: ".\web.bat help"
   echo [INFO] Startup doc: "STARTUP.md"
+  echo [INFO] Missing environment? Run ".\scripts\setup_local_env.ps1"
   echo.
   powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" start -OpenBrowser
 ) else (

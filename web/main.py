@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.requests import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -2412,6 +2413,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
 
 @app.middleware("http")
@@ -2425,6 +2427,11 @@ async def _sliding_local_ui_session(request: Request, call_next):
         renew_local_ui_session_cookie(request, response)
     except Exception:
         pass
+    # Every dashboard asset URL carries a version token. Tell browsers they may
+    # retain those immutable bytes across visits; a version bump publishes the
+    # next asset immediately without a stale-UI risk.
+    if request.url.path.startswith("/static/") and request.query_params.get("v"):
+        response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
     return response
 
 static_path = Path(__file__).parent / "static"

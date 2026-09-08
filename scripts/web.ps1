@@ -292,8 +292,16 @@ function Get-HealthSummary {
 function Get-AutonomousAgentSummary {
     param([int]$PortNumber)
 
+    # The endpoint is behind read_trading_state and answers 401 without the ops
+    # token, which used to surface as a bare "AI Agent : status unavailable"
+    # even while the agent was running. The first call after boot can also warm
+    # a symbol scan, so allow more than the old 8s.
+    $headers = Get-OpsAuthHeaders -EnvValues (Get-EnvFileValues)
     try {
-        return Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/ai/autonomous-agent/status" -TimeoutSec 8
+        if ($headers.Count -gt 0) {
+            return Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/ai/autonomous-agent/status" -Headers $headers -TimeoutSec 20
+        }
+        return Invoke-RestMethod -Uri "http://127.0.0.1:$PortNumber/api/ai/autonomous-agent/status" -TimeoutSec 20
     }
     catch {
         return $null
@@ -318,7 +326,12 @@ function Get-WebSupervisorTaskSummary {
     param([int]$PortNumber)
     try {
         $task = Get-ScheduledTask -TaskName ("CryptoTradingSystem_WebSupervisor_{0}" -f $PortNumber) -ErrorAction Stop
-        return [string]$task.State
+        $state = [string]$task.State
+        # A paper managed start registers a delayed logon trigger; a live start
+        # registers none. Surface it so reboot behaviour is visible from status.
+        $hasLogonTrigger = @($task.Triggers | Where-Object { $_.CimClass.CimClassName -eq "MSFT_TaskLogonTrigger" }).Count -gt 0
+        $bootText = if ($hasLogonTrigger) { "auto-start at logon" } else { "manual start only" }
+        return ("{0}, {1}" -f $state, $bootText)
     } catch {
         return "not registered"
     }
@@ -358,7 +371,7 @@ function Show-Help {
     Write-Host ""
     Write-Host "Managed default profile:"
     Write-Host "  - '.\web.bat start' launches web + news worker + news LLM worker."
-    Write-Host "  - Managed start defaults to PAPER mode with market WS disabled."
+    Write-Host "  - Managed start defaults to PAPER mode with market WS primary and REST quality fallback."
     Write-Host "  - Pass -AllowPersistedLiveMode for an explicit LIVE + strategy_primary startup."
     Write-Host "  - Managed start ignores .env START_* worker flags and uses command-line flags."
     Write-Host "  - Analytics history stays off unless you pass -EnableAnalyticsHistory."

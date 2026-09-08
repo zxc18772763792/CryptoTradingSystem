@@ -113,36 +113,8 @@ function Enable-CondaEnv {
         }
     }
 
-    $hookCandidates = @(
-        $localCondaHook,
-        "C:\ProgramData\anaconda3\shell\condabin\conda-hook.ps1",
-        "$env:USERPROFILE\anaconda3\shell\condabin\conda-hook.ps1",
-        "$env:USERPROFILE\miniconda3\shell\condabin\conda-hook.ps1"
-    )
-
-    foreach ($hook in $hookCandidates) {
-        if (-not (Test-Path $hook)) { continue }
-        . $hook
-        conda activate $Name
-        if ($env:CONDA_DEFAULT_ENV -eq $Name) {
-            return $true
-        }
-    }
-
-    if (Get-Command conda -ErrorAction SilentlyContinue) {
-        $condaBase = (& conda info --base).Trim()
-        if ($condaBase) {
-            $condaHook = Join-Path $condaBase "shell\condabin\conda-hook.ps1"
-            if (Test-Path $condaHook) {
-                . $condaHook
-                conda activate $Name
-                if ($env:CONDA_DEFAULT_ENV -eq $Name) {
-                    return $true
-                }
-            }
-        }
-    }
-
+    # Startup is intentionally hermetic: never search user/global Conda
+    # installations. Use scripts\setup_local_env.ps1 to provision this path.
     return $false
 }
 
@@ -159,12 +131,7 @@ function Resolve-PythonExecutable {
         return $venvPython
     }
 
-    $pyCmd = Get-Command python -ErrorAction SilentlyContinue
-    if ($pyCmd) {
-        return $pyCmd.Source
-    }
-
-    throw "Cannot find Python executable. Please install Conda or create .venv."
+    throw "Cannot find the project Python environment. Run .\scripts\setup_local_env.ps1 from $PSScriptRoot."
 }
 
 function Import-DotEnvFile {
@@ -349,6 +316,10 @@ function Start-WebSupervisor {
                 StartNewsLlmWorker = [bool]$StartNewsLlmWorker
                 StartPmWorker = [bool]$StartPmWorker
                 EnableAnalyticsHistory = [bool]$EnableAnalyticsHistory
+                # Paper starts get a delayed logon trigger so a reboot does not end an
+                # unattended long run. A live start never does: the task action would
+                # carry -AllowPersistedLiveMode and resurrect LIVE trading unattended.
+                RegisterLogonTrigger = (-not [bool]$AllowPersistedLiveMode)
                 StartNow = $true
                 Quiet = $true
             }
@@ -451,8 +422,14 @@ if ($AllowPersistedLiveMode) {
     Set-Item -Path Env:MARKET_WS_QUALITY_GUARD_ENABLED -Value "1"
     Set-Item -Path Env:MARKET_WS_SYMBOL_MAX_AGE_SEC -Value "60"
 } else {
-    Set-Item -Path Env:MARKET_WS_ENABLED -Value "0"
-    Set-Item -Path Env:MARKET_WS_MODE -Value "off"
+    # Paper trading still needs real-time market data. Keep WS authoritative
+    # for strategy/runtime prices and let the quality guard fall back to REST
+    # only when the socket is unavailable or stale.
+    Set-Item -Path Env:MARKET_WS_ENABLED -Value "1"
+    Set-Item -Path Env:MARKET_WS_MODE -Value "strategy_primary"
+    Set-Item -Path Env:MARKET_WS_FORCE_REST -Value "0"
+    Set-Item -Path Env:MARKET_WS_QUALITY_GUARD_ENABLED -Value "1"
+    Set-Item -Path Env:MARKET_WS_SYMBOL_MAX_AGE_SEC -Value "60"
 }
 Set-EffectiveWorkerEnvFlags `
     -NewsWorker $StartNewsWorker `
@@ -477,7 +454,7 @@ if ($pidOnPort) {
         if ($AllowPersistedLiveMode) {
             Write-Host "Managed start uses explicit LIVE mode with MARKET_WS_MODE=strategy_primary and fail-closed quality guards." -ForegroundColor Yellow
         } else {
-            Write-Host "Managed start uses PAPER mode with market WS disabled." -ForegroundColor Yellow
+            Write-Host "Managed start uses PAPER mode with market WS primary and REST quality fallback." -ForegroundColor Yellow
         }
         if ($requestedExternalWorkerLabels.Count) {
             Write-Host "Worker mix was not changed because the web service is already running." -ForegroundColor Yellow
@@ -499,7 +476,7 @@ if ($pidOnPort) {
 if (Enable-CondaEnv -Name $EnvName) {
     Write-Host "Using conda env: $EnvName"
 } else {
-    Write-Host "Conda env '$EnvName' not found from common paths/PATH. Falling back to .venv or system python."
+    Write-Host "Local environment '$EnvName' was not found under $PSScriptRoot\.conda\miniforge3. Run .\scripts\setup_local_env.ps1 first." -ForegroundColor Red
 }
 
 $pythonExe = Resolve-PythonExecutable
@@ -517,7 +494,19 @@ if (-not $EnableAnalyticsHistory) {
 if ($AllowPersistedLiveMode) {
     Write-Host "Managed start uses explicit LIVE mode with MARKET_WS_MODE=strategy_primary and fail-closed quality guards." -ForegroundColor Yellow
 } else {
-    Write-Host "Managed start uses PAPER mode with market WS disabled." -ForegroundColor Yellow
+    Write-Host "Managed start uses PAPER mode with market WS primary and REST quality fallback." -ForegroundColor Yellow
+}
+
+# Managed startup creates a fresh uvicorn out/err log pair every time and nothing
+# else ever removes them, so prune before adding another pair. Never fatal.
+$pruneLogsScript = Join-Path $PSScriptRoot "scripts\prune_logs.ps1"
+if (Test-Path $pruneLogsScript) {
+    try {
+        & $pruneLogsScript -ProjectRoot $PSScriptRoot
+    }
+    catch {
+        Write-Host ("Log prune skipped: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+    }
 }
 
 $startupStamp = Get-Date -Format "yyyyMMdd_HHmmss"
