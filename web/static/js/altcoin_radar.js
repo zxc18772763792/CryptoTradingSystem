@@ -1076,7 +1076,16 @@
       ['异动启动', String(summary?.anomaly_count ?? '--')],
       ['布局吸筹', String(summary?.accumulation_count ?? '--')],
       ['高控盘', String(summary?.control_count ?? '--')],
-      ['降级行数', String(summary?.degraded_count ?? '--')],
+      // The backend counts degraded rows across the WHOLE scan, but the table
+      // below only lists the first `limit` of them, so a bare "20" sitting above
+      // 30 rows containing 10 degraded ones is unreconcilable. Show both scopes.
+      ['降级行数', (() => {
+        const shown = summary?.degraded_count_displayed;
+        const total = summary?.degraded_count;
+        if (total == null) return '--';
+        if (shown == null || shown === total) return String(total);
+        return `${shown} / ${total}`;
+      })()],
       ['当前榜首', leader?.symbol ? `${leader.symbol}` : '--'],
     ];
     strip.innerHTML = metrics
