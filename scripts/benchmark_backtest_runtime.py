@@ -68,13 +68,32 @@ def _hash_result(result: Dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:12]
 
 
+def _resolve_anchor() -> datetime:
+    """End of the benchmark's data window.
+
+    Defaults to now, which makes two runs read DIFFERENT data and silently
+    invalidates any before/after comparison -- a real run of this script reported
+    changed result hashes for RSI/MACD/MA purely from an hour's drift, none of
+    which had any code change between the runs. Pin it with --anchor (or
+    BACKTEST_BENCH_ANCHOR) to an ISO timestamp whenever the numbers are being
+    compared across runs rather than just recorded.
+    """
+    raw = (os.getenv("BACKTEST_BENCH_ANCHOR") or "").strip()
+    if not raw:
+        return datetime.now(timezone.utc)
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 async def _prepare_inputs(
     strategy: str, symbol: str, timeframe: str, days: int
 ) -> tuple[Any, Any, str]:
     """Load OHLCV once for a case."""
     from web.api.backtest import _load_backtest_inputs
 
-    end_time = datetime.now(timezone.utc)
+    end_time = _resolve_anchor()
     start_time = end_time - timedelta(days=days)
     df, bundle, resolved = await _load_backtest_inputs(
         strategy=strategy,
@@ -376,6 +395,11 @@ async def amain(args: argparse.Namespace) -> int:
     payload = {
         "git_sha": sha,
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # Recorded so a later comparison can tell whether two runs actually read
+        # the same data. Two baselines with different anchors are not comparable,
+        # however similar their case names look.
+        "data_anchor": _resolve_anchor().isoformat(),
+        "data_anchor_pinned": bool(os.getenv("BACKTEST_BENCH_ANCHOR")),
         "python": sys.version.split()[0],
         "symbol": symbol,
         "cases": cases,
@@ -403,7 +427,19 @@ def main() -> int:
         action="store_true",
         help="Run the full 3mo/1y workload set (slow, ~25 min). Default is 1mo smoke profile.",
     )
+    parser.add_argument(
+        "--anchor",
+        default=None,
+        help=(
+            "ISO timestamp to end the data window at (e.g. 2026-09-01T00:00:00Z). "
+            "REQUIRED for before/after comparisons: the default 'now' makes two runs "
+            "read different data, so result hashes and timings change on their own. "
+            "Also settable via BACKTEST_BENCH_ANCHOR."
+        ),
+    )
     args = parser.parse_args()
+    if args.anchor:
+        os.environ["BACKTEST_BENCH_ANCHOR"] = args.anchor
     return asyncio.run(amain(args))
 
 
