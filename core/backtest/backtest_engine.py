@@ -14,6 +14,7 @@ from core.backtest.cost_models import fee_rate as resolve_fee_rate
 from core.backtest.cost_models import microstructure_proxies
 from core.backtest.cost_models import slippage_rate as resolve_slippage_rate
 from core.backtest.funding_provider import FundingRateProvider
+from core.factors_ts.cache import factor_cache_scope
 from core.strategies import Signal, SignalType, StrategyBase
 
 
@@ -154,6 +155,16 @@ class BacktestEngine:
         logger.info(f"Starting backtest for {symbol} with {len(data)} bars")
 
         result: Optional[BacktestResult] = None
+        # Each bar hands the strategy a trailing window, so factors are recomputed
+        # from scratch every bar -- 81% of backtest wall time in profiling. Inside
+        # this scope a factor is computed once over `data` and each window is served
+        # as a slice, but only while the cached and windowed values keep matching;
+        # path-dependent factors (EWM, cumsum) are detected and fall back to the
+        # original path automatically. See core/factors_ts/cache.py.
+        # Entered explicitly rather than via `with` so the existing try/finally
+        # below keeps its indentation.
+        _factor_scope = factor_cache_scope(data)
+        _factor_scope.__enter__()
         try:
             strategy.initialize()
             strategy.start()
@@ -226,6 +237,7 @@ class BacktestEngine:
                 strategy.stop()
             except Exception as exc:
                 logger.warning(f"Strategy stop failed during backtest cleanup for {symbol}: {exc}")
+            _factor_scope.__exit__(None, None, None)
 
         return result
 
