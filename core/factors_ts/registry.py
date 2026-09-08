@@ -22,7 +22,21 @@ def build_factor(name: str, params: Dict[str, Any] | None = None) -> TimeSeriesF
     return klass(**params)
 
 
-def compute_factor(name: str, df: pd.DataFrame, params: Dict[str, Any] | None = None) -> pd.Series:
+def _compute_uncached(name: str, df: pd.DataFrame, params: Dict[str, Any] | None = None) -> pd.Series:
     factor = build_factor(name=name, params=params)
     return factor(df)
+
+
+def compute_factor(name: str, df: pd.DataFrame, params: Dict[str, Any] | None = None) -> pd.Series:
+    # Inside a factor_cache_scope (installed by the backtest replay loops) the
+    # factor is computed once over the full frame and each window is served as a
+    # slice. try_cached returns None whenever that would not be provably
+    # equivalent, so the uncached path below stays the default. Imported lazily
+    # to keep this module import-light and avoid an import cycle.
+    from core.factors_ts.cache import try_cached
+
+    cached = try_cached(name, df, params, _compute_uncached)
+    if cached is not None:
+        return cached
+    return _compute_uncached(name, df, params)
 
