@@ -39,6 +39,14 @@ if (-not $SkipRequirements) {
     if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
 }
 
-& $python -c "import fastapi, uvicorn; print('Environment ready:', __import__('sys').executable); print('uvicorn', uvicorn.__version__)"
-if ($LASTEXITCODE -ne 0) { throw "Environment verification failed." }
+# Verification lives in scripts/verify_env.py rather than an inline here-string:
+# PowerShell mangles embedded quotes when passing a multi-line script to python -c.
+# It fails on missing REQUIRED modules (unguarded top-level imports on the startup
+# path) and warns on missing OPTIONAL ones. Checking only fastapi+uvicorn used to
+# pass while `.\web.bat` still died at import on a missing jinja2.
+& $python (Join-Path $projectRoot "scripts\verify_env.py")
+if ($LASTEXITCODE -ne 0) {
+    throw "Environment verification failed. Rerun this script with -Upgrade, or install manually: pip install -r requirements.txt"
+}
+
 Write-Host "Done. Start with .\web.bat" -ForegroundColor Green

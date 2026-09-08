@@ -11,6 +11,10 @@ fastapi>=0.115,<1
 uvicorn[standard]>=0.34,<1
 aiohttp>=3.11,<4
 websockets>=14,<15
+# Required by web/main.py's `from fastapi.templating import Jinja2Templates`
+# (top-level, unguarded). FastAPI does NOT pull jinja2 in automatically -- it is
+# an optional extra -- so omitting it here makes the web service fail at import.
+jinja2>=3.1,<4
 
 # Database
 sqlalchemy>=2.0,<3
@@ -21,6 +25,11 @@ redis>=5,<6
 # Backtesting
 backtrader>=1.9,<2
 xgboost>=2.1,<3
+# Hard (top-level) import in core/research/binance_{runup,sequential,continuation}*.py.
+# Upper bound is deliberate: xgboost 2.1's sklearn wrapper breaks against sklearn's
+# newer estimator-tag validation (>=1.9), which sends core/ai/ml_signal.py down its
+# native-Booster fallback path -- see the comment at core/ai/ml_signal.py:120.
+scikit-learn>=1.5,<1.9
 
 # Blockchain (DEX)
 web3>=7.6,<8
@@ -39,8 +48,20 @@ schedule>=1.2,<2
 apscheduler>=3.11,<4
 
 # Technical Analysis
-ta-lib>=0.4,<0.5
-pandas-ta>=0.3.14b0,<0.4
+# Both are commented out because NOTHING in the repo imports `talib` or
+# `pandas_ta` (verified by grep across all *.py), and neither was installed in the
+# working environment -- so nothing currently depends on them.
+#
+# Leaving them declared was actively harmful: ta-lib needs the TA-Lib C library,
+# which makes it the single biggest obstacle to a clean `pip install -r`. The pin
+# below was also unsatisfiable on Windows/py3.11 -- no 0.4.x wheels are published,
+# only 0.6.5+ -- so the install could only ever fail or fall back to a source build.
+#
+# Re-enable BOTH the dependency and a real import if TA-Lib is ever adopted. Do not
+# simply widen the pin to 0.7: indicator implementations differ between TA-Lib and
+# pandas_ta, so introducing either one changes signal values and needs a backtest.
+# ta-lib>=0.6,<0.8
+# pandas-ta>=0.3.14b0,<0.4
 
 # Logging
 loguru>=0.7,<1
@@ -59,7 +80,11 @@ types-redis>=4.6,<5
 httpx>=0.28,<1
 tenacity>=9,<10
 python-dateutil>=2.9,<3
-pytz>=2024,<2026
+# Deliberately has no upper bound, unlike every other pin here. pytz versions are
+# calendar-named (2026.1), so a `<YYYY` cap silently expires on New Year's Day and
+# freezes the tz database -- the previous `<2026` cap had already excluded every
+# current release by the time it was noticed. Timezone data must roll forward.
+pytz>=2024
 requests>=2.32,<3
 pyyaml>=6,<7
 pytrends>=4.9,<5
