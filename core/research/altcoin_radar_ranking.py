@@ -190,6 +190,12 @@ def summarize_rows(
     ordered = sort_rows(rows, sort_by=sort_by)
     leader = ordered[0] if ordered else {}
     degraded_count = sum(1 for row in ordered if row.get("data_quality", {}).get("degraded_reason"))
+    # Every count here covers the rows passed in, which is the FULL scan -- the
+    # caller truncates to `limit` only afterwards. So a summary saying "20
+    # degraded" can sit above a table of 30 rows containing 10 degraded ones, and
+    # the reader has no way to reconcile the two. State the scope explicitly so
+    # the UI can label it instead of silently implying it describes the table.
+    counts_row_total = len(ordered)
     summary = {
         "exchange": exchange,
         "timeframe": timeframe,
@@ -210,6 +216,9 @@ def summarize_rows(
             and _to_float(row.get("risk_penalty"), 0.0) < 0.35
         ),
         "degraded_count": degraded_count,
+        # Denominator for every *_count above; not the number of rows returned.
+        "counts_row_total": counts_row_total,
+        "counts_scope": "all_scanned_rows",
         "leader": {
             "symbol": leader.get("symbol"),
             "signal_state": leader.get("signal_state"),

@@ -730,7 +730,17 @@ async def _compute_scan_payload(
     warnings.extend(frame_warnings)
     if isinstance(market_snapshot_result, Exception):
         market_snapshots = {}
-        warnings.append(f"CoinGlass market snapshot unavailable: {market_snapshot_result}")
+        # str(exc) is empty for argument-less exceptions -- asyncio.TimeoutError
+        # being the common one here -- which rendered this warning as
+        # "CoinGlass market snapshot unavailable: " with nothing after the colon
+        # and no way to tell a timeout from a connection failure. Lead with the
+        # type, like the Binance Alpha branch below already does.
+        _detail = str(market_snapshot_result).strip()
+        warnings.append(
+            "CoinGlass market snapshot unavailable: "
+            f"{type(market_snapshot_result).__name__}"
+            + (f": {_detail}" if _detail else "")
+        )
     else:
         market_snapshots = market_snapshot_result
 
@@ -1122,6 +1132,18 @@ def _build_scan_response(
     )
     response = dict(summarized)
     response["rows"] = limited_rows
+    # summarize_rows counted the full scan; the table only shows `limited_rows`.
+    # Publish the displayed-scope figure next to it (inside `summary`, where the
+    # other counts live) so the UI can render both rather than showing a number
+    # the reader cannot reconcile with the table. Copied rather than mutated in
+    # place because `summarized` may be shared with a cached scan payload.
+    response["summary"] = {
+        **(response.get("summary") or {}),
+        "degraded_count_displayed": sum(
+            1 for row in limited_rows if (row.get("data_quality") or {}).get("degraded_reason")
+        ),
+        "displayed_row_count": len(limited_rows),
+    }
     response["mode"] = _normalize_mode(mode)
     response["view"] = scan_payload.get("view") or str(scan_payload.get("timeframe") or DEFAULT_TIMEFRAME)
     response["universe_meta"] = scan_payload.get("universe_meta") or {}
