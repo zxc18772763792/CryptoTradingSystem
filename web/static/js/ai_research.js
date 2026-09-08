@@ -473,6 +473,19 @@
     setTimeout(() => box.classList.remove('show'), 3000);
   }
 
+  // Keep the user on the next meaningful step after a long-running action.
+  // The workbench renders the same state in several panels; a gentle focus
+  // cue prevents users from having to hunt through the three-column layout.
+  function focusNextResearchStep(elementId) {
+    const el = document.getElementById(elementId);
+    if (!el || typeof el.scrollIntoView !== 'function') return;
+    window.setTimeout(() => {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      el.classList.add('ai-next-step-focus');
+      window.setTimeout(() => el.classList.remove('ai-next-step-focus'), 1800);
+    }, 80);
+  }
+
   function csvInput(id) {
     return String(document.getElementById(id)?.value || '').split(',').map(s => s.trim()).filter(Boolean);
   }
@@ -4687,6 +4700,8 @@ ${confirmHint}`,
         }
         updatePlannerModeHint();
         notify(draftCount > 0 ? `研究思路已生成，并附带 ${draftCount} 个 AI 草案。` : '研究思路已生成，假设已写入规划区。');
+        // Move the user's attention to the action that consumes this output.
+        focusNextResearchStep('ai-generate-btn');
       } else {
         notify(`生成研究思路失败: ${result?.error || 'LLM不可用'}`, true);
         setAIContextButtonState('idle');
@@ -5049,6 +5064,7 @@ ${confirmHint}`,
     updatePlannerModeHint();
     notify(`研究任务已生成：${researchModeText(plannerConstraints.research_mode)}。${filteredTpls.length ? `已过滤 ${filteredTpls.length} 个不支持模板。` : ''}`);
     await refreshWorkbench(result?.proposal?.proposal_id || '', '');
+    focusNextResearchStep('run-selected-btn');
   }
 
   // generateAIContext / generateProposal 使用上方唯一实现，避免重复覆盖。
@@ -5269,6 +5285,7 @@ ${confirmHint}`,
       startJobPolling(pid, jobId);
     }
     await refreshWorkbench(pid, '');
+    focusNextResearchStep('ai-candidate-cards');
   }
 
   async function cancelProposal(proposalId) {

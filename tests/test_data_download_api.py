@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pandas as pd
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -25,6 +26,35 @@ def _reset_download_state() -> None:
     data_api._DOWNLOAD_BACKGROUND_TASKS.clear()
     data_api._DOWNLOAD_TASK_SEMAPHORE = None
     data_api._DOWNLOAD_TASK_SEMAPHORE_LOOP_ID = None
+
+
+def test_kline_serializer_is_vectorized_and_preserves_missing_volume():
+    frame = pd.DataFrame(
+        {"open": [100.0, 101.0], "high": [102.0, 103.0], "low": [99.0, 100.0], "close": [101.0, 102.0]},
+        index=pd.to_datetime(["2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z"]),
+    )
+    payload = data_api._serialize_kline_frame(frame)
+    assert [row["close"] for row in payload] == [101.0, 102.0]
+    assert [row["volume"] for row in payload] == [0.0, 0.0]
+    assert payload[0]["timestamp"].endswith("Z")
+
+
+def test_kline_writer_delegates_incremental_updates_to_partition_storage(monkeypatch):
+    received = []
+
+    async def fake_save(klines, exchange, symbol, timeframe):
+        received.extend(klines)
+        assert (exchange, symbol, timeframe) == ("binance", "ETH/USDT", "1m")
+
+    monkeypatch.setattr(data_api.data_storage, "save_klines_to_parquet", fake_save)
+    frame = pd.DataFrame(
+        {"open": [100.0], "high": [101.0], "low": [99.0], "close": [100.5], "volume": [12.0]},
+        index=pd.to_datetime(["2026-01-01T00:00:00Z"]),
+    )
+    asyncio.run(data_api._save_df_to_parquet("binance", "ETH/USDT", "1m", frame))
+    assert len(received) == 1
+    assert received[0].timestamp.tzinfo is None
+    assert received[0].close == 100.5
 
 
 def test_download_route_honors_explicit_background_true_for_small_single_request(monkeypatch):

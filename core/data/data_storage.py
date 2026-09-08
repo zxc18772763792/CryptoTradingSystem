@@ -14,8 +14,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from loguru import logger
 import redis.asyncio as redis
-from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import insert, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config.settings import settings
 from config.database import (
@@ -354,34 +355,45 @@ class DataStorage:
     # ==================== K线数据存储 ====================
 
     async def save_klines_to_db(self, klines: List[Kline]) -> int:
-        """保存K线数据到数据库"""
+        """Save klines in one conflict-safe batch instead of flushing each bar."""
         if not klines:
             return 0
 
-        async with async_session_maker() as session:
-            count = 0
-            for kline in klines:
-                db_kline = KlineModel(
-                    exchange=kline.exchange,
-                    symbol=kline.symbol,
-                    timeframe=kline.timeframe,
-                    timestamp=kline.timestamp,
-                    open=kline.open,
-                    high=kline.high,
-                    low=kline.low,
-                    close=kline.close,
-                    volume=kline.volume,
-                )
-                session.add(db_kline)
-                try:
-                    await session.flush()
-                    count += 1
-                except IntegrityError:
-                    # Duplicate bar (concurrent writer or re-fetch) — skip silently.
-                    await session.rollback()
+        rows = [
+            {
+                "exchange": kline.exchange,
+                "symbol": kline.symbol,
+                "timeframe": kline.timeframe,
+                "timestamp": kline.timestamp,
+                "open": kline.open,
+                "high": kline.high,
+                "low": kline.low,
+                "close": kline.close,
+                "volume": kline.volume,
+            }
+            for kline in klines
+        ]
 
+        async with async_session_maker() as session:
+            dialect = session.get_bind().dialect.name
+            conflict_columns = ("exchange", "symbol", "timeframe", "timestamp")
+            if dialect == "sqlite":
+                statement = sqlite_insert(KlineModel).values(rows).on_conflict_do_nothing(
+                    index_elements=conflict_columns
+                )
+            elif dialect == "postgresql":
+                statement = postgresql_insert(KlineModel).values(rows).on_conflict_do_nothing(
+                    index_elements=conflict_columns
+                )
+            else:
+                # The supported deployments are SQLite and PostgreSQL. Keep a
+                # portable bulk path for other engines; their unique constraint
+                # still protects integrity, even if duplicate retries surface.
+                statement = insert(KlineModel).values(rows)
+            result = await session.execute(statement)
             await session.commit()
-            return count
+            rowcount = result.rowcount
+            return len(rows) if rowcount is None or rowcount < 0 else int(rowcount)
 
     async def save_klines_to_parquet(
         self,

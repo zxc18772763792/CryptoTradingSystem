@@ -7,10 +7,13 @@ from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from core.data.data_storage import DataStorage
 from core.data.parquet_lock import ParquetPartitionLockTimeout, parquet_partition_lock
 from core.data.path_utils import canonical_symbol_dir
+from config.database import Kline as KlineModel
 from core.exchanges.base_exchange import Kline
 
 data_storage_module = importlib.import_module("core.data.data_storage")
@@ -121,6 +124,36 @@ def test_initialize_only_bootstraps_db_once(tmp_path: Path, monkeypatch):
     asyncio.run(storage.initialize())
 
     assert init_db_mock.await_count == 1
+
+
+def test_save_klines_to_db_batches_and_ignores_duplicates(tmp_path: Path, monkeypatch):
+    """A repeated live refresh should be one bulk insert, not N flushes."""
+    db_path = tmp_path / "klines.sqlite"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(data_storage_module, "async_session_maker", sessions)
+
+    async def _run() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(KlineModel.metadata.create_all)
+        storage = DataStorage()
+        bars = [
+            Kline(
+                exchange="binance", symbol="ETH/USDT", timeframe="1m",
+                timestamp=datetime(2026, 1, 1, 0, minute, tzinfo=timezone.utc),
+                open=100.0 + minute, high=101.0 + minute, low=99.0 + minute,
+                close=100.5 + minute, volume=10.0,
+            )
+            for minute in range(3)
+        ]
+        assert await storage.save_klines_to_db(bars) == 3
+        assert await storage.save_klines_to_db(bars) == 0
+        async with sessions() as session:
+            rows = (await session.execute(select(KlineModel))).scalars().all()
+        assert len(rows) == 3
+        await engine.dispose()
+
+    asyncio.run(_run())
 
 
 def test_save_klines_to_parquet_writes_incremental_daily_parts(tmp_path: Path):

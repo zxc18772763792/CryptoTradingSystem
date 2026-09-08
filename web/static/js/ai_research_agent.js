@@ -33,6 +33,9 @@
   let lastScorecardSnapshot = null;
   let statusInFlight = null;
   let governanceInFlight = null;
+  let journalInFlight = null;
+  let reviewInFlight = null;
+  let detailRefreshInFlight = null;
   let lastGovernanceLoadedAt = 0;
   let lastJournalLoadedAt = 0;
   let lastReviewLoadedAt = 0;
@@ -1133,7 +1136,7 @@
     if (!banner) {
       banner = document.createElement('div');
       banner.id = 'ai-agent-operating-mode-banner';
-      banner.style.cssText = 'margin:0 0 12px;padding:10px 12px;border:1px solid rgba(94,200,255,.24);background:rgba(94,200,255,.08);border-radius:8px;color:#d8e7ff;font-size:12px;';
+      banner.className = 'ai-agent-operating-mode-banner';
       card.parentElement?.insertBefore(banner, card);
     }
     if (errorText) {
@@ -1319,6 +1322,25 @@
       ? eligibility.selected.reason_codes.map((item) => String(item || '').trim()).filter(Boolean)
       : [];
     return selectedCodes.length ? selectedCodes.slice(0, 4).join(' / ') : '当前没有 eligibility reason code';
+  }
+
+  function runAgentButtonAction(buttonId, action, busyText = '刷新中...') {
+    const button = document.getElementById(buttonId);
+    if (button?.disabled) return Promise.resolve(null);
+    const label = button?.textContent || '';
+    if (button) {
+      button.disabled = true;
+      button.textContent = busyText;
+      normalizeElementText(button);
+    }
+    return Promise.resolve()
+      .then(action)
+      .finally(() => {
+        if (!button) return;
+        button.disabled = false;
+        button.textContent = label;
+        normalizeElementText(button);
+      });
   }
 
   function updateAgentSymbolModeVisibility() {
@@ -2010,8 +2032,10 @@
 
   async function loadAgentJournal() {
     const el = document.getElementById('ai-agent-journal');
-    if (!el) return;
-    try {
+    if (!el) return null;
+    if (journalInFlight) return journalInFlight;
+    const task = (async () => {
+      try {
       const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`, { timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
       lastJournalLoadedAt = Date.now();
       const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
@@ -2058,8 +2082,15 @@
           </div>
         `;
       }).join('');
-    } catch (_) {
-      el.innerHTML = '<div class="ai-agent-empty">日志加载失败</div>';
+      } catch (_) {
+        el.innerHTML = '<div class="ai-agent-empty">日志加载失败</div>';
+      }
+    })();
+    journalInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (journalInFlight === task) journalInFlight = null;
     }
   }
 
@@ -2323,9 +2354,11 @@
     const historyMetaEl = document.getElementById('ai-agent-review-history-meta');
     const listEl = document.getElementById('ai-agent-review');
     if (!summaryEl || !listEl) return null;
+    if (reviewInFlight) return reviewInFlight;
     const requestId = ++reviewRequestSeq;
-    renderAgentReviewLoading();
-    try {
+    const task = (async () => {
+      renderAgentReviewLoading();
+      try {
       const response = await withTimeout(
         rootApi(`${AGENT_REVIEW_API}?limit=12`, { timeoutMs: AGENT_REVIEW_TIMEOUT_MS }),
         AGENT_REVIEW_TIMEOUT_MS + 500,
@@ -2335,11 +2368,38 @@
       lastReviewLoadedAt = Date.now();
       renderAgentReview(response || {});
       return response;
-    } catch (err) {
-      if (requestId !== reviewRequestSeq) return null;
-      renderAgentReviewError(err?.message || '复盘数据加载失败');
-      return null;
+      } catch (err) {
+        if (requestId !== reviewRequestSeq) return null;
+        renderAgentReviewError(err?.message || '复盘数据加载失败');
+        return null;
+      }
+    })();
+    reviewInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (reviewInFlight === task) reviewInFlight = null;
     }
+  }
+
+  function scheduleAgentDetails(options = {}) {
+    if (!isAgentTabActive()) return null;
+    if (detailRefreshInFlight) return detailRefreshInFlight;
+    const force = options.force === true;
+    const notifyOnError = options.notifyOnError === true;
+    const now = Date.now();
+    const shouldGovernance = force || !lastGovernanceLoadedAt || now - lastGovernanceLoadedAt > AGENT_GOVERNANCE_REFRESH_MS;
+    const shouldJournal = force || !lastJournalLoadedAt || now - lastJournalLoadedAt > AGENT_DETAIL_REFRESH_MS;
+    const shouldReview = force || !lastReviewLoadedAt || now - lastReviewLoadedAt > AGENT_DETAIL_REFRESH_MS;
+    const task = (async () => {
+      if (shouldGovernance) await loadAgentGovernance({ notifyOnError, timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
+      if (shouldJournal && document.getElementById('ai-agent-journal')) await loadAgentJournal();
+      if (shouldReview && document.getElementById('ai-agent-review')) await loadAgentReview();
+    })().finally(() => {
+      if (detailRefreshInFlight === task) detailRefreshInFlight = null;
+    });
+    detailRefreshInFlight = task;
+    return task;
   }
 
   function shouldAutoRefreshAgentRanking(status = {}, cfg = {}) {
@@ -2356,8 +2416,10 @@
     const timeoutMs = Math.max(5000, Number(options.timeoutMs || (force ? 90000 : 20000)));
     const notifyOnError = options.notifyOnError !== false;
     const preserveExisting = options.preserveExisting !== false;
-    try {
-      const response = await rootApi(`${AGENT_SYMBOL_RANKING_API}?limit=10${force ? '&refresh=1' : ''}`, { timeoutMs });
+    if (rankingInFlight) return rankingInFlight;
+    const task = (async () => {
+      try {
+        const response = await rootApi(`${AGENT_SYMBOL_RANKING_API}?limit=10${force ? '&refresh=1' : ''}`, { timeoutMs });
       const cfg = {
         symbol_mode: response?.symbol_mode || document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
         symbol: response?.configured_symbol || document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
@@ -2382,18 +2444,25 @@
         };
       }
       renderAgentRanking(response || null, cfg, scanMeta);
-      return response;
-    } catch (err) {
-      if (notifyOnError) {
-        notify(`刷新选币排行失败: ${err.message}`, true);
+        return response;
+      } catch (err) {
+        if (notifyOnError) {
+          notify(`刷新选币排行失败: ${err.message}`, true);
+        }
+        if (!preserveExisting) {
+          renderAgentRanking(null, {
+            symbol_mode: document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
+            symbol: document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
+          });
+        }
+        return null;
       }
-      if (!preserveExisting) {
-        renderAgentRanking(null, {
-          symbol_mode: document.getElementById('ai-agent-symbol-mode')?.value || 'manual',
-          symbol: document.getElementById('ai-agent-manual-symbol')?.value || 'BTC/USDT',
-        });
-      }
-      return null;
+    })();
+    rankingInFlight = task;
+    try {
+      return await task;
+    } finally {
+      if (rankingInFlight === task) rankingInFlight = null;
     }
   }
 
@@ -2476,19 +2545,12 @@
       syncAgentConfigForm(cfg);
       notify('自动交易代理配置已保存');
       await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
-      if (String(document.getElementById('ai-agent-symbol-mode')?.value || 'manual').toLowerCase() === 'auto') {
+      if (symbolMode === 'auto') {
         lastRankingAutoRefreshAt = Date.now();
         loadAgentSymbolRanking(true, {
           timeoutMs: 90000,
-          notifyOnError: false,
-          preserveExisting: true,
-        }).catch(() => {});
-      }
-      if (symbolMode === 'auto') {
-        loadAgentSymbolRanking(true, {
-          timeoutMs: 90000,
           notifyOnError: true,
-          preserveExisting: false,
+          preserveExisting: true,
         }).catch(() => {});
       }
     } catch (err) {
@@ -2544,19 +2606,7 @@
     if (statusInFlight) {
       if (includeDetails) {
         return statusInFlight.then((response) => {
-          const now = Date.now();
-          if (
-            document.getElementById('ai-agent-journal')
-            && (forceDetails || !lastJournalLoadedAt || now - lastJournalLoadedAt > AGENT_DETAIL_REFRESH_MS)
-          ) {
-            loadAgentJournal().catch(() => {});
-          }
-          if (
-            document.getElementById('ai-agent-review')
-            && (forceDetails || !lastReviewLoadedAt || now - lastReviewLoadedAt > AGENT_DETAIL_REFRESH_MS)
-          ) {
-            loadAgentReview().catch(() => {});
-          }
+          scheduleAgentDetails({ force: forceDetails, notifyOnError }).catch(() => {});
           return response;
         });
       }
@@ -2584,31 +2634,8 @@
             preserveExisting: true,
           }).catch(() => {});
         }
-        const now = Date.now();
-        const shouldLoadGovernance = includeDetails && (
-          forceDetails
-          || !lastGovernanceLoadedAt
-          || now - lastGovernanceLoadedAt > AGENT_GOVERNANCE_REFRESH_MS
-        );
-        if (shouldLoadGovernance) {
-          loadAgentGovernance({
-            notifyOnError,
-            timeoutMs: Math.min(timeoutMs, AGENT_DETAIL_TIMEOUT_MS),
-          }).catch(() => {});
-        }
-        if (
-          includeDetails
-          && document.getElementById('ai-agent-journal')
-          && (forceDetails || !lastJournalLoadedAt || now - lastJournalLoadedAt > AGENT_DETAIL_REFRESH_MS)
-        ) {
-          loadAgentJournal().catch(() => {});
-        }
-        if (
-          includeDetails
-          && document.getElementById('ai-agent-review')
-          && (forceDetails || !lastReviewLoadedAt || now - lastReviewLoadedAt > AGENT_DETAIL_REFRESH_MS)
-        ) {
-          loadAgentReview().catch(() => {});
+        if (includeDetails) {
+          scheduleAgentDetails({ force: forceDetails, notifyOnError }).catch(() => {});
         }
         return response;
       } catch (err) {
@@ -2750,7 +2777,7 @@
       refresh: (options = {}) => loadAgentStatus(options),
       refreshJournal: () => loadAgentStatus({ includeDetails: true, notifyOnError: true, forceDetails: true }),
       refreshReview: () => loadAgentReview(),
-      refreshRanking: () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false }),
+      refreshRanking: () => runAgentButtonAction('ai-agent-ranking-refresh-btn', () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false }), '刷新中...'),
       refreshRisk: () => loadAgentGovernance({ notifyOnError: true, timeoutMs: AGENT_DETAIL_TIMEOUT_MS }),
       saveConfig: () => saveAgentConfig(),
       saveRiskConfig: () => saveAgentRiskConfig(),
@@ -2763,9 +2790,9 @@
     window.agentStart = agentStart;
     window.agentStop = agentStop;
     window.agentRunOnce = agentRunOnce;
-    window.agentRefreshJournal = () => loadAgentStatus({ includeDetails: true, notifyOnError: true, forceDetails: true }).catch(() => {});
+    window.agentRefreshJournal = () => loadAgentJournal().catch(() => {});
     window.agentRefreshReview = () => loadAgentReview().catch(() => {});
-    window.agentRefreshRanking = () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false });
+    window.agentRefreshRanking = () => runAgentButtonAction('ai-agent-ranking-refresh-btn', () => loadAgentSymbolRanking(true, { timeoutMs: 90000, notifyOnError: true, preserveExisting: false }), '刷新中...');
     window.agentSaveConfig = () => saveAgentConfig();
     window.agentRefreshRisk = () => loadAgentGovernance({ notifyOnError: true, timeoutMs: AGENT_DETAIL_TIMEOUT_MS }).catch(() => {});
     window.agentSaveRiskConfig = () => saveAgentRiskConfig();
@@ -2780,8 +2807,14 @@
     });
 
     document.addEventListener('click', (event) => {
-      if (event.target instanceof Element && event.target.closest('.tab-btn')) {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('.tab-btn')) {
         window.setTimeout(() => syncPollingState(), 0);
+      }
+      const commandLink = target?.closest('.ai-agent-command-link[href="#ai-agent-ranking-panel"]');
+      if (commandLink) {
+        const drawer = document.getElementById('ai-agent-settings-panel');
+        if (drawer) drawer.open = true;
       }
     });
     document.addEventListener('visibilitychange', syncPollingState);

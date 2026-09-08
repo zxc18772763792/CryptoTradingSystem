@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends
 
+from core.utils.asset_valuation import build_currency_usd_quotes
 from web.api import trading as trading_api
 from web.api.auth import require_sensitive_ops_permissions
 
@@ -502,7 +503,7 @@ async def _build_all_balances_payload():
                     price_candidates.append(ccy)
 
             if price_candidates:
-                quote_map = await trading_api.build_currency_usd_quotes(
+                quote_map = await build_currency_usd_quotes(
                     connector=connector,
                     currencies=price_candidates,
                     timeout_sec=trading_api._TICKER_FETCH_TIMEOUT_SEC,
@@ -633,7 +634,7 @@ async def _build_all_balances_payload():
                             ):
                                 price_candidates.append(ccy)
                         if price_candidates:
-                            quote_map = await trading_api.build_currency_usd_quotes(
+                            quote_map = await build_currency_usd_quotes(
                                 connector=connector,
                                 currencies=price_candidates,
                                 timeout_sec=trading_api._TICKER_FETCH_TIMEOUT_SEC,

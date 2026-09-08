@@ -12,6 +12,7 @@ param(
     [switch]$StartNewsLlmWorker,
     [switch]$StartPmWorker,
     [switch]$EnableAnalyticsHistory,
+    [switch]$RegisterLogonTrigger,
     [switch]$StartNow,
     [switch]$Quiet
 )
@@ -63,8 +64,12 @@ if ($EnableAnalyticsHistory) { $actionArgs += " -EnableAnalyticsHistory" }
 # Task-hosted processes are parented to the Schedule service and survive.
 #
 # Settings rationale:
-# - No triggers: on-demand only; reboot recovery stays an operator decision
-#   because a managed start can restore LIVE trading mode.
+# - Triggers: on-demand only by default. -RegisterLogonTrigger adds a delayed
+#   logon trigger so an unattended paper long-run survives a reboot. Callers
+#   must only pass it for a paper start: the action line carries the caller's
+#   own flags, so a live-mode task with a logon trigger would silently
+#   resurrect LIVE trading after a reboot. The delay lets the network and the
+#   local proxy come up before the stack starts reaching exchanges.
 # - ExecutionTimeLimit PT0S: the Windows default of PT72H would hard-kill the
 #   supervisor tree after 3 days and reintroduce the exact failure mode.
 # - Priority 4: task defaults run at below-normal CPU/IO priority, which the
@@ -76,11 +81,15 @@ $escapedExecutable = [System.Security.SecurityElement]::Escape($powershellExe)
 $escapedArguments = [System.Security.SecurityElement]::Escape($actionArgs)
 $escapedWorkingDirectory = [System.Security.SecurityElement]::Escape($ProjectRoot)
 $escapedSid = [System.Security.SecurityElement]::Escape($sid)
+$triggersXml = "<Triggers />"
+if ($RegisterLogonTrigger) {
+    $triggersXml = "<Triggers><LogonTrigger><Enabled>true</Enabled><UserId>$escapedSid</UserId><Delay>PT2M</Delay></LogonTrigger></Triggers>"
+}
 $xml = @"
 <?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Keeps the CryptoTradingSystem web stack alive outside any console job object.</Description></RegistrationInfo>
-  <Triggers />
+  $triggersXml
   <Principals><Principal id="Author"><UserId>$escapedSid</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>
@@ -137,6 +146,7 @@ $result = [pscustomobject]@{
     started_now = $startedNow
     state = [string]$task.State
     port = $Port
+    logon_trigger = [bool]$RegisterLogonTrigger
     supervisor_script = $supervisorScript
     python_executable = $PythonExecutable
 }

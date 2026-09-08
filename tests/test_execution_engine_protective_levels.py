@@ -222,6 +222,19 @@ def test_conditional_background_routing_and_paper_clear_use_stored_mode(monkeypa
     assert set(engine._conditional_orders) == {"live"}
 
 
+def test_paper_clear_resets_equity_to_configured_initial_value(monkeypatch):
+    engine = ExecutionEngine()
+    engine.set_paper_trading(True, sync_runtime_state=False)
+    engine._paper_equity_anchor = 12864.2465
+    engine._cached_equity = 12864.2465
+    monkeypatch.setattr(settings, "PAPER_INITIAL_EQUITY", 10000.0, raising=False)
+
+    engine.clear_paper_runtime()
+
+    assert engine._paper_equity_anchor == pytest.approx(10000.0)
+    assert engine._cached_equity == pytest.approx(10000.0)
+
+
 def test_auto_inject_buy_levels_from_policy_pct():
     engine = ExecutionEngine()
     signal = _make_signal(price=100.0)

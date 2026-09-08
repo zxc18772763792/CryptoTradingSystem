@@ -1629,12 +1629,15 @@
                                 <div class="ai-workspace-section-kicker">AI策略研究与增强</div>
                                 <div class="ai-workspace-section-title">从研究目标到提案、候选、验证与注册建议</div>
                             </div>
-                            <div class="ai-workspace-section-note">这里负责研究与增强，不直接替代自治代理下单。</div>
+                            <div class="ai-workspace-section-note">研究与增强独立运行；自治代理基于实时行情、聚合信号、风控和执行状态独立给出动作并尝试下单。</div>
                         </div>
-                        <div class="ai-research-overview-grid">
+                        <div class="ai-research-overview-grid ai-research-overview-compact">
                             <div class="card ai-research-hero-card ai-research-hero-card-slim">
                                 <div class="ai-top-intro-title">AI 研究工作台</div>
-                                <div class="ai-top-intro-subtitle">识别市场阶段 → 生成提案 → 运行研究 → 比较候选 → 注册建议。核心操作在下方候选工作区。</div>
+                                <div class="ai-top-intro-subtitle">围绕一个目标完成提案、研究、候选比较和注册建议。</div>
+                                <div class="ai-research-hero-steps" aria-label="研究流程">
+                                    <span class="is-active">1 目标</span><span>2 提案</span><span>3 研究</span><span>4 候选</span><span>5 注册</span>
+                                </div>
                             </div>
 
                             <div class="ai-research-command-stack">
@@ -1691,6 +1694,8 @@
                             </div>
                         </div>
 
+                        <details class="ai-research-secondary-drawer ai-review-drawer">
+                            <summary><strong>下单前 AI 复核</strong><span>策略库 / 候选执行链的可选增强</span></summary>
                         <div class="ai-review-panel">
                             <div class="ai-review-intro">
                                 <div class="ai-review-panel-head">
@@ -1748,6 +1753,7 @@
                                 </div>
                             </div>
                         </div>
+                        </details>
                 <div id="ai-flow-console" class="card ai-flow-console">
                     <div class="ai-flow-console-header">
                         <div>
@@ -1831,6 +1837,8 @@
                                     <input type="number" id="ai-planner-max-templates" min="1" max="12" value="5">
                                 </div>
                             </div>
+                            <details class="ai-planner-advanced-drawer">
+                                <summary><strong>高级研究参数</strong><span>研究方式、草案预算、回测预算、探索强度</span></summary>
                             <div class="form-row ai-planner-advanced-grid">
                                 <div class="form-group">
                                     <label>研究方式</label>
@@ -1856,6 +1864,7 @@
                                     <input type="number" id="ai-planner-exploration-bias" min="0" max="1" step="0.05" value="0.45">
                                 </div>
                             </div>
+                            </details>
                             <div class="form-group">
                                 <label>币种（逗号分隔）</label>
                                 <input type="text" id="ai-planner-symbols" value="BTC/USDT, ETH/USDT">
@@ -1962,7 +1971,7 @@
                             <div id="ai-approval-list"></div>
                         </div>
 
-                        <details class="card ai-sidebar-card" style="padding:0;overflow:hidden;">
+                        <details class="card ai-sidebar-card ai-research-secondary-drawer ai-data-drawer" style="padding:0;overflow:hidden;">
                             <summary style="list-style:none;cursor:pointer;padding:14px 16px;font-size:13px;font-weight:700;color:var(--text-main);display:flex;align-items:center;justify-content:space-between;">
                                 <span>🧭 研究数据诊断</span>
                                 <span style="font-size:11px;color:var(--text-faint);font-weight:400;">新闻 / 宏观 / 数据准备度</span>
@@ -2233,7 +2242,7 @@
                                                     <div class="ai-agent-section-title">币种模式与自动选币</div>
                                                     <div class="ai-agent-section-subtitle">固定币种时只盯一个 symbol；自动模式会扫描候选币池，优先选当前最值得跟踪的标的。</div>
                                                 </div>
-                                                <button class="btn btn-sm" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
+                                                <button class="btn btn-sm" id="ai-agent-ranking-refresh-btn" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
                                             </div>
                                             <div class="ai-agent-config-grid">
                                                 <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
@@ -3565,14 +3574,14 @@
         </div>
     </div>
 
-    <script charset="utf-8" src="{{ static_asset_url('js/altcoin_radar.js') }}"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/app.js') }}&bt_modes=20260525d"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/research_workbench.js') }}"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/ai_research.js') }}"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/ai_research_diagnostics.js') }}"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/ai_research_runtime.js') }}"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/ai_research_agent.js') }}"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/news_tab_runtime.js') }}"></script>
-    <script charset="utf-8" src="{{ static_asset_url('js/dashboard_unstructured_news.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/altcoin_radar.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/app.js') }}&bt_modes=20260525d"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/research_workbench.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research_diagnostics.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research_runtime.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research_agent.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/news_tab_runtime.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/dashboard_unstructured_news.js') }}"></script>
 </body>
 </html>
