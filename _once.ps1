@@ -134,6 +134,18 @@ function Resolve-PythonExecutable {
     throw "Cannot find the project Python environment. Run .\scripts\setup_local_env.ps1 from $PSScriptRoot."
 }
 
+function Normalize-ProcessEnvironment {
+    # PowerShell 7 on Windows can expose the inherited PATH variable twice
+    # (PATH and Path). Start-Process builds a case-insensitive environment map
+    # and then fails with "Key ... PATH ... Path". Keep the canonical Path entry
+    # and remove the duplicate alias before spawning web/workers/supervisor.
+    $pathValue = [string]$env:Path
+    if (-not [string]::IsNullOrWhiteSpace($pathValue)) {
+        Remove-Item Env:PATH -ErrorAction SilentlyContinue
+        $env:Path = $pathValue
+    }
+}
+
 function Import-DotEnvFile {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return }
@@ -374,6 +386,7 @@ function Invoke-NativeRuntimePrecheck {
 
 Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env")
 Import-DotEnvFile -Path (Join-Path $PSScriptRoot ".env.local")
+Normalize-ProcessEnvironment
 
 $ignoredEnvWorkerFlags = @()
 if ((Test-TruthyText ([string]$env:START_NEWS_WORKER)) -and (-not $StartNewsWorker)) {
