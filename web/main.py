@@ -2483,14 +2483,17 @@ app.include_router(create_ops_router())
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    response = templates.TemplateResponse("index.html", {"request": request})
+    # Starlette >=1.0 removed the legacy TemplateResponse(name, context) form; the
+    # request is now the first argument. Called the old way it treats the context
+    # dict as the template name and fails with "unhashable type: 'dict'".
+    response = templates.TemplateResponse(request, "index.html")
     set_local_ui_session_cookie(request, response)
     return response
 
 
 @app.get("/news", response_class=HTMLResponse)
 async def news_page(request: Request):
-    response = templates.TemplateResponse("news.html", {"request": request})
+    response = templates.TemplateResponse(request, "news.html")
     set_local_ui_session_cookie(request, response)
     return response
 
