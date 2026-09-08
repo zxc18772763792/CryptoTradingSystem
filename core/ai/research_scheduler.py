@@ -96,6 +96,9 @@ class ResearchScheduler:
         app = self._app
         ensure_ai_research_runtime_state(app)
 
+        from core.ai.autonomous_research_loop import get_research_loop
+        await get_research_loop(app).tick()
+
         # Old queued jobs must not be starved by newer drafts in the UI's top 50.
         all_proposals = app.state.ai_proposal_registry.list(limit=None)
         queued = [p for p in all_proposals if p.status == "research_queued"]

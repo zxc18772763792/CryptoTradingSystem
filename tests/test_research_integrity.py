@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 import asyncio
+import pytest
 
 from fastapi import FastAPI
 
@@ -47,6 +48,19 @@ def test_template_planner_does_not_claim_llm_use():
     assert output.proposal.source == "rule"
     assert output.proposal.metadata["generation_method"] == "rule_template"
     assert output.proposal.metadata["llm_used"] is False
+
+
+def test_mixed_research_preserves_both_preferred_families():
+    from core.ai.research_planner import _ensure_family_diversity
+
+    templates = ["MAStrategy", "EMAStrategy", "ADXTrendStrategy", "AroonStrategy", "MACDStrategy"]
+    selected = _ensure_family_diversity(templates, "mixed", 5)
+    assert len(selected) == len(set(selected)) == 5
+    assert "MLXGBoostStrategy" in selected
+    assert "MarketSentimentStrategy" in selected
+    assert selected[:3] == templates[:3]
+    assert len(_ensure_family_diversity(templates, "mixed", 1)) == 1
+    assert _ensure_family_diversity(templates, "mixed", 0) == []
 
 
 def test_orphan_research_strategy_cannot_restore():
@@ -99,3 +113,59 @@ def test_quarantine_follows_fixture_links_but_preserves_real_ma():
     repeated, second_report = quarantine_plan(cleaned)
     assert repeated == cleaned
     assert all(row["quarantined"] == 0 for row in second_report.values())
+
+
+def test_funding_warm_keeps_event_loop_responsive(monkeypatch):
+    import threading
+    import pandas as pd
+    from web.api import ai_research
+
+    heartbeat = threading.Event()
+    observed = []
+
+    def slow_fetch(*args, **kwargs):
+        observed.append(heartbeat.wait(timeout=1))
+        return pd.Series(dtype=float)
+
+    monkeypatch.setattr(ai_research, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_research, "FundingRateProvider", lambda config: SimpleNamespace(ensure_history=slow_fetch))
+    monkeypatch.setattr(ai_research, "_serialize_funding_cache", lambda *args, **kwargs: {})
+
+    async def run():
+        async def tick():
+            await asyncio.sleep(0.01)
+            heartbeat.set()
+        result, _ = await asyncio.gather(
+            ai_research.warm_ai_funding_cache(SimpleNamespace(app=FastAPI()), ai_research.AIFundingWarmRequest()),
+            tick(),
+        )
+        assert result["warmed"] is False
+
+    asyncio.run(run())
+    assert observed == [True]
+
+
+@pytest.mark.parametrize("age_hours, expected_health, ready", [
+    (None, "missing", False),
+    (72, "stale", False),
+    (8, "healthy", True),
+])
+def test_funding_warm_reports_data_freshness(monkeypatch, tmp_path, age_hours, expected_health, ready):
+    import pandas as pd
+    from web.api import ai_research
+
+    series = pd.Series(dtype=float) if age_hours is None else pd.Series(
+        [0.0001], index=[pd.Timestamp.now(tz="UTC") - pd.Timedelta(hours=age_hours)],
+    )
+    provider = SimpleNamespace(
+        ensure_history=lambda *args, **kwargs: series,
+        _cache_path=lambda *args, **kwargs: tmp_path / "funding.parquet",
+    )
+    monkeypatch.setattr(ai_research, "ensure_ai_research_runtime_state", lambda app: None)
+    monkeypatch.setattr(ai_research, "FundingRateProvider", lambda config: provider)
+    result = asyncio.run(ai_research.warm_ai_funding_cache(
+        SimpleNamespace(app=FastAPI()), ai_research.AIFundingWarmRequest(),
+    ))
+    assert result["warmed"] is ready
+    assert result["funding"]["ready"] is ready
+    assert result["funding"]["health"] == expected_health

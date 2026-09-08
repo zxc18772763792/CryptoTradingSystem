@@ -1445,6 +1445,7 @@ def _serialize_funding_cache(provider: FundingRateProvider, *, exchange: str, sy
     path = provider._cache_path(symbol, exchange=exchange)  # noqa: SLF001
     rows = int(len(series)) if series is not None else 0
     latest_rate = None
+    age_sec = None
     coverage = {"start": None, "end": None}
     if rows > 0:
         try:
@@ -1453,9 +1454,14 @@ def _serialize_funding_cache(provider: FundingRateProvider, *, exchange: str, sy
                 "end": pd.Timestamp(series.index.max()).isoformat(),
             }
             latest_rate = float(series.iloc[-1])
+            latest_ts = pd.Timestamp(series.index.max())
+            latest_ts = latest_ts.tz_localize("UTC") if latest_ts.tzinfo is None else latest_ts.tz_convert("UTC")
+            age_sec = max(0.0, (pd.Timestamp.now(tz="UTC") - latest_ts).total_seconds())
         except Exception:
             coverage = {"start": None, "end": None}
             latest_rate = None
+    max_age_sec = 36 * 3600
+    health = "missing" if rows <= 0 else ("unknown" if age_sec is None else ("stale" if age_sec > max_age_sec else "healthy"))
     return {
         "exchange": exchange,
         "symbol": symbol,
@@ -1464,6 +1470,10 @@ def _serialize_funding_cache(provider: FundingRateProvider, *, exchange: str, sy
         "rows": rows,
         "latest_rate": latest_rate,
         "coverage": coverage,
+        "health": health,
+        "ready": health == "healthy",
+        "age_sec": age_sec,
+        "max_age_sec": max_age_sec,
         "storage": {
             "mode": "parquet",
             "description": "资金费率历史缓存写入本地 Parquet，研究回测直接读取",
@@ -3711,7 +3721,8 @@ async def warm_ai_funding_cache(request: Request, payload: AIFundingWarmRequest)
     requested_source = str(payload.source or "coinglass")
     provider = FundingRateProvider(FundingProviderConfig(exchange=exchange_norm, source=requested_source))
     try:
-        series = provider.ensure_history(
+        series = await asyncio.to_thread(
+            provider.ensure_history,
             symbol_norm,
             start_time=start_time,
             end_time=end_time,
@@ -3720,10 +3731,11 @@ async def warm_ai_funding_cache(request: Request, payload: AIFundingWarmRequest)
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"funding warm failed: {exc}") from exc
+    funding = _serialize_funding_cache(provider, exchange=exchange_norm, symbol=symbol_norm, series=series)
     return {
-        "warmed": True,
+        "warmed": bool(funding.get("ready")),
         "funding": {
-            **_serialize_funding_cache(provider, exchange=exchange_norm, symbol=symbol_norm, series=series),
+            **funding,
             "requested_days": int(payload.days),
             "source": requested_source,
         },
@@ -6193,9 +6205,34 @@ async def get_sources_health(force: bool = False):
 
 
 @router.get("/operating-mode")
-async def get_operating_mode():
+async def get_operating_mode(request: Request = None):
     """Return the authoritative AI/runtime operating-mode snapshot."""
-    return await _get_operating_mode_payload()
+    payload = await _get_operating_mode_payload()
+    if request is not None:
+        from core.ai.autonomous_research_loop import get_research_loop
+        loop = get_research_loop(request.app).status()
+        payload["research_planner"] = {**payload.get("research_planner", {}), "autonomous_loop": loop["config"]["enabled"], "loop": loop}
+    return payload
+
+
+@router.get("/research-loop")
+async def get_ai_research_loop(request: Request):
+    from core.ai.autonomous_research_loop import get_research_loop
+    return get_research_loop(request.app).status()
+
+
+@router.patch("/research-loop", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
+async def configure_ai_research_loop(request: Request, payload: Dict[str, Any]):
+    from core.ai.autonomous_research_loop import ResearchLoopConfig, get_research_loop
+    from pydantic import ValidationError
+    loop = get_research_loop(request.app)
+    if set(payload) - set(ResearchLoopConfig.model_fields):
+        raise HTTPException(status_code=422, detail="Unknown research loop configuration field")
+    try:
+        config = ResearchLoopConfig.model_validate({**loop.state["config"], **payload})
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return loop.configure(config)
 
 
 async def _build_operating_mode_payload() -> Dict[str, Any]:

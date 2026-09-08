@@ -191,13 +191,11 @@ def _ensure_family_diversity(templates: List[str], market_regime: str, max_templ
     elif regime in {"trend", "trending", "trend_up", "trend_down"}:
         preferred.append("MLXGBoostStrategy")
 
-    for name in reversed(preferred):
-        if name in selected:
-            continue
-        if len(selected) >= max_templates:
-            selected.pop()
-        selected.append(name)
-    return _dedupe_keep_order(selected)[:max_templates]
+    # Reserve all preferred slots together. Popping the last item for each
+    # insertion removed the preference added in the previous iteration.
+    preferred = _dedupe_keep_order(preferred)[:max_templates]
+    base = [name for name in selected if name not in preferred]
+    return base[:max(0, max_templates - len(preferred))] + preferred
 
 
 def _derive_required_features(strategy_templates: List[str], provided: List[str]) -> List[str]:

@@ -45,6 +45,8 @@ _DEFAULT_WORKER_SYMBOL_LIMIT = 3
 _DEFAULT_OVERVIEW_SYMBOL = "BTC/USDT"
 _STRUCTURED_SOURCE = "coinglass_proxy"
 _NON_MANUAL_DATASET_RESERVE = 3
+# Where the next budget-limited background sweep starts in COINGLASS_DEFAULT_DATASETS.
+_NON_MANUAL_DATASET_CURSOR = 0
 
 
 @dataclass
@@ -193,16 +195,28 @@ def _latest_payload_rows(dataset: str, symbol: str) -> List[Dict[str, Any]]:
     if frame.empty:
         return []
     latest_request_key = ""
-    if "source_ts" in frame.columns:
-        source_ts = pd.to_datetime(frame["source_ts"], utc=True, errors="coerce")
-        if not source_ts.dropna().empty:
-            latest_idx = source_ts.fillna(pd.Timestamp.min.tz_localize("UTC")).idxmax()
-            latest_request_key = str(frame.loc[latest_idx].get("request_key") or "")
-    if not latest_request_key and "ingested_at" in frame.columns:
-        ingested = pd.to_datetime(frame["ingested_at"], utc=True, errors="coerce")
-        if not ingested.dropna().empty:
-            latest_idx = ingested.fillna(pd.Timestamp.min.tz_localize("UTC")).idxmax()
-            latest_request_key = str(frame.loc[latest_idx].get("request_key") or "")
+    # Rank by upstream source_ts, falling back to a row's own ingest time when the
+    # dataset does not carry one. Several datasets only populate source_ts on error
+    # responses, and treating a missing source_ts as "oldest possible" let a
+    # months-old error payload shadow the batch fetched minutes ago.
+    ranked = None
+    source_ts = (
+        pd.to_datetime(frame["source_ts"], utc=True, errors="coerce")
+        if "source_ts" in frame.columns
+        else None
+    )
+    ingested = (
+        pd.to_datetime(frame["ingested_at"], utc=True, errors="coerce")
+        if "ingested_at" in frame.columns
+        else None
+    )
+    if source_ts is not None and ingested is not None:
+        ranked = source_ts.fillna(ingested)
+    else:
+        ranked = source_ts if source_ts is not None else ingested
+    if ranked is not None and not ranked.dropna().empty:
+        latest_idx = ranked.fillna(pd.Timestamp.min.tz_localize("UTC")).idxmax()
+        latest_request_key = str(frame.loc[latest_idx].get("request_key") or "")
     if not latest_request_key:
         latest_request_key = str(frame.iloc[-1].get("request_key") or "")
     if latest_request_key and "request_key" in frame.columns:
@@ -1247,6 +1261,26 @@ async def persist_market_structure_snapshot(snapshot: DerivativesSnapshot) -> No
         await session.commit()
 
 
+def _rotate_non_manual_datasets(datasets: Sequence[str], window: int) -> List[str]:
+    """Take `window` datasets, advancing the start position on every sweep.
+
+    The 10 req/min plan only affords a couple of datasets per background round.
+    Always slicing the head of COINGLASS_DEFAULT_DATASETS meant the open-interest
+    entries were refreshed every round while everything after them (funding,
+    taker, liquidation, long/short) was never reached. Rotating puts every
+    dataset on a bounded refresh cycle instead.
+    """
+    global _NON_MANUAL_DATASET_CURSOR
+    total = len(datasets)
+    if total <= 0:
+        return []
+    window = max(1, min(int(window), total))
+    start = _NON_MANUAL_DATASET_CURSOR % total
+    picked = [datasets[(start + offset) % total] for offset in range(window)]
+    _NON_MANUAL_DATASET_CURSOR = (start + window) % total
+    return picked
+
+
 async def update_coinglass_cache(
     *,
     symbols: Optional[Sequence[str]] = None,
@@ -1300,9 +1334,12 @@ async def update_coinglass_cache(
         if total_planned > effective_capacity:
             if effective_capacity < len(selected_symbols):
                 selected_symbols = selected_symbols[:effective_capacity]
-                selected_datasets = selected_datasets[:1]
+                selected_datasets = _rotate_non_manual_datasets(selected_datasets, 1)
             else:
-                selected_datasets = selected_datasets[: max(1, effective_capacity // max(1, len(selected_symbols)))]
+                selected_datasets = _rotate_non_manual_datasets(
+                    selected_datasets,
+                    max(1, effective_capacity // max(1, len(selected_symbols))),
+                )
             summary["symbols"] = selected_symbols
             summary["datasets"] = selected_datasets
             summary["stopped_early"] = True
@@ -1456,7 +1493,8 @@ async def update_coinglass_cache(
                     if degrade_due_to_budget:
                         stop_reason = error_text
                         break
-            snapshot = build_derivatives_snapshot(symbol)
+            # Reads every supported dataset parquet (tens of MB); keep it off the loop.
+            snapshot = await asyncio.to_thread(build_derivatives_snapshot, symbol)
             if snapshot is not None:
                 await persist_derivatives_snapshot(snapshot)
                 await persist_market_structure_snapshot(snapshot)
@@ -1503,6 +1541,7 @@ async def load_latest_derivatives_snapshot(symbol: str) -> Optional[Dict[str, An
                 select(AnalyticsDerivativesSnapshot)
                 .where(AnalyticsDerivativesSnapshot.symbol == normalized_symbol)
                 .order_by(AnalyticsDerivativesSnapshot.timestamp.desc())
+                .limit(1)
             )
         ).scalars().first()
     if row is None:

@@ -870,6 +870,38 @@ def test_latest_payload_rows_prefers_latest_source_request_and_filters_mismatche
     assert rows[0]["spread"] == 0.5
 
 
+def test_latest_payload_rows_ignores_stale_error_row_when_data_rows_lack_source_ts(monkeypatch):
+    # Real CoinGlass history datasets leave source_ts empty on data rows; only the
+    # error responses carry one. Ranking a missing source_ts as "oldest" let a
+    # months-old error payload win over the batch fetched minutes ago.
+    frame = pd.DataFrame(
+        [
+            {
+                "normalized_symbol": "BTC",
+                "request_key": "req-old-error",
+                "source_ts": "2026-04-18T13:31:06+00:00",
+                "ingested_at": "2026-04-18T13:31:06+00:00",
+                "exchange": "Binance",
+                "payload_json": '{"code":"400","msg":"The requested pair does not exist"}',
+            },
+            {
+                "normalized_symbol": "BTC",
+                "request_key": "req-fresh",
+                "source_ts": None,
+                "ingested_at": "2026-09-08T11:02:25+00:00",
+                "exchange": "Binance",
+                "payload_json": '{"long_short_ratio":1.27,"global_account_long_short_ratio":1.27}',
+            },
+        ]
+    )
+    monkeypatch.setattr(builder_module, "load_dataset_rows_for_symbol", lambda dataset, symbol: frame)
+
+    rows = builder_module._latest_payload_rows("global_long_short_account_ratio_history", "BTC")
+
+    assert len(rows) == 1
+    assert rows[0]["long_short_ratio"] == 1.27
+
+
 def test_build_coinglass_overview_prefers_snapshot_active_datasets(monkeypatch):
     async def fake_load_snapshot(symbol: str):
         return {

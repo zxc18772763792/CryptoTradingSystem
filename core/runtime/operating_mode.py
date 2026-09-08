@@ -183,14 +183,21 @@ def validate_operating_mode(
         ready = item.get("ready")
         stale = _truthy(item.get("stale"))
         if status in {"missing", "failed", "degraded", "stale"} or stale or _explicit_false(ready):
-            degradations.append(
-                _degradation(
-                    f"source_{str(item.get('key') or item.get('source') or 'unknown')}",
-                    "Source degraded",
-                    _source_issue_detail(item, status),
-                    "warn" if status != "failed" else "danger",
-                )
+            degradation = _degradation(
+                f"source_{str(item.get('key') or item.get('source') or 'unknown')}",
+                "Source degraded",
+                _source_issue_detail(item, status),
+                "warn" if status != "failed" else "danger",
             )
+            degradation.update({
+                "source_label": str(item.get("label") or item.get("key") or ""),
+                "health": status,
+                "support_level": item.get("support_level"),
+                "configured": item.get("configured"),
+                "last_updated": item.get("last_updated"),
+                "recommendation": str(item.get("recommendation") or ""),
+            })
+            degradations.append(degradation)
 
     if bool(getattr(settings, "AI_MARKET_STATE_RISK_POSTURE_ENABLED", True)) and not bool(
         getattr(settings, "AI_MARKET_STATE_RISK_POSTURE_LIVE_ENFORCE", False)
@@ -210,8 +217,8 @@ def validate_operating_mode(
         governance_enabled=bool(getattr(settings, "GOVERNANCE_ENABLED", False)),
         ai_live_decision=live_cfg,
         research_planner={
-            "configured_model": str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.5"),
-            "configured_backup_model": str(getattr(settings, "OPENAI_BACKUP_MODEL", "") or ""),
+            "configured_model": settings.AI_RESEARCH_MODEL,
+            "configured_backup_model": settings.AI_RESEARCH_BACKUP_MODEL,
             "autonomous_loop": False,
         },
         autonomous_agent=agent_cfg,

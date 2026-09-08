@@ -6304,6 +6304,7 @@ ${confirmHint}`,
       const live = data?.ai_live_decision || {};
       const agent = data?.autonomous_agent || {};
       const deri = data?.coinglass || {};
+      const researchLoop = data?.research_planner?.loop;
       banner.innerHTML = `
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
           <strong>运行模式</strong>
@@ -6315,12 +6316,29 @@ ${confirmHint}`,
           <span style="color:${actionableDegradations.length ? '#f59e0b' : '#20bf78'};">降级=${actionableDegradations.length}</span>
           ${advisoryCount ? `<span>提示=${advisoryCount}</span>` : ''}
         </div>
-        <div style="margin-top:6px;">更新于 ${esc(data?.generated_at || '--')} · 研究由提案触发；自动替代任务使用规则模板。</div>
+        <div style="margin-top:6px;">更新于 ${esc(data?.generated_at || '--')} · 自动替代任务使用规则模板；研究循环使用 LLM 假设与候选反馈。</div>
+        ${researchLoop ? `<div style="margin-top:8px;">研究循环：${researchLoop.config.enabled ? '已启用' : '已暂停'} · ${esc(researchLoop.status)} · 今日 ${researchLoop.attempts_today}/${researchLoop.config.max_rounds_per_day} 轮 · 间隔 ${Math.round(researchLoop.config.interval_seconds / 60)} 分钟 · 每轮最多 ${researchLoop.config.max_backtest_runs} 次回测
+          <button id="ai-research-loop-toggle">${researchLoop.config.enabled ? '暂停研究循环' : '启用研究循环'}</button>
+          <div>下一轮：${esc(researchLoop.next_run_at || '等待调度')} · 自动生成提案并回测；候选部署由你确认。</div>
+          ${researchLoop.last_error ? `<div style="color:#f59e0b;">最近失败：${esc(researchLoop.last_error)}</div>` : ''}
+          ${researchLoop.rounds?.length ? `<div>最近一轮：${esc(researchLoop.rounds[researchLoop.rounds.length - 1].status)} · ${esc(researchLoop.rounds[researchLoop.rounds.length - 1].proposal_id || '')}</div>` : ''}
+        </div>` : ''}
         <details style="margin-top:6px;">
           <summary>降级明细（${actionableDegradations.length}）与提示（${advisoryCount}）</summary>
           <div>表示运行配置或数据源健康异常，不是失败策略数量。</div>
-          ${degradations.map(item => `<div style="padding:5px 0;border-top:1px solid #263a56;">${esc(item.severity || 'warn')} · ${esc(item.code || '--')} · ${esc(item.label || '--')}<br>${esc(item.detail || '暂无详情')}</div>`).join('') || '<div>暂无降级。</div>'}
+          ${degradations.map(item => `<div style="padding:5px 0;border-top:1px solid #263a56;">${esc(item.source_label || item.label || '--')} · ${esc(item.health || item.severity || 'warn')}${item.configured === false ? ' · 未配置或未启用' : ''}${item.support_level === 'optional' || item.support_level === 'enhancement' ? ' · 可选增强源' : ''}<br>${esc(item.detail || '暂无详情')}${item.last_updated ? `<br>数据时间：${esc(item.last_updated)}` : ''}${item.recommendation ? `<br>处理建议：${esc(item.recommendation)}` : ''}<br><small>${esc(item.code || '--')}</small></div>`).join('') || '<div>暂无降级。</div>'}
         </details>`;
+      banner.querySelector('#ai-research-loop-toggle')?.addEventListener('click', async (event) => {
+        event.target.disabled = true;
+        try {
+          await aiApi('/research-loop', { method: 'PATCH', body: JSON.stringify({enabled: !researchLoop.config.enabled}) });
+          state.operatingModeLoadedAt = 0;
+          await refreshOperatingModeBanner({force: true});
+        } catch (err) {
+          notify(`研究循环设置失败：${err.message}`, true);
+          event.target.disabled = false;
+        }
+      });
       return data;
     })()
       .catch((err) => {
