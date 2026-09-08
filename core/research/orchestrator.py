@@ -379,6 +379,13 @@ def _recover_stale_jobs_on_startup(app: FastAPI) -> None:
         for proposal in proposals:
             if str(proposal.status) not in stale_states:
                 continue
+            if proposal.status == "research_queued" and proposal.metadata.get("created_by") == "cusum_auto" and not any(
+                job.get("proposal_id") == proposal.proposal_id
+                for job in (getattr(app.state, "research_jobs", {}) or {}).values()
+            ):
+                # A watcher proposal waiting for its first scheduler tick has no
+                # interrupted job to recover. Keep it queued across restarts.
+                continue
             old_status = str(proposal.status)
             proposal.status = "draft"  # type: ignore[assignment]
             proposal.metadata["last_research_error"] = recovery_reason
@@ -696,8 +703,8 @@ def create_manual_proposal(
         actor=actor,
     ).proposal
     source_value = str(source or "ai").strip().lower()
-    if source_value not in {"ai", "human", "hybrid"}:
-        source_value = "ai"
+    if source_value not in {"human", "hybrid", "rule"}:
+        source_value = "rule"
     proposal = ResearchProposal(
         proposal_id=f"proposal-{int(now.timestamp())}-{secrets.token_hex(4)}",
         created_at=now,
@@ -717,7 +724,7 @@ def create_manual_proposal(
         planner_version="planner_v1" if source_value == "ai" else "manual_v1",
         origin_context={},
         notes=_dedupe_keep_order(notes),
-        metadata={"created_by": actor, **dict(metadata or {})},
+        metadata={"created_by": actor, **dict(metadata or {}), "generation_method": "rule_template", "llm_used": False},
     )
     proposal_id, display_name, seq, day_key = _next_proposal_identity(app, proposal.thesis)
     proposal.proposal_id = proposal_id

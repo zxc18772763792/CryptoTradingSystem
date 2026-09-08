@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from loguru import logger
@@ -103,6 +104,20 @@ def _row_sort_time(row: Any) -> datetime:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
     return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _research_restore_issue(payload: Dict[str, Any], candidates: Dict[str, Any]) -> Optional[str]:
+    metadata = dict(payload.get("metadata") or {})
+    if metadata.get("source") != "ai_research" and metadata.get("owner_group") != "ai_research":
+        return None
+    candidate = candidates.get(str(metadata.get("candidate_id") or ""))
+    if candidate is None:
+        return "ai_research_candidate_missing"
+    if candidate.status not in {"paper_running", "shadow_running", "live_candidate", "live_running"}:
+        return "ai_research_candidate_not_running"
+    if metadata.get("proposal_id") != candidate.proposal_id or metadata.get("experiment_id") != candidate.experiment_id:
+        return "ai_research_lineage_mismatch"
+    return None
 
 
 def _select_ai_runtime_restore_winners(rows: List[Any]) -> Dict[str, str]:
@@ -208,9 +223,24 @@ async def restore_strategies_from_db(
             "skipped": [{"name": "*", "reason": str(e)}],
         }
 
-    ai_runtime_winners = _select_ai_runtime_restore_winners(rows)
+    from core.research.experiment_registry import CandidateRegistry
 
+    candidate_path = (Path(settings.DATA_STORAGE_PATH).parent / "research" / "ai" / "candidates.json").resolve()
+    try:
+        candidates = {candidate.candidate_id: candidate for candidate in CandidateRegistry(candidate_path).list(limit=None)}
+    except Exception as exc:
+        logger.warning(f"AI candidate registry unavailable during restore: {exc}")
+        candidates = {}
+    eligible_rows = []
     for row in rows:
+        issue = _research_restore_issue(dict(row.params or {}), candidates)
+        if issue:
+            skipped.append({"name": str(row.name), "reason": issue})
+        else:
+            eligible_rows.append(row)
+    ai_runtime_winners = _select_ai_runtime_restore_winners(eligible_rows)
+
+    for row in eligible_rows:
         name = str(row.name)
         payload = dict(row.params or {})
         strategy_type = str(row.type or "")

@@ -317,6 +317,7 @@
         proposalResearchThesis(proposal) || inputs.goal || '等待输入研究目标',
         [
           metric('模式', researchModeText(effectiveResearchMode)),
+          metric('来源', proposal?.metadata?.llm_used || Object.keys(proposal?.metadata?.llm_research_output || {}).length ? 'LLM 输出指导' : '规则模板 / 无 LLM 记录'),
           metric('市场', inputs.regime || 'mixed'),
           metric('模板上限', inputs.maxTemplates),
         ],

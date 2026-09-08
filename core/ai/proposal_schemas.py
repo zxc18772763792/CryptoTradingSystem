@@ -20,7 +20,7 @@ ProposalState = Literal[
     "retired",
 ]
 
-ProposalSource = Literal["ai", "human", "hybrid"]
+ProposalSource = Literal["ai", "human", "hybrid", "rule"]
 ValidationDecision = Literal["reject", "paper", "shadow", "live_candidate"]
 ResearchMode = Literal["template", "hybrid", "autonomous_draft"]
 StrategyDraftMode = Literal["template_seed", "hybrid_seed", "dsl_seed"]

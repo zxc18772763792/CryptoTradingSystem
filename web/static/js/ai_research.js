@@ -2023,7 +2023,8 @@
 
     return `
       <div style="margin-bottom:14px;">
-        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">自主研究上下文</div>
+        <div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">研究来源与上下文</div>
+        <div style="margin-bottom:8px;">${proposalInfo?.metadata?.llm_used === true || Object.keys(llmResearchOutput).length ? '使用 LLM 研究输出指导规划' : '规则模板规划 · 无 LLM 研究输出记录'} · 实际模板：${esc(toArray(proposalInfo?.strategy_templates).join('、') || '--')}</div>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px;">
           <div style="text-align:center;padding:8px;background:var(--border-subtle);border-radius:4px;">
             <div style="font-size:10px;color:var(--text-faint);">研究模式</div>
@@ -6307,12 +6308,19 @@ ${confirmHint}`,
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
           <strong>运行模式</strong>
           <span>交易=${esc(data?.trading_mode || '--')}</span>
-          <span>AI=${esc(live.mode || '--')} / ${esc(live.provider || '--')}</span>
+          <span>下单前复核=${esc(live.mode || '--')} / ${esc(live.provider || '--')}</span>
+          <span>研究配置模型=${esc(data?.research_planner?.configured_model || '--')}（按需调用）</span>
           <span>代理=${esc(agent.mode || '--')} / ${agent.allow_live ? '允许实盘' : '仅纸盘'}</span>
           <span>衍生品=${deri.live_gating_enabled ? '实盘门控' : '仅影子'}</span>
           <span style="color:${actionableDegradations.length ? '#f59e0b' : '#20bf78'};">降级=${actionableDegradations.length}</span>
           ${advisoryCount ? `<span>提示=${advisoryCount}</span>` : ''}
-        </div>`;
+        </div>
+        <div style="margin-top:6px;">更新于 ${esc(data?.generated_at || '--')} · 研究由提案触发；自动替代任务使用规则模板。</div>
+        <details style="margin-top:6px;">
+          <summary>降级明细（${actionableDegradations.length}）与提示（${advisoryCount}）</summary>
+          <div>表示运行配置或数据源健康异常，不是失败策略数量。</div>
+          ${degradations.map(item => `<div style="padding:5px 0;border-top:1px solid #263a56;">${esc(item.severity || 'warn')} · ${esc(item.code || '--')} · ${esc(item.label || '--')}<br>${esc(item.detail || '暂无详情')}</div>`).join('') || '<div>暂无降级。</div>'}
+        </details>`;
       return data;
     })()
       .catch((err) => {
@@ -6321,6 +6329,14 @@ ${confirmHint}`,
           banner.textContent = message;
         } else {
           banner.dataset.refreshError = message;
+          let stale = banner.querySelector('[data-operating-stale]');
+          if (!stale) {
+            stale = document.createElement('div');
+            stale.setAttribute('data-operating-stale', 'true');
+            stale.style.color = '#e05260';
+            banner.prepend(stale);
+          }
+          stale.textContent = `数据已过期，以下为上次成功快照。${message}`;
         }
         return null;
       })

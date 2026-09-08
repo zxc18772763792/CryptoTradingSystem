@@ -15,6 +15,7 @@ class OperatingModeSnapshot(BaseModel):
     decision_mode: str = "shadow"
     governance_enabled: bool = False
     ai_live_decision: Dict[str, Any] = Field(default_factory=dict)
+    research_planner: Dict[str, Any] = Field(default_factory=dict)
     autonomous_agent: Dict[str, Any] = Field(default_factory=dict)
     coinglass: Dict[str, Any] = Field(default_factory=dict)
     source_health: Dict[str, Any] = Field(default_factory=dict)
@@ -208,6 +209,11 @@ def validate_operating_mode(
         decision_mode=decision_mode,
         governance_enabled=bool(getattr(settings, "GOVERNANCE_ENABLED", False)),
         ai_live_decision=live_cfg,
+        research_planner={
+            "configured_model": str(getattr(settings, "OPENAI_MODEL", "") or "gpt-5.5"),
+            "configured_backup_model": str(getattr(settings, "OPENAI_BACKUP_MODEL", "") or ""),
+            "autonomous_loop": False,
+        },
         autonomous_agent=agent_cfg,
         coinglass={
             "live_gating_enabled": bool(getattr(settings, "COINGLASS_LIVE_GATING_ENABLED", False)),

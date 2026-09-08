@@ -1457,13 +1457,21 @@ def test_auto_draft_replacement_creates_proposal(monkeypatch):
             "actor": kwargs.get("actor", ""),
             "source_candidate": (kwargs.get("metadata") or {}).get("parent_candidate_id"),
         })
-        return SimpleNamespace(proposal_id="prop-auto-draft")
+        # `status` is required: _auto_draft_replacement now routes the new proposal
+        # through transition_proposal(), which reads str(proposal.status).
+        return SimpleNamespace(proposal_id="prop-auto-draft", status="draft")
 
+    # Mirrors core.research.experiment_schemas.StrategyCandidate, which declares
+    # singular `symbol` / `timeframe`. This stub previously used the plural forms;
+    # because the old production code also read `candidate.symbols`, both sides
+    # shared the same mistake and the test passed while the real code path fell
+    # through to its "BTC/USDT" default for every candidate. Keep this aligned with
+    # the schema so the stub cannot mask a bug again.
     candidate = SimpleNamespace(
         candidate_id="cand-cusum-c",
         strategy="BollingerStrategy",
-        symbols=["ETH/USDT"],
-        timeframes=["15m", "1h"],
+        symbol="ETH/USDT",
+        timeframe="15m",
         status="paper_running",
     )
     decay_result = {"decay_pct": 14.2, "cusum_low": -3.1}
