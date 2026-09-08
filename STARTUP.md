@@ -60,3 +60,26 @@
 - Supervisor 日志：`logs\web_supervisor.log`
 - 环境检查：`.\scripts\setup_local_env.ps1 -SkipRequirements`
 - 服务检查：`.\web.bat status`
+
+### 启动即失败（服务根本起不来）
+
+先跑环境检查，它区分"必需"和"可选"两类依赖：
+
+```powershell
+& F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe scripts\verify_env.py
+```
+
+- 报 **MISSING REQUIRED MODULES** → 服务无法启动，按提示装依赖后重试。
+  这类模块是启动路径上的无保护顶层 import（例如 `web/main.py:23` 的 `Jinja2Templates`
+  依赖 `jinja2`，而它是 FastAPI 的可选 extra，pip 不会自动带入）。
+- 只报 `[WARN] optional` → 服务能起，但对应功能已静默降级，见下。
+
+### 功能"没反应"但服务是好的
+
+可选依赖缺失不会阻止启动，只会安静地削掉功能。最容易误诊的是 ML：
+缺 `xgboost` / `scikit-learn` 时，ML 信号恒为 FLAT、权重归零，
+而聚合器**照常输出交易决策**，提示只有启动时的一行 WARNING
+（`core/ai/ml_signal.py`）。排查"模型为什么不出信号"时先看这里。
+
+`verify_env.py` 会列出所有缺失的可选依赖及其影响；原生包（ta-lib、matplotlib、
+polars、asyncpg 等）请用 conda-forge 安装，不要用 pip，理由见 `AGENTS.md`。
