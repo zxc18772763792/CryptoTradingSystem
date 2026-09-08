@@ -77,6 +77,15 @@ Stop-Process -Id <PID> -Force
 .\web.bat start
 ```
 
+### `/readyz` 返回 503 但 Web 进程仍在启动
+
+`/readyz` 会等待交易所连接和实时行情新鲜度；网络受限时它可能暂时返回 503，而 `/livez` 已经正常。启动器会保留仍在运行且 `/livez` 正常的进程，并输出降级提示，不再误杀 Web 服务。可用以下命令确认页面可访问：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/ -UseBasicParsing
+.\web.bat status
+```
+
 - Web 日志：`logs\uvicorn_web_*.out.log`、`logs\uvicorn_web_*.err.log`
 - Supervisor 日志：`logs\web_supervisor.log`
 - 环境检查：`.\scripts\setup_local_env.ps1 -SkipRequirements`

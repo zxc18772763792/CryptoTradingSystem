@@ -587,6 +587,7 @@ Start-Sleep -Seconds 2
 
 $status = $null
 $health = $null
+$live = $null
 $healthTimeoutSec = if ($EnableAnalyticsHistory) { 18 } else { 12 }
 $statusTimeoutSec = if ($EnableAnalyticsHistory) { 15 } else { 8 }
 $pollIntervalMs = if ($EnableAnalyticsHistory) { 1200 } else { 800 }
@@ -627,6 +628,11 @@ while ((Get-Date) -lt $statusDeadline) {
     }
     catch {
         $lastProbeError = $_.Exception.Message
+        try {
+            $live = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/livez" -TimeoutSec 5
+        } catch {
+            $live = $null
+        }
         if ((Get-Date) -ge $healthDeadline) {
             break
         }
@@ -667,8 +673,16 @@ if ($proc.HasExited) {
     if ($StartAutonomousAgent) {
         Write-Host "Autonomous agent start skipped because the full runtime status endpoint was not ready yet." -ForegroundColor Yellow
     }
+} elseif ($live -and -not $proc.HasExited) {
+    Write-Host "Process started (PID=$($proc.Id)) and /livez is responding, but /readyz is still degraded (usually an exchange or market-data dependency). Keeping the service up; inspect status and logs." -ForegroundColor Yellow
+    if ($lastProbeError) {
+        Write-Host ("Last readiness probe: {0}" -f $lastProbeError) -ForegroundColor Yellow
+    }
+    if ($StartAutonomousAgent) {
+        Write-Host "Autonomous agent start skipped because readiness was not complete." -ForegroundColor Yellow
+    }
 } else {
-    Write-Host "Process started (PID=$($proc.Id)) but health endpoint is still warming up. Startup profile: $startupProfile." -ForegroundColor Yellow
+    Write-Host "Process started (PID=$($proc.Id)) but readiness is still warming up. Startup profile: $startupProfile." -ForegroundColor Yellow
     if ($lastProbeError) {
         Write-Host ("Last probe error: {0}" -f $lastProbeError) -ForegroundColor Yellow
     }
