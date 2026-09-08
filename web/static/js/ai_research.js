@@ -2389,8 +2389,7 @@
   function renderSignalMini() {
     const box = document.getElementById('ai-signal-mini');
     if (!box) return;
-    const selectedSymbol = String(document.getElementById('signal-symbol')?.value || '').trim();
-    const symbols = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, ...(selectedSymbol ? [selectedSymbol] : [])]));
+    const symbols = DEFAULT_SIGNAL_SYMBOLS;
     box.innerHTML = normalizeUiText(symbols.map((sym) => {
       const data = state.latestSignals[sym] || null;
       const hasData = !!(data && (data.timestamp || data.direction || data.confidence != null));
@@ -2423,12 +2422,13 @@
     normalizeDomText(box);
   }
 
-  async function loadSignal(symbol) {
+  async function loadSignal() {
     if (state.signalLoading) return;
     state.signalLoading = true;
     const statusEl = document.getElementById('signal-status');
-    const selectedSymbol = String(symbol || document.getElementById('signal-symbol')?.value || 'BTC/USDT').trim() || 'BTC/USDT';
-    const watchlist = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));
+    // Fixed five-asset refresh replaces the former custom-symbol expression:
+    // const watchlist = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));
+    const watchlist = DEFAULT_SIGNAL_SYMBOLS;
     if (statusEl) statusEl.textContent = `刷新 ${watchlist.length} 个币种...`;
     renderSignalMini();
     try {
@@ -6070,8 +6070,6 @@ ${confirmHint}`,
     /* 信号鍒锋柊 */
     document.getElementById('signal-refresh-btn')?.addEventListener('click', () =>
       loadSignal().catch(err => notify(`\u4fe1\u53f7\u5931\u8d25: ${err.message}`, true)));
-    document.getElementById('signal-symbol')?.addEventListener('change', (e) =>
-      loadSignal(e.target.value).catch(() => {}));
 
     /* \u4fe1\u53f7\u9762\u677f\u6298\u53e0 */
     document.getElementById('signal-panel-toggle')?.addEventListener('click', () => {

@@ -558,6 +558,7 @@
                 <div class="grid strategies-layout">
                     <div class="card wide">
                         <h3>策略控制台</h3>
+                        <div class="strategy-console-guide">AI研究注册的纸盘/影子候选也会显示在下方策略列表；收益、回撤和运行状态会与仪表盘保持同一口径。要创建新候选，请先到 AI研究页完成“生成提案 → 运行研究 → 注册”。</div>
                         <div id="strategy-console-cards" class="strategy-console-cards">
                             <div class="strategy-console-stat">
                                 <div class="label">策略总览</div>
@@ -725,8 +726,7 @@
                         <div id="data-board-summary" class="data-board-summary">
                             <div class="data-board-kpi"><span>当前标的</span><strong id="data-board-symbol">--</strong><small id="data-board-exchange">--</small></div>
                             <div class="data-board-kpi"><span>本地K线</span><strong id="data-board-bars">--</strong><small id="data-board-timeframe">--</small></div>
-                            <div class="data-board-kpi"><span>数据覆盖</span><strong id="data-board-coverage">--</strong><small>最近可用区间</small></div>
-                            <div class="data-board-kpi"><span>回测计算</span><strong id="data-board-compute">检测中</strong><small id="data-board-compute-note">CPU 可用</small></div>
+                            <div class="data-board-kpi data-board-kpi-coverage"><span>数据覆盖范围</span><strong id="data-board-coverage">--</strong><small id="data-board-coverage-note">加载行情后显示起止时间与跨度</small></div>
                         </div>
                         <div class="data-board-quick-actions" aria-label="数据快捷操作">
                             <button type="button" class="btn btn-primary btn-sm" data-data-preset="BTC/USDT|1h">BTC · 1h</button>
@@ -1673,6 +1673,11 @@
                     </div>
                     <div class="ai-iteration-history" id="ai-iteration-history"><span>暂无轮次记录</span></div>
                 </section>
+                <div class="ai-research-use-guide" role="note">
+                    <strong>AI研究怎么用</strong>
+                    <span>① 填写目标并生成提案</span><span>② 选择任务运行研究</span><span>③ 比较候选结果</span><span>④ 在候选详情中纸面运行或提交审批</span>
+                    <em>自主迭代会自动重复第 ②–③ 步，直到暂停、收敛或预算用完。</em>
+                </div>
 
                 <div class="ai-workspace-stack">
                     <section class="ai-workspace-section ai-workspace-section-research">
@@ -1722,14 +1727,7 @@
                                                 <div style="color:var(--text-faint);font-size:12px;">加载中...</div>
                                             </div>
                                             <div class="inline-actions ai-context-inline-actions">
-                                                <select id="signal-symbol" style="flex:1;min-width:0;font-size:12px;">
-                                                    <option value="BTC/USDT">BTC/USDT</option>
-                                                    <option value="ETH/USDT">ETH/USDT</option>
-                                                    <option value="BNB/USDT">BNB/USDT</option>
-                                                    <option value="SOL/USDT">SOL/USDT</option>
-                                                    <option value="XRP/USDT">XRP/USDT</option>
-                                                </select>
-                                                <button class="btn btn-sm" id="signal-refresh-btn" style="font-size:12px;">刷新</button>
+                                                <button class="btn btn-sm" id="signal-refresh-btn" style="font-size:12px;">刷新 5 个币种</button>
                                             </div>
                                             <div id="signal-status" class="ai-context-status">每30秒自动刷新</div>
                                         </div>
@@ -3224,7 +3222,7 @@
 
             <div id="backtest" class="tab-content">
                 <div class="grid">
-                    <div class="card">
+                    <div class="card wide backtest-config-card">
                         <h3>策略回测</h3>
                         <div class="backtest-mode-tabs" id="backtest-mode-tabs" role="tablist" aria-label="回测模式">
                             <button type="button" class="backtest-mode-tab active" data-backtest-mode="classic">自由回测</button>
@@ -3609,7 +3607,7 @@
                         </div>
                     </div>
 
-                    <div class="card wide">
+                    <div class="card wide backtest-results-card">
                         <h3>回测结果</h3>
                         <div id="backtest-results">
                             <p>运行回测后展示结果</p>

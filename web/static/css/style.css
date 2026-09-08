@@ -12855,11 +12855,6 @@ input[type="radio"] {
  * first analysis section.
  * ------------------------------------------------------------------ */
 @media (min-width: 1761px) {
-    body:has(#research.tab-content.active) .container {
-        max-width: 1820px;
-        padding-inline: 28px;
-    }
-
     #altcoin-radar .altcoin-radar-workspace {
         max-width: 1840px;
         margin-inline: auto;
@@ -13576,22 +13571,9 @@ input[type="radio"] {
 }
 
 /* ===== Altcoin Radar 1920 Workstation Redesign ===== */
-@supports selector(.container:has(#altcoin-radar.active)) {
-    .container:has(#altcoin-radar.active) {
-        max-width: 1900px;
-        padding: 14px 20px 18px;
-    }
-
-    .container:has(#altcoin-radar.active) header {
-        margin-bottom: 12px;
-        padding-bottom: 12px;
-    }
-
-    .container:has(#altcoin-radar.active) .tabs {
-        margin-bottom: 14px;
-        padding-bottom: 8px;
-    }
-}
+/* Shell (container / header / tabs) intentionally not overridden here: the
+   application chrome is owned by the UI SYSTEM v3 block at the end of this
+   file, so switching tabs must not move or resize the nav bar. */
 
 #altcoin-radar {
     --radar-bg: var(--bg-main);
@@ -14283,22 +14265,7 @@ input[type="radio"] {
 }
 
 /* ===== Altcoin Radar Command Layout (authoritative) ===== */
-@supports selector(.container:has(#altcoin-radar.active)) {
-    .container:has(#altcoin-radar.active) {
-        max-width: 1880px;
-        padding: 14px 20px 22px;
-    }
-
-    .container:has(#altcoin-radar.active) header {
-        margin-bottom: 12px;
-        padding-bottom: 12px;
-    }
-
-    .container:has(#altcoin-radar.active) .tabs {
-        margin-bottom: 14px;
-        padding-bottom: 8px;
-    }
-}
+/* Shell overrides removed — see the note on the workstation block above. */
 
 #altcoin-radar {
     --radar-surface: var(--card-bg);
@@ -15263,9 +15230,7 @@ input[type="radio"] {
 }
 
 /* ===== AI autonomous agent 1920x1080 command layout ===== */
-body:has(#ai-agent.active) .container {
-    max-width: 1840px;
-}
+/* Shell width is owned by the shared UI SYSTEM v3 .app-shell rule. */
 
 #ai-agent {
     --ai-agent-main-gap: 14px;
@@ -15685,20 +15650,6 @@ body:has(#ai-agent.active) .container {
 }
 
 @media (min-width: 1600px) {
-    body:has(#ai-agent.active) .container {
-        padding: 18px 28px 28px;
-    }
-
-    body:has(#ai-agent.active) header {
-        margin-bottom: 14px;
-        padding-bottom: 12px;
-    }
-
-    body:has(#ai-agent.active) .tabs {
-        margin-bottom: 14px;
-        padding-bottom: 8px;
-    }
-
     #ai-agent .ai-agent-cockpit {
         grid-template-columns: minmax(300px, 0.22fr) minmax(0, 0.78fr);
         gap: 14px;
@@ -16644,23 +16595,7 @@ body:has(#ai-agent.active) .container {
 }
 
 /* ===== AI Research 1920x1080 flow refinement ===== */
-@supports selector(body:has(#ai-research.active)) {
-    @media (min-width: 1761px) {
-        body:has(#ai-research.active) .container {
-            max-width: 1800px;
-            padding-inline: 20px;
-        }
-
-        body:has(#ai-research.active) header {
-            margin-bottom: 16px;
-            padding-bottom: 14px;
-        }
-
-        body:has(#ai-research.active) .tabs {
-            margin-bottom: 16px;
-        }
-    }
-}
+/* Shell (container / header / tabs) left to the shared UI SYSTEM v3 rules. */
 
 @media (min-width: 1761px) {
     #ai-research #ai-operating-mode-banner {
@@ -17729,6 +17664,10 @@ body:has(#ai-agent.active) .container {
 #ai-research .ai-iteration-history { display:flex; gap:7px; overflow:auto; margin-top:10px; color:var(--text-faint); font-size:11px; }
 #ai-research .ai-iteration-history > div { min-width:150px; padding:8px 10px; background:rgba(4,14,26,.4); border:1px solid var(--card-border); border-radius:6px; }
 #ai-research .ai-iteration-history b { display:block; color:var(--text-main); font-size:11px; margin-bottom:3px; }
+#ai-research .ai-research-use-guide { display:flex; align-items:center; flex-wrap:wrap; gap:8px 14px; margin:0 0 16px; padding:10px 14px; border:1px solid var(--card-border); border-radius:8px; background:var(--panel-bg-deep); color:var(--text-sub); font-size:12px; }
+#ai-research .ai-research-use-guide strong { color:var(--text-main); }
+#ai-research .ai-research-use-guide span { white-space:nowrap; }
+#ai-research .ai-research-use-guide em { flex-basis:100%; color:var(--text-faint); font-size:11px; font-style:normal; }
 @media (max-width: 760px) {
     #ai-research .ai-iteration-cockpit-head { display:block; }
     #ai-research .ai-iteration-actions { margin-top:12px; }
@@ -18793,6 +18732,10 @@ body.app-page #data .data-command-center {
     border-color: rgba(var(--accent-rgb), .34);
     background: linear-gradient(135deg, rgba(20, 42, 66, .98), rgba(15, 27, 42, .96));
 }
+body.app-page #data .data-board-kpi-coverage { grid-column: span 2; }
+body.app-page #data .data-board-kpi-coverage strong { font-size: 15px; letter-spacing: -.02em; }
+.strategy-performance-source { margin-top: 3px; color: var(--accent-soft); font-size: 10px; }
+.strategy-console-guide { margin: 8px 0 12px; padding: 9px 11px; border-left: 2px solid var(--accent); background: rgba(var(--accent-rgb), .06); color: var(--text-sub); font-size: 12px; line-height: 1.55; }
 body.app-page #data .data-command-center .card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }
 body.app-page #data .data-command-center h3 { margin:2px 0 2px; }
 body.app-page .eyebrow { color:var(--accent-soft); font:700 10px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.16em; }
@@ -18809,8 +18752,30 @@ body.app-page #backtest #backtest-equity-chart { min-height:340px; border:1px so
 @media (max-width:900px){
  body.app-page #data .data-command-center .card-head { flex-direction:column; }
  body.app-page .data-board-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
+ body.app-page #data .data-board-kpi-coverage { grid-column: span 2; }
 }
 @media (max-width:560px){ body.app-page .data-board-summary { grid-template-columns:1fr; } }
+
+/* Backtest configuration is a full-width workbench paired with the result chart. */
+body.app-page #backtest > .grid > .backtest-config-card { grid-column: 1 / -1; }
+body.app-page #backtest > .grid > .backtest-results-card { grid-column: 1 / -1; }
+body.app-page #backtest .backtest-config-card > .backtest-mode-panel.active > form,
+body.app-page #backtest .backtest-config-card > .backtest-mode-panel.active > .form { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:12px; align-items:end; }
+body.app-page #backtest .backtest-config-card .backtest-mode-tabs,
+body.app-page #backtest .backtest-config-card .backtest-mode-note,
+body.app-page #backtest .backtest-config-card .backtest-mode-panel,
+body.app-page #backtest .backtest-config-card .inline-actions,
+body.app-page #backtest .backtest-config-card .backtest-register-options,
+body.app-page #backtest .backtest-config-card details,
+body.app-page #backtest .backtest-config-card .output-box { grid-column:1 / -1; }
+body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form > .form-group { grid-column:span 3; }
+body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form > .form-row { grid-column:span 6; }
+body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form > .backtest-protection-row { grid-column:1 / -1; }
+body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form > .inline-actions { align-items:center; }
+@media (max-width:900px){ body.app-page #backtest .backtest-config-card > .backtest-mode-panel.active > form,
+ body.app-page #backtest .backtest-config-card > .backtest-mode-panel.active > .form { grid-template-columns:1fr; }
+ body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form > .form-group,
+ body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form > .form-row { grid-column:1; } }
 
 /* ===== Trading / Strategy / Data workspace refresh =====
    Dense desktop-first composition for Chrome at 100% zoom. The existing
@@ -18839,11 +18804,9 @@ body.app-page .primary-tabs .tab-btn {
     font-weight: 600;
 }
 
-body.app-page .primary-tabs .tab-btn[data-tab="trading"],
-body.app-page .primary-tabs .tab-btn[data-tab="strategies"],
-body.app-page .primary-tabs .tab-btn[data-tab="data"] {
-    color: var(--text-main);
-}
+/* No per-tab colour overrides: every nav button uses the same idle
+   (--text-sub) / hover / active (--text-bright) ramp. Pinning three tabs to
+   --text-main also outranked .tab-btn.active, so those tabs never lit up. */
 
 body.app-page .card {
     border: 1px solid var(--workspace-line);
@@ -19102,12 +19065,10 @@ body.app-page #data .data-managed-sources {
    Keep this workspace on the same shell, card rhythm and responsive
    columns as the trading console. Radar-specific styling only changes
    its content components; it must not change the application chrome.
+   The shell itself is deliberately absent here: it inherits
+   `body.app-page .app-shell` unchanged. Restating those values would pin the
+   radar to a stale copy the next time the shared shell moves.
    ===================================================================== */
-body.app-page:has(#altcoin-radar.active) .app-shell {
-    width: min(100%, var(--ui-content-max));
-    max-width: none;
-    padding: 24px var(--ui-gutter) 40px;
-}
 
 body.app-page #altcoin-radar .altcoin-radar-page-head {
     display: grid;
@@ -19180,15 +19141,10 @@ body.app-page #altcoin-radar #altcoin-radar-operating-mode-banner {
     display: none !important;
 }
 
-body.app-page:has(#altcoin-radar.active) .primary-tabs {
-    margin: 0 0 18px;
-    padding: 5px;
-}
-
-body.app-page:has(#altcoin-radar.active) .page-header {
-    margin: 0 0 16px;
-    padding: 4px 0 18px;
-}
+/* The nav bar and page header are chrome, not radar content: they inherit
+   `body.app-page .primary-tabs` / `.page-header` untouched. Re-stating those
+   values here pinned the radar to the pre-full-bleed nav, so the bar visibly
+   narrowed and shrank whenever this tab was opened. */
 
 body.app-page #altcoin-radar .ui-operating-mode-banner-content {
     display: flex;
@@ -19460,11 +19416,6 @@ body.app-page #altcoin-radar #altcoin-radar-output {
 
 /* ===== AI research 100% desktop usability pass ===== */
 @media (min-width: 1180px) {
-    body:has(#ai-research.active) .container {
-        max-width: 1760px;
-        padding-inline: 20px;
-    }
-
     #ai-research .ai-workspace-section-research {
         gap: 10px;
         padding: 12px;

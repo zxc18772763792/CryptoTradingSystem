@@ -2122,19 +2122,13 @@ setTimeout(()=>{if(document.getElementById('candlestick-chart')&&!marketDataStat
 }
 async function loadBacktestComputeRuntime(){
   const status=document.getElementById('backtest-compute-status');
-  const board=document.getElementById('data-board-compute');
-  const note=document.getElementById('data-board-compute-note');
   try{
     const d=await api('/backtest/runtime',{timeoutMs:8000});
     const c=d?.compute||{};
     const gpu=Array.isArray(c.available)&&c.available.includes('gpu');
     if(status)status.textContent=gpu?`GPU 可用${c.gpu_name?` · ${c.gpu_name}`:''}，自动模式会优先使用 GPU。`:'未发现 GPU，自动模式使用 CPU。';
-    if(board)board.textContent=gpu?'GPU 优先':'CPU';
-    if(note)note.textContent=gpu?'GPU 可用 · 自动优先':'未检测到 GPU · CPU 稳定模式';
   }catch(err){
     if(status)status.textContent='设备检测失败，回测仍可使用 CPU。';
-    if(board)board.textContent='CPU';
-    if(note)note.textContent='设备状态暂不可用';
   }
 }
 function markTabBootstrap(tabName){
@@ -3063,6 +3057,7 @@ const d=await api('/strategies/list',{timeoutMs:STRATEGY_LIST_TIMEOUT_MS});
 const availableTypes=Array.isArray(d?.strategies)?d.strategies:[];
 state.availableStrategyTypes=availableTypes;
 state.strategies=d.registered||[];
+if (state.summary && state.summary.strategy_performance) renderStrategySummary(state.summary);
 const pool=document.getElementById('strategies-list');
 if(pool){
 const catalog=backtestCompareCatalog();
@@ -3360,7 +3355,10 @@ a.innerHTML=(running.map(s=>{const p=perf[s.name]||{},rt=s.runtime||{};const rp=
 }
 if(r)r.innerHTML=signals.length?signals.map(s=>`<div class="list-item"><span>${s.strategy} | ${s.symbol} | ${s.signal_type.toUpperCase()}</span><span>${fmtTime(s.timestamp)}</span></div>`).join(''):`<div class="list-item"><span>${running.length?`实时刷新中（${d.refresh_hint_seconds||5}秒）暂无新信号，可能是策略条件未触发`:'暂无近期信号'}</span><span>${fmtTime(new Date())}</span></div>`;
 if(rt){
-rt.innerHTML=running.length?running.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?fmtDateTime(s.last_run_at):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=getStrategyMeta(stype);const desc=meta.desc||s.description||stype;const cat=meta.cat||'';return`<tr><td>${s.name}</td><td style="font-size:12px;color:var(--text-sub);max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?fmtDateTime(lu):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无运行中策略数据</td></tr>';
+const byName=new Map((state.strategies||[]).map(item=>[String(item?.name||''),item]));
+const displayStrategies=[...(state.strategies||[])];
+Object.keys(perf||{}).forEach(name=>{if(!byName.has(String(name))){displayStrategies.push({name:String(name),strategy_type:String(name),state:'idle'});}});
+rt.innerHTML=displayStrategies.length?displayStrategies.map(s=>{const p=perf[s.name]||{},ri=s.runtime||{};const rp=Number(p.return_pct),dd=Number(p.max_drawdown_pct),realized=Number(p.realized_pnl),unrealized=Number(p.unrealized_pnl),absPnl=(Number.isFinite(realized)?realized:0)+(Number.isFinite(unrealized)?unrealized:0),lu=p.last_update;const runtimeTxt=fmtDurationSec(ri.uptime_seconds||0);const lastRunTxt=s.last_run_at?fmtDateTime(s.last_run_at):'-';const rpTxt=Number.isFinite(rp)?`${rp.toFixed(2)}%`:'--';const ddTxt=Number.isFinite(dd)?`${dd.toFixed(2)}%`:'--';const absTxt=Number.isFinite(absPnl)?fmt(absPnl):'--';const rpCls=Number.isFinite(rp)?(rp>=0?'positive':'negative'):'';const absCls=Number.isFinite(absPnl)?(absPnl>=0?'positive':'negative'):'';const stype=s.strategy_type||s.name;const meta=getStrategyMeta(stype);const desc=meta.desc||s.description||stype;const cat=meta.cat||'';const own=s.ownership?.label||'';return`<tr><td>${esc(s.name)}</td><td style="font-size:12px;color:var(--text-sub);max-width:200px;">${cat?`[${cat}] `:''}${esc(desc)}${own?`<div class="strategy-performance-source">${esc(own)}</div>`:''}</td><td class="${rpCls}">${rpTxt}</td><td>${ddTxt}</td><td class="${absCls}">${absTxt}</td><td>${runtimeTxt}</td><td>${lastRunTxt}</td><td>${lu?fmtDateTime(lu):'-'}</td></tr>`;}).join(''):'<tr><td colspan="8">暂无已注册策略数据</td></tr>';
 }
 renderStrategyHealthAlerts(d,state.strategyHealth);
 renderStrategyConsolePanel();
@@ -3872,7 +3870,13 @@ function updateDataBoardSummary(){
   const tf=marketDataState.timeframe||document.getElementById('data-timeframe')?.value||'--';
   const put=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=String(value);};
   put('data-board-symbol',symbol); put('data-board-exchange',String(exchange).toUpperCase()); put('data-board-bars',bars.length?bars.length.toLocaleString('en-US'):'--'); put('data-board-timeframe',tf);
-  if(bars.length){put('data-board-coverage',`${fmtDateTime(bars[0].timestamp)} → ${fmtDateTime(bars[bars.length-1].timestamp)}`);}
+  if(bars.length){
+    const first=bars[0].timestamp, last=bars[bars.length-1].timestamp;
+    const firstMs=new Date(first).getTime(), lastMs=new Date(last).getTime();
+    const spanDays=Number.isFinite(firstMs)&&Number.isFinite(lastMs)?Math.max(0,(lastMs-firstMs)/86400000):null;
+    put('data-board-coverage',`${fmtDateTime(first)} → ${fmtDateTime(last)}`);
+    put('data-board-coverage-note',`${bars.length.toLocaleString('zh-CN')} 根 K 线${spanDays!==null?` · 覆盖 ${spanDays>=2?spanDays.toFixed(1):Math.round(spanDays*24)+' 小时'}`:''}`);
+  } else { put('data-board-coverage','--'); put('data-board-coverage-note','加载行情后显示起止时间与跨度'); }
   const status=document.getElementById('data-board-source-status'); if(status)status.textContent=bars.length?'数据可用':'等待数据';
 }
 }catch(err){
