@@ -56,6 +56,27 @@
 
 ## 故障定位
 
+### PowerShell 启动时报 `Key in dictionary: 'PATH' ... 'Path'`
+
+这是 PowerShell 7 在 Windows 上继承大小写不同的 PATH 别名导致的启动器问题。项目启动脚本会在加载 `.env` 后自动规范化环境变量，保留 canonical `Path` 后再创建 Web、Worker 和 Supervisor 进程。若使用旧脚本缓存，重新打开 PowerShell 后再次执行：
+
+```powershell
+.\web.bat stop -IncludeWorkers
+.\web.bat start
+```
+
+启动失败时先查看 `logs\web_ps.log`、`logs\web_supervisor.err.log` 和最新的 `logs\uvicorn_web_*.err.log`。
+
+### 8000 端口被非托管进程占用
+
+`web.bat stop` 会拒绝终止无法确认归属的进程。先确认端口 PID 是本项目的 Python/Uvicorn 进程，再手动结束后重启：
+
+```powershell
+Get-Process -Id <PID> | Select-Object Id,ProcessName,Path
+Stop-Process -Id <PID> -Force
+.\web.bat start
+```
+
 - Web 日志：`logs\uvicorn_web_*.out.log`、`logs\uvicorn_web_*.err.log`
 - Supervisor 日志：`logs\web_supervisor.log`
 - 环境检查：`.\scripts\setup_local_env.ps1 -SkipRequirements`
