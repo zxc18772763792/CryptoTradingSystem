@@ -268,6 +268,8 @@
         if (!Number(summary?.raw_count || 0) && !Number(summary?.feed_count || 0)) issues.push('新闻摘要为空');
         if (pendingNewsTasks > 0 && !Number(health?.sync_pull_llm)) issues.push(`LLM 队列积压 ${pendingNewsTasks} 条`);
         if (!fundingRows) issues.push('资金费率缓存为空，建议人工确认');
+        else if (funding.health === 'stale') issues.push(`资金费率缓存过期，最新数据 ${fmtTs(funding.coverage?.end)}`);
+        else if (funding.ready === false) issues.push('资金费率缓存状态待核实');
         if (!Number.isFinite(fundingRate)) issues.push('实时 funding 不可用');
         if (!whaleCount && !announcementCount) issues.push('社区/巨鲸数据偏弱');
         if (premiumConfiguredCount > 0 && premiumCachedCount === 0) issues.push('高级数据源已配置，但暂无缓存');
@@ -364,8 +366,14 @@
     const macroPayload = macroResult.status === 'fulfilled' ? (macroResult.value || {}) : null;
 
     if (fundingPayload) {
-      const path = String(fundingPayload?.funding?.cache_path || '');
-      parts.push(path ? `Funding ${path}` : 'Funding');
+      const funding = fundingPayload.funding || {};
+      if (funding.ready === true) {
+        parts.push(`资金费率 ${Number(funding.rows || 0)} 条，最新 ${fmtTs(funding.coverage?.end)}`);
+      } else {
+        partialErrors.push(Number(funding.rows || 0) > 0
+          ? `资金费率仍未就绪，最新数据 ${fmtTs(funding.coverage?.end)}，请检查上游历史数据更新`
+          : '资金费率缓存仍为空，请检查上游数据源');
+      }
     } else {
       partialErrors.push(String(fundingResult.reason?.message || fundingResult.reason || 'funding warm failed'));
     }
@@ -377,11 +385,12 @@
       partialErrors.push(String(macroResult.reason?.message || macroResult.reason || 'macro warm failed'));
     }
 
-    const suffix = partialErrors.length ? `；部分失败: ${partialErrors.join(' / ')}` : '';
-    notify(`研究缓存已预热: ${parts.join(' + ')}${suffix}`);
+    const suffix = partialErrors.length ? `；未恢复: ${partialErrors.join(' / ')}` : '';
+    const prefix = partialErrors.length ? '研究缓存预热未完全恢复:' : '研究缓存已预热:';
+    notify(`${prefix} ${parts.join(' + ')}${suffix}`, partialErrors.length > 0);
     await refreshDiagnostics({ force: true, reason: 'post-research-warm' }).catch(() => {});
     return {
-      warmed: true,
+      warmed: partialErrors.length === 0,
       funding: fundingPayload?.funding || null,
       macro: macroPayload?.macro || null,
       partial_errors: partialErrors,

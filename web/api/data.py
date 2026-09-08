@@ -144,6 +144,17 @@ _HEALTH_FAST_SCAN_MIN_EXPECTED_BARS = 20000
 _HEALTH_FAST_SCAN_DENSITY_THRESHOLD = 0.35
 _ONCHAIN_OVERVIEW_CACHE_TTL_SEC = 180.0
 _ONCHAIN_OVERVIEW_CACHE_STALE_SEC = 1800.0
+# Chain TVL is a daily series, so a last-known value beats an empty card while a
+# slow api.llama.fi round trip finishes in the background.
+_DEFILLAMA_TVL_CACHE: Dict[str, Dict[str, Any]] = {}
+_DEFILLAMA_TVL_TASKS: Dict[str, asyncio.Task] = {}
+_DEFILLAMA_TVL_CACHE_STALE_SEC = 86400.0
+_DEFILLAMA_TVL_WAIT_SEC = 6.0
+_DEFILLAMA_REQUEST_TIMEOUT_SEC = 10.0
+# api.llama.fi answers a direct connection in <2s here but drops most requests
+# sent through the local CN proxy; other machines may need the opposite, so the
+# transport that last worked is remembered rather than hardcoded.
+_DEFILLAMA_PREFER_DIRECT = True
 _FACTOR_CACHE_TTL_SEC = 300.0
 _FACTOR_CACHE_STALE_SEC = 1800.0
 _FACTOR_LIBRARY_BOOTSTRAP_WAIT_SEC = 3.0
@@ -2148,6 +2159,35 @@ def _build_chain_tvl_unavailable_payload(
     }
 
 
+async def _defillama_get_json(url: str) -> Any:
+    """GET from api.llama.fi over whichever transport this machine can reach it on.
+
+    The environment proxy is required for some upstreams (CoinGecko) but drops
+    most llama.fi requests, so try the transport that last succeeded and fall
+    back to the other one instead of committing to either.
+    """
+    global _DEFILLAMA_PREFER_DIRECT
+    attempts = (
+        (True, False) if _DEFILLAMA_PREFER_DIRECT else (False, True)
+    )
+    last_error: Optional[Exception] = None
+    for direct in attempts:
+        try:
+            async with httpx.AsyncClient(
+                timeout=_DEFILLAMA_REQUEST_TIMEOUT_SEC,
+                verify=get_shared_ssl_context(),
+                trust_env=not direct,
+            ) as client:
+                res = await client.get(url)
+                res.raise_for_status()
+                payload = res.json()
+            _DEFILLAMA_PREFER_DIRECT = direct
+            return payload
+        except Exception as exc:
+            last_error = exc
+    raise last_error if last_error is not None else RuntimeError("defillama_request_failed")
+
+
 async def _fetch_defillama_chain_tvl(
     chain: str = "Ethereum",
     *,
@@ -2178,10 +2218,7 @@ async def _fetch_defillama_chain_tvl(
 
     url = f"https://api.llama.fi/v2/historicalChainTvl/{lookup_chain}"
     try:
-        async with httpx.AsyncClient(timeout=12, verify=get_shared_ssl_context()) as client:
-            res = await client.get(url)
-            res.raise_for_status()
-            rows = res.json() or []
+        rows = await _defillama_get_json(url) or []
     except Exception as e:
         return _build_chain_tvl_unavailable_payload(
             {
@@ -2244,6 +2281,75 @@ async def _fetch_defillama_chain_tvl(
         "change_7d_pct": round(chg_7d, 4),
         "series": data[-180:],
     }
+
+
+def _cached_chain_tvl_payload(cache_key: str) -> Optional[Dict[str, Any]]:
+    cached = dict(_DEFILLAMA_TVL_CACHE.get(cache_key) or {})
+    payload = dict(cached.get("payload") or {})
+    if not payload:
+        return None
+    age_sec = max(0.0, time.monotonic() - float(cached.get("created_monotonic") or 0.0))
+    if age_sec > _DEFILLAMA_TVL_CACHE_STALE_SEC:
+        return None
+    payload["cached"] = True
+    payload["cache_age_sec"] = round(age_sec, 3)
+    payload["refreshing"] = cache_key in _DEFILLAMA_TVL_TASKS
+    return payload
+
+
+async def _load_chain_tvl_snapshot(chain_context: Dict[str, Any]) -> Dict[str, Any]:
+    """Chain TVL for the on-chain overview, bounded by the page's latency budget.
+
+    api.llama.fi can take longer than the overview is willing to wait (a cold
+    round trip has been seen at 11s). Waiting a bounded slice and letting the
+    request finish in the background means the next overview serves a real TVL
+    instead of the card staying permanently empty.
+    """
+    lookup_chain = str(chain_context.get("lookup_chain") or "").strip()
+    cache_key = lookup_chain.lower()
+    task = _DEFILLAMA_TVL_TASKS.get(cache_key)
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        # Left over from a previous loop (tests, or a restarted runtime): awaiting
+        # it here would raise instead of returning TVL.
+        task = None
+    if task is None or task.done():
+        task = asyncio.create_task(
+            _fetch_defillama_chain_tvl(
+                chain=lookup_chain,
+                display_chain=str(chain_context.get("display_name") or ""),
+                chain_context=chain_context,
+            )
+        )
+        _DEFILLAMA_TVL_TASKS[cache_key] = task
+        task.add_done_callback(
+            lambda finished: _finalize_chain_tvl_task(cache_key, finished)
+        )
+    try:
+        payload = await asyncio.wait_for(
+            asyncio.shield(task), timeout=_DEFILLAMA_TVL_WAIT_SEC
+        )
+    except Exception:
+        payload = None
+    if isinstance(payload, dict) and payload.get("available"):
+        return payload
+    cached = _cached_chain_tvl_payload(cache_key)
+    if cached is not None:
+        return cached
+    if isinstance(payload, dict):
+        return payload
+    return _build_chain_tvl_unavailable_payload(chain_context, error="chain_tvl_pending")
+
+
+def _finalize_chain_tvl_task(cache_key: str, task: asyncio.Task) -> None:
+    if _DEFILLAMA_TVL_TASKS.get(cache_key) is task:
+        _DEFILLAMA_TVL_TASKS.pop(cache_key, None)
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        payload = task.result()
+        if isinstance(payload, dict) and payload.get("available"):
+            _DEFILLAMA_TVL_CACHE[cache_key] = {
+                "created_monotonic": time.monotonic(),
+                "payload": _clone_jsonable(payload),
+            }
 
 
 async def _fetch_btc_whale_unconfirmed(min_btc: float = 10.0) -> Dict[str, Any]:
@@ -2463,7 +2569,10 @@ async def _fetch_coinglass_multi_exchange_funding(symbol: str) -> Dict[str, Any]
 
     rates: Dict[str, Dict[str, Any]] = {}
     values: List[float] = []
-    frame = load_dataset_rows_for_symbol("funding_rate_exchange_list", symbol)
+    # Multi-MB parquet read; keep it off the event loop.
+    frame = await asyncio.to_thread(
+        load_dataset_rows_for_symbol, "funding_rate_exchange_list", symbol
+    )
     if not frame.empty and "payload_json" in frame.columns:
         latest_request_key = str(frame.iloc[-1].get("request_key") or "")
         if latest_request_key and "request_key" in frame.columns:
@@ -2666,7 +2775,8 @@ async def _compute_onchain_overview(
 ) -> Dict[str, Any]:
     started_at = time.monotonic()
     chain_context = resolve_onchain_chain_context(symbol, chain)
-    premium_external = _load_premium_external_snapshot()
+    # Reads the premium-source parquet caches from disk; keep it off the event loop.
+    premium_external = await asyncio.to_thread(_load_premium_external_snapshot)
     connector = exchange_manager.get_exchange(exchange)
     if connector is None:
         imbalance = {
@@ -2688,16 +2798,7 @@ async def _compute_onchain_overview(
         }
 
     if chain_context.get("tvl_supported") and chain_context.get("lookup_chain"):
-        tvl_task = asyncio.create_task(
-            asyncio.wait_for(
-                _fetch_defillama_chain_tvl(
-                    chain=str(chain_context.get("lookup_chain") or ""),
-                    display_chain=str(chain_context.get("display_name") or ""),
-                    chain_context=chain_context,
-                ),
-                timeout=6.0,
-            )
-        )
+        tvl_task = asyncio.create_task(_load_chain_tvl_snapshot(chain_context))
     else:
         tvl_task = asyncio.create_task(
             asyncio.sleep(
@@ -3333,6 +3434,15 @@ def _latest_partition_end_time(exchange: str, symbol: str, timeframe: str) -> Op
     return None
 
 
+def _latest_partition_end_times(
+    exchange: str, symbol_list: List[str], timeframe: str
+) -> Dict[str, Optional[datetime]]:
+    return {
+        sym: _latest_partition_end_time(exchange=exchange, symbol=sym, timeframe=timeframe)
+        for sym in symbol_list
+    }
+
+
 async def _build_factor_input_frames(
     exchange: str,
     symbol_list: List[str],
@@ -3343,9 +3453,11 @@ async def _build_factor_input_frames(
     tf_seconds = max(1, _timeframe_seconds(timeframe))
     # Bound disk scan cost for high-frequency data by querying a recent window first.
     window_seconds = max(3600, min(approx_bars * tf_seconds * 2, 366 * 24 * 3600))
-    common_end_candidates: Dict[str, Optional[datetime]] = {
-        sym: _latest_partition_end_time(exchange=exchange, symbol=sym, timeframe=timeframe) for sym in symbol_list
-    }
+    # The partition scan is dozens of directory globs over the parquet store; run it
+    # off the event loop so a cold/contended disk cannot stall every other request.
+    common_end_candidates: Dict[str, Optional[datetime]] = await asyncio.to_thread(
+        _latest_partition_end_times, exchange, symbol_list, timeframe
+    )
     known_ends = [ts for ts in common_end_candidates.values() if ts is not None]
     common_end = min(known_ends) if known_ends else None
     query_start = (common_end - timedelta(seconds=window_seconds)) if common_end else None

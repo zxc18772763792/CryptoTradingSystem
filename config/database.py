@@ -664,6 +664,12 @@ async def _migrate_analytics_history_schema(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_analytics_community_es_status ON analytics_community_snapshots(exchange, symbol, capture_status)",
         "CREATE INDEX IF NOT EXISTS idx_analytics_whale_es_ts ON analytics_whale_snapshots(exchange, symbol, timestamp)",
         "CREATE INDEX IF NOT EXISTS idx_analytics_whale_es_status ON analytics_whale_snapshots(exchange, symbol, capture_status)",
+        # "latest snapshot for symbol" was resolving through the single-column symbol
+        # index and then sorting 11k+ rows in a temp B-tree on every CoinGlass read.
+        "CREATE INDEX IF NOT EXISTS idx_analytics_derivatives_symbol_ts ON analytics_derivatives_snapshots(symbol, timestamp)",
+        # Equity-curve reads filter on source and order by timestamp; without the
+        # pair the whole (unbounded, ever-growing) table is scanned and re-sorted.
+        "CREATE INDEX IF NOT EXISTS idx_account_snapshots_source_ts ON account_snapshots(source, timestamp)",
     ]
     for sql in index_statements:
         await conn.exec_driver_sql(sql)

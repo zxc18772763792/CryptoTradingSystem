@@ -122,6 +122,8 @@ class Settings(BaseSettings):
     OPENAI_BACKUP_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-5.5"
     OPENAI_BACKUP_MODEL: str = "gpt-5.5"
+    AI_RESEARCH_MODEL: str = "gpt-5.6-sol"
+    AI_RESEARCH_BACKUP_MODEL: str = "gpt-5.6-sol"
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = ""
     ANTHROPIC_MODEL: str = ""

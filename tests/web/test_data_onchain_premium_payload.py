@@ -327,3 +327,44 @@ def test_load_premium_external_snapshot_includes_coinglass(monkeypatch):
     assert payload["sources"]["coinglass"]["has_cached_data"] is True
     assert payload["sources"]["coinglass"]["snapshot"]["active_datasets"] == ["derivatives"]
     assert "coinglass" in payload["summary"]["active_sources"]
+
+
+def test_load_chain_tvl_snapshot_serves_cache_when_upstream_is_slow(monkeypatch):
+    from web.api import data as data_api
+
+    chain_context = {"display_name": "Bitcoin", "lookup_chain": "Bitcoin", "tvl_supported": True}
+    data_api._DEFILLAMA_TVL_CACHE.pop("bitcoin", None)
+    data_api._DEFILLAMA_TVL_TASKS.pop("bitcoin", None)
+    monkeypatch.setattr(data_api, "_DEFILLAMA_TVL_WAIT_SEC", 0.2)
+
+    async def quick_tvl(*args, **kwargs):
+        return {"chain": "Bitcoin", "available": True, "latest_tvl": 42.0, "series": []}
+
+    async def slow_tvl(*args, **kwargs):
+        await asyncio.sleep(5)
+        return {"chain": "Bitcoin", "available": True, "latest_tvl": 99.0, "series": []}
+
+    async def scenario():
+        monkeypatch.setattr(data_api, "_fetch_defillama_chain_tvl", quick_tvl)
+        first = await data_api._load_chain_tvl_snapshot(chain_context)
+        # The done-callback that fills the cache runs on the next loop pass.
+        await asyncio.sleep(0)
+        monkeypatch.setattr(data_api, "_fetch_defillama_chain_tvl", slow_tvl)
+        second = await data_api._load_chain_tvl_snapshot(chain_context)
+        pending = data_api._DEFILLAMA_TVL_TASKS.get("bitcoin")
+        if pending is not None:
+            pending.cancel()
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    assert first["available"] is True
+    assert first["latest_tvl"] == 42.0
+    # Upstream did not answer in time, so the card keeps the last known TVL
+    # instead of rendering as unavailable.
+    assert second["available"] is True
+    assert second["latest_tvl"] == 42.0
+    assert second["cached"] is True
+
+    data_api._DEFILLAMA_TVL_CACHE.pop("bitcoin", None)
+    data_api._DEFILLAMA_TVL_TASKS.pop("bitcoin", None)

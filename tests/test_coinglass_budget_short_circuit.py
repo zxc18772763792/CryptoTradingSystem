@@ -193,6 +193,7 @@ def test_manual_update_caps_planned_requests_to_minute_limit(monkeypatch):
 
 
 def test_non_manual_update_caps_symbols_when_minute_headroom_is_tighter_than_symbol_count(monkeypatch):
+    monkeypatch.setattr(builder_module, "_NON_MANUAL_DATASET_CURSOR", 0)
     monkeypatch.setattr(builder_module, "coinglass_enabled", lambda: True)
     monkeypatch.setattr(builder_module, "persist_raw_snapshot", lambda **kwargs: None)
     monkeypatch.setattr(builder_module, "persist_normalized_rows", lambda **kwargs: pd.DataFrame([{"symbol": "BTC"}]))
@@ -256,6 +257,7 @@ def test_non_manual_update_caps_symbols_when_minute_headroom_is_tighter_than_sym
 
 
 def test_update_cache_limits_non_manual_refresh_to_minute_headroom(monkeypatch):
+    monkeypatch.setattr(builder_module, "_NON_MANUAL_DATASET_CURSOR", 0)
     monkeypatch.setattr(builder_module, "coinglass_enabled", lambda: True)
     monkeypatch.setattr(builder_module, "persist_raw_snapshot", lambda **kwargs: None)
     monkeypatch.setattr(builder_module, "persist_normalized_rows", lambda **kwargs: pd.DataFrame([{"symbol": "BTC"}]))
@@ -325,4 +327,28 @@ def test_update_cache_limits_non_manual_refresh_to_minute_headroom(monkeypatch):
         ("open_interest_exchange_list", False),
         ("open_interest_history", False),
         ("funding_rate_exchange_list", False),
+    ]
+
+    # The next budget-limited sweep must continue past the head of the list, or the
+    # tail datasets (funding history, taker volume, long/short) never refresh.
+    fake_client.calls.clear()
+    followup = asyncio.run(
+        builder_module.update_coinglass_cache(
+            symbols=["BTC"],
+            datasets=[
+                "open_interest_exchange_list",
+                "open_interest_history",
+                "funding_rate_exchange_list",
+                "funding_rate_history",
+                "taker_buy_sell_volume_exchange_list",
+            ],
+            manual=False,
+            max_symbols_per_run=1,
+        )
+    )
+
+    assert followup["datasets"] == [
+        "funding_rate_history",
+        "taker_buy_sell_volume_exchange_list",
+        "open_interest_exchange_list",
     ]

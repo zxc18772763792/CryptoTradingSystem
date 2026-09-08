@@ -37,7 +37,7 @@ from core.utils.openai_responses import (
 
 
 _DEFAULT_OPENAI_BASE_URL = "https://nowcoding.ai/v1"
-_DEFAULT_OPENAI_MODEL = "gpt-5.5"
+_DEFAULT_OPENAI_MODEL = "gpt-5.6-sol"
 _OPENAI_FAILOVER_SCOPE = "ai_research"
 
 _CONTEXT_SYSTEM_PROMPT = """You are a quantitative research planner.
@@ -203,8 +203,8 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
             backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
             primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
             backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
-            primary_model=str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL).strip() or _DEFAULT_OPENAI_MODEL,
-            backup_model=str(getattr(settings, "OPENAI_BACKUP_MODEL", "") or "").strip(),
+            primary_model=str(settings.AI_RESEARCH_MODEL or _DEFAULT_OPENAI_MODEL),
+            backup_model=str(settings.AI_RESEARCH_BACKUP_MODEL or settings.AI_RESEARCH_MODEL),
         ),
         scope=_OPENAI_FAILOVER_SCOPE,
     )
@@ -212,7 +212,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
         logger.debug("research_context_generator: OPENAI_API_KEY missing")
         return None
 
-    model = str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL).strip() or _DEFAULT_OPENAI_MODEL
+    model = str(settings.AI_RESEARCH_MODEL or _DEFAULT_OPENAI_MODEL)
     messages = [
         {"role": "system", "content": _CONTEXT_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
@@ -220,7 +220,8 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
     payload = build_responses_payload(
         model=model,
         messages=messages,
-        max_output_tokens=2400,
+        max_output_tokens=6000,
+        reasoning_effort="none",
         temperature=0.2,
         text_format="json_object",
         stream=False,
@@ -228,7 +229,8 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
     chat_payload = build_chat_completions_payload(
         model=model,
         messages=messages,
-        max_tokens=2400,
+        max_tokens=6000,
+        reasoning_effort="none",
         temperature=0.2,
         response_format={"type": "json_object"},
         stream=False,
@@ -333,7 +335,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                                     scope=_OPENAI_FAILOVER_SCOPE,
                                 )
                                 try:
-                                    return _parse_json_payload(raw)
+                                    return {**_parse_json_payload(raw), "_generation": {"requested_model": target_model, "response_model": data.get("model"), "usage": data.get("usage", {})}}
                                 except Exception as exc:
                                     logger.debug(f"research_context_generator: failed to parse chat payload: {exc}")
                                     return None
@@ -384,7 +386,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                     continue
                 return None
             try:
-                return _parse_json_payload(raw)
+                return {**_parse_json_payload(raw), "_generation": {"requested_model": target_model, "response_model": data.get("model"), "usage": data.get("usage", {})}}
             except Exception as exc:  # noqa: BLE001
                 logger.debug(f"research_context_generator: JSON parse error: {exc}")
                 remember_openai_target_failure(
@@ -419,7 +421,10 @@ async def generate_research_context(
         missing = _REQUIRED_KEYS - set(payload.keys())
         if missing:
             logger.debug(f"research_context_generator: missing keys after fill: {missing}")
-        return LLMResearchOutput.model_validate(payload).model_dump(mode="json")
+        validated = LLMResearchOutput.model_validate(payload).model_dump(mode="json")
+        if parsed.get("_generation"):
+            validated["_generation"] = parsed["_generation"]
+        return validated
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"research_context_generator: unexpected error: {exc}")
         return None

@@ -50,7 +50,7 @@ def test_operating_mode_surfaces_provider_fallback_and_derivatives_shadow(monkey
     assert "provider_fallback" in codes
     assert "derivatives_shadow_only" in codes
     assert "autonomous_allow_live_false" in codes
-    assert snapshot["research_planner"]["configured_model"] == module.settings.OPENAI_MODEL
+    assert snapshot["research_planner"]["configured_model"] == module.settings.AI_RESEARCH_MODEL
     assert snapshot["research_planner"]["autonomous_loop"] is False
 
 
@@ -69,6 +69,10 @@ def test_operating_mode_reads_mapping_source_health():
                 "macro_cache": {
                     "status": "failed",
                     "issues": ["timeout"],
+                    "label": "Macro cache",
+                    "configured": True,
+                    "support_level": "core",
+                    "recommendation": "Refresh macro cache",
                 }
             }
         },
@@ -77,6 +81,9 @@ def test_operating_mode_reads_mapping_source_health():
     degradation = next(item for item in snapshot["degradations"] if item["code"] == "source_macro_cache")
     assert degradation["severity"] == "danger"
     assert "timeout" in degradation["detail"]
+    assert degradation["source_label"] == "Macro cache"
+    assert degradation["configured"] is True
+    assert degradation["recommendation"] == "Refresh macro cache"
     assert "source_cache_ok" not in {item["code"] for item in snapshot["degradations"]}
 
 
