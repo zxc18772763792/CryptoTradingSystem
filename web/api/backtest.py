@@ -49,6 +49,31 @@ from strategies.quantitative.multi_factor_hf import MultiFactorHFStrategy
 router = APIRouter()
 
 
+def _compute_backend_status(requested: str = "auto") -> Dict[str, Any]:
+    """Describe optional acceleration without making GPU a hard dependency."""
+    req = str(requested or "auto").strip().lower()
+    devices: List[str] = ["cpu"]
+    gpu_name = ""
+    for module_name in ("cupy", "torch"):
+        try:
+            module = __import__(module_name)
+            available = bool(module.cuda.is_available()) if module_name == "torch" else bool(module.cuda.runtime.getDeviceCount())
+            if available:
+                devices.append("gpu")
+                if not gpu_name:
+                    gpu_name = str(getattr(module.cuda.Device(0), "name", "CUDA GPU")) if module_name == "cupy" else str(module.cuda.get_device_name(0))
+                break
+        except Exception:
+            continue
+    selected = "gpu" if req == "gpu" and "gpu" in devices else ("gpu" if req == "auto" and "gpu" in devices else "cpu")
+    return {"requested": req if req in {"auto", "cpu", "gpu"} else "auto", "selected": selected, "available": devices, "gpu_name": gpu_name, "fallback": req == "gpu" and selected != "gpu"}
+
+
+@router.get("/runtime")
+async def backtest_runtime_status():
+    return {"compute": _compute_backend_status("auto")}
+
+
 _ACTIVE_OPTIMIZE_POOLS: Dict[int, tuple[Any, threading.Event]] = {}
 _ACTIVE_OPTIMIZE_POOLS_LOCK = threading.RLock()
 
@@ -4698,6 +4723,7 @@ async def run_backtest(
     use_stop_take: bool = False,
     stop_loss_pct: Optional[float] = None,
     take_profit_pct: Optional[float] = None,
+    compute_backend: str = "auto",
 ):
     requested_exit_template = _normalize_requested_exit_template(exit_template)
     parsed_start = _parse_backtest_bound(start_date, bound="start_date")
@@ -4772,6 +4798,7 @@ async def run_backtest(
             "use_stop_take": bool(result.get("use_stop_take", False)),
             "stop_loss_pct": result.get("stop_loss_pct"),
             "take_profit_pct": result.get("take_profit_pct"),
+            "compute": _compute_backend_status(compute_backend),
         }
     )
     return result

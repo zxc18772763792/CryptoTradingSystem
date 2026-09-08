@@ -2114,10 +2114,28 @@ uiLoadState.dataInitialized=true;
 loadDataSymbolOptions(document.getElementById('data-exchange')?.value||'binance',['data-symbol']);
 loadDataSymbolOptions(document.getElementById('download-exchange')?.value||'binance',['download-symbol']);
 loadManagedDataSourceStatus().catch(err=>console.warn('loadManagedDataSourceStatus failed',err?.message||err));
-loadBacktestSymbolOptions('binance');
+  loadBacktestSymbolOptions('binance');
+  loadBacktestComputeRuntime().catch(()=>{});
 scheduleKlineRealtime();
 setTimeout(()=>{loadDataStorageHealth(null,{skipStorage:true}).catch(err=>console.warn('loadDataStorageHealth failed',err?.message||err));},900);
 setTimeout(()=>{if(document.getElementById('candlestick-chart')&&!marketDataState.bars.length){loadKlinesByForm().catch(()=>{});}},500);
+}
+async function loadBacktestComputeRuntime(){
+  const status=document.getElementById('backtest-compute-status');
+  const board=document.getElementById('data-board-compute');
+  const note=document.getElementById('data-board-compute-note');
+  try{
+    const d=await api('/backtest/runtime',{timeoutMs:8000});
+    const c=d?.compute||{};
+    const gpu=Array.isArray(c.available)&&c.available.includes('gpu');
+    if(status)status.textContent=gpu?`GPU 可用${c.gpu_name?` · ${c.gpu_name}`:''}，自动模式会优先使用 GPU。`:'未发现 GPU，自动模式使用 CPU。';
+    if(board)board.textContent=gpu?'GPU 优先':'CPU';
+    if(note)note.textContent=gpu?'GPU 可用 · 自动优先':'未检测到 GPU · CPU 稳定模式';
+  }catch(err){
+    if(status)status.textContent='设备检测失败，回测仍可使用 CPU。';
+    if(board)board.textContent='CPU';
+    if(note)note.textContent='设备状态暂不可用';
+  }
 }
 function markTabBootstrap(tabName){
 const tab=String(tabName||'').trim();
@@ -3841,10 +3859,21 @@ if(loadSeq!==marketDataState.loadSeq)return;
 if(!data.length){throw new Error(`${s} ${tf} 暂无可用数据，已触发后台自动补数，请稍后再试`);}
 marketDataState.exchange=actualExchange;
 await drawK(data);
+updateDataBoardSummary();
 if(loadSeq===marketDataState.loadSeq)scheduleKlineRealtime();
 if(!managedSource&&hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
   const range=inferBackfillRangeFromBars(marketDataState.bars, marketDataState.timeframe);
   await autoBackfillData({exchange:actualExchange,symbol:s,timeframe:tf,reason:'gap-check',...range});
+}
+function updateDataBoardSummary(){
+  const bars=Array.isArray(marketDataState.bars)?marketDataState.bars:[];
+  const symbol=marketDataState.symbol||document.getElementById('data-symbol')?.value||'--';
+  const exchange=marketDataState.exchange||document.getElementById('data-exchange')?.value||'--';
+  const tf=marketDataState.timeframe||document.getElementById('data-timeframe')?.value||'--';
+  const put=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=String(value);};
+  put('data-board-symbol',symbol); put('data-board-exchange',String(exchange).toUpperCase()); put('data-board-bars',bars.length?bars.length.toLocaleString('en-US'):'--'); put('data-board-timeframe',tf);
+  if(bars.length){put('data-board-coverage',`${fmtDateTime(bars[0].timestamp)} → ${fmtDateTime(bars[bars.length-1].timestamp)}`);}
+  const status=document.getElementById('data-board-source-status'); if(status)status.textContent=bars.length?'数据可用':'等待数据';
 }
 }catch(err){
 if(loadSeq===marketDataState.loadSeq){
@@ -4961,6 +4990,18 @@ try{
 function bindData(){
 const f=document.getElementById('data-form');
 if(f)f.onsubmit=async e=>{e.preventDefault();try{await loadKlinesByForm();notify('行情加载完成（可拖动自动加载历史）');}catch(err){marketDataState.isLoading=false;notify(`行情加载失败: ${err.message}`,true);}};
+document.getElementById('btn-data-board-refresh')?.addEventListener('click',()=>{
+  loadBacktestComputeRuntime().catch(()=>{});
+  loadDataSourceStatus(document.getElementById('data-exchange')?.value||'binance').catch(()=>{});
+  loadKlinesByForm().catch(()=>{});
+});
+document.querySelectorAll('[data-data-preset]').forEach(btn=>btn.addEventListener('click',()=>{
+  const [symbol,timeframe]=String(btn.dataset.dataPreset||'').split('|');
+  const symbolEl=document.getElementById('data-symbol'), tfEl=document.getElementById('data-timeframe');
+  if(symbolEl&&symbol)symbolEl.value=symbol;
+  if(tfEl&&timeframe)tfEl.value=timeframe;
+  loadKlinesByForm().then(()=>notify(`${symbol} · ${timeframe} 行情已更新`)).catch(err=>notify(`行情加载失败: ${err.message}`,true));
+}));
 const d=document.getElementById('download-form');
 if(d)d.onsubmit=async e=>{
   e.preventDefault();
@@ -9076,12 +9117,13 @@ if(f)f.onsubmit=async e=>{
 e.preventDefault();
 try{
 notify('回测运行中...');
-const st=await ensureSelectedBacktestStrategy(),tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date').value,ed=document.getElementById('backtest-end-date').value,cr=0.0004,sb=2;
+const st=await ensureSelectedBacktestStrategy(),tf=document.getElementById('backtest-timeframe').value,c=document.getElementById('backtest-capital').value,sd=document.getElementById('backtest-start-date').value,ed=document.getElementById('backtest-end-date').value,cr=0.0004,sb=2,computeBackend=document.getElementById('backtest-compute-backend')?.value||'auto';
 if(isBacktestMlStrategy(st))requireSelectedBacktestMlModel();
 const ctx=buildBacktestRequestContext(st,{includeCustomParams:true});
 let u=`/backtest/${ctx.useCustomRun?'run_custom':'run'}?strategy=${encodeURIComponent(st)}&symbol=${encodeURIComponent(ctx.symbol)}&timeframe=${encodeURIComponent(tf)}&initial_capital=${encodeURIComponent(c)}&commission_rate=${encodeURIComponent(cr)}&slippage_bps=${encodeURIComponent(sb)}&include_series=true`;
 if(sd)u+=`&start_date=${encodeURIComponent(sd)}`;
 if(ed)u+=`&end_date=${encodeURIComponent(ed)}`;
+u+=`&compute_backend=${encodeURIComponent(computeBackend)}`;
 if(ctx.useCustomRun&&ctx.params&&Object.keys(ctx.params).length)u+=`&params_json=${encodeURIComponent(JSON.stringify(ctx.params))}`;
 u=appendBacktestProtectionParams(u);
 const runTimeoutMs=estimateBacktestRunTimeoutMs(st, ctx.params);

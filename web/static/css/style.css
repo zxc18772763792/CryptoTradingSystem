@@ -18753,6 +18753,32 @@ body.app-page #news .news-card-queue .news-scroll-fill {
     }
 }
 
+/* ===== Data board + smooth backtest flow ===== */
+body.app-page #data .data-command-center {
+    grid-column: 1 / -1;
+    padding: 20px;
+    border-color: rgba(var(--accent-rgb), .34);
+    background: linear-gradient(135deg, rgba(20, 42, 66, .98), rgba(15, 27, 42, .96));
+}
+body.app-page #data .data-command-center .card-head { display:flex; justify-content:space-between; align-items:flex-start; gap:18px; }
+body.app-page #data .data-command-center h3 { margin:2px 0 2px; }
+body.app-page .eyebrow { color:var(--accent-soft); font:700 10px/1.2 ui-monospace,SFMono-Regular,Consolas,monospace; letter-spacing:.16em; }
+body.app-page .data-board-summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:14px; }
+body.app-page .data-board-kpi { min-height:84px; padding:13px 14px; border:1px solid var(--workspace-line); border-radius:9px; background:rgba(7,15,25,.45); }
+body.app-page .data-board-kpi span, body.app-page .data-board-kpi small { display:block; color:var(--text-sub); font-size:11px; }
+body.app-page .data-board-kpi strong { display:block; margin:5px 0 2px; color:var(--text-bright); font-size:19px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+body.app-page .data-board-quick-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+body.app-page #backtest .backtest-compute-group { padding:10px; border:1px solid rgba(var(--accent-rgb),.22); border-radius:8px; background:rgba(var(--accent-rgb),.05); }
+body.app-page #backtest .backtest-compute-group select { border-color:rgba(var(--accent-rgb),.48); }
+body.app-page #backtest .backtest-mode-tabs { position:sticky; top:58px; z-index:3; padding:6px; border-radius:9px; background:rgba(10,16,24,.9); backdrop-filter:blur(12px); }
+body.app-page #backtest #backtest-results { min-height:110px; }
+body.app-page #backtest #backtest-equity-chart { min-height:340px; border:1px solid var(--workspace-line); border-radius:9px; background:#0b1420; }
+@media (max-width:900px){
+ body.app-page #data .data-command-center .card-head { flex-direction:column; }
+ body.app-page .data-board-summary { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media (max-width:560px){ body.app-page .data-board-summary { grid-template-columns:1fr; } }
+
 /* ===== Trading / Strategy / Data workspace refresh =====
    Dense desktop-first composition for Chrome at 100% zoom. The existing
    markup and ids remain unchanged so runtime behavior is preserved. */

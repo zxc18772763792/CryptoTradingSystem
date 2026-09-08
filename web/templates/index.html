@@ -710,6 +710,31 @@
 
             <div id="data" class="tab-content">
                 <div class="grid">
+                    <div class="card wide data-command-center">
+                        <div class="card-head">
+                            <div>
+                                <div class="eyebrow">DATA COMMAND CENTER</div>
+                                <h3>数据板</h3>
+                                <p class="form-help">先看数据是否可用，再加载行情、补齐历史或进入回放。</p>
+                            </div>
+                            <div class="inline-actions">
+                                <span id="data-board-source-status" class="status-badge">状态读取中...</span>
+                                <button type="button" class="btn btn-primary btn-sm" id="btn-data-board-refresh">刷新数据板</button>
+                            </div>
+                        </div>
+                        <div id="data-board-summary" class="data-board-summary">
+                            <div class="data-board-kpi"><span>当前标的</span><strong id="data-board-symbol">--</strong><small id="data-board-exchange">--</small></div>
+                            <div class="data-board-kpi"><span>本地K线</span><strong id="data-board-bars">--</strong><small id="data-board-timeframe">--</small></div>
+                            <div class="data-board-kpi"><span>数据覆盖</span><strong id="data-board-coverage">--</strong><small>最近可用区间</small></div>
+                            <div class="data-board-kpi"><span>回测计算</span><strong id="data-board-compute">检测中</strong><small id="data-board-compute-note">CPU 可用</small></div>
+                        </div>
+                        <div class="data-board-quick-actions" aria-label="数据快捷操作">
+                            <button type="button" class="btn btn-primary btn-sm" data-data-preset="BTC/USDT|1h">BTC · 1h</button>
+                            <button type="button" class="btn btn-primary btn-sm" data-data-preset="ETH/USDT|1h">ETH · 1h</button>
+                            <button type="button" class="btn btn-primary btn-sm" data-data-preset="BTC/USDT|5m">BTC · 5m</button>
+                            <button type="button" class="btn btn-primary btn-sm" data-data-preset="SOL/USDT|15m">SOL · 15m</button>
+                        </div>
+                    </div>
                     <div class="card">
                         <h3>行情查看</h3>
                         <form id="data-form" class="form">
@@ -3283,6 +3308,15 @@
                             <div class="form-group">
                                 <label>初始资金 ($)</label>
                                 <input type="number" id="backtest-capital" value="10000">
+                            </div>
+                            <div class="form-group backtest-compute-group">
+                                <label>计算后端</label>
+                                <select id="backtest-compute-backend">
+                                    <option value="auto" selected>自动选择（GPU 优先）</option>
+                                    <option value="gpu">GPU（不可用时自动回退）</option>
+                                    <option value="cpu">CPU（稳定模式）</option>
+                                </select>
+                                <div id="backtest-compute-status" class="form-help">正在检测计算设备...</div>
                             </div>
                             <div class="form-row backtest-protection-row">
                                 <div class="form-group">
