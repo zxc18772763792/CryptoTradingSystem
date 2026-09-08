@@ -38,7 +38,9 @@ check below rather than by being named here.
 """
 from __future__ import annotations
 
+import os
 import threading
+from collections import OrderedDict
 from contextlib import contextmanager
 from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
@@ -46,16 +48,42 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-# Values must agree this closely for a factor to stay cached. Chosen to sit well
-# above genuine float noise (<=5e-11 observed) and well below a real semantic
-# difference (2.3e-05 for the EWM factor).
-_REL_TOL = 1e-9
+# How closely a cached value must match the uncached one for a factor to stay
+# cached. Default 0.0 means bit-exact.
+#
+# This is deliberately strict. Computing a rolling factor over the full series
+# rather than a 200-bar window is mathematically the same but not bit-identical:
+# pandas accumulates over a different-length array, leaving ~1e-11 of float noise
+# in realized_vol / volume_z / zscore_price / ema_slope (atr_pct and spread_proxy
+# do come out bit-identical). That noise is harmless right up until a strategy
+# compares against a threshold -- `score > enter_th` turns 1e-11 into a different
+# trade. Measured on an 8-trial MultiFactorHF sweep over 3,000 bars: a 1e-9
+# tolerance gives 2.64x but changes the position on 8 bars; bit-exact gives 1.40x
+# and changes nothing.
+#
+# So exactness is the default and the faster mode is opt-in, for parameter sweeps
+# and research runs where the tiny drift is acceptable:
+#     FACTOR_CACHE_REL_TOL=1e-9
+_REL_TOL = float(os.getenv("FACTOR_CACHE_REL_TOL", "0") or 0.0)
 
 # Re-verify every Nth cached call, so a factor that only diverges later (e.g. once
 # its warmup completes) is still caught rather than trusted forever.
 _RECHECK_EVERY = 500
 
 _local = threading.local()
+
+# Full-series results survive scope exit, keyed by a fingerprint of the frame.
+# An optimize run replays the SAME price frame once per parameter trial, and the
+# gate factors (realized_vol, atr_pct, spread_proxy, volume_z) do not depend on
+# the strategy parameters being swept -- without this they would be recomputed
+# from scratch for every trial. Signal factors whose parameters do vary simply
+# land under different keys, so this stays correct without special-casing.
+#
+# Bounded so a long-lived web process cannot accumulate frames indefinitely.
+_STORE_MAX = 512
+_store: "OrderedDict[Tuple, pd.Series]" = OrderedDict()
+_store_status: "OrderedDict[Tuple, str]" = OrderedDict()
+_store_lock = threading.Lock()
 
 
 def _params_key(params: Optional[Dict[str, Any]]) -> Tuple:
@@ -64,21 +92,60 @@ def _params_key(params: Optional[Dict[str, Any]]) -> Tuple:
     return tuple(sorted((str(k), repr(v)) for k, v in params.items()))
 
 
+def _fingerprint(df: pd.DataFrame) -> Tuple:
+    """Cheap content identity for a price frame.
+
+    Index plus the close column is enough: two frames sharing both are the same
+    replay input. Deliberately not id()-based -- the optimize pool ships a fresh
+    unpickled copy of the frame to every trial, so object identity would never
+    match and the cross-trial reuse this exists for would never happen.
+    """
+    idx = df.index
+    try:
+        close_hash = int(pd.util.hash_pandas_object(df["close"], index=False).sum())
+    except Exception:
+        close_hash = 0
+    return (len(df), str(idx[0]), str(idx[-1]), close_hash)
+
+
+def _store_get(key: Tuple) -> Optional[pd.Series]:
+    with _store_lock:
+        series = _store.get(key)
+        if series is not None:
+            _store.move_to_end(key)
+        return series
+
+
+def _store_put(key: Tuple, series: pd.Series) -> None:
+    with _store_lock:
+        _store[key] = series
+        _store.move_to_end(key)
+        while len(_store) > _STORE_MAX:
+            _store.popitem(last=False)
+
+
+def clear_factor_cache() -> None:
+    """Drop all retained full-series results (used by tests)."""
+    with _store_lock:
+        _store.clear()
+        _store_status.clear()
+
+
 class _Scope:
-    __slots__ = ("full", "_index", "_pos", "full_results", "status", "calls",
-                 "served", "computed", "rejected_names")
+    __slots__ = ("full", "fp", "_index", "_pos", "calls",
+                 "served", "computed", "reused", "rejected_names")
 
     def __init__(self, full: pd.DataFrame) -> None:
         self.full = full
+        self.fp = _fingerprint(full)
         self._index = full.index
         # Position lookup so we can cheaply confirm a window is a contiguous
         # slice of the full frame rather than some unrelated frame.
         self._pos = {ts: i for i, ts in enumerate(full.index)}
-        self.full_results: Dict[Tuple, pd.Series] = {}
-        self.status: Dict[Tuple, str] = {}
         self.calls: Dict[Tuple, int] = {}
         self.served = 0
-        self.computed = 0
+        self.computed = 0   # full-series passes done by THIS scope
+        self.reused = 0     # full-series results inherited from an earlier scope
         self.rejected_names: set[str] = set()
 
     def is_slice_of_full(self, window: pd.DataFrame) -> bool:
@@ -133,7 +200,8 @@ def factor_cache_scope(full: pd.DataFrame) -> Iterator[None]:
         _local.scope = None
         if scope.served:
             msg = (f"factor cache: served {scope.served} calls from "
-                   f"{scope.computed} full-series computations")
+                   f"{scope.computed} full-series computations "
+                   f"({scope.reused} reused from an earlier run)")
             if scope.rejected_names:
                 msg += f"; not cacheable: {sorted(scope.rejected_names)}"
             logger.debug(msg)
@@ -156,28 +224,33 @@ def try_cached(
     if not scope.is_slice_of_full(df):
         return None
 
-    key = (str(name), _params_key(params))
-    state = scope.status.get(key)
+    # Keyed by frame fingerprint so a later replay of the same frame -- the next
+    # trial of an optimize sweep -- reuses this work instead of redoing it.
+    key = (scope.fp, str(name), _params_key(params))
+    state = _store_status.get(key)
     if state == "rejected":
+        scope.rejected_names.add(str(name))
         return None
 
-    full_series = scope.full_results.get(key)
+    full_series = _store_get(key)
     if full_series is None:
         try:
             full_series = compute(name, scope.full, params)
         except Exception as exc:
             # A factor that cannot run on the full frame (e.g. needs a column the
             # window has but the frame lacks) is simply not cacheable.
-            scope.status[key] = "rejected"
+            _store_status[key] = "rejected"
             scope.rejected_names.add(str(name))
             logger.debug(f"factor cache: {name} not cacheable on full frame: {exc}")
             return None
         if not isinstance(full_series, pd.Series):
-            scope.status[key] = "rejected"
+            _store_status[key] = "rejected"
             scope.rejected_names.add(str(name))
             return None
-        scope.full_results[key] = full_series
+        _store_put(key, full_series)
         scope.computed += 1
+    elif key not in scope.calls:
+        scope.reused += 1
 
     n = scope.calls.get(key, 0)
     scope.calls[key] = n + 1
@@ -188,9 +261,9 @@ def try_cached(
     if must_verify:
         actual = compute(name, df, params)
         if _values_match(candidate, actual):
-            scope.status[key] = "verified"
+            _store_status[key] = "verified"
         else:
-            scope.status[key] = "rejected"
+            _store_status[key] = "rejected"
             scope.rejected_names.add(str(name))
             logger.debug(
                 f"factor cache: {name} rejected -- windowed and full-series values "
@@ -209,9 +282,14 @@ def scope_stats() -> Optional[Dict[str, Any]]:
     scope: Optional[_Scope] = getattr(_local, "scope", None)
     if scope is None:
         return None
+    verified = sorted({
+        key[1] for key, state in _store_status.items()
+        if state == "verified" and key[0] == scope.fp
+    })
     return {
         "served": scope.served,
         "full_computations": scope.computed,
-        "verified": sorted({k[0] for k, v in scope.status.items() if v == "verified"}),
+        "reused_from_earlier_run": scope.reused,
+        "verified": verified,
         "rejected": sorted(scope.rejected_names),
     }

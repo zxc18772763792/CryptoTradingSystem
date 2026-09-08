@@ -12,8 +12,20 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core.factors_ts.cache import factor_cache_scope, scope_stats
+from core.factors_ts.cache import (
+    clear_factor_cache,
+    factor_cache_scope,
+    scope_stats,
+)
 from core.factors_ts.registry import _compute_uncached, compute_factor
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cache():
+    """Full-series results deliberately outlive a scope, so isolate each test."""
+    clear_factor_cache()
+    yield
+    clear_factor_cache()
 
 
 def _ohlcv(n: int = 600, seed: int = 3) -> pd.DataFrame:
@@ -85,6 +97,52 @@ def test_scope_actually_serves_from_cache():
         assert "atr_pct" in stats["verified"], stats
 
 
+def test_results_are_reused_across_separate_scopes():
+    """The optimize sweep replays one frame per trial; the work must carry over.
+
+    Each trial opens its own scope, and the pool hands every trial a freshly
+    unpickled copy of the frame, so reuse has to key on frame *content* rather
+    than object identity.
+    """
+    df = _ohlcv()
+    trial_1 = df
+    trial_2 = df.copy(deep=True)  # what a pool worker would receive
+
+    with factor_cache_scope(trial_1):
+        for end in range(300, 330):
+            compute_factor("atr_pct", trial_1.iloc[end - 200: end])
+        first = scope_stats()
+    assert first["full_computations"] == 1, first
+    assert first["reused_from_earlier_run"] == 0, first
+
+    with factor_cache_scope(trial_2):
+        for end in range(300, 330):
+            compute_factor("atr_pct", trial_2.iloc[end - 200: end])
+        second = scope_stats()
+    # Second trial must not recompute the full series.
+    assert second["full_computations"] == 0, second
+    assert second["reused_from_earlier_run"] == 1, second
+    assert second["served"] > 20, second
+
+
+def test_a_different_frame_does_not_collide():
+    """Different price data must not read another frame's cached factors."""
+    a = _ohlcv(seed=1)
+    b = _ohlcv(seed=2)
+    with factor_cache_scope(a):
+        for end in range(300, 320):
+            compute_factor("atr_pct", a.iloc[end - 200: end])
+    with factor_cache_scope(b):
+        window = b.iloc[100:300]
+        got = compute_factor("atr_pct", window)
+        expected = _compute_uncached("atr_pct", window)
+        assert float(got.iloc[-1]) == pytest.approx(float(expected.iloc[-1]), rel=1e-9)
+        stats = scope_stats()
+        # b is a different frame, so it must do its own full-series pass.
+        assert stats["full_computations"] == 1, stats
+        assert stats["reused_from_earlier_run"] == 0, stats
+
+
 def test_window_from_a_different_frame_is_not_served():
     """A window that is not a slice of the scope frame must fall through."""
     df = _ohlcv(seed=3)
@@ -98,14 +156,26 @@ def test_window_from_a_different_frame_is_not_served():
         assert stats["served"] == 0, stats
 
 
-def test_obv_is_cacheable_because_its_cumsum_offset_cancels():
+def test_default_tolerance_is_bit_exact():
+    """Exactness is the default: a threshold compare turns 1e-11 into a trade."""
+    import core.factors_ts.cache as cache_mod
+
+    assert cache_mod._REL_TOL == 0.0
+
+
+def test_obv_is_cacheable_under_the_relaxed_tolerance(monkeypatch):
     """OBV uses cumsum but is returned as a rolling z-score, so it IS window-safe.
 
     Guards against someone "fixing" the cache by denylisting cumsum factors: the
     constant offset between a window's cumsum and the full series' cumsum cancels
-    in (obv - obv_ma), so the value is genuinely window-invariant here. This is
-    why acceptance is decided by measurement rather than by a hand-kept list.
+    in (obv - obv_ma), so the value is mathematically window-invariant. It is not
+    bit-identical though, so it only qualifies under the opt-in tolerance -- which
+    is exactly why acceptance is decided by measurement rather than a hand-kept
+    list of "path-dependent" factor names.
     """
+    import core.factors_ts.cache as cache_mod
+
+    monkeypatch.setattr(cache_mod, "_REL_TOL", 1e-9)
     df = _ohlcv()
     with factor_cache_scope(df):
         for end in (300, 350, 420):
