@@ -3232,13 +3232,14 @@
                         <div id="backtest-mode-note" class="backtest-mode-note">自由选择策略、交易对、周期、退出模板和优化参数。</div>
                         <div id="backtest-mode-classic" class="backtest-mode-panel active">
                         <form id="backtest-form" class="form">
-                            <div class="form-group">
+                            <div class="backtest-form-divider">研究对象</div>
+                            <div class="form-group backtest-field backtest-field-strategy">
                                 <label>策略</label>
                                 <select id="backtest-strategy">
                                     <option value="" selected disabled>策略目录加载中...</option>
                                 </select>
                             </div>
-                            <div class="form-row">
+                            <div class="form-row backtest-field backtest-field-symbols">
                                 <div class="form-group">
                                     <label id="backtest-symbol-label">交易对</label>
                                     <select id="backtest-symbol">
@@ -3290,7 +3291,7 @@
                                     </select>
                                 </div>
                             </div>
-                            <div class="form-group">
+                            <div class="form-group backtest-field backtest-field-timeframe">
                                 <label>周期</label>
                                 <select id="backtest-timeframe">
                                     <option value="1s">1秒</option>
@@ -3308,7 +3309,7 @@
                                     <option value="1M">月线</option>
                                 </select>
                             </div>
-                            <div class="form-row" id="backtest-ml-model-row" style="display:none;">
+                            <div class="form-row backtest-field backtest-field-ml" id="backtest-ml-model-row" style="display:none;">
                                 <div class="form-group">
                                     <label>已训练模型</label>
                                     <select id="backtest-ml-model">
@@ -3320,7 +3321,8 @@
                                     <div id="backtest-ml-model-meta" class="form-help">选择 ML 策略后，可直接选用已训练模型进行回测。</div>
                                 </div>
                             </div>
-                            <div class="form-row">
+                            <div class="backtest-form-divider">样本与资金</div>
+                            <div class="form-row backtest-field backtest-field-dates">
                                 <div class="form-group">
                                     <label>开始时间（精确到分钟）</label>
                                     <input type="datetime-local" id="backtest-start-date" step="60">
@@ -3330,11 +3332,11 @@
                                     <input type="datetime-local" id="backtest-end-date" step="60">
                                 </div>
                             </div>
-                            <div class="form-group">
+                            <div class="form-group backtest-field backtest-field-capital">
                                 <label>初始资金 ($)</label>
                                 <input type="number" id="backtest-capital" value="10000">
                             </div>
-                            <div class="form-group backtest-compute-group">
+                            <div class="form-group backtest-field backtest-field-compute backtest-compute-group">
                                 <label>计算后端</label>
                                 <select id="backtest-compute-backend">
                                     <option value="auto" selected>自动选择（GPU 优先）</option>
@@ -3343,6 +3345,7 @@
                                 </select>
                                 <div id="backtest-compute-status" class="form-help">正在检测计算设备...</div>
                             </div>
+                            <div class="backtest-form-divider">退出与风险</div>
                             <div class="form-row backtest-protection-row">
                                 <div class="form-group">
                                     <label>统一退出模板</label>
@@ -3372,7 +3375,8 @@
                                     <input type="number" id="backtest-take-profit-pct" value="0.10" min="0.01" max="0.99" step="0.01" disabled>
                                 </div>
                             </div>
-                            <div class="inline-actions">
+                            <div class="inline-actions backtest-action-row">
+                                <span class="backtest-action-hint">先运行单策略；需要横向比较时再打开多策略对比或参数优化。</span>
                                 <button type="submit" class="btn btn-primary">运行回测</button>
                                 <button type="button" class="btn btn-primary" id="btn-backtest-compare">多策略对比</button>
                                 <button type="button" class="btn btn-primary" id="btn-backtest-optimize">参数优化</button>

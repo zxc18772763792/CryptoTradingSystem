@@ -18761,6 +18761,17 @@ body.app-page #backtest > .grid > .backtest-config-card { grid-column: 1 / -1; }
 body.app-page #backtest > .grid > .backtest-results-card { grid-column: 1 / -1; }
 body.app-page #backtest .backtest-config-card > .backtest-mode-panel.active > form,
 body.app-page #backtest .backtest-config-card > .backtest-mode-panel.active > .form { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:12px; align-items:end; }
+body.app-page #backtest .backtest-config-card #backtest-form { gap:10px 12px; }
+body.app-page #backtest .backtest-form-divider { grid-column:1 / -1; margin-top:4px; padding:7px 0 4px; border-bottom:1px solid var(--workspace-line); color:var(--accent-soft); font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
+body.app-page #backtest .backtest-field-strategy { grid-column:span 4; }
+body.app-page #backtest .backtest-field-symbols { grid-column:span 5; }
+body.app-page #backtest .backtest-field-timeframe { grid-column:span 3; }
+body.app-page #backtest .backtest-field-ml { grid-column:1 / -1; }
+body.app-page #backtest .backtest-field-dates { grid-column:span 6; }
+body.app-page #backtest .backtest-field-capital { grid-column:span 3; }
+body.app-page #backtest .backtest-field-compute { grid-column:span 3; }
+body.app-page #backtest .backtest-action-row { align-items:center; padding-top:4px; }
+body.app-page #backtest .backtest-action-hint { margin-right:auto; color:var(--text-faint); font-size:11px; }
 body.app-page #backtest .backtest-config-card .backtest-mode-tabs,
 body.app-page #backtest .backtest-config-card .backtest-mode-note,
 body.app-page #backtest .backtest-config-card .backtest-mode-panel,
@@ -18776,6 +18787,15 @@ body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form
  body.app-page #backtest .backtest-config-card > .backtest-mode-panel.active > .form { grid-template-columns:1fr; }
  body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form > .form-group,
  body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form > .form-row { grid-column:1; } }
+@media (max-width:900px){
+ body.app-page #backtest .backtest-field-strategy,
+ body.app-page #backtest .backtest-field-symbols,
+ body.app-page #backtest .backtest-field-timeframe,
+ body.app-page #backtest .backtest-field-dates,
+ body.app-page #backtest .backtest-field-capital,
+ body.app-page #backtest .backtest-field-compute { grid-column:1; }
+ body.app-page #backtest .backtest-action-hint { flex-basis:100%; margin-bottom:4px; }
+}
 
 /* ===== Trading / Strategy / Data workspace refresh =====
    Dense desktop-first composition for Chrome at 100% zoom. The existing
