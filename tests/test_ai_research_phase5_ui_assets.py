@@ -201,7 +201,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "当前已选中 watchlist，正在等待最新聚合信号快照。" in ai_js
     assert "当前 watchlist 暂无聚合信号快照，后续刷新后会自动显示。" in ai_js
     assert 'option value="codex">OpenAI' in template
-    assert "真实执行边界" in template
+    assert "真实执行态" in template
     assert "一键退出运行中条目" in template
     assert "一键清空当前候选" in template
     assert "一键清空当前任务" in template

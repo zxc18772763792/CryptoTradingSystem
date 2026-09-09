@@ -2152,7 +2152,6 @@
                     <div class="ai-agent-cockpit-main">
                         <div class="ai-agent-cockpit-kicker">AI自治代理运行驾驶舱</div>
                         <div class="ai-agent-cockpit-title">状态、动作、风险、复盘一屏串联</div>
-                        <div class="ai-agent-cockpit-desc">先确认运行与真实执行边界，再处理试跑、诊断、选币和日志，最后用右侧摘要判断是否允许继续放大。</div>
                         <div class="ai-agent-cockpit-flow">
                             <span class="ai-agent-cockpit-flow-step">真实执行态</span>
                             <span class="ai-agent-cockpit-flow-step">观望原因</span>
@@ -2205,10 +2204,6 @@
                                 <div class="ai-workspace-section-kicker">AI自治代理</div>
                                 <div class="ai-workspace-section-title">运行状态、触发动作、风险判断、交易复盘</div>
                             </div>
-                            <div class="ai-workspace-section-note ai-agent-workspace-note">
-                                <span class="ai-agent-workspace-note-label">运行时工作区</span>
-                                <span>按执行链路排列，优先露出当前状态、主阻塞原因和下一步动作。</span>
-                            </div>
                         </div>
 
                         <div class="ai-agent-workspace-grid">
@@ -2216,7 +2211,6 @@
                                 <div class="ai-agent-command-hero">
                                     <div>
                                         <div class="ai-top-intro-title">AI 自动交易指挥台</div>
-                                        <div class="ai-top-intro-subtitle">运行控制、Hold 诊断、自动选币、决策日志在同一操作面展开。</div>
                                     </div>
                                     <div class="ai-agent-command-side">
                                         <div class="ai-agent-command-tags">
@@ -2242,7 +2236,6 @@
                                                 <div class="ai-auto-step-title">运行状态与开关</div>
                                                 <span id="ai-agent-status-dot" class="agent-dot agent-dot-off" title="未运行"></span>
                                             </div>
-                                            <div class="ai-auto-step-desc">先确认代理是否在跑、当前盯哪个币、真实执行边界是否会动用实盘，再决定是否启动或停止。</div>
                                             <div id="ai-agent-info" class="ai-auto-step-info">加载中...</div>
                                             <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                                 <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
@@ -2256,7 +2249,6 @@
                                         <div class="ai-agent-section-head">
                                             <div>
                                                 <div class="ai-agent-section-title">为什么现在是 Hold / 观望</div>
-                                                <div class="ai-agent-section-subtitle">把当前不下单的主因、模型反馈、执行成本和补充说明拆开看，不再埋在运行信息里。</div>
                                             </div>
                                             <div id="ai-agent-hold-badge" class="ai-agent-section-badge">等待诊断</div>
                                         </div>
@@ -2268,7 +2260,6 @@
                                             <summary>
                                                 <span>
                                                     <strong>选币、仓位与风险设置</strong>
-                                                    <small>默认收起；只有调整运行参数时展开</small>
                                                 </span>
                                                 <span class="ai-agent-settings-summary-action">展开设置</span>
                                             </summary>
@@ -2276,7 +2267,7 @@
                                             <div class="ai-agent-section-head">
                                                 <div>
                                                     <div class="ai-agent-section-title">币种模式与自动选币</div>
-                                                    <div class="ai-agent-section-subtitle">固定币种时只盯一个 symbol；自动模式会扫描候选币池，优先选当前最值得跟踪的标的。</div>
+                                                    <div class="ai-agent-section-subtitle">自动模式扫描候选币池，选出最值得跟踪的标的。</div>
                                                 </div>
                                                 <button class="btn btn-sm" id="ai-agent-ranking-refresh-btn" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
                                             </div>
@@ -2298,21 +2289,20 @@
                                                 <textarea id="ai-agent-universe-symbols" rows="2" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
                                             </label>
                                             <div class="ai-agent-config-divider">AI 资金预算</div>
-                                            <div class="ai-agent-risk-config-note">默认按总资金比例限制 AI 可用仓位；如果填写固定总金额，就会直接覆盖比例上限。</div>
                                             <div class="ai-agent-config-grid">
                                                 <label class="ai-agent-field">
                                                     <span>总资金比例</span>
                                                     <input id="ai-agent-max-total-exposure-ratio" type="number" min="0.05" max="0.4" step="0.01" placeholder="0.40" />
-                                                    <div class="ai-agent-field-hint">默认生效。0.40 代表 AI 最多可使用账户权益的 40%。</div>
+                                                    <div class="ai-agent-field-hint">默认生效，0.40 = 账户权益的 40%</div>
                                                 </label>
                                                 <label class="ai-agent-field">
                                                     <span>固定总金额（USDT，可选）</span>
                                                     <input id="ai-agent-max-total-exposure-usdt" type="number" min="0" step="10" placeholder="留空则按比例" />
-                                                    <div class="ai-agent-field-hint">填写后优先按固定金额生效，例如 500 表示 AI 总持仓上限约 500 USDT。</div>
+                                                    <div class="ai-agent-field-hint">填写后覆盖比例上限，500 = 上限约 500 USDT</div>
                                                 </label>
                                             </div>
                                             <div class="ai-agent-config-divider">自治风险纪律阈值</div>
-                                            <div class="ai-agent-risk-config-note">这组阈值只作用于自治代理的新单纪律，不直接改动全局账户风控上限。</div>
+                                            <div class="ai-agent-risk-config-note">只作用于自治代理新单，不改全局风控上限。</div>
                                             <div class="ai-agent-config-grid ai-agent-risk-config-grid">
                                                 <label class="ai-agent-field">
                                                     <span>日内止损缓冲</span>
@@ -2346,7 +2336,6 @@
                                             <div class="ai-auto-step-head">
                                                 <div>
                                                     <div class="ai-auto-step-title">最近决策日志与聚合信号快照</div>
-                                                    <div class="ai-auto-step-desc">先看当前周期快照，再看最近每轮决策日志，避免只盯着最终提交结果。</div>
                                                 </div>
                                                 <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
                                             </div>
@@ -2359,7 +2348,7 @@
                                     <div class="ai-auto-step-head">
                                         <div>
                                             <div class="ai-auto-step-title">最近放行交易复盘</div>
-                                            <div class="ai-auto-step-desc">把真正放行的开仓和平仓单独拎出来，看亏损是来自方向错误、平仓过慢，还是模型服务异常导致管理失灵。</div>
+                                            <div class="ai-auto-step-desc">只看真正放行的开仓/平仓，判断亏损来自方向、平仓速度还是模型异常。</div>
                                         </div>
                                         <button class="btn btn-sm" type="button" onclick="agentRefreshReview()">刷新复盘</button>
                                     </div>
@@ -2376,7 +2365,6 @@
                             <div class="ai-agent-runtime-stack">
                                 <div class="card ai-agent-runtime-card">
                                     <div class="ai-sidebar-title">自治代理运行摘要</div>
-                                    <div class="ai-agent-runtime-card-desc">这里单独看代理当前模式、运行状态、最近决策和最近动作，不再和研究链路混在同一块摘要里。</div>
                                     <article class="ai-chain-summary-card ai-chain-summary-card-trading">
                                         <div class="ai-chain-summary-head">
                                             <div class="ai-chain-summary-title">自治交易链路速览</div>
@@ -2405,7 +2393,6 @@
 
                                 <div class="card ai-agent-runtime-card">
                                     <div class="ai-sidebar-title">风险纪律状态</div>
-                                    <div class="ai-agent-runtime-card-desc">把“能不能开新单、是否已经 close-only、为什么被挡住、阈值设在哪里”单独拆开看。</div>
                                     <div id="ai-agent-risk-status-panel" class="ai-agent-runtime-panel">
                                         <div class="u-footnote">加载中...</div>
                                     </div>
@@ -2413,7 +2400,6 @@
 
                                 <div class="card ai-agent-runtime-card">
                                     <div class="ai-sidebar-title">交易记分卡</div>
-                                    <div class="ai-agent-runtime-card-desc">把收益、成本、胜率、持仓时长和复盘一致性压成一张短表，方便判断系统是否真的在变好。</div>
                                     <div id="ai-agent-scorecard-panel" class="ai-agent-runtime-panel">
                                         <div class="u-footnote">加载中...</div>
                                     </div>
@@ -2421,7 +2407,7 @@
 
                                 <div class="card ai-live-signals-card">
                                     <div class="ai-sidebar-title">自治代理聚合信号</div>
-                                    <div class="ai-agent-runtime-card-desc">这里只看自治代理当前 watchlist / 选中币种的聚合信号，不再混入 AI 研究候选。研究候选运行信号已经单独放到 AI 研究页；若最近行情为空或过旧，会直接标注“缺数据 / 数据旧”。</div>
+                                    <div class="ai-agent-runtime-card-desc" title="最近行情为空或过旧会标注「缺数据 / 数据旧」；研究候选的运行信号在 AI 研究页">仅代理当前 watchlist / 选中币种，不含研究候选。</div>
                                     <div id="ai-agent-live-signals-panel">
                                         <div class="u-footnote">加载中...</div>
                                     </div>
