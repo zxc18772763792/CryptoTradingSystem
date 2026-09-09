@@ -39,7 +39,8 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-queue-title"' in template
     assert 'id="ai-queue-hint"' in template
     assert '研究目标（可留空自动生成）' in template
-    assert '先让 AI 判断当前市场状态与适配策略' in template
+    assert 'placeholder="留空自动生成，或写明研究方向"' in template
+    assert '判断市场 → 生成目标 → 生成提案 → 后台研究 → 尝试部署' in template
     assert '页面时区：上海时间 (UTC+8)' in template
     assert '页面时区：上海时间 (UTC+8)' in news_template
     assert '/static/favicon.svg' in template
@@ -161,7 +162,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "const watchlist = Array.from(new Set([...DEFAULT_SIGNAL_SYMBOLS, selectedSymbol]));" in ai_js
     assert "loadSignal(undefined, { compact: true })" not in ai_js
     assert "liveDecisionActivityLastGood" in ai_js
-    assert "FLOW_HINT_QUICK_PATH" in ai_js
+    assert "hintEl.textContent = busy ? '执行中，请等待当前步骤完成' : '';" in ai_js
     assert "候选回填" in ai_js
     assert "该条目由候选结果回填" in ai_js
     assert "fallback_candidate_created_at" in ai_js

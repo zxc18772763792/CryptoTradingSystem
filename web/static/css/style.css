@@ -18772,6 +18772,9 @@ body.app-page #backtest .backtest-field-capital { grid-column:span 3; }
 body.app-page #backtest .backtest-field-compute { grid-column:span 3; }
 body.app-page #backtest .backtest-action-row { align-items:center; padding-top:4px; }
 body.app-page #backtest .backtest-action-hint { margin-right:auto; color:var(--text-faint); font-size:11px; }
+body.app-page #backtest .backtest-advanced-drawer { margin-top:2px; border-top:1px solid var(--workspace-line); padding-top:8px; }
+body.app-page #backtest .backtest-advanced-drawer > summary { color:var(--text-sub); font-size:12px; cursor:pointer; }
+body.app-page #backtest .backtest-advanced-drawer[open] > summary { color:var(--accent-soft); margin-bottom:8px; }
 body.app-page #backtest .backtest-config-card .backtest-mode-tabs,
 body.app-page #backtest .backtest-config-card .backtest-mode-note,
 body.app-page #backtest .backtest-config-card .backtest-mode-panel,
@@ -18795,6 +18798,158 @@ body.app-page #backtest .backtest-config-card .backtest-mode-panel.active > form
  body.app-page #backtest .backtest-field-capital,
  body.app-page #backtest .backtest-field-compute { grid-column:1; }
  body.app-page #backtest .backtest-action-hint { flex-basis:100%; margin-bottom:4px; }
+}
+
+/* Compact backtest setup: common inputs first, specialist controls on demand. */
+body.app-page #backtest > .grid > .card.backtest-config-card {
+    grid-column: 1 / -1 !important;
+    padding: 18px;
+}
+body.app-page #backtest .backtest-config-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+body.app-page #backtest .backtest-config-header h3 {
+    margin: 0;
+    padding-bottom: 0;
+    border: 0;
+}
+body.app-page #backtest .backtest-config-header .backtest-mode-tabs {
+    position: static;
+    margin: 0;
+    padding: 3px;
+    gap: 3px;
+    width: auto;
+    backdrop-filter: none;
+}
+body.app-page #backtest .backtest-config-header .backtest-mode-tab {
+    min-height: 32px;
+    padding: 5px 16px;
+    font-size: 12px;
+}
+body.app-page #backtest .backtest-mode-note {
+    padding: 0;
+    margin: 0 0 14px;
+    border: 0;
+    background: none;
+    color: var(--text-sub);
+}
+body.app-page #backtest #backtest-form {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: 12px;
+    align-items: start;
+}
+body.app-page #backtest #backtest-form > .backtest-field-strategy { grid-column: span 4; }
+body.app-page #backtest #backtest-form > .backtest-field-symbols { grid-column: span 4; }
+body.app-page #backtest #backtest-form > .backtest-field-timeframe,
+body.app-page #backtest #backtest-form > .backtest-field-capital { grid-column: span 2; }
+body.app-page #backtest #backtest-form > .backtest-field-dates { grid-column: span 8; }
+body.app-page #backtest #backtest-form > .backtest-field-exit { grid-column: span 4; }
+body.app-page #backtest #backtest-form > .backtest-field-ml { grid-column: 1 / -1; }
+body.app-page #backtest #backtest-form .form-group { min-width: 0; margin: 0; }
+body.app-page #backtest #backtest-form .form-row { margin: 0; gap: 12px; }
+body.app-page #backtest #backtest-form .backtest-field-symbols {
+    display: flex;
+}
+body.app-page #backtest #backtest-form .backtest-field-symbols > .form-group { flex: 1; }
+body.app-page #backtest #backtest-form label {
+    font-size: 12px;
+    margin-bottom: 5px;
+}
+body.app-page #backtest #backtest-form select,
+body.app-page #backtest #backtest-form input:not([type="checkbox"]) {
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+    height: 36px;
+    padding: 6px 10px;
+    font-size: 12px;
+}
+body.app-page #backtest #backtest-form .form-help { font-size: 11px; line-height: 1.6; }
+body.app-page #backtest #backtest-form .backtest-settings {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--workspace-line);
+    margin-top: 2px;
+}
+body.app-page #backtest #backtest-form .backtest-settings > details {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-bottom: 1px solid var(--workspace-line);
+    border-radius: 0;
+    background: none;
+}
+body.app-page #backtest #backtest-form .backtest-settings > details > summary {
+    padding: 10px 2px;
+    margin: 0;
+    width: fit-content;
+    max-width: 100%;
+    color: var(--text-soft);
+    font-size: 12px;
+    cursor: pointer;
+}
+body.app-page #backtest #backtest-form summary:hover,
+body.app-page #backtest #backtest-form details[open] > summary { color: var(--accent-soft); }
+body.app-page #backtest .backtest-disclosure-hint {
+    margin-left: 12px;
+    color: var(--text-faint);
+    font-size: 11px;
+    font-weight: 400;
+}
+body.app-page #backtest .backtest-settings-content { padding: 8px 0 14px; }
+body.app-page #backtest #backtest-custom-params-hint { padding-bottom: 12px; }
+body.app-page #backtest #backtest-form .backtest-risk-settings .backtest-settings-content {
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 1fr);
+    gap: 16px;
+    align-items: start;
+}
+body.app-page #backtest #backtest-form .backtest-protection-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) repeat(2, minmax(0, 1fr)) !important;
+    align-items: start;
+}
+body.app-page #backtest #backtest-form .backtest-field-compute {
+    grid-column: auto;
+    padding: 0;
+    border: 0;
+    background: none;
+}
+body.app-page #backtest #backtest-form .backtest-tools-actions { align-items: end; gap: 10px; }
+body.app-page #backtest .backtest-tool-field { display: grid; gap: 5px; width: 120px; }
+body.app-page #backtest #backtest-form #backtest-export-format { width: 90px; }
+body.app-page #backtest #backtest-form .backtest-action-row { margin: 0; padding: 0; gap: 12px; }
+body.app-page #backtest #backtest-form .backtest-action-row .btn-primary { min-width: 136px; min-height: 38px; }
+body.app-page #backtest #backtest-form .backtest-action-row .btn-primary span { margin-left: 16px; }
+body.app-page #backtest #backtest-form summary:focus-visible,
+body.app-page #backtest .backtest-switch input:focus-visible + .backtest-switch-ui {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    border-radius: 4px;
+}
+@media (max-width: 1100px) {
+    body.app-page #backtest #backtest-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    body.app-page #backtest #backtest-form > .backtest-field { grid-column: span 1; }
+    body.app-page #backtest #backtest-form > .backtest-field-dates,
+    body.app-page #backtest #backtest-form > .backtest-field-exit,
+    body.app-page #backtest #backtest-form > .backtest-field-ml { grid-column: 1 / -1; }
+    body.app-page #backtest #backtest-form .backtest-risk-settings .backtest-settings-content { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+    body.app-page #backtest > .grid > .card.backtest-config-card { padding: 14px; }
+    body.app-page #backtest .backtest-config-header .backtest-mode-tabs { width: 100%; }
+    body.app-page #backtest .backtest-config-header .backtest-mode-tab { padding-inline: 8px; }
+    body.app-page #backtest #backtest-form > .backtest-field-strategy,
+    body.app-page #backtest #backtest-form > .backtest-field-symbols { grid-column: 1 / -1; }
+    body.app-page #backtest #backtest-form .backtest-field-dates,
+    body.app-page #backtest #backtest-form .backtest-protection-row { grid-template-columns: 1fr !important; }
+    body.app-page #backtest .backtest-disclosure-hint { display: none; }
+    body.app-page #backtest #backtest-form .backtest-action-row .btn-primary { width: 100%; }
 }
 
 /* ===== Trading / Strategy / Data workspace refresh =====
