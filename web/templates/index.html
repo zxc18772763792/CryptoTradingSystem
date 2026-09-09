@@ -1686,12 +1686,11 @@
                                 <div class="ai-workspace-section-kicker">AI策略研究与增强</div>
                                 <div class="ai-workspace-section-title">从研究目标到提案、候选、验证与注册建议</div>
                             </div>
-                            <div class="ai-workspace-section-note">研究与增强独立运行；自治代理基于实时行情、聚合信号、风控和执行状态独立给出动作并尝试下单。</div>
+                            <div class="ai-workspace-section-note">实时盯盘与下单在「AI自治代理」页。</div>
                         </div>
                         <div class="ai-research-overview-grid ai-research-overview-compact">
                             <div class="card ai-research-hero-card ai-research-hero-card-slim">
                                 <div class="ai-top-intro-title">AI 研究工作台</div>
-                                <div class="ai-top-intro-subtitle">围绕一个目标完成提案、研究、候选比较和注册建议。</div>
                                 <div class="ai-research-hero-steps" aria-label="研究流程">
                                     <span class="is-active">1 目标</span><span>2 提案</span><span>3 研究</span><span>4 候选</span><span>5 注册</span>
                                 </div>
@@ -1736,7 +1735,7 @@
 
                                 <div class="ai-context-mini-card ai-research-live-signals-card">
                                     <div class="ai-sidebar-title">📈 研究候选运行信号</div>
-                                    <div class="ai-agent-runtime-card-desc">这里只看 AI 研究链路里已进入运行状态的候选策略，不混入自治代理 watchlist。会按 symbol + timeframe + strategy + params 去重；若最近行情为空或过旧，会直接标注“缺数据 / 数据旧”。</div>
+                                    <div class="ai-agent-runtime-card-desc" title="按 symbol + timeframe + strategy + params 去重；最近行情为空或过旧会标注「缺数据 / 数据旧」">仅研究链路中已运行的候选，不含自治代理 watchlist。</div>
                                     <div id="ai-research-live-signals-panel">
                                         <div class="u-footnote">加载中...</div>
                                     </div>
@@ -1753,7 +1752,7 @@
                                     <span class="ai-review-panel-tag">策略/候选</span>
                                 </div>
                                 <div class="ai-review-panel-desc">
-                                    只给已注册/候选策略加下单前复核；不生成新策略，不拦截 AI 自动交易直连链。
+                                    仅作用于策略库/候选执行链，不拦截 AI 自动交易。
                                 </div>
                             </div>
                             <div class="ai-review-metrics-strip">
@@ -1864,10 +1863,9 @@
                                 </div>
                                 <span class="ai-sidebar-badge">Planner</span>
                             </div>
-                                <div class="ai-sidebar-caption">先让 AI 判断当前市场状态与适配策略，再补全研究目标；你也可以在自动结果基础上继续微调。Quick Path 适合快速试跑整条研究链路。</div>
                             <div class="form-group" style="margin-top:4px;">
                                 <label>研究目标（可留空自动生成）</label>
-                                <textarea id="ai-planner-goal" rows="3" placeholder="留空即可：AI 会先判断当前市场状态、适合的策略类型，再自动生成研究目标"></textarea>
+                                <textarea id="ai-planner-goal" rows="3" placeholder="留空自动生成，或写明研究方向"></textarea>
                             </div>
                             <div class="form-row">
                                 <div class="form-group">
@@ -1941,10 +1939,9 @@
                                         <div class="ai-auto-step-title">one-click 自动研究+部署</div>
                                         <span class="ai-review-panel-tag ai-oneclick-entry-tag">Quick Path</span>
                                     </div>
-                                    <div class="ai-auto-step-desc">即使不手填研究目标，系统也会先判断市场状态、自动生成研究目标，再执行生成提案 → 提交后台研究 → 尝试部署。执行结果和失败原因会直接显示在下面。</div>
+                                    <div class="ai-auto-step-desc">自动串联：判断市场 → 生成目标 → 生成提案 → 后台研究 → 尝试部署。</div>
                                     <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
                                         <button class="btn btn-primary btn-sm" id="ai-oneclick-btn">⚡ one-click 自动研究+部署</button>
-                                        <span class="ai-auto-step-status">适合想快速验证整个研究链路能否跑通的场景</span>
                                     </div>
                                     <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap" style="margin-top:6px;align-items:center;">
                                         <span class="u-hint">一键研究天数</span>
@@ -1952,10 +1949,7 @@
                                         <span class="u-hint">部署仓位</span>
                                         <input type="number" id="ai-oneclick-allocation" value="5" min="1" max="100" step="1" style="width:64px;font-size:12px;" title="一键部署仓位百分比（1%-100%）">
                                         <span class="u-hint">%</span>
-                                        <span class="u-note">仅影响 one-click，不改下方手动“运行研究”天数</span>
-                                    </div>
-                                    <div style="margin-top:6px;font-size:11px;color:var(--text-faint);line-height:1.5;">
-                                        职责边界：这里负责“研究与候选”链路；自治代理的实时盯盘与执行请在“AI自治代理”页操作。
+                                        <span class="u-note">仅用于 one-click</span>
                                     </div>
                                 </div>
                             </section>
@@ -2001,7 +1995,7 @@
                                     <span id="ai-queue-badge" class="ai-sidebar-badge ai-sidebar-badge-muted"></span>
                                 </div>
                             </div>
-                            <div id="ai-queue-hint" class="ai-sidebar-caption">这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。</div>
+                            <div id="ai-queue-hint" class="ai-sidebar-caption">选择要运行的提案</div>
                             <div id="ai-proposal-list" class="ai-proposal-compact-list">
                                 <div style="color:var(--text-faint);font-size:12px;padding:8px 0;">暂无研究任务</div>
                             </div>
@@ -2027,9 +2021,6 @@
                                 <span style="font-size:11px;color:var(--text-faint);font-weight:400;">新闻 / 宏观 / 数据准备度</span>
                             </summary>
                             <div style="padding:0 16px 16px;">
-                                <div style="font-size:11px;color:var(--text-faint);line-height:1.6;margin-bottom:10px;">
-                                    这里只看研究是否具备足够的数据上下文，例如新闻、funding、宏观缓存是否到位。
-                                </div>
                                 <div id="ai-data-readiness-panel" class="u-hint">
                                     <div class="ai-sidebar-title" style="margin-bottom:4px;">🧭 数据诊断</div>
                                     <div id="ai-data-readiness-summary" style="margin-bottom:8px;">正在检测新闻与宏观数据...</div>
@@ -2054,7 +2045,6 @@
                                     <span class="ai-hub-title">候选策略工作区</span>
                                     <span id="ai-candidate-count" style="font-size:12px;color:var(--text-faint);"></span>
                                 </div>
-                                <div class="ai-hub-subtitle">先选研究任务，再运行研究；这里专注比较候选结果本身，不把注册动作混在一起。</div>
                             </div>
                             <div class="ai-hub-toolbar">
                                 <div class="ai-hub-toolbar-group">
@@ -2096,7 +2086,6 @@
                             <div class="ai-hub-candidates-head">
                                 <div>
                                     <div class="ai-hub-candidates-title">候选列表</div>
-                                    <div class="ai-hub-candidates-desc">优先看综合评分、回撤和策略类别，选中后去右侧查看验证细节与注册动作。</div>
                                 </div>
                                 <div class="ai-hub-candidates-actions">
                                     <button
@@ -2111,9 +2100,7 @@
                             </div>
                             <div id="ai-candidate-cards" class="ai-candidate-cards">
                                 <div class="ai-empty-hint">
-                                    暂无候选策略。<br>
-                                    先在左侧点击 <strong>2) 生成提案</strong>，<br>
-                                    再选中研究任务并点击 <strong>3) 运行研究</strong> 开始回测。
+                                    暂无候选。先 <strong>2) 生成提案</strong>，再选中任务 <strong>3) 运行研究</strong>。
                                 </div>
                             </div>
                         </section>
@@ -2126,13 +2113,12 @@
                                     <span class="ai-hub-kicker ai-hub-kicker-detail">Step 4</span>
                                     <div class="ai-hub-title">候选详情与注册</div>
                                 </div>
-                                <div class="ai-hub-subtitle">选中候选后，在这里看验证、对比、部署模式和第 4 步注册/部署动作。</div>
                             </div>
                         </div>
                         <div id="ai-detail-panel" class="ai-detail-panel">
                             <div class="ai-detail-placeholder">
                                 <div style="font-size:36px;opacity:.3;">📊</div>
-                                <div style="margin-top:10px;color:var(--text-faint);font-size:13px;">先选研究任务，再点击候选策略卡片<br>查看详细分析与第 4 步注册/部署</div>
+                                <div style="margin-top:10px;color:var(--text-faint);font-size:13px;">选中候选策略查看详情与注册</div>
                             </div>
                         </div>
                     </aside>
@@ -3223,25 +3209,26 @@
             <div id="backtest" class="tab-content">
                 <div class="grid">
                     <div class="card wide backtest-config-card">
+                        <div class="backtest-config-header">
                         <h3>策略回测</h3>
                         <div class="backtest-mode-tabs" id="backtest-mode-tabs" role="tablist" aria-label="回测模式">
                             <button type="button" class="backtest-mode-tab active" data-backtest-mode="classic">自由回测</button>
                             <button type="button" class="backtest-mode-tab" data-backtest-mode="factor_template">因子模板</button>
                             <button type="button" class="backtest-mode-tab" data-backtest-mode="factor_batch">批量因子</button>
                         </div>
-                        <div id="backtest-mode-note" class="backtest-mode-note">自由选择策略、交易对、周期、退出模板和优化参数。</div>
+                        </div>
+                        <div id="backtest-mode-note" class="backtest-mode-note">先选研究对象和样本区间，再运行回测；对比、优化、导出均放在结果工具中。</div>
                         <div id="backtest-mode-classic" class="backtest-mode-panel active">
                         <form id="backtest-form" class="form">
-                            <div class="backtest-form-divider">研究对象</div>
                             <div class="form-group backtest-field backtest-field-strategy">
-                                <label>策略</label>
+                                <label for="backtest-strategy">策略</label>
                                 <select id="backtest-strategy">
                                     <option value="" selected disabled>策略目录加载中...</option>
                                 </select>
                             </div>
                             <div class="form-row backtest-field backtest-field-symbols">
                                 <div class="form-group">
-                                    <label id="backtest-symbol-label">交易对</label>
+                                    <label id="backtest-symbol-label" for="backtest-symbol">交易对</label>
                                     <select id="backtest-symbol">
                                         <option value="BTC/USDT" selected>BTC/USDT</option>
                                         <option value="ETH/USDT">ETH/USDT</option>
@@ -3266,7 +3253,7 @@
                                     </select>
                                 </div>
                                 <div class="form-group" id="backtest-pair-symbol-group" style="display:none;">
-                                    <label>副腿</label>
+                                    <label for="backtest-pair-symbol">副腿</label>
                                     <select id="backtest-pair-symbol">
                                         <option value="ETH/USDT" selected>ETH/USDT</option>
                                         <option value="BTC/USDT">BTC/USDT</option>
@@ -3292,7 +3279,7 @@
                                 </div>
                             </div>
                             <div class="form-group backtest-field backtest-field-timeframe">
-                                <label>周期</label>
+                                <label for="backtest-timeframe">K 线周期</label>
                                 <select id="backtest-timeframe">
                                     <option value="1s">1秒</option>
                                     <option value="5s">5秒</option>
@@ -3309,9 +3296,33 @@
                                     <option value="1M">月线</option>
                                 </select>
                             </div>
+                            <div class="form-group backtest-field backtest-field-capital">
+                                <label for="backtest-capital">初始资金 ($)</label>
+                                <input type="number" id="backtest-capital" value="10000">
+                            </div>
+                            <div class="form-row backtest-field backtest-field-dates">
+                                <div class="form-group">
+                                    <label for="backtest-start-date">开始时间</label>
+                                    <input type="datetime-local" id="backtest-start-date" step="60">
+                                </div>
+                                <div class="form-group">
+                                    <label for="backtest-end-date">结束时间</label>
+                                    <input type="datetime-local" id="backtest-end-date" step="60">
+                                </div>
+                            </div>
+                                <div class="form-group backtest-field-exit">
+                                    <label for="backtest-exit-template">统一退出模板</label>
+                                    <select id="backtest-exit-template">
+                                        <option value="SignalPlusTimeStop" selected>SignalPlusTimeStop（默认稳健）</option>
+                                        <option value="ATRTrail">ATRTrail（趋势留盈）</option>
+                                        <option value="PartialPlusATR">PartialPlusATR（分批 + ATR）</option>
+                                        <option value="ReversalOnly">ReversalOnly（仅信号反转）</option>
+                                        <option value="Original">Original（旧版离场）</option>
+                                    </select>
+                                </div>
                             <div class="form-row backtest-field backtest-field-ml" id="backtest-ml-model-row" style="display:none;">
                                 <div class="form-group">
-                                    <label>已训练模型</label>
+                                    <label for="backtest-ml-model">已训练模型</label>
                                     <select id="backtest-ml-model">
                                         <option value="">加载中...</option>
                                     </select>
@@ -3321,43 +3332,11 @@
                                     <div id="backtest-ml-model-meta" class="form-help">选择 ML 策略后，可直接选用已训练模型进行回测。</div>
                                 </div>
                             </div>
-                            <div class="backtest-form-divider">样本与资金</div>
-                            <div class="form-row backtest-field backtest-field-dates">
-                                <div class="form-group">
-                                    <label>开始时间（精确到分钟）</label>
-                                    <input type="datetime-local" id="backtest-start-date" step="60">
-                                </div>
-                                <div class="form-group">
-                                    <label>结束时间（精确到分钟）</label>
-                                    <input type="datetime-local" id="backtest-end-date" step="60">
-                                </div>
-                            </div>
-                            <div class="form-group backtest-field backtest-field-capital">
-                                <label>初始资金 ($)</label>
-                                <input type="number" id="backtest-capital" value="10000">
-                            </div>
-                            <div class="form-group backtest-field backtest-field-compute backtest-compute-group">
-                                <label>计算后端</label>
-                                <select id="backtest-compute-backend">
-                                    <option value="auto" selected>自动选择（GPU 优先）</option>
-                                    <option value="gpu">GPU（不可用时自动回退）</option>
-                                    <option value="cpu">CPU（稳定模式）</option>
-                                </select>
-                                <div id="backtest-compute-status" class="form-help">正在检测计算设备...</div>
-                            </div>
-                            <div class="backtest-form-divider">退出与风险</div>
+                            <div class="backtest-settings">
+                            <details class="backtest-advanced-drawer backtest-risk-settings">
+                                <summary>风险与运行设置 <span class="backtest-disclosure-hint">固定止盈止损 · 计算后端</span></summary>
+                                <div class="backtest-settings-content">
                             <div class="form-row backtest-protection-row">
-                                <div class="form-group">
-                                    <label>统一退出模板</label>
-                                    <select id="backtest-exit-template">
-                                        <option value="SignalPlusTimeStop" selected>SignalPlusTimeStop（默认稳健）</option>
-                                        <option value="ATRTrail">ATRTrail（趋势留盈）</option>
-                                        <option value="PartialPlusATR">PartialPlusATR（分批 + ATR）</option>
-                                        <option value="ReversalOnly">ReversalOnly（仅信号反转）</option>
-                                        <option value="Original">Original（旧版离场）</option>
-                                    </select>
-                                    <div class="form-help">默认使用统一退出引擎；下方固定百分比止盈止损是在模板基础上的额外叠加。</div>
-                                </div>
                                 <div class="form-group backtest-protection-toggle">
                                     <label class="backtest-switch" for="backtest-use-stop-take">
                                         <input type="checkbox" id="backtest-use-stop-take">
@@ -3367,41 +3346,53 @@
                                     <div class="form-help">关闭 = 不叠加固定百分比；统一退出模板仍会照常生效。</div>
                                 </div>
                                 <div class="form-group">
-                                    <label>固定止损比例（0.01~0.5，如 0.05 = 5%）</label>
+                                    <label for="backtest-stop-loss-pct" title="固定止损比例（0.01~0.5，如 0.05 = 5%）">固定止损 <span class="form-help-inline">0.05 = 5%</span></label>
                                     <input type="number" id="backtest-stop-loss-pct" value="0.05" min="0.01" max="0.5" step="0.01" disabled>
                                 </div>
                                 <div class="form-group">
-                                    <label>固定止盈比例（0.01~0.99，如 0.10 = 10%）</label>
+                                    <label for="backtest-take-profit-pct" title="固定止盈比例（0.01~0.99，如 0.10 = 10%）">固定止盈 <span class="form-help-inline">0.10 = 10%</span></label>
                                     <input type="number" id="backtest-take-profit-pct" value="0.10" min="0.01" max="0.99" step="0.01" disabled>
                                 </div>
                             </div>
-                            <div class="inline-actions backtest-action-row">
-                                <span class="backtest-action-hint">先运行单策略；需要横向比较时再打开多策略对比或参数优化。</span>
-                                <button type="submit" class="btn btn-primary">运行回测</button>
-                                <button type="button" class="btn btn-primary" id="btn-backtest-compare">多策略对比</button>
-                                <button type="button" class="btn btn-primary" id="btn-backtest-optimize">参数优化</button>
-                                <select id="backtest-opt-objective" title="参数优化目标">
-                                    <option value="total_return" selected>优化目标: 收益率</option>
-                                    <option value="sharpe_ratio">优化目标: 夏普</option>
-                                    <option value="win_rate">优化目标: 胜率</option>
+                            <div class="form-group backtest-field backtest-field-compute backtest-compute-group">
+                                <label for="backtest-compute-backend">计算后端</label>
+                                <select id="backtest-compute-backend">
+                                    <option value="auto" selected>自动选择（GPU 优先）</option>
+                                    <option value="gpu">GPU（不可用时自动回退）</option>
+                                    <option value="cpu">CPU（稳定模式）</option>
                                 </select>
-                                <input type="number" id="backtest-opt-trials" value="48" min="8" max="1024" step="8" title="参数优化试验数（多策略对比会先对每个策略做预优化）">
-                                <button type="button" class="btn btn-primary" id="btn-backtest-export">导出报告</button>
-                                <select id="backtest-export-format">
-                                    <option value="xlsx" selected>XLSX</option>
-                                    <option value="csv">CSV</option>
-                                    <option value="pdf">PDF</option>
-                                </select>
+                                <div id="backtest-compute-status" class="form-help">正在检测计算设备...</div>
                             </div>
-                            <details class="backtest-custom-params" id="backtest-custom-params-panel">
-                                <summary>自定义策略参数（JSON，可选）</summary>
+                                </div>
+                            </details>
+                            <details class="backtest-custom-params backtest-advanced-drawer" id="backtest-custom-params-panel">
+                                <summary>自定义参数 <span class="backtest-disclosure-hint">策略参数 JSON</span></summary>
                                 <div class="form-group" style="margin-top:10px;">
                                     <label>用于“运行回测”与“套利页带配置进入回测”的完整参数</label>
                                     <textarea id="backtest-custom-params" rows="8" placeholder='例如 {&quot;pair_symbol&quot;:&quot;ETH/USDT&quot;,&quot;lookback_period&quot;:48}'></textarea>
                                 </div>
                                 <div id="backtest-custom-params-hint" class="form-help">留空时使用策略默认参数。运行回测与参数优化会读取这里的 JSON；多策略对比不会读取这里的自由 JSON，只读取策略集合与专用批量参数。</div>
                             </details>
-                            <details class="backtest-compare-picker" id="backtest-compare-picker">
+                            <details class="backtest-advanced-drawer backtest-tools-settings">
+                                <summary>对比、优化与导出 <span class="backtest-disclosure-hint">策略集合 · 实例注册</span></summary>
+                                <div class="backtest-settings-content">
+                            <div class="inline-actions backtest-tools-actions">
+                                <button type="button" class="btn btn-secondary" id="btn-backtest-compare">多策略对比</button>
+                                <button type="button" class="btn btn-secondary" id="btn-backtest-optimize">参数优化</button>
+                                <label class="backtest-tool-field">优化目标<select id="backtest-opt-objective" title="参数优化目标">
+                                    <option value="total_return" selected>收益率</option>
+                                    <option value="sharpe_ratio">夏普</option>
+                                    <option value="win_rate">胜率</option>
+                                </select>
+                                </label><label class="backtest-tool-field">试验次数<input type="number" id="backtest-opt-trials" value="48" min="8" max="1024" step="8" title="参数优化试验数（多策略对比会先对每个策略做预优化）">
+                                </label><button type="button" class="btn btn-secondary" id="btn-backtest-export">导出报告</button>
+                                <select id="backtest-export-format" aria-label="导出格式">
+                                    <option value="xlsx" selected>XLSX</option>
+                                    <option value="csv">CSV</option>
+                                    <option value="pdf">PDF</option>
+                                </select>
+                            </div>
+                            <details class="backtest-compare-picker backtest-advanced-drawer" id="backtest-compare-picker">
                                 <summary>多策略对比策略集合（可自选）<span id="backtest-compare-picked-count" style="margin-left:8px;color:var(--text-sub);">已选 0</span></summary>
                                 <div class="form-help" style="margin-top:8px;">未填写开始/结束时间时，多策略对比会自动锁定最近窗口来控制耗时；如需全历史，请手动填写区间。</div>
                                 <div class="inline-actions" style="margin-top:8px;">
@@ -3428,7 +3419,7 @@
                                 </div>
                                 <div id="backtest-compare-strategy-list" class="backtest-compare-groups"></div>
                             </details>
-                            <details class="backtest-compare-picker" id="backtest-ml-compare-panel" style="display:none;">
+                            <details class="backtest-compare-picker backtest-advanced-drawer" id="backtest-ml-compare-panel" style="display:none;">
                                 <summary>ML 模型集合（可自选）<span id="backtest-ml-picked-count" style="margin-left:8px;color:var(--text-sub);">已选 0</span></summary>
                                 <div class="form-help" style="margin-top:8px;">这里管理“训练好的模型资产”，点击“多策略对比”时会改为执行“多模型回测对比”。每个模型默认使用自己的训练币种、训练周期与模型参数。</div>
                                 <div class="inline-actions" style="margin-top:8px;">
@@ -3441,11 +3432,11 @@
                             </details>
                             <div class="backtest-register-options">
                                 <div class="form-group">
-                                    <label>注册新实例资金占比</label>
+                                    <label for="backtest-register-allocation">注册新实例资金占比</label>
                                     <input type="number" id="backtest-register-allocation" value="0.15" min="0" max="1" step="0.01">
                                 </div>
                                 <div class="form-group">
-                                    <label>实例名后缀（可选）</label>
+                                    <label for="backtest-register-suffix">实例名后缀（可选）</label>
                                     <input type="text" id="backtest-register-suffix" placeholder="例如 regimeB / test02">
                                 </div>
                                 <div class="form-group checkbox-like">
@@ -3454,6 +3445,13 @@
                                         注册后立即启动实例
                                     </label>
                                 </div>
+                            </div>
+                                </div>
+                            </details>
+                            </div>
+                            <div class="inline-actions backtest-action-row">
+                                <span class="backtest-action-hint">时间可精确到分钟；留空使用可用历史数据。</span>
+                                <button type="submit" class="btn btn-primary">运行回测 <span aria-hidden="true">→</span></button>
                             </div>
                         </form>
                         </div>

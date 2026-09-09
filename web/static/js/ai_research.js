@@ -13,7 +13,6 @@
   const AGENT_START_API = '/ai/autonomous-agent/start';
   const AGENT_STOP_API = '/ai/autonomous-agent/stop';
   const AGENT_RUN_ONCE_API = '/ai/autonomous-agent/run-once';
-  const FLOW_HINT_QUICK_PATH = '当前主流程：0) AI判断市场与策略 → 1) 生成研究思路 → 2) 生成提案 → 3) 运行研究 → 4) 注册/部署。也可以直接点击“⚡ one-click 自动研究+部署”。';
   const AI_UI_TIMEZONE = (typeof window !== 'undefined' && window.CTS_UI_TIMEZONE) || 'Asia/Shanghai';
   const AI_UI_TIMEZONE_LABEL = (typeof window !== 'undefined' && window.CTS_UI_TIMEZONE_LABEL) || '上海时间 (UTC+8)';
   const AI_SHARED_POLL_TAB = 'ai-research';
@@ -539,8 +538,8 @@
     const requestedText = requested === 'auto' ? '自动判断' : researchModeText(requested);
     const effectiveText = researchModeText(effective.research_mode || 'template');
     const draftCount = pendingStrategyDraftCount();
-    const draftText = draftCount > 0 ? `当前已挂起 ${draftCount} 个 AI 草案，生成提案时会一起进入搜索。` : '当前还没有 AI 草案，系统会先从模板和市场上下文起步。';
-    hintEl.textContent = `当前选择：${requestedText}；实际生成：${effectiveText}；模板上限 ${effective.max_templates}，草案预算 ${effective.max_strategy_drafts}，回测预算 ${effective.max_backtest_runs}，探索强度 ${(effective.exploration_bias * 100).toFixed(0)}%。${draftText}`;
+    const draftText = draftCount > 0 ? `｜AI草案 ${draftCount}` : '';
+    hintEl.textContent = `${requestedText} → ${effectiveText}｜模板 ${effective.max_templates}·草案 ${effective.max_strategy_drafts}·回测 ${effective.max_backtest_runs}·探索 ${(effective.exploration_bias * 100).toFixed(0)}%${draftText}`;
   }
 
   function setPlannerFieldValue(id, value) {
@@ -2914,12 +2913,12 @@
     }
     if (titleEl) titleEl.textContent = realCount ? '研究任务' : (virtualCount ? '候选回填' : '研究任务');
     if (hintEl) {
-      if (realCount && virtualCount) {
-        hintEl.textContent = '这里负责切换当前提案。候选回填条目仅支持查看候选详情/注册，不支持重新运行或删除提案。';
-      } else if (virtualCount) {
-        hintEl.textContent = '当前没有原始研究提案，以下条目由候选记录回填，只支持查看候选详情/注册，不支持重新运行或删除提案。';
+      if (virtualCount) {
+        hintEl.textContent = realCount
+          ? '回填条目只能查看/注册，不能重跑'
+          : '仅有候选回填条目，只能查看/注册';
       } else {
-        hintEl.textContent = '这里负责切换当前提案。选中后去中栏执行第 3 步“运行研究”，再到右侧完成第 4 步“注册/部署”。';
+        hintEl.textContent = '选择要运行的提案';
       }
     }
     if (!visibleProposals.length) {
@@ -4853,9 +4852,7 @@ ${confirmHint}`,
     if (generateBtn && !state.actionLocks.generate) generateBtn.disabled = busy;
     if (oneClickBtn && !state.actionLocks.oneclick) oneClickBtn.disabled = busy;
     if (hintEl) {
-      hintEl.textContent = busy
-        ? '当前有步骤正在执行，请等待当前流程完成后再继续下一步。'
-        : FLOW_HINT_QUICK_PATH;
+      hintEl.textContent = busy ? '执行中，请等待当前步骤完成' : '';
     }
     updateRunBtn();
     updateClearQueueButton();
