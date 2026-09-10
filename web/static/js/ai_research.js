@@ -5987,6 +5987,7 @@ ${confirmHint}`,
       toggleAutonomousResearchLoop(true).catch(err => notify(`启动自主迭代失败: ${err.message}`, true)));
     document.getElementById('ai-iteration-toggle-btn')?.addEventListener('click', () =>
       toggleAutonomousResearchLoop().catch(err => notify(`更新自主迭代状态失败: ${err.message}`, true)));
+    document.getElementById('ai-iteration-run-btn')?.addEventListener('click', runAutonomousResearchOnce);
 
     /* Pending human approval queue events */
     document.getElementById('ai-approval-list')?.addEventListener('click', e => {
@@ -6363,6 +6364,8 @@ ${confirmHint}`,
       waiting: ['已启用 · 等待下一轮', 'is-running'], generating: ['正在生成研究假设', 'is-running'],
       waiting_for_research: ['等待当前回测完成', 'is-running'], daily_budget_reached: ['今日预算已用完', 'is-paused'],
       paused: ['已暂停', 'is-paused'], retry_scheduled: ['本轮失败 · 已安排重试', 'is-error'], interrupted: ['上次运行中断', 'is-error'],
+      checking_data: ['检查并补齐历史数据', 'is-running'], evaluating: ['回测与成本压力验证中', 'is-running'],
+      data_blocked: ['数据未就绪 · 待重试', 'is-error'], observing: ['新增行情观察中', 'is-running'],
     };
     const [label, tone] = statusMap[status] || [status || '未知状态', enabled ? 'is-running' : 'is-paused'];
     const dot = document.getElementById('ai-iteration-status-dot');
@@ -6370,9 +6373,9 @@ ${confirmHint}`,
     const statusEl = document.getElementById('ai-iteration-status');
     if (statusEl) statusEl.textContent = label;
     const detail = document.getElementById('ai-iteration-status-detail');
-    if (detail) detail.textContent = payload?.last_error ? `原因：${payload.last_error}` : `间隔 ${Math.round(Number(config.interval_seconds || 3600) / 60)} 分钟`;
+    if (detail) detail.textContent = payload?.last_error ? `原因：${payload.last_error}` : `已完成 ${Number(payload?.completed_rounds || 0)} 轮验证 · 间隔 ${Math.round(Number(config.interval_seconds || 3600) / 60)} 分钟`;
     const next = document.getElementById('ai-iteration-next');
-    if (next) next.textContent = payload?.next_run_at ? `下一轮：${fmtTs(payload.next_run_at)}` : '';
+    if (next) next.textContent = payload?.next_run_at ? `${status === 'daily_budget_reached' ? '预算重置' : '下一轮'}：${fmtTs(payload.next_run_at)}` : '';
     const rounds = Array.isArray(payload?.rounds) ? payload.rounds : [];
     const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
     setText('ai-iteration-rounds', `${Number(payload?.attempts_today || 0)} 轮`);
@@ -6383,13 +6386,37 @@ ${confirmHint}`,
     const history = document.getElementById('ai-iteration-history');
     if (history) history.innerHTML = rounds.length ? rounds.slice(-5).map((row, index) => {
       const roundStatus = String(row?.status || 'unknown');
-      const title = row?.proposal_id ? `已生成提案 · ${String(row.proposal_id).slice(-8)}` : roundStatus;
-      return `<div><b>第 ${Math.max(1, rounds.length - 4 + index)} 轮</b><span>${esc(title)}</span></div>`;
+      const title = roundStatus === 'completed'
+        ? (row.outcome === 'forward_observation' ? '验证完成 · 进入新增行情观察' : '验证完成 · 本轮无合格候选')
+        : ({generating:'生成假设中', evaluating:'验证中', failed:'执行失败', interrupted:'运行中断', queued:'历史提案已入队'}[roundStatus] || roundStatus);
+      const reasonNames = {insufficient_trades:'交易样本不足', no_net_edge:'扣费后无正收益', excess_drawdown:'回撤超限', weak_risk_adjusted_return:'风险收益不足', cost_sensitive:'双倍成本未通过', training_no_edge:'训练段无优势', invalid_program:'程序无效', duplicate_program:'程序重复', data_outliers:'数据异常', evaluation_budget:'回测预算不足'};
+      const failures = Object.entries(row?.feedback?.rejection_counts || {}).map(([reason,count]) => `${reasonNames[reason] || reason} ${count}`).join('；');
+      return `<div><b>${esc(row.started_at ? fmtTs(row.started_at) : `第 ${index + 1} 轮`)}</b><span>${esc(title)}${row.backtest_runs ? ` · ${Number(row.backtest_runs)} 次回测` : ''}</span><span>${esc(row.error || failures)}</span></div>`;
     }).join('') : '<span>暂无轮次记录</span>';
     const toggle = document.getElementById('ai-iteration-toggle-btn');
     if (toggle) toggle.textContent = enabled ? '暂停研究循环' : '启用研究循环';
     const start = document.getElementById('ai-iteration-start-btn');
     if (start) start.textContent = enabled ? '查看迭代任务' : '启动自主迭代';
+    const run = document.getElementById('ai-iteration-run-btn');
+    if (run) { run.disabled = !!payload?.busy || Number(payload?.attempts_today || 0) >= Number(config.max_rounds_per_day || 0); run.textContent = payload?.busy ? '研究进行中…' : '立即研究一轮'; }
+    const evidence = document.getElementById('ai-iteration-evidence');
+    const observations = Array.isArray(payload?.observations) ? payload.observations : [];
+    const champions = new Set(Object.values(payload?.champions || {}).map(row => row.candidate_id));
+    if (evidence) evidence.innerHTML = observations.length ? observations.slice(-8).map(row => {
+      const verdict = row.data_status && row.data_status !== 'ready' ? '等待行情或重新计算，暂不推荐' : champions.has(row.candidate_id) ? '当前优胜候选 · 待人工注册' : ({observing:'观察中',qualified:'观察验证通过',rejected:'观察淘汰',expired:'观察期结束'}[row.status] || row.status);
+      const metrics = row.metrics ? ` · 净收益 ${Number(row.metrics.total_return).toFixed(2)}% · 回撤 ${Number(row.metrics.max_drawdown).toFixed(2)}% · ${Number(row.metrics.total_trades)} 笔` : '';
+      return `<div><b>${esc(row.symbol)} · ${esc(row.timeframe)}</b><span>${esc(verdict)}</span><span>新增 ${Number(row.bars || 0)}/${Number(row.min_bars || 0)} 根${esc(metrics)}</span></div>`;
+    }).join('') : '<span>尚无观察候选。历史验证通过后开始积累全新的行情证据，未达标不会选出优胜策略。</span>';
+  }
+
+  async function runAutonomousResearchOnce() {
+    const button = document.getElementById('ai-iteration-run-btn');
+    if (button) button.disabled = true;
+    try {
+      const payload = await aiApi('/research-loop/run', {method:'POST', timeoutMs:15000});
+      renderAutonomousResearchCockpit({...payload, busy:true});
+      notify(payload.requested ? '已安排一轮研究，将在现有预算内执行' : '已有研究正在执行');
+    } catch (err) { notify(err?.message || '无法启动研究', true); await refreshAutonomousResearchCockpit(); }
   }
 
   async function refreshAutonomousResearchCockpit() {
@@ -6412,6 +6439,10 @@ ${confirmHint}`,
     try {
       const current = await aiApi('/research-loop', { timeoutMs: 12000 });
       const enabled = typeof forceEnabled === 'boolean' ? forceEnabled : !current?.config?.enabled;
+      if (forceEnabled === true && current?.config?.enabled) {
+        document.getElementById('ai-iteration-cockpit')?.scrollIntoView({behavior:'smooth', block:'start'});
+        return;
+      }
       const payload = await aiApi('/research-loop', { method: 'PATCH', body: JSON.stringify({ enabled }), timeoutMs: 15000 });
       renderAutonomousResearchCockpit(payload);
       notify(enabled ? '自主迭代已启用' : '自主迭代已暂停');

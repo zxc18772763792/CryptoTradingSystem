@@ -6235,6 +6235,16 @@ async def configure_ai_research_loop(request: Request, payload: Dict[str, Any]):
     return loop.configure(config)
 
 
+@router.post("/research-loop/run", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
+async def run_ai_research_loop_once(request: Request):
+    from core.ai.autonomous_research_loop import get_research_loop
+    loop = get_research_loop(request.app)
+    snapshot = loop.status()
+    if snapshot['attempts_today'] >= snapshot['config']['max_rounds_per_day']:
+        raise HTTPException(status_code=409, detail='今日研究预算已用完，请等待预算重置')
+    return loop.request_run()
+
+
 async def _build_operating_mode_payload() -> Dict[str, Any]:
     from core.runtime.operating_mode import validate_operating_mode
     from core.runtime.state import runtime_state

@@ -55,6 +55,9 @@ class ResearchScheduler:
                 pass
             finally:
                 self._task = None
+        loop = getattr(getattr(self._app, 'state', None), 'autonomous_research_loop', None)
+        if loop is not None and hasattr(loop, 'stop'):
+            await loop.stop()
         logger.info("ResearchScheduler stopped")
 
     async def _loop(self) -> None:
