@@ -677,6 +677,26 @@ def test_autonomous_agent_codex_retries_responses_token_param_variant(monkeypatc
     assert capture["requests"][1]["json"]["max_completion_tokens"] == 256
 
 
+def test_research_context_generator_accepts_completed_stream(monkeypatch):
+    import core.ai.research_context_generator as module
+
+    monkeypatch.setattr(settings, 'OPENAI_API_KEY', 'test-key', raising=False)
+    monkeypatch.setattr(settings, 'OPENAI_BASE_URL', 'https://stream.test/v1', raising=False)
+    monkeypatch.setattr(settings, 'OPENAI_BACKUP_BASE_URL', '', raising=False)
+    response = {'status': 'completed', 'model': 'test-model', 'output': [{'type': 'message',
+        'content': [{'type': 'output_text', 'text': '{"hypothesis":"streamed hypothesis"}'}]}]}
+    stream = 'event: response.created\ndata: {"response":{"status":"in_progress","output":[]}}\n\n'
+    stream += 'event: response.completed\ndata: ' + json.dumps({'response': response}) + '\n\n'
+    capture = {}
+    monkeypatch.setattr(module.aiohttp, 'ClientSession', lambda **kw: _FakeSession(
+        capture=capture, payload=None, text_payload=stream, headers={'content-type':'text/event-stream'}, **kw))
+    result = asyncio.run(module._call_openai_responses_json('prompt', timeout=10))
+    assert capture['json']['stream'] is True
+    assert capture['json']['reasoning'] == {'effort': 'low'}
+    assert result['hypothesis'] == 'streamed hypothesis'
+    assert result['_generation']['response_model'] == 'test-model'
+
+
 def test_research_context_generator_fails_over_to_backup_relay(monkeypatch):
     import core.ai.research_context_generator as module
 
@@ -711,7 +731,8 @@ def test_research_context_generator_fails_over_to_backup_relay(monkeypatch):
 
     result = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
 
-    assert result == {"hypothesis": "backup relay ok"}
+    assert result["hypothesis"] == "backup relay ok"
+    assert result["_generation"]["requested_model"] == capture["requests"][-1]["json"]["model"]
     assert capture["urls"] == [
         "https://primary.test/v1/responses",
         "https://backup.test/v1/responses",
@@ -773,9 +794,9 @@ def test_research_context_generator_sticks_to_backup_until_next_day(monkeypatch,
     monkeypatch.setattr(response_helpers, "_openai_failover_now", lambda: day_two)
     third = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
 
-    assert first == {"hypothesis": "sticky backup ok"}
-    assert second == {"hypothesis": "sticky backup ok"}
-    assert third == {"hypothesis": "sticky backup ok"}
+    for result in (first, second, third):
+        assert result["hypothesis"] == "sticky backup ok"
+        assert result["_generation"]["requested_model"]
     assert captures[0]["urls"] == [
         "https://primary.test/v1/responses",
         "https://backup.test/v1/responses",
@@ -822,7 +843,8 @@ def test_research_context_generator_falls_back_to_chat_completions(monkeypatch):
 
     result = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
 
-    assert result == {"hypothesis": "chat fallback ok"}
+    assert result["hypothesis"] == "chat fallback ok"
+    assert result["_generation"]["requested_model"] == capture["requests"][-1]["json"]["model"]
     assert capture["urls"] == [
         "https://example.test/v1/responses",
         "https://example.test/v1/chat/completions",
