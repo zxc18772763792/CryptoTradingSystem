@@ -1652,10 +1652,11 @@
                         <div>
                             <div class="ai-iteration-kicker">自主多轮迭代研究</div>
                             <h2>让 AI 根据每轮验证结果继续改进假设</h2>
-                            <p>系统会在预算内生成新假设、排队回测并淘汰重复方案；不会自动进入 Live。</p>
+                            <p>自动补数、提出假设、验证与复盘。候选需经新增行情观察后才能入选，不自动注册或下单。</p>
                         </div>
                         <div class="ai-iteration-actions">
                             <button class="btn btn-primary btn-sm" id="ai-iteration-start-btn">启动自主迭代</button>
+                            <button type="button" class="btn btn-sm" id="ai-iteration-run-btn">立即研究一轮</button>
                             <button class="btn btn-sm" id="ai-iteration-toggle-btn">加载状态</button>
                         </div>
                     </div>
@@ -1672,11 +1673,12 @@
                         <div><span>最近产物</span><strong id="ai-iteration-last-output">—</strong></div>
                     </div>
                     <div class="ai-iteration-history" id="ai-iteration-history"><span>暂无轮次记录</span></div>
+                    <div class="ai-iteration-history" id="ai-iteration-evidence"><span>尚无新增行情观察证据</span></div>
                 </section>
                 <div class="ai-research-use-guide" role="note">
                     <strong>AI研究怎么用</strong>
                     <span>① 填写目标并生成提案</span><span>② 选择任务运行研究</span><span>③ 比较候选结果</span><span>④ 在候选详情中纸面运行或提交审批</span>
-                    <em>自主迭代会自动重复第 ②–③ 步，直到暂停、收敛或预算用完。</em>
+                    <em>自动循环会把验证结论反馈给下一轮；预算耗尽后继续检查观察候选，允许没有合格策略。</em>
                 </div>
 
                 <div class="ai-workspace-stack">
