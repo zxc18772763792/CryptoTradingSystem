@@ -2127,6 +2127,12 @@ class AutonomousTradingAgent:
             end_time=now,
         )
         df = df.copy() if df is not None and not df.empty else pd.DataFrame()
+        # Parquet uses UTC-naive timestamps; connectors may return UTC-aware
+        # datetimes. Normalize before concat so pandas retains a DatetimeIndex.
+        # A failed sort after assigning a mixed index used to leave price data
+        # present but make its last-bar timestamp invisible to freshness checks.
+        if not df.empty and isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index, utc=True).tz_localize(None)
         local_bar_count = int(len(df))
         local_last_bar_age_sec: Optional[float] = None
         local_missing_bar_count = 0
@@ -2186,8 +2192,8 @@ class AutonomousTradingAgent:
                     if df.empty:
                         df = live_df
                     else:
-                        df = pd.concat([df, live_df])
-                        df = df[~df.index.duplicated(keep="last")].sort_index()
+                        merged = pd.concat([df, live_df])
+                        df = merged[~merged.index.duplicated(keep="last")].sort_index()
             except asyncio.TimeoutError:
                 logger.debug(
                     f"autonomous_agent live klines timed out for {exchange} {symbol} {normalized_timeframe}"
@@ -2225,7 +2231,7 @@ class AutonomousTradingAgent:
         )
         if frame.empty:
             return pd.DataFrame()
-        frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", utc=True).dt.tz_localize(None)
         frame = frame.dropna(subset=["timestamp"]).set_index("timestamp").sort_index()
         return frame
 
@@ -5138,6 +5144,8 @@ class AutonomousTradingAgent:
             )
         elif decision_reason == "no_price":
             add_item("no_price", "当前价格不可用", "缺少可用行情，代理只能观望", "danger", 8)
+        elif decision_reason.startswith("stale_market_data"):
+            add_item("stale_market_data", "行情未通过新鲜度检查", "K 线时间缺失或已过期，等待有效行情后重新决策", "warn", 8)
         elif decision_reason.startswith("below_min_confidence"):
             add_item(
                 "below_min_confidence",

@@ -30,9 +30,9 @@ class CryptoCompareNewsCollector(BaseNewsCollector):
         limit = max(5, min(int(max_records or self.max_records), 200))
         since_ts = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(since_minutes or 240)))
         params: Dict[str, Any] = {"lang": "EN"}
-        if self.api_key:
-            params["api_key"] = self.api_key
-        response = self._request(self.endpoint, params=params, headers={"Accept": "application/json"})
+        if not self.api_key:
+            raise RuntimeError("cryptocompare_news requires CRYPTOCOMPARE_API_KEY")
+        response = self._request(self.endpoint, params=params, headers={"Accept": "application/json", "Authorization": f"Apikey {self.api_key}"})
         payload = response.json()
         rows = (payload or {}).get("Data") or []
         out: List[Dict[str, Any]] = []

@@ -634,9 +634,16 @@ async def pull_source_once(
         cooldown = max(30, _env_int("NEWS_SOURCE_BREAKER_COOLDOWN_SEC", 180))
         fresh_state = await news_db.get_source_state(source)
         if fresh_state and int(fresh_state.get("error_count") or 0) >= threshold:
+            until = datetime.now(timezone.utc) + timedelta(seconds=cooldown)
+            existing_pause = fresh_state.get("paused_until")
+            if existing_pause:
+                existing_until = datetime.fromisoformat(str(existing_pause).replace("Z", "+00:00"))
+                if existing_until.tzinfo is None:
+                    existing_until = existing_until.replace(tzinfo=timezone.utc)
+                until = max(until, existing_until)
             await news_db.set_source_state(
                 source,
-                paused_until=datetime.now(timezone.utc) + timedelta(seconds=cooldown),
+                paused_until=until,
             )
 
     return {

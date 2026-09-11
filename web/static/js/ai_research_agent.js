@@ -25,6 +25,8 @@
 
   let pollTimer = null;
   let initialized = false;
+  let configFormDirty = false;
+  let riskFormDirty = false;
   let initRetryBound = false;
   let lastStatusSnapshot = null;
   let lastConfigSnapshot = null;
@@ -978,10 +980,10 @@
     const latestActionText = lastExecution.submitted
       ? `${submissionScope} / ${decisionActionText(lastDecision.action || '')}`
       : compactText(lastExecution.reason || '最近未提交', 56);
-    const cycleText = nextRunText !== '--'
+    const cycleText = !running ? '等待启动' : nextRunText !== '--'
       ? nextRunText
       : (intervalSec > 0 ? `${intervalSec}s 轮询` : '等待调度');
-    const cycleSubText = latencyText !== '--'
+    const cycleSubText = !running ? `运行周期 ${intervalSec || '--'} 秒` : latencyText !== '--'
       ? `上次耗时 ${latencyText}${intervalSec > 0 ? ` / 周期 ${intervalSec}s` : ''}`
       : (intervalSec > 0 ? `轮询周期 ${intervalSec}s` : '等待耗时数据');
     const stateTone = lastError ? 'danger' : (running ? 'good' : 'warn');
@@ -990,7 +992,7 @@
       : 'good';
     const modelTone = modelFeedback.tone || executionCost.tone || 'info';
     const modeText = reality.label;
-    const modeSubText = `${reality.detail} / ${symbolModeLabel(cfg.symbol_mode || 'manual')}`;
+    const modeSubText = `${tradingModeLabel(reality.tradingMode)} · 实盘权限${reality.allowLive ? '已开' : '关闭'}`;
     const stateText = running ? '运行中' : '未启动';
     const stateSubText = running
       ? `${Number(status.tick_count || 0)} 轮决策 / ${submissionScope} ${Number(status.submitted_count || 0)} 次`
@@ -999,7 +1001,7 @@
       ? (lastError
         ? `${selectedSymbol} 仍在运行，最近错误：${compactText(lastError, 96)}`
         : `${selectedSymbol} 正在被持续盯盘，最近动作 ${latestActionText}`)
-      : (lastError ? compactText(lastError, 120) : '代理当前未运行，可以先单次试跑再决定是否长期开启。');
+      : (lastError ? compactText(lastError, 120) : '代理已停止。启动后将按配置持续监测并决策。');
 
     setAgentCockpitBadge(
       'ai-agent-cockpit-state-badge',
@@ -1140,33 +1142,33 @@
       card.parentElement?.insertBefore(banner, card);
     }
     if (errorText) {
-      banner.textContent = `Operating Mode unavailable: ${compactText(errorText, 120)}`;
+      banner.hidden = false;
+      banner.textContent = `服务状态暂时不可用：${compactText(errorText, 120)}`;
       normalizeElementText(banner);
       return;
     }
     const degradations = Array.isArray(snapshot.degradations) ? snapshot.degradations : [];
-    const actionableDegradations = degradations.filter((item) => String(item?.severity || '').toLowerCase() !== 'info');
-    const advisoryCount = Math.max(0, degradations.length - actionableDegradations.length);
-    const agent = snapshot.autonomous_agent || {};
-    const coinglass = snapshot.coinglass || {};
-    const provider = agent.provider || snapshot.ai_live_decision?.provider || '--';
-    const reality = buildAgentExecutionReality(
-      { running: Boolean(agent.safety?.running), safety: agent.safety || {} },
-      { ...agent, trading_mode: snapshot.trading_mode }
-    );
-    banner.innerHTML = `
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
-        <strong>Operating Mode</strong>
-        <span>real=${esc(reality.label)}</span>
-        <span>trading=${esc(snapshot.trading_mode || '--')}</span>
-        <span>agent=${esc(agent.mode || '--')}</span>
-        <span>provider=${esc(provider)}</span>
-        <span>allow_live=${agent.allow_live ? 'true' : 'false'}</span>
-        ${reality.providerRestricted ? '<span>provider_restricted=true</span>' : ''}
-        <span>derivatives=${coinglass.live_gating_enabled ? 'live' : 'shadow'}</span>
-        <span>degraded=${actionableDegradations.length}</span>
-        ${advisoryCount ? `<span>advisory=${advisoryCount}</span>` : ''}
-      </div>`;
+    const unconfigured = degradations.filter((item) => item.configured === false && String(item.code || '').startsWith('source_') && item.action_required === false);
+    const actionable = degradations.filter((item) => String(item?.severity || '').toLowerCase() !== 'info');
+    const expanded = banner.querySelector('details')?.open || false;
+    const sourceReason = (item) => {
+      const raw = String(item.message || item.detail || item.reason || item.label || '服务状态异常');
+      if (/\b429\b|Too Many Requests/i.test(raw)) return '接口限流，按退避时间自动重试';
+      if (/\b401\b|Unauthorized/i.test(raw)) return '接口鉴权失败，需检查该来源的密钥';
+      if (/\b403\b|forbidden/i.test(raw)) return '接口无访问权限，需检查该来源的套餐或授权';
+      if (/cache\/state freshness threshold exceeded/i.test(raw)) return '缓存已过期，等待采集更新';
+      if (/cache empty|not warmed/i.test(raw)) return '暂无缓存，等待首次采集';
+      if (/Paused until/i.test(raw)) return '采集处于冷却期，稍后自动重试';
+      return compactText(raw, 180);
+    };
+    banner.hidden = !actionable.length && !unconfigured.length;
+    banner.dataset.tone = actionable.length ? 'warn' : 'info';
+    banner.innerHTML = !banner.hidden ? `
+      <details class="agent-disclosure" ${expanded ? 'open' : ''}>
+        <summary>数据源状态 · ${actionable.length ? `${actionable.length} 项异常` : '已启用来源无异常'}${unconfigured.length ? ` · ${unconfigured.length} 项可选来源未配置` : ''}</summary>
+        ${actionable.length ? `<ul>${actionable.map((item) => `<li><strong>${esc(item.source_label || item.label || item.code)}</strong>：${esc(sourceReason(item))}</li>`).join('')}</ul>` : ''}
+        ${unconfigured.length ? `<p class="agent-source-optional">未配置的可选来源：${unconfigured.map((item) => esc(item.source_label || item.label || item.code)).join('、')}。这些来源不计入故障。</p>` : ''}
+      </details>` : '';
     normalizeElementHtml(banner);
   }
 
@@ -1200,6 +1202,7 @@
   }
 
   function syncAgentConfigForm(cfg = {}) {
+    if (configFormDirty) return;
     const modeEl = document.getElementById('ai-agent-symbol-mode');
     const manualEl = document.getElementById('ai-agent-manual-symbol');
     const universeEl = document.getElementById('ai-agent-universe-symbols');
@@ -1220,6 +1223,7 @@
   }
 
   function syncAgentRiskConfigForm(payload = {}) {
+    if (riskFormDirty) return;
     const cfg = payload?.config && typeof payload.config === 'object' ? payload.config : payload;
     [
       ['ai-agent-risk-daily-stop', 'autonomy_daily_stop_buffer_ratio'],
@@ -1280,7 +1284,7 @@
     const code = String(item.code || '').trim().toLowerCase();
     const source = String(item.source || '').trim().toLowerCase();
     if (code === 'halted') return '账户熔断已触发';
-    if (code === 'reduce_only') return '纪律闸门切到 reduce-only';
+    if (code === 'reduce_only') return '回撤保护：仅允许平仓';
     if (code === 'learning_service_instability_guard') return '模型服务异常期暂停新单';
     if (code === 'learning_loss_streak_guard') return '连亏保护暂停新单';
     if (source === 'risk_discipline') return '账户纪律阻止新单';
@@ -1421,6 +1425,10 @@
     setAgentCockpitStat('ai-agent-cockpit-model-card', 'ai-agent-cockpit-model', 'ai-agent-cockpit-model-sub', '--', statusText, 'danger');
     const cockpitNote = document.getElementById('ai-agent-cockpit-state-note');
     if (cockpitNote) cockpitNote.textContent = normalizeUiText(statusText);
+    ['ai-agent-start-btn', 'ai-agent-run-once-btn'].forEach((id) => {
+      const button = document.getElementById(id);
+      if (button) button.disabled = true;
+    });
     renderAgentGovernanceError(statusText);
   }
 
@@ -1430,7 +1438,7 @@
       return {
         code: 'agent_stopped',
         label: '代理当前未运行',
-        detail: '当前进程里的 autonomous agent 已停止；重新启动后才会持续 tick。',
+        detail: '代理已停止，启动后恢复自动监测与决策。',
         tone: 'warn',
       };
     }
@@ -1438,14 +1446,14 @@
       return {
         code: 'agent_disabled',
         label: '代理未启用',
-        detail: 'enabled=false，当前不会自动决策。',
+        detail: '当前未启用自动决策。',
         tone: 'danger',
       };
     }
     return {
       code: 'agent_not_started',
       label: '代理还没启动',
-      detail: '配置已启用，但本次进程里还没有 start。',
+      detail: '配置已就绪。启动代理后开始持续监测，或运行一轮查看决策结果。',
       tone: 'warn',
     };
   }
@@ -1470,8 +1478,8 @@
     const currentAction = String(status.last_decision?.action || diagnostics.action || 'hold').trim().toLowerCase();
     const badgeTone = primary?.tone || (currentAction === 'hold' ? 'warn' : 'info');
     const badgeText = currentAction === 'hold'
-      ? '当前动作: Hold / 观望'
-      : `当前动作: ${decisionActionText(currentAction)}`;
+      ? (status.last_decision?.action ? '观望' : '暂无决策')
+      : decisionActionText(currentAction);
 
     if (badgeEl) {
       badgeEl.className = `ai-agent-section-badge ${toneClass(badgeTone)}`;
@@ -1554,8 +1562,8 @@
     const trace = diagnostics.decision_trace || {};
     const traceGates = Array.isArray(trace.gates) ? trace.gates : [];
     const gateLadder = traceGates.length
-      ? `<details class="ai-agent-reason-section" open>
-          <summary class="ai-agent-reason-section-title">Root blocker: ${esc(trace.root_blocker_label || trace.root_blocker_code || '--')}</summary>
+      ? `<details class="ai-agent-reason-section">
+          <summary class="ai-agent-reason-section-title">执行检查：${esc(trace.root_blocker_label || trace.root_blocker_code || '--')}</summary>
           <div class="ai-agent-reason-list">${traceGates.map((gate) => `
             <div class="ai-agent-reason-chip ${toneClass(gate.status === 'block' ? 'danger' : gate.status === 'pass' ? 'good' : 'warn')}">
               <div class="ai-agent-reason-chip-label">${esc(gate.label || gate.code || '--')} · ${esc(gate.status || '--')}</div>
@@ -1577,7 +1585,8 @@
         </div>`
       : '';
 
-    el.innerHTML = `${primarySummary}${meta}${noteGrid}${gateLadder}${detailList}`;
+    const expanded = el.querySelector('.agent-disclosure')?.open || false;
+    el.innerHTML = `${primarySummary}<details class="agent-disclosure" ${expanded ? 'open' : ''}><summary>查看决策依据</summary>${meta}${noteGrid}${gateLadder}${detailList}</details>`;
     normalizeElementHtml(el);
   }
 
@@ -1642,17 +1651,18 @@
       : (executionGateBlocked
         ? executionGateLabel(executionGate)
         : (closeOnly
-          ? (risk?.trading_halted ? '当前只允许平仓 / 熔断中' : '当前处于 reduce-only')
+          ? (risk?.trading_halted ? '已熔断，仅允许平仓' : '仅允许平仓')
           : '当前禁止新开仓'));
     const primaryDetail = executionGateBlocked
       ? executionGateDetail(executionGate)
       : (primaryBlocker?.detail
         || (discipline?.reasons && discipline.reasons[0])
-        || (freshEntryAllowed ? '风险纪律与复盘记忆都没有阻止新单；执行安全门禁也未阻止提交。' : '当前有风险纪律或学习保护正在阻止新单。'));
-    const blockerList = blockers.length
+        || (freshEntryAllowed ? '风险检查通过，满足交易信号后可提交新单。' : '风险限制或学习保护正在阻止新单。'));
+    const additionalBlockers = blockers.filter((item) => item?.detail !== primaryDetail);
+    const blockerList = additionalBlockers.length
       ? `<div class="ai-agent-reason-section">
           <div class="ai-agent-reason-section-title">当前阻止新单的来源</div>
-          <div class="ai-agent-reason-list">${blockers.map((item) => {
+          <div class="ai-agent-reason-list">${additionalBlockers.map((item) => {
             const tone = item?.source === 'learning_memory' ? 'is-warn' : 'is-danger';
             return `
               <div class="ai-agent-reason-chip ${tone}">
@@ -1694,6 +1704,7 @@
       ? executionGate.recommendations.slice(0, 3).join(' / ')
       : (executionGateBlocked ? '请按执行门禁提示调整交易模式或 agent live 授权' : '无需处理');
 
+    const expanded = el.querySelector('.agent-disclosure')?.open || false;
     el.innerHTML = `
       <div class="ai-agent-reason-primary ${toneClass(primaryTone)}">
         <div class="ai-agent-reason-primary-kicker">新单提交总闸</div>
@@ -1703,7 +1714,7 @@
       <div class="ai-agent-gate-lane">
         <div class="ai-agent-gate-step ${toneClass(freshEntryAllowed && !closeOnly ? 'good' : (risk?.trading_halted ? 'danger' : 'warn'))}">
           <span>1 风险纪律</span>
-          <strong>${esc(closeOnly ? 'Close-only' : (freshEntryAllowed ? '允许新单' : '暂停新单'))}</strong>
+          <strong>${esc(closeOnly ? '仅允许平仓' : (freshEntryAllowed ? '允许新单' : '暂停新单'))}</strong>
         </div>
         <div class="ai-agent-gate-step ${toneClass(blockers.some((item) => item?.source === 'learning_memory') ? 'warn' : 'good')}">
           <span>2 学习保护</span>
@@ -1714,6 +1725,8 @@
           <strong>${esc(executionGateBlocked ? '阻止提交' : '允许提交')}</strong>
         </div>
       </div>
+      ${blockerList}
+      <details class="agent-disclosure" ${expanded ? 'open' : ''}><summary>查看风险指标与限制</summary>
       <div class="ai-agent-diagnostic-meta">
         <div class="ai-agent-diagnostic-item">
           <span>风险级别</span>
@@ -1787,7 +1800,7 @@
         </div>
       </div>
       <div class="ai-agent-empty">${esc(`Eligibility: ${buildEligibilityReasonText(eligibility)}`)}</div>
-      ${blockerList || '<div class="ai-agent-empty">当前没有风险纪律或学习记忆 blocker；若仍不能提交，请看上方“执行安全门禁”。</div>'}
+      </details>
     `;
     normalizeElementHtml(el);
     syncAgentRiskConfigForm(riskConfigPayload);
@@ -1825,12 +1838,12 @@
       insights.push(`复盘记忆记录到 ${Number(learningSummary.recent_close_loss_streak_count)} 次连续亏损平仓，说明系统仍在防守区。`);
     }
     if (!eligibility?.available) {
-      insights.push(`runtime eligibility 当前不可用：${buildEligibilityReasonText(eligibility)}。`);
+      insights.push('交易资格状态暂不可用，详情见风险指标。');
     } else if (eligibilitySelected?.is_expired) {
-      insights.push(`当前 runtime eligibility 已过期：${buildEligibilityReasonText(eligibility)}。`);
+      insights.push('交易资格已过期，详情见风险指标。');
     }
     if (!insights.length) {
-      insights.push('收益、成本、回撤和纪律目前至少能在一个面板里同时观察，不会再只盯单次决策。');
+      insights.push(Number(metrics?.trades || 0) ? '当前没有额外的交易表现提示。' : '暂无交易记录，代理产生交易后显示统计结果。');
     }
 
     el.innerHTML = `
@@ -1857,10 +1870,10 @@
         </article>
       </div>
       <div class="ai-agent-review-meta">
-        <span>${esc(`观察窗口 ${Number(windowInfo?.hours || 0)}h / trade limit ${Number(windowInfo?.trade_limit || 0)}`)}</span>
-        <span>${esc(`放行 ${Number(reviewSummary?.submitted_count || 0)} 次 / 亏损平仓 ${Number(reviewSummary?.losing_close_count || 0)} 次`)}</span>
-        <span>${esc(`当前纪律 ${discipline?.reduce_only ? 'Reduce-only' : (discipline?.fresh_entry_allowed ? '允许新单' : '暂停新单')}`)}</span>
+        <span>${esc(`统计窗口 ${Number(windowInfo?.hours || 0)} 小时`)}</span>
+        <span>收益已计入交易成本</span>
       </div>
+      <details class="agent-disclosure"><summary>查看统计明细</summary>
       <div class="ai-agent-review-meta ai-agent-review-meta-secondary">
         <span>${esc(`3日回撤 ${formatPct(risk?.rolling_3d_drawdown, 2)} / 7日回撤 ${formatPct(risk?.rolling_7d_drawdown, 2)}`)}</span>
         <span>${esc(`有效阈值 ${formatRatio(learningSummary?.effective_min_confidence, 3)} / 连亏 ${Number(learningSummary?.recent_close_loss_streak_count || 0)} 次`)}</span>
@@ -1871,6 +1884,7 @@
         <span>${esc(`候选 ${eligibilitySelected?.candidate_id || '--'} / ${eligibilitySelected?.status || '--'} / ${eligibilitySelected?.is_expired ? '已过期' : '未过期'}`)}</span>
         <span>${esc(buildEligibilityReasonText(eligibility))}</span>
       </div>
+      </details>
       <div class="ai-agent-review-insights">
         ${insights.map((item) => `<div class="ai-agent-review-insight">${esc(item)}</div>`).join('')}
       </div>
@@ -1955,57 +1969,23 @@
     dot.title = running ? '运行中' : '已停止';
 
     const rankingState = resolveAgentRankingState(status, cfg);
-    const lastScan = status.last_symbol_scan || {};
-    const activeSymbol = String(lastScan.selected_symbol || rankingState.scan?.selected_symbol || cfg.symbol || '--');
-    const selectionReason = symbolSelectionReasonText(
-      String(lastScan.selection_reason || rankingState.scan?.selection_reason || 'manual_symbol')
-    );
     const lastRunAt = fmtAgentTs(status.last_run_at);
-    const nextRunAt = fmtAgentTs(status.next_run_at);
     const latencyText = formatLatencyMs(status.last_latency_ms);
     const lastError = String(status.last_error || '').trim();
     const modelText = cfg.model ? `${providerDisplayName(cfg.provider || '-')}/${cfg.model}` : providerDisplayName(cfg.provider || '-');
-    const modelFeedback = describeModelFeedback(status, status.last_diagnostics || {});
-    const modelOutput = describeModelOutput(status.last_diagnostics || {});
-    const executionCost = describeExecutionCost(status.last_diagnostics || {});
     const reality = buildAgentExecutionReality(status, cfg);
     const submissionScope = agentSubmissionScopeLabel(reality);
 
     info.innerHTML = `
-      <div class="ai-agent-info-grid">
-        <span>模型</span>
-        <span>${esc(modelText)}</span>
-        <span>真实执行态</span>
-        <span class="${toneClass(reality.tone)}">${esc(reality.label)}</span>
-        <span>执行配置</span>
-        <span>${esc(reality.detail)}</span>
-        <span>币种模式</span>
-        <span>${esc(symbolModeLabel(cfg.symbol_mode || 'manual'))}</span>
-        <span>当前盯盘</span>
-        <span>${esc(activeSymbol)}</span>
-        <span>轮询次数</span>
-        <span>${esc(Number(status.tick_count || 0))}</span>
-        <span>${esc(submissionScope)}</span>
-        <span>${esc(Number(status.submitted_count || 0))}</span>
-        <span>选币原因</span>
-        <span>${esc(selectionReason)}</span>
-        <span>模型反馈</span>
-        <span class="${toneClass(modelFeedback.tone)}">${esc(modelFeedback.summary)}</span>
-        <span>模型动作</span>
-        <span class="${toneClass(modelOutput.tone)}">${esc(modelOutput.summary)}</span>
-        <span>执行成本</span>
-        <span class="${toneClass(executionCost.tone)}">${esc(executionCost.summary)}</span>
-        <span>最后运行</span>
-        <span>${esc(lastRunAt)}</span>
-        <span>下次计划</span>
-        <span>${esc(nextRunAt)}</span>
-        <span>上次耗时</span>
-        <span>${esc(latencyText)}</span>
-      </div>
-      <div class="ai-agent-muted">${esc(modelFeedback.detail)}</div>
-      <div class="ai-agent-muted">${esc(modelOutput.detail)}</div>
-      <div class="ai-agent-muted">${esc(executionCost.detail)}</div>
-      ${lastError ? `<div class="ai-agent-error">错误：${esc(lastError)}</div>` : ''}
+      <dl class="agent-runtime-list">
+        <div><dt>决策模型</dt><dd>${esc(modelText)}</dd></div>
+        <div><dt>执行配置</dt><dd>${esc(reality.detail)}</dd></div>
+        <div><dt>已运行</dt><dd>${esc(Number(status.tick_count || 0))} 轮</dd></div>
+        <div><dt>${esc(submissionScope)}</dt><dd>${esc(Number(status.submitted_count || 0))} 次</dd></div>
+        <div><dt>最后运行</dt><dd>${esc(lastRunAt)}</dd></div>
+        <div><dt>上次耗时</dt><dd>${esc(latencyText)}</dd></div>
+      </dl>
+      ${lastError ? `<div class="ai-agent-error">${esc(lastError)}</div>` : ''}
     `;
 
     normalizeElementHtml(info);
@@ -2013,13 +1993,15 @@
     const stopBtn = document.getElementById('ai-agent-stop-btn');
     if (startBtn) {
       startBtn.disabled = running;
-      startBtn.textContent = running ? '运行中' : '启动';
+      startBtn.textContent = running ? '运行中' : '启动代理';
     }
     if (stopBtn) {
       stopBtn.disabled = !running;
-      stopBtn.textContent = '停止';
+      stopBtn.textContent = '停止代理';
     }
 
+    const runOnceBtn = document.getElementById('ai-agent-run-once-btn');
+    if (runOnceBtn) runOnceBtn.disabled = false;
     normalizeElementText(startBtn);
     normalizeElementText(stopBtn);
     renderAgentCockpit(status, cfg, rankingState);
@@ -2039,9 +2021,9 @@
       const response = await rootApi(`${AGENT_JOURNAL_API}?limit=15`, { timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
       lastJournalLoadedAt = Date.now();
       const rows = Array.isArray(response?.items) ? response.items.slice().reverse() : [];
-      const summaryHtml = buildAgentJournalCurrentSummary(lastStatusSnapshot || {}, lastConfigSnapshot || {});
+      const summaryHtml = ''; // Current state lives in the overview; journal contains historical events only.
       if (!rows.length) {
-        el.innerHTML = `${summaryHtml}<div class="ai-agent-empty">暂无日志</div>`;
+        el.innerHTML = `${summaryHtml}<div class="ai-agent-empty">暂无决策记录。代理运行后，每轮决策将显示在这里。</div>`;
         return;
       }
       el.innerHTML = summaryHtml + rows.map((row) => {
@@ -2129,7 +2111,7 @@
     if (historyMetaEl) {
       historyMetaEl.innerHTML = `
         <div class="ai-agent-review-history-title">${esc(historyCountText)}</div>
-        <div class="ai-agent-review-history-note">${esc(historyScopeText)}，左侧保留摘要与复盘记忆。</div>
+        <div class="ai-agent-review-history-note">${esc(historyScopeText)}</div>
       `;
       normalizeElementHtml(historyMetaEl);
     }
@@ -2170,6 +2152,7 @@
       <div class="ai-agent-review-insights">
         ${insights.length ? insights.map((item) => `<div class="ai-agent-review-insight">${esc(item)}</div>`).join('') : '<div class="ai-agent-empty">暂无复盘洞察</div>'}
       </div>
+      <details class="agent-disclosure"><summary>复盘记忆与学习规则</summary>
       <section class="ai-agent-learning-panel">
         <div class="ai-agent-learning-head">
           <div class="ai-agent-learning-title">AI 复盘记忆</div>
@@ -2204,6 +2187,7 @@
           ${learningLessons.length ? learningLessons.slice(0, 4).map((item) => `<div class="ai-agent-review-insight">${esc(item)}</div>`).join('') : '<div class="ai-agent-empty">复盘记忆还在积累中</div>'}
         </div>
       </section>
+      </details>
     `;
 
     normalizeElementHtml(summaryEl);
@@ -2212,7 +2196,7 @@
       if (historyMetaEl) {
         historyMetaEl.innerHTML = `
           <div class="ai-agent-review-history-title">最近复盘</div>
-          <div class="ai-agent-review-history-note">还没有可展示的放行交易，后续这里会自动滚动沉淀历史。</div>
+          <div class="ai-agent-review-history-note">代理产生交易后显示复盘结果。</div>
         `;
         normalizeElementHtml(historyMetaEl);
       }
@@ -2391,11 +2375,11 @@
     const shouldGovernance = force || !lastGovernanceLoadedAt || now - lastGovernanceLoadedAt > AGENT_GOVERNANCE_REFRESH_MS;
     const shouldJournal = force || !lastJournalLoadedAt || now - lastJournalLoadedAt > AGENT_DETAIL_REFRESH_MS;
     const shouldReview = force || !lastReviewLoadedAt || now - lastReviewLoadedAt > AGENT_DETAIL_REFRESH_MS;
-    const task = (async () => {
-      if (shouldGovernance) await loadAgentGovernance({ notifyOnError, timeoutMs: AGENT_DETAIL_TIMEOUT_MS });
-      if (shouldJournal && document.getElementById('ai-agent-journal')) await loadAgentJournal();
-      if (shouldReview && document.getElementById('ai-agent-review')) await loadAgentReview();
-    })().finally(() => {
+    const task = Promise.allSettled([
+      shouldGovernance ? loadAgentGovernance({ notifyOnError, timeoutMs: AGENT_DETAIL_TIMEOUT_MS }) : null,
+      shouldJournal ? loadAgentJournal() : null,
+      shouldReview ? loadAgentReview() : null,
+    ]).finally(() => {
       if (detailRefreshInFlight === task) detailRefreshInFlight = null;
     });
     detailRefreshInFlight = task;
@@ -2542,6 +2526,7 @@
         body: JSON.stringify(payload),
       });
       const cfg = response?.config || {};
+      configFormDirty = false;
       syncAgentConfigForm(cfg);
       notify('自动交易代理配置已保存');
       await loadAgentStatus({ includeDetails: isAgentTabActive(), notifyOnError: true });
@@ -2582,6 +2567,7 @@
       });
       const snapshot = response?.config || response || {};
       lastRiskConfigSnapshot = snapshot;
+      riskFormDirty = false;
       syncAgentRiskConfigForm(snapshot);
       if (lastRiskStatusSnapshot || snapshot) {
         renderAgentRiskGovernance(lastRiskStatusSnapshot || {}, snapshot);
@@ -2760,6 +2746,45 @@
     }, POLL_MS);
   }
 
+  function bindAgentViews() {
+    const tabs = Array.from(document.querySelectorAll('[data-agent-view]'));
+    const settings = document.getElementById('agent-view-settings');
+    const markDirty = (event) => {
+      if (!event.target.matches('input, select, textarea')) return;
+      if (event.target.id.startsWith('ai-agent-risk-')) riskFormDirty = true;
+      else configFormDirty = true;
+    };
+    settings?.addEventListener('input', markDirty);
+    settings?.addEventListener('change', markDirty);
+    const activate = (tab, focus = false) => {
+      tabs.forEach((item) => {
+        const selected = item === tab;
+        item.setAttribute('aria-selected', String(selected));
+        item.tabIndex = selected ? 0 : -1;
+        const panel = document.getElementById(item.getAttribute('aria-controls'));
+        if (panel) panel.hidden = !selected;
+      });
+      if (focus) tab.focus();
+      if (tab.dataset.agentView === 'review') {
+        queueAgentReviewHistorySync();
+        if (typeof window.schedulePlotlyResize === 'function') {
+          window.schedulePlotlyResize(document.getElementById('ai-agent-review-panel'));
+        }
+      }
+    };
+    tabs.forEach((tab, index) => {
+      tab.addEventListener('click', () => activate(tab));
+      tab.addEventListener('keydown', (event) => {
+        let next;
+        if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+        if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+        if (event.key === 'Home') next = 0;
+        if (event.key === 'End') next = tabs.length - 1;
+        if (next !== undefined) { event.preventDefault(); activate(tabs[next], true); }
+      });
+    });
+  }
+
   function init() {
     bindInitRetry();
     if (!document.getElementById('ai-agent-card')) return;
@@ -2771,6 +2796,7 @@
       return;
     }
     initialized = true;
+    bindAgentViews();
 
     const modules = aiRoot().modules || {};
     modules.agent = {

@@ -1,6 +1,24 @@
 from __future__ import annotations
 
 from core.ai.model_feedback_errors import describe_model_feedback_issue
+import pytest
+
+
+@pytest.mark.parametrize("error", [
+    'codex_http_403:{"code":"insufficient_user_quota"}',
+    'codex_http_429:{"code":"insufficient_quota"}',
+    'codex_http_403:用户额度不足',
+])
+def test_explicit_quota_error_takes_precedence_over_http_status(error):
+    issue = describe_model_feedback_issue(error)
+    assert issue["kind"] == "quota_exhausted"
+    assert issue["code"] == "model_quota_exhausted"
+    assert "额度不足" in issue["label"]
+
+
+def test_transient_rate_limit_stays_retryable():
+    issue = describe_model_feedback_issue("codex_http_429:Too Many Requests")
+    assert issue["kind"] == "rate_limit"
 
 
 def test_describe_model_feedback_issue_distinguishes_auth_error():

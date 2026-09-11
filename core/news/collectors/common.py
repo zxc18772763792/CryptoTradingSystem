@@ -203,10 +203,15 @@ class BaseNewsCollector:
                 return resp
             except Exception as exc:
                 last_error = exc
+                # These require credentials or a provider-directed cooldown;
+                # immediate retries only waste quota and extend the failure.
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status in {401, 403, 429}:
+                    break
                 if attempt >= self.retry_count:
                     break
                 time.sleep(min(3.0, 0.5 * (2 ** attempt) + random.uniform(0.0, 0.5)))
-        raise RuntimeError(f"{self.provider_name} request failed: {last_error}")
+        raise RuntimeError(f"{self.provider_name} request failed: {last_error}") from last_error
 
     @staticmethod
     def filter_incremental(items: List[Dict[str, Any]], cursor: Optional[str]) -> List[Dict[str, Any]]:

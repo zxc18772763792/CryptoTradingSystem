@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from email.utils import parsedate_to_datetime
 
 from dateutil import parser as dt_parser
 from loguru import logger
@@ -43,6 +44,39 @@ def _safe_int(value: Any, default: int) -> int:
         return int(value)
     except Exception:
         return int(default)
+
+
+def _retry_cooldown(exc: Exception, failures: int, default: int) -> int:
+    """Back off repeated throttling and honor upstream Retry-After."""
+    cause = exc
+    for _ in range(5):
+        if getattr(cause, "response", None) is not None:
+            break
+        if cause.__cause__ is None:
+            break
+        cause = cause.__cause__
+    response = getattr(cause, "response", None)
+    status = getattr(response, "status_code", None)
+    throttled = status == 429 or "429" in str(exc) or "Too Many Requests" in str(exc)
+    if status in {401, 403} or re.search(r"\b(401|403)\b", str(exc)):
+        return 3600
+    if not throttled:
+        return 0
+    delay = min(7200, max(180, default) * (2 ** min(3, max(0, failures))))
+    retry_after = str((getattr(response, "headers", {}) or {}).get("Retry-After") or "").strip()
+    if retry_after:
+        try:
+            requested = float(retry_after)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                requested = (retry_at - datetime.now(timezone.utc)).total_seconds()
+            except (ValueError, TypeError, OverflowError):
+                requested = 0
+        delay = max(delay, int(max(0, requested)))
+    return delay
 
 
 def _parse_ts_to_unix(value: Any) -> float:
@@ -218,7 +252,8 @@ class MultiSourceNewsCollector:
             if name == "cryptocompare_news":
                 if _env_bool("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True):
                     if not str(os.getenv("CRYPTOCOMPARE_API_KEY") or "").strip():
-                        errors.append("cryptocompare running without CRYPTOCOMPARE_API_KEY; stricter rate limit applied")
+                        errors.append("cryptocompare disabled: CRYPTOCOMPARE_API_KEY missing")
+                        continue
                     specs.append(_CollectorSpec(name=name, collector=CryptoCompareNewsCollector(self.cfg)))
                 continue
             if name == "opennews":
@@ -405,8 +440,9 @@ class MultiSourceNewsCollector:
                     errors.append(err_msg)
                     source_stats[spec.name]["errors"].append(str(exc))
                     pause_until = None
-                    if "429" in str(exc) or "Too Many Requests" in str(exc):
-                        cooldown = max(180, _safe_int(self.defaults.get("news_source_429_cooldown_sec"), 900))
+                    prior_state = await news_db.get_source_state(spec.name)
+                    cooldown = _retry_cooldown(exc, int((prior_state or {}).get("error_count") or 0), _safe_int(self.defaults.get("news_source_429_cooldown_sec"), 900))
+                    if cooldown:
                         pause_until = datetime.now(timezone.utc) + timedelta(seconds=cooldown)
                     state_after = await news_db.set_source_state(
                         spec.name,
