@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "catalog_and_time_isolation_are_fixed": true,
+    "risk_is_reserved_not_increased": true,
+    "calibration_rejects_every_add_fraction": true,
+    "full_initial_baseline_matches_hold_router": true,
+    "confirmation_rejects_reserving_cash_for_breakout": true,
+    "weighted_tranche_and_portfolio_metrics_recomputed": true,
+    "all_allocations_cover_all_confirmation_folds": true,
+    "no_forward_or_primary_change": true
+  },
+  "recomputed": {
+    "selected_breakout_add_fraction": 0.0,
+    "baseline_expectancy": 0.1964959305195798,
+    "baseline_profit_factor": 2.792020519122662,
+    "confirmation_add_increments": {
+      "0.1": -0.0095356830201416,
+      "0.25": -0.0238392075503541,
+      "0.5": -0.0476784151007083
+    }
+  }
+}

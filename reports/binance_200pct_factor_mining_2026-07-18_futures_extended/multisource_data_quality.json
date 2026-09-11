@@ -1,0 +1,32 @@
+{
+  "news": {
+    "raw_rows": 221383,
+    "raw_min_fetched_at": "2026-02-22T00:03:03.411415+00:00",
+    "raw_max_fetched_at": "2026-07-19T09:40:00.244592+00:00",
+    "strict_mapped_mentions": 9284,
+    "mapped_news_items": 8465,
+    "mapped_symbols": 377,
+    "mapped_source_keys": 438,
+    "eligible_walk_forward_folds": 3,
+    "limitation": "local archive begins 2026-02-21; only later folds have enough pre-test news history"
+  },
+  "onchain": {
+    "unique_coingecko_identities": 289,
+    "ambiguous_identities": 221,
+    "missing_identities": 14,
+    "defillama_matches": 83,
+    "details_loaded": 83,
+    "tvl_rows": 55035,
+    "tvl_symbols": 53,
+    "eligible_walk_forward_folds": 4,
+    "limitation": "current identity maps create survivorship risk; only unique CoinGecko-to-DefiLlama matches are admitted"
+  },
+  "recent_oi": {
+    "available": true,
+    "observed_rows": 8855,
+    "symbols": 524,
+    "min_date": "2026-06-18T00:00:00+00:00",
+    "max_date": "2026-07-04T00:00:00+00:00",
+    "role": "recent directional sensitivity only; window is too short for walk-forward ranking validation"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "intensity_selected_from_calibration": true,
+    "intensity_candidate_grid_frozen": true,
+    "intensity_confirmation_counts": true,
+    "intensity_confirmation_metrics": true,
+    "intensity_event_metrics": true,
+    "intensity_not_promoted_without_uncertainty": true,
+    "failure_exit_selected_from_calibration": true,
+    "failure_exit_retains_frozen": true,
+    "tail_exit_selected_from_calibration": true,
+    "tail_exit_confirmation_metrics": true,
+    "tail_point_estimate_improves": true,
+    "tail_not_promoted_without_increment_ci": true,
+    "tail_counterfactual_is_forward_recorded_not_primary": true,
+    "research_only": true
+  },
+  "recomputed": {
+    "intensity_selected_precision": 0.11290322580645161,
+    "intensity_average_precision": 0.11368924645214082,
+    "tail_trades": 63,
+    "tail_expectancy": 0.19280040349938407,
+    "tail_profit_factor": 2.8053133729673068,
+    "tail_paired_increment": 0.0148929727866053
+  }
+}

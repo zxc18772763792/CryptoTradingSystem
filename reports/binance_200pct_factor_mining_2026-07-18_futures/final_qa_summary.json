@@ -1,0 +1,27 @@
+{
+  "status": "passed",
+  "events": {
+    "total": 19,
+    "close_confirmed": 17,
+    "wick_only": 2,
+    "futures_only": 12,
+    "AKEUSDT_present": true,
+    "BTWUSDT_present": true
+  },
+  "data_quality": {
+    "requested_symbols": 530,
+    "loaded_symbols": 530,
+    "source_errors": 0,
+    "duplicate_symbol_time_rows": 0,
+    "invalid_ohlc_rows": 0
+  },
+  "model": {
+    "preferred_ranking": "full_factor_model",
+    "test_top_2pct_lift": 9.25869126043039,
+    "independent_events_captured_top_2pct": 15
+  },
+  "limitations_asserted": {
+    "oi_combo_not_independently_validated": true,
+    "strategy_not_approved_for_live_trading": true
+  }
+}

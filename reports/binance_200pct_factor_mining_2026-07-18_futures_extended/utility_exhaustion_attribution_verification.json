@@ -1,0 +1,29 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "fixed_factorial_no_reselection": true,
+    "posthoc_policy_explicitly_quarantined": true,
+    "policy_metrics_recomputed": true,
+    "row_and_event_contrasts_recomputed": true,
+    "wider_35pct_trail_uniformly_harms_confirmation": true,
+    "pure_wick_point_gain_but_not_identified": true,
+    "combined_increment_attribution_identity": true,
+    "posthoc_tail30_wick_is_forward_hypothesis_only": true,
+    "posthoc_rule_recorded_prospectively_without_promotion": true
+  },
+  "recomputed": {
+    "policies": 5,
+    "contrasts": 8,
+    "paired_rows_per_contrast": [
+      88
+    ],
+    "events_per_contrast": [
+      67
+    ],
+    "pure_wick_row_increment": 0.01988139567927053,
+    "pure_wick_event_increment": 0.012619280352188868,
+    "posthoc_expectancy": 0.1849661750536046,
+    "posthoc_profit_factor": 2.682217973567563
+  }
+}

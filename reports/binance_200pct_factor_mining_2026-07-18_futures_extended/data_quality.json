@@ -1,0 +1,53 @@
+{
+  "daily_rows": 187616,
+  "daily_symbols": 530,
+  "daily_min_date": "2025-06-13T00:00:00+00:00",
+  "daily_max_date": "2026-07-18T00:00:00+00:00",
+  "modeling_rows": 177295,
+  "modeling_positive_rows": 1873,
+  "panel_4h_rows": 1122828,
+  "panel_4h_symbols": 530,
+  "duplicate_symbol_open_time": 0,
+  "invalid_ohlc_rows": 0,
+  "price_factor_null_rates_modeling": {
+    "realized_vol_7d": 0.011793902817338334,
+    "intraday_range_1d": 0.0,
+    "atr_7d_pct": 0.005905411884147889,
+    "upper_wick_pct": 0.0,
+    "breakout_vs_prior_20d": 0.014738148283933557,
+    "drawdown_from_30d_high": 0.01768239375052878,
+    "lower_wick_pct": 0.0,
+    "range_compression_7d_30d": 0.01768239375052878
+  },
+  "current_close_confirmed_events": 17,
+  "current_wick_only_events": 2,
+  "current_event_regression_expected": {
+    "close_confirmed": 17,
+    "wick_only": 2
+  },
+  "ake_btw_regression": {
+    "AKEUSDT": {
+      "present": true,
+      "classification": "close-confirmed",
+      "observed_close_return": 9.475635593220339,
+      "expected_approx": 9.4756
+    },
+    "BTWUSDT": {
+      "present": true,
+      "classification": "close-confirmed",
+      "observed_close_return": 3.3453389830508478,
+      "expected_approx": 3.3453
+    }
+  },
+  "current_event_regression_pass": true,
+  "spot_exchange_info_error": "external refresh disabled",
+  "long_oi": {
+    "manifest_symbols": 110,
+    "loaded_symbols": 107,
+    "rows": 34181,
+    "min_date": "2025-07-20T00:00:00+00:00",
+    "max_date": "2026-07-19T00:00:00+00:00",
+    "source_errors": [],
+    "supply_approximation_symbols": []
+  }
+}

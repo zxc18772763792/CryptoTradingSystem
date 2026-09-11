@@ -1,0 +1,46 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "fixed_taker_counts_recomputed": true,
+    "nearby_thresholds_are_directionally_robust": true,
+    "full_path_match_recomputed_and_fails_independence": true,
+    "taker_annotation_remains_non_actionable": true,
+    "runner_catalog_changes_only_partial_and_trail_controls": true,
+    "all_runner_candidates_fail_calibration": true,
+    "calibration_paired_means_recomputed": true,
+    "early_30d_absolute_expectancy_is_negative": true,
+    "confirmation_point_estimate_is_not_promoted": true,
+    "confirmation_trade_metrics_recomputed": true,
+    "partial_fraction_catalog_isolated": true,
+    "calibration_selects_sell75_from_three_windows": true,
+    "partial_fraction_reverses_in_confirmation": true,
+    "partial_fraction_nonstationarity_is_not_promoted": true,
+    "regime_state_support_is_too_sparse": true,
+    "regime_route_direction_reverses_out_of_sample": true,
+    "regime_router_is_not_promoted": true,
+    "regime_confirmation_trade_metrics_recomputed": true,
+    "forward_operational_gap_is_evidence_backed": true,
+    "late_diagnostic_is_not_backfilled_as_oos": true
+  },
+  "recomputed": {
+    "confirmation_taker_rows": 48,
+    "confirmation_taker_positives": 9,
+    "full_path_match_p": 0.0691861627674465,
+    "calibration_runner_best_increment": -0.0161815900932089,
+    "confirmation_best_policy": "breakout6_full_runner_a150_t30_wick",
+    "confirmation_best_expectancy": 0.2103256760791799,
+    "calibration_selected_partial_fraction": 0.75,
+    "confirmation_sell75_increment": -0.0047365446322781,
+    "confirmation_sell25_increment": 0.0047365446322781,
+    "regime_calibration_affected_signals": 3,
+    "regime_confirmation_affected_signals": 6,
+    "regime_semantic_vol_calibration_increment": -0.009739990961509126,
+    "regime_semantic_vol_confirmation_increment": 0.006824308821359649,
+    "forward_snapshot_dates": [
+      "2026-07-18",
+      "2026-07-19"
+    ],
+    "forward_mature_utility_observations": 0
+  }
+}

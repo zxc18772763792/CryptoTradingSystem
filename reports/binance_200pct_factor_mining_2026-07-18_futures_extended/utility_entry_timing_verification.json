@@ -1,0 +1,26 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "selected_only_from_calibration": true,
+    "candidate_family_and_clock_frozen": true,
+    "signal_recognition_enrichment_with_retention": true,
+    "independent_event_enrichment_retains_all_positive_events": true,
+    "event_increment_passes_but_row_increment_fails": true,
+    "entry_price_does_not_manufacture_target_labels": true,
+    "selected_trade_metrics_recomputed": true,
+    "trade_increment_and_absolute_uncertainty_fail": true,
+    "candidate_rows_match_decision": true,
+    "forward_counterfactual_is_read_only_and_not_promoted": true
+  },
+  "recomputed": {
+    "calibration_rules": 9,
+    "confirmation_filled": 54,
+    "selected_precision": 0.14814814814814814,
+    "selected_event_precision": 0.1111111111111111,
+    "trades": 44,
+    "expectancy": 0.14966457054428595,
+    "profit_factor": 2.2822455641300117,
+    "paired_trade_increment": 0.0191256992866772
+  }
+}

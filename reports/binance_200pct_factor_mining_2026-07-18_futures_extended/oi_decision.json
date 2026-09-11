@@ -1,0 +1,41 @@
+{
+  "ranking_eligible": false,
+  "folds": 5,
+  "fold_majority_both_positive": 0.2,
+  "bootstrap": {
+    "samples": 500,
+    "delta_ap_median": -0.02020774908505879,
+    "delta_ap_lower_95pct": -0.0516315486318213,
+    "delta_ap_upper_95pct": 0.002041296978298857,
+    "delta_lift_median": -3.954676504421611,
+    "delta_lift_lower_95pct": -7.022574323419467,
+    "delta_lift_upper_95pct": -1.5405075565804647
+  },
+  "factor_group_evidence": {
+    "small_cap": {
+      "fold_majority_ap_and_lift_positive": 0.2,
+      "median_delta_average_precision": -0.016337460762406983,
+      "median_delta_top_2pct_lift": -1.3583333333333325,
+      "evidence_tier": "directional_only"
+    },
+    "absolute_oi": {
+      "fold_majority_ap_and_lift_positive": 0.2,
+      "median_delta_average_precision": -0.015519909556332298,
+      "median_delta_top_2pct_lift": -1.5538461538461554,
+      "evidence_tier": "directional_only"
+    },
+    "oi_to_mcap": {
+      "fold_majority_ap_and_lift_positive": 0.2,
+      "median_delta_average_precision": -0.0157750863120016,
+      "median_delta_top_2pct_lift": -3.640037976400379,
+      "evidence_tier": "directional_only"
+    },
+    "oi_growth": {
+      "fold_majority_ap_and_lift_positive": 0.2,
+      "median_delta_average_precision": 0.007975555226957587,
+      "median_delta_top_2pct_lift": 0.0,
+      "evidence_tier": "directional_only"
+    }
+  },
+  "rule": "majority of folds improve AP and top-2% lift, with both 95% lower bounds above zero"
+}

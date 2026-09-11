@@ -1,0 +1,64 @@
+{
+  "generated_at_utc": "2026-07-18T07:44:35.262353+00:00",
+  "server_time_utc": "2026-07-18T07:44:08.821000+00:00",
+  "definition": {
+    "window_start_utc": "2026-06-18T00:00:00+00:00",
+    "window_end_open_utc": "2026-07-18T00:00:00+00:00",
+    "window_days": 30,
+    "path": "any earlier 4h close/low to a strictly later 4h high",
+    "threshold_return": 2.0,
+    "threshold_price_multiple": 3.0,
+    "not_first_to_last": true
+  },
+  "universe": {
+    "current_trading_usdt_perpetuals": 530,
+    "with_usdt_spot_pair": 362,
+    "futures_only": 168,
+    "loaded_symbols": 530,
+    "load_errors": 0
+  },
+  "events": {
+    "total": 19,
+    "close_confirmed": 17,
+    "wick_only": 2,
+    "futures_only_total": 12,
+    "symbols": [
+      "AKEUSDT",
+      "TAIKOUSDT",
+      "SYNUSDT",
+      "VELVETUSDT",
+      "EVAAUSDT",
+      "TLMUSDT",
+      "SLXUSDT",
+      "USUSDT",
+      "BTWUSDT",
+      "INUSDT",
+      "DEXEUSDT",
+      "BICOUSDT",
+      "TACUSDT",
+      "VANRYUSDT",
+      "TAGUSDT",
+      "MUSDT",
+      "LABUSDT",
+      "HMSTRUSDT",
+      "AGLDUSDT"
+    ]
+  },
+  "data_quality": {
+    "panel_rows": 95625,
+    "duplicate_symbol_time_rows": 0,
+    "invalid_ohlc_rows": 0,
+    "min_bars_per_symbol": 90,
+    "median_bars_per_symbol": 181.0,
+    "max_bars_per_symbol": 181
+  },
+  "errors": [],
+  "scope_diagnosis": {
+    "prior_scope": "current Binance USDT spot pairs",
+    "corrected_scope": "current TRADING Binance USD-M USDT perpetuals",
+    "AKEUSDT_spot_listed": false,
+    "BTWUSDT_spot_listed": false,
+    "AKEUSDT_futures_listed": true,
+    "BTWUSDT_futures_listed": true
+  }
+}

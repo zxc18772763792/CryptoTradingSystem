@@ -1,0 +1,40 @@
+{
+  "definition": {
+    "window_days": 30,
+    "window_start_utc": "2026-06-18T00:00:00+00:00",
+    "window_end_utc": "2026-07-18T00:00:00+00:00",
+    "threshold_return": 2.0,
+    "threshold_price_multiple": 3.0,
+    "path": "any earlier 4h close/low to a strictly later 4h high",
+    "not_used": "first-window-close versus last-window-close"
+  },
+  "independent_events": {
+    "total": 7,
+    "close_confirmed": 5,
+    "wick_only": 2,
+    "symbols": [
+      "SYNUSDT",
+      "TLMUSDT",
+      "DEXEUSDT",
+      "BICOUSDT",
+      "VANRYUSDT",
+      "HMSTRUSDT",
+      "REUSDT"
+    ]
+  },
+  "production_comparison": {
+    "symbol_set_exact_match": true,
+    "classification_exact_match": true,
+    "event_times_exact_match": true,
+    "maximum_absolute_return_difference": 2.220446049250313e-16
+  },
+  "data_quality": {
+    "panel_rows": 948562,
+    "panel_symbols": 460,
+    "window_rows": 79513,
+    "duplicate_symbol_time_rows": 0,
+    "invalid_ohlc_rows": 0,
+    "unordered_symbols": 0,
+    "event_symbols_outside_altcoin_universe": []
+  }
+}

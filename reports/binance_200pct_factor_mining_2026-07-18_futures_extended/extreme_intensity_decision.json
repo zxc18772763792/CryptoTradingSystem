@@ -1,0 +1,120 @@
+{
+  "generated_at_utc": "2026-07-19T14:00:33.426860+00:00",
+  "evidence_class": "secondary_historical_time_isolated_intensity_challenger",
+  "prediction_clock": "completed 4h bars strictly before checkpoint; score at checkpoint open",
+  "training_families": [
+    "ordinal",
+    "ridge_intensity"
+  ],
+  "ordinal_thresholds": [
+    0.5,
+    1.0,
+    1.5,
+    2.0
+  ],
+  "ordinal_weights": [
+    0.1,
+    0.2,
+    0.3,
+    0.4
+  ],
+  "ridge_target": "log1p(clipped positive future 14d MFE), cap +900%",
+  "candidate_checkpoints_hours": [
+    4,
+    8,
+    12,
+    16,
+    20,
+    24
+  ],
+  "candidate_quantiles": [
+    0.6,
+    0.7,
+    0.8,
+    0.9
+  ],
+  "candidate_count": 48,
+  "features": [
+    "price_model_score",
+    "price_model_pctile",
+    "early_close_return",
+    "early_mfe",
+    "early_mae",
+    "early_max_drawdown",
+    "early_pullback_from_peak",
+    "early_log_return_vol",
+    "early_path_efficiency",
+    "early_positive_bar_share",
+    "early_close_location",
+    "early_range_mean",
+    "early_range_expansion",
+    "early_volume_ratio_prior",
+    "early_volume_acceleration",
+    "early_taker_buy_share",
+    "early_taker_acceleration",
+    "entry_chase_vs_signal_close"
+  ],
+  "selected_family": "ordinal",
+  "selected_checkpoint_hours": 20,
+  "selected_quantile": 0.8,
+  "calibration_eligible": true,
+  "confirmation": {
+    "rows": 281,
+    "positives": 22,
+    "base_precision": 0.07829181494661921,
+    "price_average_precision": 0.07768762255607688,
+    "intensity_average_precision": 0.11368924645214082,
+    "selected_rows": 62,
+    "selected_positives": 7,
+    "selected_precision": 0.11290322580645161,
+    "positive_retention": 0.3181818181818182,
+    "unique_selected_symbols": 39,
+    "fold_joint_improvement_share": 0.5,
+    "fold_precision_delta_mean": 0.0226343640093696,
+    "fold_precision_delta_std": 0.04856290893641352
+  },
+  "event_metrics": {
+    "events": 155,
+    "positive_events": 14,
+    "selected_events": 44,
+    "selected_positive_events": 9,
+    "selected_event_precision": 0.20454545454545456,
+    "positive_event_retention": 0.6428571428571429
+  },
+  "week_bootstrap": {
+    "cluster": "week",
+    "samples": 3000,
+    "precision_delta_median": 0.03362911726535478,
+    "precision_delta_lower_95pct": -0.02329137605347283,
+    "precision_delta_upper_95pct": 0.08802839394088105,
+    "ap_delta_median": 0.037970626930416126,
+    "ap_delta_lower_95pct": -0.023599377517834422,
+    "ap_delta_upper_95pct": 0.11621496576149964
+  },
+  "symbol_bootstrap": {
+    "cluster": "symbol",
+    "samples": 3000,
+    "precision_delta_median": 0.03455797306259771,
+    "precision_delta_lower_95pct": -0.021302287869449092,
+    "precision_delta_upper_95pct": 0.09818736457070158,
+    "ap_delta_median": 0.038097706560523574,
+    "ap_delta_lower_95pct": -0.03727218373730221,
+    "ap_delta_upper_95pct": 0.09438519333257539
+  },
+  "prior_binary200_confirmation": {
+    "rows": 281,
+    "positives": 22,
+    "base_precision": 0.07829181494661921,
+    "price_average_precision": 0.07768762255607688,
+    "continuation_average_precision": 0.09767261775229386,
+    "selected_rows": 31,
+    "selected_positives": 3,
+    "selected_precision": 0.0967741935483871,
+    "positive_retention": 0.13636363636363635,
+    "unique_selected_symbols": 23,
+    "fold_joint_improvement_share": 0.25
+  },
+  "ranking_gate_pass": false,
+  "classification": "watchlist_only",
+  "automatic_trading_allowed": false
+}

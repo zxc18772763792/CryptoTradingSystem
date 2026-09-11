@@ -1,0 +1,78 @@
+{
+  "generated_at_utc": "2026-07-19T12:35:54.050252+00:00",
+  "evidence_class": "secondary_exchange_lifecycle_challenger",
+  "factor": "listing_age_log",
+  "availability": "contract onboard date is known at the signal timestamp; age is recomputed per date",
+  "models": [
+    "price_only",
+    "listing_age_only",
+    "price_plus_listing_age"
+  ],
+  "price_pooled": {
+    "n": 96457,
+    "positives": 1015,
+    "base_rate": 0.010522823641622691,
+    "auc": 0.7632448995665797,
+    "average_precision": 0.05426954419134844,
+    "top_2pct_n": 2042,
+    "top_2pct_precision": 0.0940254652301665,
+    "top_2pct_lift": 8.935383546508543
+  },
+  "age_only_pooled": {
+    "n": 96457,
+    "positives": 1015,
+    "base_rate": 0.010522823641622691,
+    "auc": 0.6932409418331903,
+    "average_precision": 0.020920055176165537,
+    "top_2pct_n": 2042,
+    "top_2pct_precision": 0.044564152791381,
+    "top_2pct_lift": 4.234999493397278
+  },
+  "price_plus_age_pooled": {
+    "n": 96457,
+    "positives": 1015,
+    "base_rate": 0.010522823641622691,
+    "auc": 0.7701762492021822,
+    "average_precision": 0.043048609587572936,
+    "top_2pct_n": 2042,
+    "top_2pct_precision": 0.08276199804113614,
+    "top_2pct_lift": 7.864999059166373
+  },
+  "fold_joint_ap_and_lift_improvement_share": 0.14285714285714285,
+  "paired_week_bootstrap": {
+    "cluster": "7d_week",
+    "average_precision_delta": {
+      "samples": 5000,
+      "median": -0.011402651359134534,
+      "lower_95pct": -0.022013980239509744,
+      "upper_95pct": -0.0027391153859872997
+    },
+    "precision_delta": {
+      "samples": 5000,
+      "median": -0.011374876360039567,
+      "lower_95pct": -0.02778015484922575,
+      "upper_95pct": 0.0044425806104795955
+    },
+    "lift_delta": {
+      "samples": 5000,
+      "median": -1.0835232091504605,
+      "lower_95pct": -2.693374571730169,
+      "upper_95pct": 0.4301962031293549
+    }
+  },
+  "price_event_capture": {
+    "events": 99,
+    "captured": 39,
+    "capture_rate": 0.3939393939393939
+  },
+  "price_plus_age_event_capture": {
+    "events": 99,
+    "captured": 29,
+    "capture_rate": 0.29292929292929293
+  },
+  "coefficient_negative_share": 1.0,
+  "historical_incremental_gate_pass": false,
+  "classification": "annotation_only",
+  "frozen_price_ranking_changed": false,
+  "automatic_trading_allowed": false
+}
