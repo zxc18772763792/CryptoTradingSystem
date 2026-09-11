@@ -6,6 +6,7 @@
     <title>加密交易系统</title>
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
     <link rel="stylesheet" href="{{ static_asset_url('css/style.css') }}&bt_modes=20260525d">
+    <link rel="stylesheet" href="{{ static_asset_url('css/ai_agent.css') }}">
     <script>
         (function (root) {
             if (!root) return;
@@ -2141,43 +2142,41 @@
                 </div>
             </div>
 
-            <div id="ai-agent" class="tab-content">
-                <div id="ai-runtime-summary" class="ai-runtime-summary">
-                    <span class="ai-runtime-chip">人工确认：加载中</span>
-                    <span class="ai-runtime-chip">交易模式：加载中</span>
-                    <span class="ai-runtime-chip">下单前AI复核：加载中</span>
-                    <span class="ai-runtime-chip">自动交易代理：加载中</span>
-                    <span class="ai-runtime-chip">页面时区：上海时间 (UTC+8)</span>
-                </div>
-
-                <section class="card ai-agent-cockpit">
-                    <div class="ai-agent-cockpit-main">
-                        <div class="ai-agent-cockpit-kicker">AI自治代理运行驾驶舱</div>
-                        <div class="ai-agent-cockpit-title">状态、动作、风险、复盘一屏串联</div>
-                        <div class="ai-agent-cockpit-flow">
-                            <span class="ai-agent-cockpit-flow-step">真实执行态</span>
-                            <span class="ai-agent-cockpit-flow-step">观望原因</span>
-                            <span class="ai-agent-cockpit-flow-step">选币纪律</span>
-                            <span class="ai-agent-cockpit-flow-step">日志复盘</span>
+            <div id="ai-agent" class="tab-content agent-workspace">
+                <div id="ai-agent-card" class="agent-page-header">
+                    <div>
+                        <div class="agent-title-row">
+                            <h2>AI 自治代理</h2>
+                            <span id="ai-agent-status-dot" class="agent-dot agent-dot-off" title="等待状态">
+                            </span>
+                            <span id="ai-agent-cockpit-state-badge" class="ai-agent-cockpit-badge">正在同步</span>
                         </div>
-                        <div class="ai-agent-cockpit-meta">
-                            <span id="ai-agent-cockpit-state-badge" class="ai-agent-cockpit-badge">等待状态</span>
-                            <span id="ai-agent-cockpit-state-note" class="ai-agent-cockpit-note">加载中...</span>
-                        </div>
+                        <p id="ai-agent-cockpit-state-note" class="agent-page-note" aria-live="polite">正在获取代理运行状态…</p>
                     </div>
-                    <div class="ai-agent-cockpit-grid">
-                        <article id="ai-agent-cockpit-status-card" class="ai-agent-cockpit-stat">
-                            <span class="ai-agent-cockpit-stat-label">代理状态</span>
-                            <strong id="ai-agent-cockpit-status">加载中...</strong>
-                            <span id="ai-agent-cockpit-status-sub" class="ai-agent-cockpit-stat-sub">等待状态同步</span>
-                        </article>
+                    <div class="agent-header-actions">
+                        <button class="btn btn-sm" id="ai-agent-run-once-btn" onclick="agentRunOnce()" disabled title="按当前执行模式运行一轮，可能提交订单">运行一轮</button>
+                        <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()" disabled>启动代理</button>
+                        <button class="btn btn-sm btn-danger" id="ai-agent-stop-btn" onclick="agentStop()" disabled>停止代理</button>
+                    </div>
+                </div>
+                <div id="ai-agent-operating-mode-banner" class="ai-agent-operating-mode-banner" role="status" hidden>
+                </div>
+                <nav class="agent-view-tabs" role="tablist" aria-label="代理工作区">
+                    <button type="button" id="agent-tab-overview" role="tab" aria-selected="true" aria-controls="agent-view-overview" data-agent-view="overview">运行概览</button>
+                    <button type="button" id="agent-tab-journal" role="tab" aria-selected="false" aria-controls="agent-view-journal" tabindex="-1" data-agent-view="journal">决策记录</button>
+                    <button type="button" id="agent-tab-review" role="tab" aria-selected="false" aria-controls="agent-view-review" tabindex="-1" data-agent-view="review">交易复盘</button>
+                    <button type="button" id="agent-tab-settings" role="tab" aria-selected="false" aria-controls="agent-view-settings" tabindex="-1" data-agent-view="settings">代理设置</button>
+                    <span class="agent-timezone">上海时间 UTC+8</span>
+                </nav>
+                <section id="agent-view-overview" class="agent-view" role="tabpanel" aria-labelledby="agent-tab-overview" tabindex="0">
+                    <div class="agent-metrics">
                         <article id="ai-agent-cockpit-symbol-card" class="ai-agent-cockpit-stat">
                             <span class="ai-agent-cockpit-stat-label">当前盯盘</span>
                             <strong id="ai-agent-cockpit-symbol">加载中...</strong>
                             <span id="ai-agent-cockpit-symbol-sub" class="ai-agent-cockpit-stat-sub">等待选币结果</span>
                         </article>
                         <article id="ai-agent-cockpit-mode-card" class="ai-agent-cockpit-stat">
-                            <span class="ai-agent-cockpit-stat-label">真实执行态</span>
+                            <span class="ai-agent-cockpit-stat-label">执行模式</span>
                             <strong id="ai-agent-cockpit-mode">加载中...</strong>
                             <span id="ai-agent-cockpit-mode-sub" class="ai-agent-cockpit-stat-sub">等待模式同步</span>
                         </article>
@@ -2187,237 +2186,169 @@
                             <span id="ai-agent-cockpit-decision-sub" class="ai-agent-cockpit-stat-sub">等待最新动作</span>
                         </article>
                         <article id="ai-agent-cockpit-cycle-card" class="ai-agent-cockpit-stat">
-                            <span class="ai-agent-cockpit-stat-label">下一轮计划</span>
+                            <span class="ai-agent-cockpit-stat-label">下次运行</span>
                             <strong id="ai-agent-cockpit-cycle">加载中...</strong>
                             <span id="ai-agent-cockpit-cycle-sub" class="ai-agent-cockpit-stat-sub">等待调度信息</span>
                         </article>
-                        <article id="ai-agent-cockpit-model-card" class="ai-agent-cockpit-stat">
-                            <span class="ai-agent-cockpit-stat-label">模型与成本</span>
-                            <strong id="ai-agent-cockpit-model">加载中...</strong>
-                            <span id="ai-agent-cockpit-model-sub" class="ai-agent-cockpit-stat-sub">等待模型反馈</span>
-                        </article>
+                    </div>
+                    <div class="agent-overview-grid">
+                        <div class="agent-overview-main">
+                            <section id="ai-agent-diagnostics-panel" class="agent-surface">
+                                <div class="agent-section-heading">
+                                    <h3>当前决策</h3>
+                                    <span id="ai-agent-hold-badge" class="ai-agent-section-badge">等待诊断</span>
+                                </div>
+                                <div id="ai-agent-reasons" class="ai-agent-reasons-box">正在加载决策…</div>
+                            </section>
+                            <section class="agent-surface">
+                                <div class="agent-section-heading">
+                                    <h3>关注币种</h3>
+                                    <span class="agent-section-note">当前跟踪的市场信号</span>
+                                </div>
+                                <div id="ai-agent-live-signals-panel">
+                                    <div class="ai-agent-empty">正在获取市场信号…</div>
+                                </div>
+                                <details class="agent-disclosure agent-ranking-disclosure">
+                                    <summary>查看选币排名</summary>
+                                    <div class="agent-section-heading">
+                                        <span class="agent-section-note">自动选币候选</span>
+                                        <button class="btn btn-sm" id="ai-agent-ranking-refresh-btn" type="button" onclick="agentRefreshRanking()">刷新排名</button>
+                                    </div>
+                                    <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">
+                                        <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
+                                        <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
+                                    </div>
+                                </details>
+                            </section>
+                        </div>
+                        <aside class="agent-surface agent-risk-card" aria-label="风险状态">
+                            <div class="agent-section-heading">
+                                <h3>风险状态</h3>
+                                <button class="btn btn-sm" type="button" onclick="agentRefreshRisk()">刷新</button>
+                            </div>
+                            <div id="ai-agent-risk-status-panel" class="ai-agent-runtime-panel">
+                                <div class="ai-agent-empty">正在检查风险…</div>
+                            </div>
+                        </aside>
                     </div>
                 </section>
-
-                <div class="ai-workspace-stack">
-                    <section class="ai-workspace-section ai-workspace-section-agent">
-                        <div class="ai-workspace-section-head">
+                <section id="agent-view-journal" class="agent-view" role="tabpanel" aria-labelledby="agent-tab-journal" tabindex="0" hidden>
+                    <section id="ai-agent-journal-panel" class="agent-surface ai-agent-panel ai-agent-panel-journal">
+                        <div class="ai-auto-step-head">
                             <div>
-                                <div class="ai-workspace-section-kicker">AI自治代理</div>
-                                <div class="ai-workspace-section-title">运行状态、触发动作、风险判断、交易复盘</div>
+                                <div class="ai-auto-step-title">决策记录</div>
                             </div>
+                            <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
                         </div>
-
-                        <div class="ai-agent-workspace-grid">
-                            <div class="card ai-top-intro-card ai-top-intro-card-trading ai-agent-command-card">
-                                <div class="ai-agent-command-hero">
-                                    <div>
-                                        <div class="ai-top-intro-title">AI 自动交易指挥台</div>
-                                    </div>
-                                    <div class="ai-agent-command-side">
-                                        <div class="ai-agent-command-tags">
-                                            <span class="ai-agent-command-tag">独立执行链路</span>
-                                            <span class="ai-agent-command-tag">实时盯盘</span>
-                                            <span class="ai-agent-command-tag">交易后复盘</span>
-                                        </div>
-                                        <div class="ai-agent-command-links">
-                                            <a class="ai-agent-command-link" href="#ai-agent-card">状态开关</a>
-                                            <a class="ai-agent-command-link" href="#ai-agent-ranking-panel">选币纪律</a>
-                                            <a class="ai-agent-command-link" href="#ai-agent-journal-panel">决策日志</a>
-                                            <a class="ai-agent-command-link" href="#ai-agent-review-panel">交易复盘</a>
-                                        </div>
-                                    </div>
-                                </div>
-
-
-                                <div class="ai-agent-control-grid">
-                                    <section id="ai-agent-card" class="ai-auto-step ai-agent-panel ai-agent-panel-status">
-                                        <div class="ai-auto-step-index">1</div>
-                                        <div class="ai-auto-step-body">
-                                            <div class="ai-auto-step-head">
-                                                <div class="ai-auto-step-title">运行状态与开关</div>
-                                                <span id="ai-agent-status-dot" class="agent-dot agent-dot-off" title="未运行"></span>
-                                            </div>
-                                            <div id="ai-agent-info" class="ai-auto-step-info">加载中...</div>
-                                            <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
-                                                <button class="btn btn-sm btn-success" id="ai-agent-start-btn" onclick="agentStart()">启动</button>
-                                                <button class="btn btn-sm btn-danger" id="ai-agent-stop-btn" onclick="agentStop()">停止</button>
-                                                <button class="btn btn-sm" id="ai-agent-run-once-btn" onclick="agentRunOnce()">单次试跑</button>
-                                            </div>
-                                        </div>
-                                    </section>
-
-                                    <section id="ai-agent-diagnostics-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-diagnostics">
-                                        <div class="ai-agent-section-head">
-                                            <div>
-                                                <div class="ai-agent-section-title">为什么现在是 Hold / 观望</div>
-                                            </div>
-                                            <div id="ai-agent-hold-badge" class="ai-agent-section-badge">等待诊断</div>
-                                        </div>
-                                        <div id="ai-agent-reasons" class="ai-agent-reasons-box">加载中...</div>
-                                    </section>
-
-                                    <div class="ai-agent-decision-strip">
-                                        <details id="ai-agent-settings-panel" class="ai-agent-settings-drawer">
-                                            <summary>
-                                                <span>
-                                                    <strong>选币、仓位与风险设置</strong>
-                                                </span>
-                                                <span class="ai-agent-settings-summary-action">展开设置</span>
-                                            </summary>
-                                            <section id="ai-agent-ranking-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
-                                            <div class="ai-agent-section-head">
-                                                <div>
-                                                    <div class="ai-agent-section-title">币种模式与自动选币</div>
-                                                    <div class="ai-agent-section-subtitle">自动模式扫描候选币池，选出最值得跟踪的标的。</div>
-                                                </div>
-                                                <button class="btn btn-sm" id="ai-agent-ranking-refresh-btn" type="button" onclick="agentRefreshRanking()">刷新排行榜</button>
-                                            </div>
-                                            <div class="ai-agent-config-grid">
-                                                <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
-                                                    <span>币种模式</span>
-                                                    <select id="ai-agent-symbol-mode" onchange="agentToggleSymbolMode()">
-                                                        <option value="manual">固定币种</option>
-                                                        <option value="auto">自动选币</option>
-                                                    </select>
-                                                </label>
-                                                <label id="ai-agent-manual-symbol-wrap" class="ai-agent-field">
-                                                    <span>固定 symbol</span>
-                                                    <input id="ai-agent-manual-symbol" type="text" value="BTC/USDT" />
-                                                </label>
-                                            </div>
-                                            <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
-                                                <span>候选币池</span>
-                                                <textarea id="ai-agent-universe-symbols" rows="2" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ..."></textarea>
-                                            </label>
-                                            <div class="ai-agent-config-divider">AI 资金预算</div>
-                                            <div class="ai-agent-config-grid">
-                                                <label class="ai-agent-field">
-                                                    <span>总资金比例</span>
-                                                    <input id="ai-agent-max-total-exposure-ratio" type="number" min="0.05" max="0.4" step="0.01" placeholder="0.40" />
-                                                    <div class="ai-agent-field-hint">默认生效，0.40 = 账户权益的 40%</div>
-                                                </label>
-                                                <label class="ai-agent-field">
-                                                    <span>固定总金额（USDT，可选）</span>
-                                                    <input id="ai-agent-max-total-exposure-usdt" type="number" min="0" step="10" placeholder="留空则按比例" />
-                                                    <div class="ai-agent-field-hint">填写后覆盖比例上限，500 = 上限约 500 USDT</div>
-                                                </label>
-                                            </div>
-                                            <div class="ai-agent-config-divider">自治风险纪律阈值</div>
-                                            <div class="ai-agent-risk-config-note">只作用于自治代理新单，不改全局风控上限。</div>
-                                            <div class="ai-agent-config-grid ai-agent-risk-config-grid">
-                                                <label class="ai-agent-field">
-                                                    <span>日内止损缓冲</span>
-                                                    <input id="ai-agent-risk-daily-stop" type="number" min="0" max="1" step="0.001" placeholder="0.010" />
-                                                </label>
-                                                <label class="ai-agent-field">
-                                                    <span>最大回撤 close-only</span>
-                                                    <input id="ai-agent-risk-max-dd" type="number" min="0" max="1" step="0.001" placeholder="0.030" />
-                                                </label>
-                                                <label class="ai-agent-field">
-                                                    <span>3日滚动回撤 close-only</span>
-                                                    <input id="ai-agent-risk-rolling-3d" type="number" min="0" max="1" step="0.001" placeholder="0.050" />
-                                                </label>
-                                                <label class="ai-agent-field">
-                                                    <span>7日滚动回撤 close-only</span>
-                                                    <input id="ai-agent-risk-rolling-7d" type="number" min="0" max="1" step="0.001" placeholder="0.080" />
-                                                </label>
-                                            </div>
-                                            <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
-                                                <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存 AI 配置</button>
-                                                <button class="btn btn-sm" type="button" onclick="agentSaveRiskConfig()">保存风险纪律</button>
-                                            </div>
-                                            <div class="ai-agent-scroll-shell ai-agent-scroll-shell-ranking">
-                                                <div id="ai-agent-ranking-summary" class="ai-agent-ranking-summary">加载中...</div>
-                                                <div id="ai-agent-ranking" class="ai-agent-ranking-box">加载中...</div>
-                                            </div>
-                                            </section>
-                                        </details>
-
-                                        <section id="ai-agent-journal-panel" class="ai-agent-panel ai-agent-panel-journal">
-                                            <div class="ai-auto-step-head">
-                                                <div>
-                                                    <div class="ai-auto-step-title">最近决策日志与聚合信号快照</div>
-                                                </div>
-                                                <button class="btn btn-sm" type="button" onclick="agentRefreshJournal()">刷新日志</button>
-                                            </div>
-                                            <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
-                                        </section>
-                                    </div>
-                                </div>
-
-                                <section id="ai-agent-review-panel" class="ai-agent-panel ai-agent-panel-review">
-                                    <div class="ai-auto-step-head">
-                                        <div>
-                                            <div class="ai-auto-step-title">最近放行交易复盘</div>
-                                            <div class="ai-auto-step-desc">只看真正放行的开仓/平仓，判断亏损来自方向、平仓速度还是模型异常。</div>
-                                        </div>
-                                        <button class="btn btn-sm" type="button" onclick="agentRefreshReview()">刷新复盘</button>
-                                    </div>
-                                    <div class="ai-agent-review-workspace">
-                                        <div id="ai-agent-review-summary" class="ai-agent-review-summary">加载中...</div>
-                                        <div class="ai-agent-scroll-shell ai-agent-scroll-shell-review ai-agent-review-history-shell">
-                                            <div id="ai-agent-review-history-meta" class="ai-agent-review-history-meta">加载中...</div>
-                                            <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
-                                        </div>
-                                    </div>
-                                </section>
+                        <div id="ai-agent-journal" class="ai-agent-journal-box">加载中...</div>
+                    </section>
+                </section>
+                <section id="agent-view-review" class="agent-view" role="tabpanel" aria-labelledby="agent-tab-review" tabindex="0" hidden>
+                    <section class="agent-surface agent-performance">
+                        <div class="agent-section-heading">
+                            <h3>交易表现</h3>
+                            <span class="agent-section-note">最近 7 天</span>
+                        </div>
+                        <div id="ai-agent-scorecard-panel" class="ai-agent-runtime-panel">
+                            <div class="ai-agent-empty">正在获取交易表现…</div>
+                        </div>
+                    </section>
+                    <section id="ai-agent-review-panel" class="agent-surface ai-agent-panel ai-agent-panel-review">
+                        <div class="ai-auto-step-head">
+                            <div>
+                                <div class="ai-auto-step-title">交易复盘</div>
+                                <div class="ai-auto-step-desc">查看已放行交易的结果与盈亏原因。</div>
                             </div>
-
-                            <div class="ai-agent-runtime-stack">
-                                <div class="card ai-agent-runtime-card">
-                                    <div class="ai-sidebar-title">自治代理运行摘要</div>
-                                    <article class="ai-chain-summary-card ai-chain-summary-card-trading">
-                                        <div class="ai-chain-summary-head">
-                                            <div class="ai-chain-summary-title">自治交易链路速览</div>
-                                            <span id="ai-chain-trading-tag" class="ai-chain-summary-tag">加载中</span>
-                                        </div>
-                                        <div class="ai-chain-summary-items">
-                                            <div class="ai-chain-summary-item">
-                                                <span>当前模式</span>
-                                                <strong id="ai-chain-trading-mode">加载中...</strong>
-                                            </div>
-                                            <div class="ai-chain-summary-item">
-                                                <span>运行状态</span>
-                                                <strong id="ai-chain-trading-status">加载中...</strong>
-                                            </div>
-                                            <div class="ai-chain-summary-item">
-                                                <span>最近决策</span>
-                                                <strong id="ai-chain-trading-decision">加载中...</strong>
-                                            </div>
-                                            <div class="ai-chain-summary-item">
-                                                <span>最近动作</span>
-                                                <strong id="ai-chain-trading-last-action">加载中...</strong>
-                                            </div>
-                                        </div>
-                                    </article>
-                                </div>
-
-                                <div class="card ai-agent-runtime-card">
-                                    <div class="ai-sidebar-title">风险纪律状态</div>
-                                    <div id="ai-agent-risk-status-panel" class="ai-agent-runtime-panel">
-                                        <div class="u-footnote">加载中...</div>
-                                    </div>
-                                </div>
-
-                                <div class="card ai-agent-runtime-card">
-                                    <div class="ai-sidebar-title">交易记分卡</div>
-                                    <div id="ai-agent-scorecard-panel" class="ai-agent-runtime-panel">
-                                        <div class="u-footnote">加载中...</div>
-                                    </div>
-                                </div>
-
-                                <div class="card ai-live-signals-card">
-                                    <div class="ai-sidebar-title">自治代理聚合信号</div>
-                                    <div class="ai-agent-runtime-card-desc" title="最近行情为空或过旧会标注「缺数据 / 数据旧」；研究候选的运行信号在 AI 研究页">仅代理当前 watchlist / 选中币种，不含研究候选。</div>
-                                    <div id="ai-agent-live-signals-panel">
-                                        <div class="u-footnote">加载中...</div>
-                                    </div>
-                                </div>
+                            <button class="btn btn-sm" type="button" onclick="agentRefreshReview()">刷新复盘</button>
+                        </div>
+                        <div class="ai-agent-review-workspace">
+                            <div id="ai-agent-review-summary" class="ai-agent-review-summary">加载中...</div>
+                            <div class="ai-agent-scroll-shell ai-agent-scroll-shell-review ai-agent-review-history-shell">
+                                <div id="ai-agent-review-history-meta" class="ai-agent-review-history-meta">加载中...</div>
+                                <div id="ai-agent-review" class="ai-agent-review-box">加载中...</div>
                             </div>
                         </div>
                     </section>
-                </div>
+                </section>
+                <section id="agent-view-settings" class="agent-view" role="tabpanel" aria-labelledby="agent-tab-settings" tabindex="0" hidden>
+                    <div class="agent-settings-layout">
+                        <div class="agent-surface">
+                            <section id="ai-agent-ranking-panel" class="ai-agent-section ai-agent-panel ai-agent-panel-ranking">
+                                <div class="ai-agent-section-head">
+                                    <div>
+                                        <div class="ai-agent-section-title">交易标的与资金</div>
+                                        <div class="ai-agent-section-subtitle">自动模式扫描候选币池，选出最值得跟踪的标的。</div>
+                                    </div>
+                                </div>
+                                <div class="ai-agent-config-grid">
+                                    <label id="ai-agent-symbol-mode-wrap" class="ai-agent-field">
+                                        <span>币种模式</span>
+                                        <select id="ai-agent-symbol-mode" onchange="agentToggleSymbolMode()">
+                                            <option value="manual">固定币种</option>
+                                            <option value="auto">自动选币</option>
+                                        </select>
+                                    </label>
+                                    <label id="ai-agent-manual-symbol-wrap" class="ai-agent-field">
+                                        <span>固定币种</span>
+                                        <input id="ai-agent-manual-symbol" type="text" value="BTC/USDT" />
+                                    </label>
+                                </div>
+                                <label id="ai-agent-universe-symbols-wrap" class="ai-agent-field ai-agent-field-block">
+                                    <span>候选币池</span>
+                                    <textarea id="ai-agent-universe-symbols" rows="2" placeholder="留空使用默认主流币池；或手动填写 BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT ...">
+                                    </textarea>
+                                </label>
+                                <div class="ai-agent-config-divider">AI 资金预算</div>
+                                <div class="ai-agent-config-grid">
+                                    <label class="ai-agent-field">
+                                        <span>总资金比例</span>
+                                        <input id="ai-agent-max-total-exposure-ratio" type="number" min="0.05" max="0.4" step="0.01" placeholder="0.40" />
+                                        <div class="ai-agent-field-hint">填写小数，例如 0.20 = 账户权益的 20%</div>
+                                    </label>
+                                    <label class="ai-agent-field">
+                                        <span>固定总金额（USDT，可选）</span>
+                                        <input id="ai-agent-max-total-exposure-usdt" type="number" min="0" step="10" placeholder="留空则按比例" />
+                                        <div class="ai-agent-field-hint">填写后覆盖比例上限，500 = 上限约 500 USDT</div>
+                                    </label>
+                                </div>
+                                <div class="ai-agent-config-divider">风险限制</div>
+                                <div class="ai-agent-risk-config-note">比例用小数填写（0.01 = 1%），仅作用于代理新单。</div>
+                                <div class="ai-agent-config-grid ai-agent-risk-config-grid">
+                                    <label class="ai-agent-field">
+                                        <span>日内止损缓冲</span>
+                                        <input id="ai-agent-risk-daily-stop" type="number" min="0" max="1" step="0.001" placeholder="0.010" />
+                                    </label>
+                                    <label class="ai-agent-field">
+                                        <span>最大回撤 · 仅平仓</span>
+                                        <input id="ai-agent-risk-max-dd" type="number" min="0" max="1" step="0.001" placeholder="0.030" />
+                                    </label>
+                                    <label class="ai-agent-field">
+                                        <span>3 日回撤 · 仅平仓</span>
+                                        <input id="ai-agent-risk-rolling-3d" type="number" min="0" max="1" step="0.001" placeholder="0.050" />
+                                    </label>
+                                    <label class="ai-agent-field">
+                                        <span>7 日回撤 · 仅平仓</span>
+                                        <input id="ai-agent-risk-rolling-7d" type="number" min="0" max="1" step="0.001" placeholder="0.080" />
+                                    </label>
+                                </div>
+                                <div class="inline-actions ai-auto-step-actions ai-auto-step-actions-wrap">
+                                    <button class="btn btn-sm" type="button" onclick="agentSaveConfig()">保存 AI 配置</button>
+                                    <button class="btn btn-sm" type="button" onclick="agentSaveRiskConfig()">保存风险纪律</button>
+                                </div>
+                            </section>
+                        </div>
+                        <aside class="agent-surface">
+                            <div class="agent-section-heading">
+                                <h3>运行信息</h3>
+                            </div>
+                            <div id="ai-agent-info">正在读取配置…</div>
+                            <details class="agent-disclosure">
+                                <summary>系统策略</summary>
+                                <div id="ai-runtime-summary" class="ai-runtime-summary">正在读取策略…</div>
+                            </details>
+                        </aside>
+                    </div>
+                </section>
             </div>
 
             <div id="altcoin-radar" class="tab-content">

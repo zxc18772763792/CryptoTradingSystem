@@ -5386,7 +5386,7 @@ def _configured_news_source_flags() -> Dict[str, bool]:
         "okx_announcements": _enabled("NEWS_ENABLE_OKX_ANNOUNCEMENTS", True),
         "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
         "binance_announcements": _enabled("NEWS_ENABLE_BINANCE_ANNOUNCEMENTS", True),
-        "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
+        "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True) and bool(str(os.getenv("CRYPTOCOMPARE_API_KEY") or "").strip()),
         "coinglass_newsflash": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_NEWSFLASH", True),
         "coinglass_articles": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ARTICLES", True),
         "coinglass_economic_data": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ECONOMIC_DATA", True),
@@ -5406,7 +5406,7 @@ def _news_source_catalog() -> Dict[str, Dict[str, Any]]:
         "chaincatcher_flash": {"label": "ChainCatcher Flash", "support_level": "enhancement", "requires_key": False, "source_type": "crypto_flash"},
         "newsapi": {"label": "NewsAPI", "support_level": "enhancement", "requires_key": True, "source_type": "media_api"},
         "cryptopanic": {"label": "CryptoPanic", "support_level": "enhancement", "requires_key": True, "source_type": "crypto_api"},
-        "cryptocompare_news": {"label": "CryptoCompare News", "support_level": "enhancement", "requires_key": False, "source_type": "crypto_api"},
+        "cryptocompare_news": {"label": "CryptoCompare News", "support_level": "enhancement", "requires_key": True, "source_type": "crypto_api"},
         "coinglass_newsflash": {"label": "CoinGlass Newsflash", "support_level": "enhancement", "requires_key": True, "source_type": "crypto_api"},
         "coinglass_articles": {"label": "CoinGlass Articles", "support_level": "enhancement", "requires_key": True, "source_type": "crypto_api"},
         "coinglass_economic_data": {"label": "CoinGlass Economic Data", "support_level": "enhancement", "requires_key": True, "source_type": "macro_calendar"},
@@ -5432,6 +5432,22 @@ def _collect_source_entries(categories: Dict[str, Dict[str, Any]]) -> List[Dict[
             item["category"] = category_name
             rows.append(item)
     return rows
+
+
+def _agent_model_runtime_issue(status: Dict[str, Any]) -> Optional[str]:
+    """Use recent execution evidence without exposing upstream account details."""
+    if not status.get("running"):
+        return None
+    age = _age_seconds(status.get("last_run_at"))
+    if age is None or age > 3600:
+        return None
+    diagnostics = status.get("last_diagnostics") or {}
+    feedback = diagnostics.get("model_feedback") or {}
+    raw_error = str(feedback.get("raw_error") or "")
+    if not raw_error:
+        return None
+    from core.ai.model_feedback_errors import describe_model_feedback_issue
+    return str(describe_model_feedback_issue(raw_error)["label"])
 
 
 def _build_source_health_summary(categories: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -5649,7 +5665,9 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
         state_row = dict(states_by_source.get(source_name) or {})
         configured = bool(news_flags.get(source_name, False))
         inserted_count = int(coverage_row.get("inserted_count") or 0)
-        last_updated = coverage_row.get("latest_at") or state_row.get("last_success_at") or state_row.get("updated_at")
+        # A successful empty pull is healthy. Failure bookkeeping is not a
+        # successful refresh, and article publication time is not fetch time.
+        last_updated = state_row.get("last_success_at") or coverage_row.get("latest_at")
         issues = []
         if not configured:
             issues.append("Disabled or key missing" if meta.get("requires_key") else "Disabled")
@@ -5664,7 +5682,7 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
             issues.append(f"Paused until {state_row.get('paused_until')}")
         if not state_row and not coverage_row and state_error:
             issues.append(f"State read failed: {state_error}")
-        ready = bool(configured and (inserted_count > 0 or state_row.get("last_success_at") or state_row.get("updated_at")))
+        ready = bool(configured and (inserted_count > 0 or state_row.get("last_success_at")))
         if meta.get("requires_key") and not configured:
             recommendation = "Optional keyed source is unavailable; core free/official news sources can still support baseline research."
         elif issues:
@@ -6050,6 +6068,9 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
         agent_issues.append("No autonomous agent provider available")
     if bool(agent_cfg.get("provider_fallback")):
         agent_issues.append(f"Requested provider unavailable; fell back to {agent_provider}")
+    runtime_issue = _agent_model_runtime_issue(autonomous_trading_agent.get_status())
+    if runtime_issue:
+        agent_issues.append(runtime_issue)
     safety = dict(agent_cfg.get("safety") or {})
     if bool(agent_cfg.get("enabled")) and str(safety.get("status") or "") not in {"ready", ""}:
         agent_issues.append(f"Safety status: {safety.get('status')}")
@@ -6110,7 +6131,9 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
             if canonical_model_path.exists()
             else None
         ),
-        max_age_sec=30 * 24 * 3600,
+        # Model artifacts are versioned files, not live feeds. File age alone
+        # says nothing about whether inference is available.
+        max_age_sec=None,
         support_level="enhancement",
         issues=ml_issues,
         recommendation="Use the canonical path models/ml_signal_xgb.json so ML signal loading stays deterministic.",
@@ -6119,6 +6142,7 @@ async def _build_sources_health_payload() -> Dict[str, Any]:
             "canonical_path_exists": canonical_model_path.exists(),
             "alternative_candidates": detected_alternatives,
             "xgboost_installed": xgboost_installed,
+            "review_recommended": bool(canonical_model_path.exists() and (datetime.now(timezone.utc).timestamp() - canonical_model_path.stat().st_mtime) > 30 * 24 * 3600),
         },
     )
 

@@ -633,8 +633,33 @@ def test_load_market_data_drops_incomplete_latest_live_bar(monkeypatch, tmp_path
     )
 
     assert not result.empty
-    assert pd.Timestamp("2026-01-01T14:00:00+00:00") not in result.index
-    assert result.index.max() == pd.Timestamp("2026-01-01T13:50:00+00:00")
+    assert pd.Timestamp("2026-01-01T14:00:00") not in result.index
+    assert result.index.max() == pd.Timestamp("2026-01-01T13:50:00")
+
+
+@pytest.mark.parametrize("local_timezone", [None, "Asia/Shanghai"])
+def test_market_data_merge_preserves_timestamp_and_live_bar_precedence(monkeypatch, tmp_path, local_timezone):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    now = datetime(2026, 9, 10, 12, 5, tzinfo=timezone.utc)
+    index = pd.date_range("2026-09-10 11:15", periods=3, freq="15min", tz="UTC")
+    local = pd.DataFrame({"open": 1., "high": 2., "low": 1., "close": 1., "volume": 10.}, index=index)
+    local.index = index.tz_convert(local_timezone) if local_timezone else index.tz_localize(None)
+    bars = [SimpleNamespace(timestamp=datetime(2026, 9, 10, 11, 45, tzinfo=timezone.utc), open=2., high=3., low=2., close=2.5, volume=11.), SimpleNamespace(timestamp=datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc), open=3., high=4., low=3., close=3.5, volume=12.)]
+    monkeypatch.setattr(module, "_utc_now", lambda: now)
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=local))
+    monkeypatch.setattr(module.data_storage, "save_klines_to_parquet", AsyncMock())
+    monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda _: SimpleNamespace(get_klines=AsyncMock(return_value=bars)))
+    frame = asyncio.run(agent._load_market_data({"symbol": "RUNE/USDT", "timeframe": "15m", "_force_live_market": True}))
+    assert isinstance(frame.index, pd.DatetimeIndex)
+    assert frame.index.tz is None
+    assert frame.index.is_unique
+    assert frame.index.max() == pd.Timestamp("2026-09-10 11:45")
+    assert frame.iloc[-1]["close"] == 2.5
+    structure = agent._build_market_structure_payload(market_data=frame, timeframe_sec=900, last_price=2.5)
+    assert structure["last_bar_at"] == "2026-09-10T11:45:00"
+    assert agent._context_market_data_age_sec({"market_structure": structure}) == 300.
 
 
 def test_build_context_includes_multi_scale_features(monkeypatch, tmp_path: Path):

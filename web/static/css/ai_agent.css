@@ -1,0 +1,122 @@
+/* Autonomous agent workspace. Shared controls and colors come from style.css. */
+#ai-agent.agent-workspace { max-width: 1560px; margin: 0 auto; padding: 8px 4px 32px; }
+#ai-agent.agent-workspace::before { display: none; }
+#ai-agent [hidden] { display: none !important; }
+#ai-agent .agent-page-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 4px 0 24px; }
+#ai-agent .agent-title-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+#ai-agent .agent-title-row h2 { font-size: 26px; line-height: 1.4; letter-spacing: -.5px; color: var(--text-bright); }
+#ai-agent .agent-page-note { margin-top: 8px; max-width: 90ch; font-size: 13px; color: var(--text-sub); overflow-wrap: anywhere; }
+#ai-agent .agent-header-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+#ai-agent .ai-agent-cockpit-badge { padding: 3px 9px; font-size: 12px; border-radius: 6px; box-shadow: none; }
+#ai-agent .agent-view-tabs { display: flex; align-items: stretch; gap: 28px; border-bottom: 1px solid var(--card-border); margin-bottom: 24px; }
+#ai-agent .agent-view-tabs button { appearance: none; border: 0; border-bottom: 2px solid transparent; padding: 12px 2px; background: none; color: var(--text-sub); font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; }
+#ai-agent .agent-view-tabs button:hover { color: var(--text-bright); }
+#ai-agent .agent-view-tabs button[aria-selected="true"] { color: var(--accent-soft); border-bottom-color: var(--accent); font-weight: 600; }
+#ai-agent :is(button, summary, input, select, textarea):focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+#ai-agent .agent-timezone { margin-left: auto; align-self: center; font-size: 12px; color: var(--text-faint); }
+#ai-agent .agent-view { min-width: 0; }
+#ai-agent .agent-view:focus { outline: none; }
+#ai-agent .agent-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--card-border); border-radius: 12px; background: var(--panel-bg); margin-bottom: 24px; overflow: hidden; }
+#ai-agent .agent-metrics .ai-agent-cockpit-stat { display: flex; flex-direction: column; justify-content: flex-start; gap: 8px; padding: 20px 24px; min-height: 140px; border: 0; border-right: 1px solid var(--card-border); border-radius: 0 !important; background: transparent; box-shadow: none; }
+#ai-agent .agent-metrics .ai-agent-cockpit-stat:last-child { border-right: 0; }
+#ai-agent .agent-metrics .ai-agent-cockpit-stat::before,
+#ai-agent .agent-metrics .ai-agent-cockpit-stat::after { display: none; }
+#ai-agent .agent-metrics .ai-agent-cockpit-stat-label { font-size: 12px; color: var(--text-sub); }
+#ai-agent .agent-metrics strong { font-size: 20px; line-height: 1.5; font-weight: 600; color: var(--text-bright); overflow-wrap: anywhere; }
+#ai-agent .agent-metrics .ai-agent-cockpit-stat-sub { display: block; font-size: 12px; line-height: 1.6; color: var(--text-sub); overflow-wrap: anywhere; }
+#ai-agent .agent-overview-grid { display: grid; grid-template-columns: minmax(0, 1.8fr) minmax(320px, 1fr); gap: 24px; align-items: start; }
+#ai-agent .agent-overview-main { display: grid; gap: 24px; min-width: 0; }
+#ai-agent .agent-surface { min-width: 0; padding: 22px; margin: 0; border: 1px solid var(--card-border); border-radius: 12px; background: var(--panel-bg); box-shadow: none; overflow: visible; }
+#ai-agent .agent-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 20px; }
+#ai-agent .agent-section-heading h3 { margin: 0; font-size: 16px; font-weight: 600; color: var(--text-bright); }
+#ai-agent .agent-section-note { font-size: 12px; color: var(--text-sub); }
+#ai-agent .ai-agent-reasons-box,
+#ai-agent .ai-agent-runtime-panel,
+#ai-agent #ai-agent-live-signals-panel,
+#ai-agent #ai-agent-info,
+#ai-agent .ai-agent-scroll-shell-ranking,
+#ai-agent .ai-agent-journal-box { max-height: none; overflow: visible; padding: 0; scrollbar-gutter: auto; }
+#ai-agent .ai-agent-reasons-box,
+#ai-agent .ai-agent-runtime-panel { display: grid; gap: 16px; }
+#ai-agent .ai-agent-reason-primary { padding: 16px 18px; border-radius: 8px; border: 0; border-left: 3px solid var(--accent); background: var(--bg-secondary); box-shadow: none; }
+#ai-agent .ai-agent-reason-primary.is-warn { border-left-color: var(--warning); background: rgba(var(--warning-rgb), .06); }
+#ai-agent .ai-agent-reason-primary.is-danger { border-left-color: var(--negative); background: rgba(var(--negative-rgb), .06); }
+#ai-agent .ai-agent-reason-primary.is-good { border-left-color: var(--positive); background: rgba(var(--positive-rgb), .06); }
+#ai-agent .ai-agent-reason-primary-kicker { display: none; }
+#ai-agent .ai-agent-reason-primary-label { font-size: 17px; line-height: 1.6; font-weight: 600; }
+#ai-agent .ai-agent-reason-primary-detail { margin-top: 6px; font-size: 13px; line-height: 1.8; color: var(--text-sub); overflow-wrap: anywhere; }
+#ai-agent .agent-disclosure { min-width: 0; border: 0; border-top: 1px solid var(--border-subtle); border-radius: 0; background: transparent; }
+#ai-agent .agent-disclosure > summary { padding: 14px 0; cursor: pointer; color: var(--text-sub); font-size: 13px; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#ai-agent .agent-disclosure > summary::-webkit-details-marker { display: none; }
+#ai-agent .agent-disclosure > summary::after { content: '+'; font-size: 18px; color: var(--text-faint); }
+#ai-agent .agent-disclosure[open] > summary::after { content: '−'; }
+#ai-agent .agent-disclosure > summary:hover { color: var(--accent-soft); }
+#ai-agent .agent-disclosure > :not(summary) { margin-bottom: 12px; }
+#ai-agent .agent-ranking-disclosure { margin-top: 20px; }
+#ai-agent .ai-agent-diagnostic-meta { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+#ai-agent .ai-agent-diagnostic-item { padding: 10px 12px; background: var(--bg-secondary); border: 0; border-radius: 6px; }
+#ai-agent .ai-agent-diagnostic-item strong { font-size: 13px; overflow-wrap: anywhere; }
+#ai-agent .ai-agent-note-grid { grid-template-columns: 1fr; }
+#ai-agent .ai-agent-note-card { background: var(--bg-secondary); border: 0; }
+#ai-agent .ai-agent-gate-lane { display: grid; grid-template-columns: 1fr; gap: 0; }
+#ai-agent .ai-agent-gate-step { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; background: transparent; font-size: 13px; }
+#ai-agent .ai-agent-gate-step span { font-size: 13px; color: var(--text-sub); }
+#ai-agent .ai-agent-gate-step strong { font-size: 13px; }
+#ai-agent .ai-agent-empty { padding: 22px 16px; border: 1px dashed var(--border-subtle); border-radius: 8px; background: var(--bg-secondary); color: var(--text-sub); line-height: 1.8; font-size: 13px; }
+#ai-agent #ai-agent-operating-mode-banner { padding: 0 16px; margin: 0 0 16px; border: 1px solid rgba(var(--warning-rgb), .3); border-radius: 8px !important; background: rgba(var(--warning-rgb), .06); color: var(--warning-soft); font-size: 13px; }
+#ai-agent #ai-agent-operating-mode-banner .agent-disclosure { border: 0; }
+#ai-agent #ai-agent-operating-mode-banner summary { color: var(--warning-soft); }
+#ai-agent #ai-agent-operating-mode-banner ul { padding-left: 20px; line-height: 1.9; overflow-wrap: anywhere; }
+#ai-agent #ai-agent-operating-mode-banner[data-tone="info"] { border-color: var(--border-subtle); background: var(--bg-secondary); }
+#ai-agent #ai-agent-operating-mode-banner[data-tone="info"] summary,
+#ai-agent .agent-source-optional { color: var(--text-sub); }
+#ai-agent .agent-settings-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); gap: 24px; align-items: start; }
+#ai-agent .agent-settings-layout .ai-agent-panel-ranking { padding: 0; margin: 0; border: 0; border-radius: 0; background: none; box-shadow: none; }
+#ai-agent .agent-settings-layout .ai-agent-config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+#ai-agent .agent-settings-layout .ai-agent-config-divider { margin-top: 24px; padding-top: 20px; font-size: 14px; border-top: 1px solid var(--border-subtle); }
+#ai-agent .agent-settings-layout .ai-agent-field > span { font-size: 13px; }
+#ai-agent .agent-settings-layout .ai-auto-step-actions { margin-top: 24px; }
+#ai-agent .agent-runtime-list > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
+#ai-agent .agent-runtime-list dt { color: var(--text-sub); }
+#ai-agent .agent-runtime-list dd { margin: 0; overflow-wrap: anywhere; }
+#ai-agent .ai-runtime-summary { margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; background: none; border: 0; }
+#ai-agent .agent-journal-row { padding: 18px 0; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; background: transparent; box-shadow: none; }
+#ai-agent .agent-journal-main { gap: 16px; }
+#ai-agent .agent-journal-detail { font-size: 13px; line-height: 1.8; margin-top: 8px; color: var(--text-soft); }
+#ai-agent .agent-journal-signal { font-size: 12px; color: var(--text-sub); }
+#ai-agent .agent-performance { margin-bottom: 24px; }
+#ai-agent #ai-agent-scorecard-panel .ai-agent-review-kpis { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+#ai-agent .ai-agent-review-kpi { background: var(--bg-secondary); border: 0; box-shadow: none; padding: 16px; }
+#ai-agent .ai-agent-panel-review .ai-agent-review-workspace { display: grid; grid-template-columns: minmax(280px, 1fr) minmax(0, 1.5fr); gap: 24px; align-items: start; }
+#ai-agent .ai-agent-panel-review .ai-agent-review-history-shell { height: auto; max-height: none; min-height: 0; overflow: visible; background: none; border: 0; padding: 0; box-shadow: none; }
+#ai-agent .ai-agent-panel-review .ai-agent-review-box { max-height: none; overflow: visible; }
+#ai-agent .ai-agent-panel-review .ai-agent-review-history-meta { position: static; background: transparent; padding: 0 0 16px; }
+#ai-agent .ai-agent-review-meta { font-size: 12px; color: var(--text-sub); }
+@media (max-width: 1100px) {
+    #ai-agent .agent-overview-grid { grid-template-columns: minmax(0, 1.4fr) minmax(290px, 1fr); gap: 16px; }
+    #ai-agent .agent-metrics .ai-agent-cockpit-stat { padding: 16px; }
+    #ai-agent .agent-metrics strong { font-size: 17px; }
+    #ai-agent .agent-surface { padding: 18px; }
+    #ai-agent .ai-agent-panel-review .ai-agent-review-workspace { grid-template-columns: 1fr; }
+}
+@media (max-width: 800px) {
+    #ai-agent .agent-page-header { align-items: flex-start; flex-direction: column; gap: 16px; }
+    #ai-agent .agent-overview-grid, #ai-agent .agent-settings-layout { grid-template-columns: 1fr; }
+    #ai-agent .agent-risk-card { grid-row: 1; }
+    #ai-agent .agent-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    #ai-agent .agent-metrics .ai-agent-cockpit-stat { min-height: 120px; border-bottom: 1px solid var(--card-border); }
+    #ai-agent .agent-metrics .ai-agent-cockpit-stat:nth-child(2) { border-right: 0; }
+    #ai-agent .agent-metrics .ai-agent-cockpit-stat:nth-child(n+3) { border-bottom: 0; }
+    #ai-agent .agent-timezone { display: none; }
+    #ai-agent #ai-agent-scorecard-panel .ai-agent-review-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 480px) {
+    #ai-agent .agent-view-tabs { gap: 0; justify-content: space-between; }
+    #ai-agent .agent-view-tabs button { font-size: 13px; }
+    #ai-agent .agent-title-row h2 { font-size: 22px; }
+    #ai-agent .agent-surface { padding: 16px; }
+    #ai-agent .agent-section-heading { flex-wrap: wrap; gap: 8px; }
+    #ai-agent .agent-settings-layout .ai-agent-config-grid { grid-template-columns: 1fr; }
+    #ai-agent .agent-metrics strong { font-size: 16px; }
+    #ai-agent .agent-metrics .ai-agent-cockpit-stat { padding: 14px; }
+}

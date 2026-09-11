@@ -1766,6 +1766,28 @@ async def _coinglass_worker(stop_event: asyncio.Event) -> None:
             await asyncio.sleep(1)
 
 
+async def _source_cache_worker(stop_event: asyncio.Event) -> None:
+    """Keep options and funding caches current independently of UI visits."""
+    from core.data.source_cache_maintenance import refresh_source_caches
+
+    interval = 45
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+            break
+        except asyncio.TimeoutError:
+            pass
+        try:
+            report = await refresh_source_caches()
+            _touch_runtime_task("source_cache", success=not bool(report.get("errors")))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"source_cache_worker: {exc}")
+            _touch_runtime_task("source_cache", success=False)
+        interval = 900
+
+
 async def _binance_alpha_collector_worker(stop_event: asyncio.Event) -> None:
     """Persist Binance Alpha directory and market data for radar research."""
     from core.data.binance_alpha_collector import BinanceAlphaCollector
@@ -2071,6 +2093,10 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
     factories: Dict[str, Dict[str, Any]] = {
         "runtime": {
             "factory": lambda stop_event: _runtime_pusher(stop_event),
+            "restart_on_failure": True,
+        },
+        "source_cache": {
+            "factory": lambda stop_event: _source_cache_worker(stop_event),
             "restart_on_failure": True,
         },
         "ai_research_scheduler": {

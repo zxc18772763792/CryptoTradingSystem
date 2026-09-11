@@ -41,7 +41,7 @@ def test_ai_research_template_loads_phase5_modules():
     assert '研究目标（可留空自动生成）' in template
     assert 'placeholder="留空自动生成，或写明研究方向"' in template
     assert '判断市场 → 生成目标 → 生成提案 → 后台研究 → 尝试部署' in template
-    assert '页面时区：上海时间 (UTC+8)' in template
+    assert '上海时间 UTC+8' in template
     assert '页面时区：上海时间 (UTC+8)' in news_template
     assert '/static/favicon.svg' in template
     assert '/static/favicon.svg' in news_template
@@ -80,7 +80,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "buildAgentJournalCurrentSummary" in agent_js
     assert "summarizeAggregatedSignal" in agent_js
     assert "buildAgentExecutionReality" in agent_js
-    assert "真实执行态" in agent_js
+    assert "const modeText = reality.label" in agent_js
     assert "满足纪律后执行" in agent_js
     assert "纸盘提交" in agent_js
     assert "影子/0权重" in agent_js
@@ -201,7 +201,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "当前已选中 watchlist，正在等待最新聚合信号快照。" in ai_js
     assert "当前 watchlist 暂无聚合信号快照，后续刷新后会自动显示。" in ai_js
     assert 'option value="codex">OpenAI' in template
-    assert "真实执行态" in template
+    assert "执行模式" in template
     assert "一键退出运行中条目" in template
     assert "一键清空当前候选" in template
     assert "一键清空当前任务" in template

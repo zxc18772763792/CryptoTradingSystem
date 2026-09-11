@@ -771,6 +771,7 @@ async def set_source_state(
         if clear_error:
             row.last_error = None
             row.error_count = 0
+            row.paused_until = None
         if last_error:
             row.last_error = str(last_error)
         if mark_success:
@@ -779,6 +780,7 @@ async def set_source_state(
             if not last_error:
                 row.last_error = None
                 row.error_count = 0
+                row.paused_until = None
         if mark_failure:
             row.failure_count = int(row.failure_count or 0) + 1
             row.error_count = int(row.error_count or 0) + 1

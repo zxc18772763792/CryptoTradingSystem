@@ -24,9 +24,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
+from urllib.request import getproxies, proxy_bypass
+from urllib.parse import urlsplit
 
 import aiohttp
 from loguru import logger
+from config.settings import settings
 
 
 @dataclass
@@ -79,7 +82,7 @@ class DeribitOptionsCollector:
         key = currency.upper()
         now = time.monotonic()
         cached_at, cached_snap = self._cache.get(key, (0.0, None))  # type: ignore[assignment]
-        if cached_snap is not None and (now - cached_at) < self._CACHE_TTL_SEC:
+        if cached_snap is not None and (now - cached_at) < self._CACHE_TTL_SEC and self._snapshot_is_fresh(cached_snap):
             return cached_snap
 
         snap = await self._fetch_from_api(key)
@@ -92,6 +95,13 @@ class DeribitOptionsCollector:
         if persisted is not None:
             self._cache[key] = (now, persisted)
         return persisted
+
+    def _snapshot_is_fresh(self, snapshot: OptionsSnapshot) -> bool:
+        timestamp = snapshot.timestamp
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        return 0 <= age < self._CACHE_TTL_SEC
 
     def load_cached_snapshot(self, currency: str = "BTC") -> Optional[OptionsSnapshot]:
         """Return the latest cached snapshot from memory or persisted storage."""
@@ -108,10 +118,16 @@ class DeribitOptionsCollector:
         url = f"{self._BASE}/get_book_summary_by_currency"
         params = {"currency": currency, "kind": "option"}
         try:
+            # aiohttp trust_env ignores Windows registry proxies. requests and
+            # urllib use them, which previously made the same URL work in
+            # diagnostics but fail in this background collector.
+            proxy = str(settings.HTTPS_PROXY or settings.HTTP_PROXY or "").strip() or None
+            if not proxy and not proxy_bypass(urlsplit(url).hostname or ""):
+                proxy = getproxies().get("https") or getproxies().get("http")
             # Respect system/env proxy settings so public Deribit requests work
             # in restricted network environments the same way as other collectors.
             async with aiohttp.ClientSession(timeout=self._timeout, trust_env=True) as session:
-                async with session.get(url, params=params) as resp:
+                async with session.get(url, params=params, proxy=proxy) as resp:
                     if resp.status != 200:
                         logger.debug(f"DeribitOptions: HTTP {resp.status} for {currency}")
                         return None

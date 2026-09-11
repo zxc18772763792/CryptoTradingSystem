@@ -183,11 +183,16 @@ def validate_operating_mode(
         ready = item.get("ready")
         stale = _truthy(item.get("stale"))
         if status in {"missing", "failed", "degraded", "stale"} or stale or _explicit_false(ready):
+            unconfigured_optional = (
+                item.get("configured") is False
+                and item.get("support_level") in {"optional", "enhancement"}
+                and status != "failed"
+            )
             degradation = _degradation(
                 f"source_{str(item.get('key') or item.get('source') or 'unknown')}",
                 "Source degraded",
                 _source_issue_detail(item, status),
-                "warn" if status != "failed" else "danger",
+                "info" if unconfigured_optional else ("warn" if status != "failed" else "danger"),
             )
             degradation.update({
                 "source_label": str(item.get("label") or item.get("key") or ""),
@@ -196,6 +201,7 @@ def validate_operating_mode(
                 "configured": item.get("configured"),
                 "last_updated": item.get("last_updated"),
                 "recommendation": str(item.get("recommendation") or ""),
+                "action_required": not unconfigured_optional,
             })
             degradations.append(degradation)
 

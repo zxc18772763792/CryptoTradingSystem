@@ -72,6 +72,8 @@ def classify_model_feedback_error(exc: BaseException) -> Optional[str]:
 
     if "timeout" in text:
         return "timeout"
+    if any(marker in text for marker in ("insufficient_quota", "insufficient_user_quota", "quota_exceeded", "余额不足", "额度不足")):
+        return "quota_exhausted"
     if status == 429 or "_http_429" in text or "usage_limit_exceeded" in text or "rate limit" in text or "too many requests" in text or "insufficient_quota" in text:
         return "rate_limit"
     if any(marker in text for marker in policy_markers):
@@ -103,7 +105,11 @@ def describe_model_feedback_issue(
     http_status = extract_model_feedback_http_status(normalized)
     action_text = str(fallback_action or "hold").strip() or "hold"
 
-    if kind == "rate_limit":
+    if kind == "quota_exhausted":
+        label = "模型供应商额度不足"
+        detail = f"上游模型账户的可用额度已耗尽，需要在该供应商账户恢复额度或配置可用的模型服务，本轮已回退为 {action_text}。"
+        code = "model_quota_exhausted"
+    elif kind == "rate_limit":
         label = "模型限流或额度受限 (429)"
         detail = f"上游模型接口触发了频率或额度限制，本轮已回退为 {action_text}。"
         code = "model_rate_limit"
