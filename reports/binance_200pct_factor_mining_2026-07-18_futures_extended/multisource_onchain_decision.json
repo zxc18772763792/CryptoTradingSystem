@@ -1,0 +1,20 @@
+{
+  "family": "onchain",
+  "folds": 4,
+  "fold_majority_ap_and_lift_positive": 0.5,
+  "bootstrap_7d_blocks": {
+    "samples": 2000,
+    "delta_average_precision": {
+      "median": 0.007691724107300544,
+      "lower_95pct": -0.010413423450769971,
+      "upper_95pct": 0.027402379124484143
+    },
+    "delta_top_2pct_lift": {
+      "median": 1.2764386129334584,
+      "lower_95pct": -2.6465775089652253,
+      "upper_95pct": 5.799118337328531
+    }
+  },
+  "ranking_eligible": false,
+  "rule": "at least 3 folds, majority improve AP and lift, both 95% increment lower bounds above zero"
+}

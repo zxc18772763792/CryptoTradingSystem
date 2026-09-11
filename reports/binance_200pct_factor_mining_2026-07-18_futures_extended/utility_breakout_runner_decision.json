@@ -1,0 +1,2128 @@
+{
+  "generated_at_utc": "2026-07-20T01:24:12.425897+00:00",
+  "evidence_class": "posthoc_family_calibration_selected_confirmation_audited_no_promotion",
+  "current_router": "breakout6_half150_trail30_wick",
+  "pre_registered_candidates": [
+    "breakout6_full_runner_a100_t25_wick",
+    "breakout6_full_runner_a100_t30_wick",
+    "breakout6_full_runner_a100_t35_wick",
+    "breakout6_full_runner_a150_t25_wick",
+    "breakout6_full_runner_a150_t30_wick",
+    "breakout6_full_runner_a150_t35_wick"
+  ],
+  "calibration_selected_policy": "breakout6_half150_trail30_wick",
+  "calibration_candidate_pass_count": 0,
+  "calibration_gate_pass": false,
+  "early_30d_sensitivity_all_candidate_expectancies_nonpositive": true,
+  "early_30d_sensitivity_best_paired_increment": 0.005808076425243427,
+  "confirmation_point_estimate_best_policy": "breakout6_full_runner_a150_t30_wick",
+  "confirmation_best_is_posthoc_only": true,
+  "historical_promotion_allowed": false,
+  "forward_change_allowed": false,
+  "classification": "reject_full_runner_retain_current_partial_exit",
+  "automatic_trading_allowed": false,
+  "calibration_details": {
+    "breakout6_half150_trail30_wick": {
+      "strategy_summary": {
+        "trades": 30,
+        "expectancy": 0.047654016202463546,
+        "median_return": -0.0025710250000000557,
+        "win_rate": 0.3,
+        "profit_factor": 1.59938491028529,
+        "cvar_5pct": -0.25254775000000007,
+        "mean_mfe": 0.45546864776258605,
+        "mean_mae": -0.16565360583511526,
+        "funding_coverage": 0.3,
+        "total_return_on_initial_equity": 0.02863656393578281,
+        "max_drawdown": -0.026319164639262316,
+        "folds": 2,
+        "fold_majority_profit_factor_gt_1": 0.5,
+        "market_states": 3,
+        "market_state_majority_profit_factor_gt_1": 0.6666666666666666,
+        "largest_positive_pnl_share": 0.3288130805169806,
+        "leave_largest_winner_out_expectancy": 0.005648535385699917,
+        "median_notional_usd": 1980.4993529277037,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": false,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.03333333333333333,
+        "hard_stop_exit_rate": 0.23333333333333334,
+        "median_holding_days": 7.25
+      },
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "trades": 19,
+          "expectancy": -0.03671914976651822,
+          "median_return": -0.001500000000000056,
+          "win_rate": 0.2631578947368421,
+          "profit_factor": 0.5392152397292995,
+          "hard_stop_rate": 0.21052631578947367,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.36556316464295463,
+          "mean_mae": -0.15233684520930613
+        },
+        {
+          "fold": 2,
+          "trades": 11,
+          "expectancy": 0.1933894846943411,
+          "median_return": -0.003642050000000056,
+          "win_rate": 0.36363636363636365,
+          "profit_factor": 3.442155256046964,
+          "hard_stop_rate": 0.2727272727272727,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.610759936787404,
+          "mean_mae": -0.1886552832796946
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.5,
+      "paired_rows": 42,
+      "paired_increment_mean_all_signals": 0.0,
+      "independent_event_rows": 33,
+      "independent_event_increment_mean": 0.0,
+      "fold_increment_positive_share": 0.0,
+      "fold_increment_means": {
+        "1": 0.0,
+        "2": 0.0
+      },
+      "routed_rows": 11,
+      "routed_increment_mean": 0.0,
+      "changed_routed_rows": 0,
+      "changed_routed_positive_share": null,
+      "changed_routed_increment_mean": null,
+      "switch_applied_rows": 11,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.045354280570500394,
+        "expectancy_lower_95pct": -0.062308174994244264,
+        "expectancy_upper_95pct": 0.17156516486311635,
+        "profit_factor_median": 1.5984815596719684,
+        "profit_factor_lower_95pct": 0.3674233573495799,
+        "profit_factor_upper_95pct": 4.317643977891144
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.04329327875593399,
+        "expectancy_lower_95pct": -0.06225071744162893,
+        "expectancy_upper_95pct": 0.1908509516155114,
+        "profit_factor_median": 1.5620457612475076,
+        "profit_factor_lower_95pct": 0.3634004363300247,
+        "profit_factor_upper_95pct": 4.7275651630698565
+      },
+      "leave_largest_winner_out_expectancy": 0.005648535385699917,
+      "largest_positive_pnl_share": 0.3288130805169806
+    },
+    "breakout6_full_runner_a100_t25_wick": {
+      "strategy_summary": {
+        "trades": 30,
+        "expectancy": 0.029709159411439878,
+        "median_return": -0.0025710250000000557,
+        "win_rate": 0.3,
+        "profit_factor": 1.373677252570303,
+        "cvar_5pct": -0.25254775000000007,
+        "mean_mfe": 0.45546864776258605,
+        "mean_mae": -0.16565360583511526,
+        "funding_coverage": 0.3,
+        "total_return_on_initial_equity": 0.017807874038906105,
+        "max_drawdown": -0.026401847973534842,
+        "folds": 2,
+        "fold_majority_profit_factor_gt_1": 0.5,
+        "market_states": 3,
+        "market_state_majority_profit_factor_gt_1": 0.6666666666666666,
+        "largest_positive_pnl_share": 0.3133498825795893,
+        "leave_largest_winner_out_expectancy": -0.004917280601173124,
+        "median_notional_usd": 1980.4993529277037,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": false,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.03333333333333333,
+        "hard_stop_exit_rate": 0.23333333333333334,
+        "median_holding_days": 7.25
+      },
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "trades": 19,
+          "expectancy": -0.03671914976651822,
+          "median_return": -0.001500000000000056,
+          "win_rate": 0.2631578947368421,
+          "profit_factor": 0.5392152397292995,
+          "hard_stop_rate": 0.21052631578947367,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.36556316464295463,
+          "mean_mae": -0.15233684520930613
+        },
+        {
+          "fold": 2,
+          "trades": 11,
+          "expectancy": 0.1444489661733675,
+          "median_return": -0.003642050000000056,
+          "win_rate": 0.36363636363636365,
+          "profit_factor": 2.824126076598218,
+          "hard_stop_rate": 0.2727272727272727,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.610759936787404,
+          "mean_mae": -0.1886552832796946
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.5,
+      "paired_rows": 42,
+      "paired_increment_mean_all_signals": -0.028884904575247273,
+      "independent_event_rows": 33,
+      "independent_event_increment_mean": -0.016313506173657878,
+      "fold_increment_positive_share": 0.0,
+      "fold_increment_means": {
+        "1": -0.029340012540420672,
+        "2": -0.028333984406879474
+      },
+      "routed_rows": 11,
+      "routed_increment_mean": -0.11028781746912596,
+      "changed_routed_rows": 3,
+      "changed_routed_positive_share": 0.0,
+      "changed_routed_increment_mean": -0.4043886640534618,
+      "switch_applied_rows": 11,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.027797177151557058,
+        "mean_delta_lower_95pct": -0.05822436965650998,
+        "mean_delta_upper_95pct": -0.006103606318720837
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.02695924427023079,
+        "mean_delta_lower_95pct": -0.06303002302235716,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.10626975195250866,
+        "mean_delta_lower_95pct": -0.25628065690197366,
+        "mean_delta_upper_95pct": -0.019150541476207386
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.10351766987749628,
+        "mean_delta_lower_95pct": -0.25628065690197366,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.01615421286534885,
+        "mean_delta_lower_95pct": -0.03293095407335091,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.015833697168550293,
+        "mean_delta_lower_95pct": -0.043231853997051914,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.028655641800827535,
+        "expectancy_lower_95pct": -0.05802405988359337,
+        "expectancy_upper_95pct": 0.13133422660127372,
+        "profit_factor_median": 1.3615904105115078,
+        "profit_factor_lower_95pct": 0.37769363993929117,
+        "profit_factor_upper_95pct": 3.6284018468351165
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.02594138246602589,
+        "expectancy_lower_95pct": -0.07118411002928719,
+        "expectancy_upper_95pct": 0.1576492204864009,
+        "profit_factor_median": 1.3227244980556239,
+        "profit_factor_lower_95pct": 0.32000374757874467,
+        "profit_factor_upper_95pct": 4.055555217984491
+      },
+      "leave_largest_winner_out_expectancy": -0.004917280601173124,
+      "largest_positive_pnl_share": 0.3133498825795893
+    },
+    "breakout6_full_runner_a100_t30_wick": {
+      "strategy_summary": {
+        "trades": 30,
+        "expectancy": 0.029709159411439878,
+        "median_return": -0.0025710250000000557,
+        "win_rate": 0.3,
+        "profit_factor": 1.373677252570303,
+        "cvar_5pct": -0.25254775000000007,
+        "mean_mfe": 0.45546864776258605,
+        "mean_mae": -0.16565360583511526,
+        "funding_coverage": 0.3,
+        "total_return_on_initial_equity": 0.017807874038906105,
+        "max_drawdown": -0.026401847973534842,
+        "folds": 2,
+        "fold_majority_profit_factor_gt_1": 0.5,
+        "market_states": 3,
+        "market_state_majority_profit_factor_gt_1": 0.6666666666666666,
+        "largest_positive_pnl_share": 0.3133498825795893,
+        "leave_largest_winner_out_expectancy": -0.004917280601173124,
+        "median_notional_usd": 1980.4993529277037,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": false,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.03333333333333333,
+        "hard_stop_exit_rate": 0.23333333333333334,
+        "median_holding_days": 7.25
+      },
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "trades": 19,
+          "expectancy": -0.03671914976651822,
+          "median_return": -0.001500000000000056,
+          "win_rate": 0.2631578947368421,
+          "profit_factor": 0.5392152397292995,
+          "hard_stop_rate": 0.21052631578947367,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.36556316464295463,
+          "mean_mae": -0.15233684520930613
+        },
+        {
+          "fold": 2,
+          "trades": 11,
+          "expectancy": 0.1444489661733675,
+          "median_return": -0.003642050000000056,
+          "win_rate": 0.36363636363636365,
+          "profit_factor": 2.824126076598218,
+          "hard_stop_rate": 0.2727272727272727,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.610759936787404,
+          "mean_mae": -0.1886552832796946
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.5,
+      "paired_rows": 42,
+      "paired_increment_mean_all_signals": -0.01947998192301824,
+      "independent_event_rows": 33,
+      "independent_event_increment_mean": -0.016313506173657878,
+      "fold_increment_positive_share": 0.0,
+      "fold_increment_means": {
+        "1": -0.012165805958089393,
+        "2": -0.028333984406879474
+      },
+      "routed_rows": 11,
+      "routed_increment_mean": -0.07437811279697873,
+      "changed_routed_rows": 3,
+      "changed_routed_positive_share": 0.0,
+      "changed_routed_increment_mean": -0.27271974692225537,
+      "switch_applied_rows": 11,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.01940403429948378,
+        "mean_delta_lower_95pct": -0.03044477362244246,
+        "mean_delta_upper_95pct": -0.0056570009783266295
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.018570222037534435,
+        "mean_delta_lower_95pct": -0.04221260528302867,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.07690652910438714,
+        "mean_delta_lower_95pct": -0.14776775754602378,
+        "mean_delta_upper_95pct": -0.018654235802403735
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.07437811279697873,
+        "mean_delta_lower_95pct": -0.16154289992790766,
+        "mean_delta_upper_95pct": -0.017841310777799373
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.015833697168550293,
+        "mean_delta_lower_95pct": -0.032627012347315756,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.015833697168550293,
+        "mean_delta_lower_95pct": -0.04322187722127307,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.025874958690553562,
+        "expectancy_lower_95pct": -0.06230853169938476,
+        "expectancy_upper_95pct": 0.13383997606555018,
+        "profit_factor_median": 1.3277491562108286,
+        "profit_factor_lower_95pct": 0.3700025841893881,
+        "profit_factor_upper_95pct": 3.616454810445342
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.02848279412623621,
+        "expectancy_lower_95pct": -0.06596496275727905,
+        "expectancy_upper_95pct": 0.15386270221051512,
+        "profit_factor_median": 1.366392148681196,
+        "profit_factor_lower_95pct": 0.32573755455236775,
+        "profit_factor_upper_95pct": 4.004171119264081
+      },
+      "leave_largest_winner_out_expectancy": -0.004917280601173124,
+      "largest_positive_pnl_share": 0.3133498825795893
+    },
+    "breakout6_full_runner_a100_t35_wick": {
+      "strategy_summary": {
+        "trades": 30,
+        "expectancy": 0.029523033927315596,
+        "median_return": -0.0025710250000000557,
+        "win_rate": 0.3,
+        "profit_factor": 1.3713361947646048,
+        "cvar_5pct": -0.25254775000000007,
+        "mean_mfe": 0.45546864776258605,
+        "mean_mae": -0.16565360583511526,
+        "funding_coverage": 0.3,
+        "total_return_on_initial_equity": 0.017695308169124135,
+        "max_drawdown": -0.026403847724499108,
+        "folds": 2,
+        "fold_majority_profit_factor_gt_1": 0.5,
+        "market_states": 3,
+        "market_state_majority_profit_factor_gt_1": 0.6666666666666666,
+        "largest_positive_pnl_share": 0.3122009600814634,
+        "leave_largest_winner_out_expectancy": -0.004917280601173124,
+        "median_notional_usd": 1980.4993529277037,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": false,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.03333333333333333,
+        "hard_stop_exit_rate": 0.23333333333333334,
+        "median_holding_days": 7.25
+      },
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "trades": 19,
+          "expectancy": -0.03671914976651822,
+          "median_return": -0.001500000000000056,
+          "win_rate": 0.2631578947368421,
+          "profit_factor": 0.5392152397292995,
+          "hard_stop_rate": 0.21052631578947367,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.36556316464295463,
+          "mean_mae": -0.15233684520930613
+        },
+        {
+          "fold": 2,
+          "trades": 11,
+          "expectancy": 0.14394135121666493,
+          "median_return": -0.003642050000000056,
+          "win_rate": 0.36363636363636365,
+          "profit_factor": 2.817715828716754,
+          "hard_stop_rate": 0.2727272727272727,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.610759936787404,
+          "mean_mae": -0.1886552832796946
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.5,
+      "paired_rows": 42,
+      "paired_increment_mean_all_signals": -0.022911320527202055,
+      "independent_event_rows": 33,
+      "independent_event_increment_mean": -0.016482711159225408,
+      "fold_increment_positive_share": 0.0,
+      "fold_increment_means": {
+        "1": -0.018188956256002083,
+        "2": -0.028627866750233603
+      },
+      "routed_rows": 11,
+      "routed_increment_mean": -0.08747958746749876,
+      "changed_routed_rows": 3,
+      "changed_routed_positive_share": 0.0,
+      "changed_routed_increment_mean": -0.3207584873808288,
+      "switch_applied_rows": 11,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.022881482883927166,
+        "mean_delta_lower_95pct": -0.03844621313187521,
+        "mean_delta_upper_95pct": -0.005648830824520288
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.021922710049208493,
+        "mean_delta_lower_95pct": -0.0493496475958139,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.0890703017381701,
+        "mean_delta_lower_95pct": -0.18739051386376235,
+        "mean_delta_upper_95pct": -0.02159280042137457
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.08593027676055702,
+        "mean_delta_lower_95pct": -0.186785530890278,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.015997925536895247,
+        "mean_delta_lower_95pct": -0.03402196457332573,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.015997925536895247,
+        "mean_delta_lower_95pct": -0.043570862504006096,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.028090201733286566,
+        "expectancy_lower_95pct": -0.062308174994244264,
+        "expectancy_upper_95pct": 0.13261538992757296,
+        "profit_factor_median": 1.3596960783150847,
+        "profit_factor_lower_95pct": 0.36909764604582546,
+        "profit_factor_upper_95pct": 3.5836599282713553
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.025746703401542594,
+        "expectancy_lower_95pct": -0.07017944629067555,
+        "expectancy_upper_95pct": 0.15673293663009294,
+        "profit_factor_median": 1.3316711598458657,
+        "profit_factor_lower_95pct": 0.32471291989647744,
+        "profit_factor_upper_95pct": 4.016778215699521
+      },
+      "leave_largest_winner_out_expectancy": -0.004917280601173124,
+      "largest_positive_pnl_share": 0.3122009600814634
+    },
+    "breakout6_full_runner_a150_t25_wick": {
+      "strategy_summary": {
+        "trades": 30,
+        "expectancy": 0.029709159411439878,
+        "median_return": -0.0025710250000000557,
+        "win_rate": 0.3,
+        "profit_factor": 1.373677252570303,
+        "cvar_5pct": -0.25254775000000007,
+        "mean_mfe": 0.45546864776258605,
+        "mean_mae": -0.16565360583511526,
+        "funding_coverage": 0.3,
+        "total_return_on_initial_equity": 0.017807874038906105,
+        "max_drawdown": -0.026401847973534842,
+        "folds": 2,
+        "fold_majority_profit_factor_gt_1": 0.5,
+        "market_states": 3,
+        "market_state_majority_profit_factor_gt_1": 0.6666666666666666,
+        "largest_positive_pnl_share": 0.3133498825795893,
+        "leave_largest_winner_out_expectancy": -0.004917280601173124,
+        "median_notional_usd": 1980.4993529277037,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": false,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.03333333333333333,
+        "hard_stop_exit_rate": 0.23333333333333334,
+        "median_holding_days": 7.25
+      },
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "trades": 19,
+          "expectancy": -0.03671914976651822,
+          "median_return": -0.001500000000000056,
+          "win_rate": 0.2631578947368421,
+          "profit_factor": 0.5392152397292995,
+          "hard_stop_rate": 0.21052631578947367,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.36556316464295463,
+          "mean_mae": -0.15233684520930613
+        },
+        {
+          "fold": 2,
+          "trades": 11,
+          "expectancy": 0.1444489661733675,
+          "median_return": -0.003642050000000056,
+          "win_rate": 0.36363636363636365,
+          "profit_factor": 2.824126076598218,
+          "hard_stop_rate": 0.2727272727272727,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.610759936787404,
+          "mean_mae": -0.1886552832796946
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.5,
+      "paired_rows": 42,
+      "paired_increment_mean_all_signals": -0.0161815900932089,
+      "independent_event_rows": 33,
+      "independent_event_increment_mean": -0.016313506173657878,
+      "fold_increment_positive_share": 0.0,
+      "fold_increment_means": {
+        "1": -0.006142655660176688,
+        "2": -0.028333984406879474
+      },
+      "routed_rows": 11,
+      "routed_increment_mean": -0.06178425308316126,
+      "changed_routed_rows": 3,
+      "changed_routed_positive_share": 0.0,
+      "changed_routed_increment_mean": -0.2265422613049246,
+      "switch_applied_rows": 11,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.0161815900932089,
+        "mean_delta_lower_95pct": -0.025635509701462382,
+        "mean_delta_upper_95pct": -0.0035320270046015957
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.015223487001013544,
+        "mean_delta_lower_95pct": -0.03848907198743564,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.06178425308316126,
+        "mean_delta_lower_95pct": -0.13951536675303988,
+        "mean_delta_upper_95pct": -0.015697897798229315
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.060515516040684746,
+        "mean_delta_lower_95pct": -0.13592535678295475,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.015995657938716677,
+        "mean_delta_lower_95pct": -0.033857736204980775,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.015833697168550293,
+        "mean_delta_lower_95pct": -0.04362094825242706,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.030136389644732708,
+        "expectancy_lower_95pct": -0.05797355628912336,
+        "expectancy_upper_95pct": 0.13169554687214083,
+        "profit_factor_median": 1.3833951119419243,
+        "profit_factor_lower_95pct": 0.40452958991206345,
+        "profit_factor_upper_95pct": 3.6291385600061195
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.027242899464241556,
+        "expectancy_lower_95pct": -0.06779662640937588,
+        "expectancy_upper_95pct": 0.15322747339926882,
+        "profit_factor_median": 1.3544843588746676,
+        "profit_factor_lower_95pct": 0.3361487008513904,
+        "profit_factor_upper_95pct": 4.2845244605115695
+      },
+      "leave_largest_winner_out_expectancy": -0.004917280601173124,
+      "largest_positive_pnl_share": 0.3133498825795893
+    },
+    "breakout6_full_runner_a150_t30_wick": {
+      "strategy_summary": {
+        "trades": 30,
+        "expectancy": 0.029709159411439878,
+        "median_return": -0.0025710250000000557,
+        "win_rate": 0.3,
+        "profit_factor": 1.373677252570303,
+        "cvar_5pct": -0.25254775000000007,
+        "mean_mfe": 0.45546864776258605,
+        "mean_mae": -0.16565360583511526,
+        "funding_coverage": 0.3,
+        "total_return_on_initial_equity": 0.017807874038906105,
+        "max_drawdown": -0.026401847973534842,
+        "folds": 2,
+        "fold_majority_profit_factor_gt_1": 0.5,
+        "market_states": 3,
+        "market_state_majority_profit_factor_gt_1": 0.6666666666666666,
+        "largest_positive_pnl_share": 0.3133498825795893,
+        "leave_largest_winner_out_expectancy": -0.004917280601173124,
+        "median_notional_usd": 1980.4993529277037,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": false,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.03333333333333333,
+        "hard_stop_exit_rate": 0.23333333333333334,
+        "median_holding_days": 7.25
+      },
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "trades": 19,
+          "expectancy": -0.03671914976651822,
+          "median_return": -0.001500000000000056,
+          "win_rate": 0.2631578947368421,
+          "profit_factor": 0.5392152397292995,
+          "hard_stop_rate": 0.21052631578947367,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.36556316464295463,
+          "mean_mae": -0.15233684520930613
+        },
+        {
+          "fold": 2,
+          "trades": 11,
+          "expectancy": 0.1444489661733675,
+          "median_return": -0.003642050000000056,
+          "win_rate": 0.36363636363636365,
+          "profit_factor": 2.824126076598218,
+          "hard_stop_rate": 0.2727272727272727,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.610759936787404,
+          "mean_mae": -0.1886552832796946
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.5,
+      "paired_rows": 42,
+      "paired_increment_mean_all_signals": -0.01947998192301824,
+      "independent_event_rows": 33,
+      "independent_event_increment_mean": -0.016313506173657878,
+      "fold_increment_positive_share": 0.0,
+      "fold_increment_means": {
+        "1": -0.012165805958089393,
+        "2": -0.028333984406879474
+      },
+      "routed_rows": 11,
+      "routed_increment_mean": -0.07437811279697873,
+      "changed_routed_rows": 3,
+      "changed_routed_positive_share": 0.0,
+      "changed_routed_increment_mean": -0.27271974692225537,
+      "switch_applied_rows": 11,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.01947998192301824,
+        "mean_delta_lower_95pct": -0.03069629355323952,
+        "mean_delta_upper_95pct": -0.0056570009783266295
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.019026959087599212,
+        "mean_delta_lower_95pct": -0.04276975262603646,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.07690652910438714,
+        "mean_delta_lower_95pct": -0.16025416512369373,
+        "mean_delta_upper_95pct": -0.018654235802403735
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.07437811279697873,
+        "mean_delta_lower_95pct": -0.15832610722730542,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.015833697168550293,
+        "mean_delta_lower_95pct": -0.03312526093181818,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.015833697168550293,
+        "mean_delta_lower_95pct": -0.04191212336608297,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.027860954268047602,
+        "expectancy_lower_95pct": -0.0579944565288716,
+        "expectancy_upper_95pct": 0.13055391094919272,
+        "profit_factor_median": 1.3620744085057015,
+        "profit_factor_lower_95pct": 0.3863876433066405,
+        "profit_factor_upper_95pct": 3.4805801237221803
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.02845032392068914,
+        "expectancy_lower_95pct": -0.06805276928985533,
+        "expectancy_upper_95pct": 0.15745457527340206,
+        "profit_factor_median": 1.3675570623387179,
+        "profit_factor_lower_95pct": 0.3287244568287113,
+        "profit_factor_upper_95pct": 4.138447615276231
+      },
+      "leave_largest_winner_out_expectancy": -0.004917280601173124,
+      "largest_positive_pnl_share": 0.3133498825795893
+    },
+    "breakout6_full_runner_a150_t35_wick": {
+      "strategy_summary": {
+        "trades": 30,
+        "expectancy": 0.029523033927315596,
+        "median_return": -0.0025710250000000557,
+        "win_rate": 0.3,
+        "profit_factor": 1.3713361947646048,
+        "cvar_5pct": -0.25254775000000007,
+        "mean_mfe": 0.45546864776258605,
+        "mean_mae": -0.16565360583511526,
+        "funding_coverage": 0.3,
+        "total_return_on_initial_equity": 0.017695308169124135,
+        "max_drawdown": -0.026403847724499108,
+        "folds": 2,
+        "fold_majority_profit_factor_gt_1": 0.5,
+        "market_states": 3,
+        "market_state_majority_profit_factor_gt_1": 0.6666666666666666,
+        "largest_positive_pnl_share": 0.3122009600814634,
+        "leave_largest_winner_out_expectancy": -0.004917280601173124,
+        "median_notional_usd": 1980.4993529277037,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": false,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.03333333333333333,
+        "hard_stop_exit_rate": 0.23333333333333334,
+        "median_holding_days": 7.25
+      },
+      "fold_metrics": [
+        {
+          "fold": 1,
+          "trades": 19,
+          "expectancy": -0.03671914976651822,
+          "median_return": -0.001500000000000056,
+          "win_rate": 0.2631578947368421,
+          "profit_factor": 0.5392152397292995,
+          "hard_stop_rate": 0.21052631578947367,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.36556316464295463,
+          "mean_mae": -0.15233684520930613
+        },
+        {
+          "fold": 2,
+          "trades": 11,
+          "expectancy": 0.14394135121666493,
+          "median_return": -0.003642050000000056,
+          "win_rate": 0.36363636363636365,
+          "profit_factor": 2.817715828716754,
+          "hard_stop_rate": 0.2727272727272727,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.610759936787404,
+          "mean_mae": -0.1886552832796946
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.5,
+      "paired_rows": 42,
+      "paired_increment_mean_all_signals": -0.022911320527202055,
+      "independent_event_rows": 33,
+      "independent_event_increment_mean": -0.016482711159225408,
+      "fold_increment_positive_share": 0.0,
+      "fold_increment_means": {
+        "1": -0.018188956256002083,
+        "2": -0.028627866750233603
+      },
+      "routed_rows": 11,
+      "routed_increment_mean": -0.08747958746749876,
+      "changed_routed_rows": 3,
+      "changed_routed_positive_share": 0.0,
+      "changed_routed_increment_mean": -0.3207584873808288,
+      "switch_applied_rows": 11,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.02263766541089824,
+        "mean_delta_lower_95pct": -0.0392199369270045,
+        "mean_delta_upper_95pct": -0.004948350096565006
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.02261329696692151,
+        "mean_delta_lower_95pct": -0.04936377673755725,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.08747958746749876,
+        "mean_delta_lower_95pct": -0.18739051386376235,
+        "mean_delta_upper_95pct": -0.021531743947745166
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.08747958746749876,
+        "mean_delta_lower_95pct": -0.19245509242849726,
+        "mean_delta_upper_95pct": -0.018270831125778483
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.015997925536895247,
+        "mean_delta_lower_95pct": -0.03398438332274749,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.015834720309008017,
+        "mean_delta_lower_95pct": -0.04188306273865997,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.02952303392731559,
+        "expectancy_lower_95pct": -0.05841935937398769,
+        "expectancy_upper_95pct": 0.13113314972685328,
+        "profit_factor_median": 1.3746156053472034,
+        "profit_factor_lower_95pct": 0.3905941805461967,
+        "profit_factor_upper_95pct": 3.5836599282713557
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.027565899222524615,
+        "expectancy_lower_95pct": -0.06781909357029553,
+        "expectancy_upper_95pct": 0.14992981090857274,
+        "profit_factor_median": 1.3444438250943858,
+        "profit_factor_lower_95pct": 0.34173576275337925,
+        "profit_factor_upper_95pct": 3.9597688955214143
+      },
+      "leave_largest_winner_out_expectancy": -0.004917280601173124,
+      "largest_positive_pnl_share": 0.3122009600814634
+    }
+  },
+  "confirmation_details": {
+    "breakout6_half150_trail30_wick": {
+      "strategy_summary": {
+        "trades": 65,
+        "expectancy": 0.1964959305195798,
+        "median_return": -0.001500000000000056,
+        "win_rate": 0.35384615384615387,
+        "profit_factor": 2.792020519122662,
+        "cvar_5pct": -0.2585442899999999,
+        "mean_mfe": 0.6586476337826054,
+        "mean_mae": -0.1959180431620957,
+        "funding_coverage": 0.3076923076923077,
+        "total_return_on_initial_equity": 0.274021493184109,
+        "max_drawdown": -0.04550992338288595,
+        "folds": 4,
+        "fold_majority_profit_factor_gt_1": 1.0,
+        "market_states": 6,
+        "market_state_majority_profit_factor_gt_1": 0.8333333333333334,
+        "largest_positive_pnl_share": 0.11889171742533937,
+        "leave_largest_winner_out_expectancy": 0.16627480110290527,
+        "median_notional_usd": 2247.6355098442573,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": true,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.2,
+        "hard_stop_exit_rate": 0.4153846153846154,
+        "median_holding_days": 6.0
+      },
+      "fold_metrics": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.27539795955982255,
+          "median_return": -0.001499999999999945,
+          "win_rate": 0.47368421052631576,
+          "profit_factor": 4.608685817635672,
+          "hard_stop_rate": 0.2631578947368421,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.8565256448784346,
+          "mean_mae": -0.17544596914915997
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": 0.01949199024791062,
+          "median_return": -0.2513749999999999,
+          "win_rate": 0.15789473684210525,
+          "profit_factor": 1.1277540356974467,
+          "hard_stop_rate": 0.5789473684210527,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.3987336201420315,
+          "mean_mae": -0.22659409604166766
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.2912820957978905,
+          "median_return": -0.001499999999999834,
+          "win_rate": 0.4117647058823529,
+          "profit_factor": 3.8069414744216763,
+          "hard_stop_rate": 0.4117647058823529,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7301529911531004,
+          "mean_mae": -0.1982665745809034
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.2217530808861619,
+          "median_return": -0.004027759999999834,
+          "win_rate": 0.4,
+          "profit_factor": 3.1863678519573173,
+          "hard_stop_rate": 0.4,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.6549569310877789,
+          "mean_mae": -0.17253797990351372
+        }
+      ],
+      "fold_profit_factor_gt1_share": 1.0,
+      "paired_rows": 88,
+      "paired_increment_mean_all_signals": 0.0,
+      "independent_event_rows": 67,
+      "independent_event_increment_mean": 0.0,
+      "fold_increment_positive_share": 0.0,
+      "fold_increment_means": {
+        "3": 0.0,
+        "4": 0.0,
+        "5": 0.0,
+        "6": 0.0
+      },
+      "routed_rows": 21,
+      "routed_increment_mean": 0.0,
+      "changed_routed_rows": 0,
+      "changed_routed_positive_share": null,
+      "changed_routed_increment_mean": null,
+      "switch_applied_rows": 21,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": 0.0,
+        "mean_delta_upper_95pct": 0.0
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.1916399441821803,
+        "expectancy_lower_95pct": 0.03968132913160471,
+        "expectancy_upper_95pct": 0.3730042526370291,
+        "profit_factor_median": 2.770291875666475,
+        "profit_factor_lower_95pct": 1.2820588161349968,
+        "profit_factor_upper_95pct": 5.907016050763606
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.19510177836405562,
+        "expectancy_lower_95pct": 0.0421498888179686,
+        "expectancy_upper_95pct": 0.3785027763084206,
+        "profit_factor_median": 2.781676198351861,
+        "profit_factor_lower_95pct": 1.3334097599766404,
+        "profit_factor_upper_95pct": 5.394412724919778
+      },
+      "leave_largest_winner_out_expectancy": 0.16627480110290527,
+      "largest_positive_pnl_share": 0.11889171742533937
+    },
+    "breakout6_full_runner_a100_t25_wick": {
+      "strategy_summary": {
+        "trades": 65,
+        "expectancy": 0.18473228219568447,
+        "median_return": -0.001500000000000056,
+        "win_rate": 0.35384615384615387,
+        "profit_factor": 2.684737385469862,
+        "cvar_5pct": -0.2585442899999999,
+        "mean_mfe": 0.6117100217351358,
+        "mean_mae": -0.1959180431620957,
+        "funding_coverage": 0.3076923076923077,
+        "total_return_on_initial_equity": 0.25569856522814016,
+        "max_drawdown": -0.04300537249958869,
+        "folds": 4,
+        "fold_majority_profit_factor_gt_1": 0.75,
+        "market_states": 6,
+        "market_state_majority_profit_factor_gt_1": 0.8333333333333334,
+        "largest_positive_pnl_share": 0.10840789689259517,
+        "leave_largest_winner_out_expectancy": 0.15320306988962012,
+        "median_notional_usd": 2226.5481332238915,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": true,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.2153846153846154,
+        "hard_stop_exit_rate": 0.4153846153846154,
+        "median_holding_days": 5.833333333333333
+      },
+      "fold_metrics": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2809867773192419,
+          "median_return": -0.001499999999999945,
+          "win_rate": 0.47368421052631576,
+          "profit_factor": 4.681919066778122,
+          "hard_stop_rate": 0.2631578947368421,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7543231724711388,
+          "mean_mae": -0.17544596914915997
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.01295455663205547,
+          "median_return": -0.2513749999999999,
+          "win_rate": 0.15789473684210525,
+          "profit_factor": 0.9150934886911504,
+          "hard_stop_rate": 0.5789473684210527,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.37921300037049976,
+          "mean_mae": -0.22659409604166766
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.3025398647853261,
+          "median_return": -0.001499999999999834,
+          "win_rate": 0.4117647058823529,
+          "profit_factor": 3.9154270254945343,
+          "hard_stop_rate": 0.4117647058823529,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7301529911531004,
+          "mean_mae": -0.1982665745809034
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.17718084483124036,
+          "median_return": -0.004027759999999834,
+          "win_rate": 0.4,
+          "profit_factor": 2.7469092270268236,
+          "hard_stop_rate": 0.4,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.581136327918998,
+          "mean_mae": -0.17253797990351372
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.75,
+      "paired_rows": 88,
+      "paired_increment_mean_all_signals": -0.01955826168946502,
+      "independent_event_rows": 67,
+      "independent_event_increment_mean": -0.012997383260927853,
+      "fold_increment_positive_share": 0.5,
+      "fold_increment_means": {
+        "3": 0.004084136054960283,
+        "4": -0.060499010705349174,
+        "5": 0.008320959686365427,
+        "6": -0.034286335426862734
+      },
+      "routed_rows": 21,
+      "routed_increment_mean": -0.0819584299368058,
+      "changed_routed_rows": 6,
+      "changed_routed_positive_share": 0.3333333333333333,
+      "changed_routed_increment_mean": -0.2868545047788203,
+      "switch_applied_rows": 21,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.01778773204519206,
+        "mean_delta_lower_95pct": -0.05105121493603225,
+        "mean_delta_upper_95pct": 0.003902438123355337
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.017800727813327543,
+        "mean_delta_lower_95pct": -0.0554148259899704,
+        "mean_delta_upper_95pct": 0.003673698891547805
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.07755559641812623,
+        "mean_delta_lower_95pct": -0.18193971857054198,
+        "mean_delta_upper_95pct": 0.018598100638460763
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.0758399385096442,
+        "mean_delta_lower_95pct": -0.20532162156072167,
+        "mean_delta_upper_95pct": 0.01566155843238801
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.01244035254974523,
+        "mean_delta_lower_95pct": -0.032562704570012084,
+        "mean_delta_upper_95pct": 0.0030378106791492834
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.012461451952523775,
+        "mean_delta_lower_95pct": -0.03328609703715483,
+        "mean_delta_upper_95pct": 0.0030378106791492834
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.1833008103658169,
+        "expectancy_lower_95pct": 0.02806349023335623,
+        "expectancy_upper_95pct": 0.36404803636297756,
+        "profit_factor_median": 2.688520816004405,
+        "profit_factor_lower_95pct": 1.1944304456701087,
+        "profit_factor_upper_95pct": 5.516163274408421
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.179049157234279,
+        "expectancy_lower_95pct": 0.032309950108351554,
+        "expectancy_upper_95pct": 0.36123652246697846,
+        "profit_factor_median": 2.6431038114863648,
+        "profit_factor_lower_95pct": 1.2450885789685586,
+        "profit_factor_upper_95pct": 5.16416514338426
+      },
+      "leave_largest_winner_out_expectancy": 0.15320306988962012,
+      "largest_positive_pnl_share": 0.10840789689259517
+    },
+    "breakout6_full_runner_a100_t30_wick": {
+      "strategy_summary": {
+        "trades": 65,
+        "expectancy": 0.20816191481860755,
+        "median_return": -0.001500000000000056,
+        "win_rate": 0.35384615384615387,
+        "profit_factor": 2.898412967985807,
+        "cvar_5pct": -0.2585442899999999,
+        "mean_mfe": 0.655407893650183,
+        "mean_mae": -0.1959180431620957,
+        "funding_coverage": 0.3076923076923077,
+        "total_return_on_initial_equity": 0.2919370397984429,
+        "max_drawdown": -0.04506154172065635,
+        "folds": 4,
+        "fold_majority_profit_factor_gt_1": 0.75,
+        "market_states": 6,
+        "market_state_majority_profit_factor_gt_1": 0.8333333333333334,
+        "largest_positive_pnl_share": 0.14840519841446903,
+        "leave_largest_winner_out_expectancy": 0.16819188588806233,
+        "median_notional_usd": 2244.142743232225,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": true,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.2,
+        "hard_stop_exit_rate": 0.4153846153846154,
+        "median_holding_days": 5.833333333333333
+      },
+      "fold_metrics": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.3076872259995507,
+          "median_return": -0.001499999999999945,
+          "win_rate": 0.47368421052631576,
+          "profit_factor": 5.031789235137917,
+          "hard_stop_rate": 0.2631578947368421,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.8565256448784346,
+          "mean_mae": -0.17544596914915997
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.016412468114783408,
+          "median_return": -0.2513749999999999,
+          "win_rate": 0.15789473684210525,
+          "profit_factor": 0.8924297103193964,
+          "hard_stop_rate": 0.5789473684210527,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.38765029863637607,
+          "mean_mae": -0.22659409604166766
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.3025398647853261,
+          "median_return": -0.001499999999999834,
+          "win_rate": 0.4117647058823529,
+          "profit_factor": 3.9154270254945343,
+          "hard_stop_rate": 0.4117647058823529,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7301529911531004,
+          "mean_mae": -0.1982665745809034
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.28531263620483693,
+          "median_return": -0.004027759999999834,
+          "win_rate": 0.4,
+          "profit_factor": 3.813031381853401,
+          "hard_stop_rate": 0.4,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.6549569310877789,
+          "mean_mae": -0.17253797990351372
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.75,
+      "paired_rows": 88,
+      "paired_increment_mean_all_signals": -0.0017494128196296123,
+      "independent_event_rows": 67,
+      "independent_event_increment_mean": 0.002161088314656253,
+      "fold_increment_positive_share": 0.75,
+      "fold_increment_means": {
+        "3": 0.02359600239826282,
+        "4": -0.06132392370982287,
+        "5": 0.008320959686365427,
+        "6": 0.04889196562975004
+      },
+      "routed_rows": 21,
+      "routed_increment_mean": -0.007330872767971709,
+      "changed_routed_rows": 6,
+      "changed_routed_positive_share": 0.5,
+      "changed_routed_increment_mean": -0.025658054687900982,
+      "switch_applied_rows": 21,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.0004293025407984098,
+        "mean_delta_lower_95pct": -0.04207071495079898,
+        "mean_delta_upper_95pct": 0.029976515137027225
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.0009360678088189776,
+        "mean_delta_lower_95pct": -0.03876074034320625,
+        "mean_delta_upper_95pct": 0.02837885650680219
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.004653899321768358,
+        "mean_delta_lower_95pct": -0.1440153575074979,
+        "mean_delta_upper_95pct": 0.14166105257099856
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.0041885111368552014,
+        "mean_delta_lower_95pct": -0.14591610683506906,
+        "mean_delta_upper_95pct": 0.12760490824403709
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0020080898581533854,
+        "mean_delta_lower_95pct": -0.021868781828946363,
+        "mean_delta_upper_95pct": 0.02704974232935074
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.0019352738126203342,
+        "mean_delta_lower_95pct": -0.02007003535353304,
+        "mean_delta_upper_95pct": 0.028714341857310786
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.20811127147628322,
+        "expectancy_lower_95pct": 0.03768364757665437,
+        "expectancy_upper_95pct": 0.40919517345100065,
+        "profit_factor_median": 2.8985896426768964,
+        "profit_factor_lower_95pct": 1.2702262770913426,
+        "profit_factor_upper_95pct": 6.147729426560621
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.19994599505612232,
+        "expectancy_lower_95pct": 0.03224474323582651,
+        "expectancy_upper_95pct": 0.4087248898240465,
+        "profit_factor_median": 2.8199636042649425,
+        "profit_factor_lower_95pct": 1.2596615824257689,
+        "profit_factor_upper_95pct": 5.600137966893725
+      },
+      "leave_largest_winner_out_expectancy": 0.16819188588806233,
+      "largest_positive_pnl_share": 0.14840519841446903
+    },
+    "breakout6_full_runner_a100_t35_wick": {
+      "strategy_summary": {
+        "trades": 65,
+        "expectancy": 0.19991511133633888,
+        "median_return": -0.001500000000000056,
+        "win_rate": 0.35384615384615387,
+        "profit_factor": 2.8232030589646886,
+        "cvar_5pct": -0.2585442899999999,
+        "mean_mfe": 0.655407893650183,
+        "mean_mae": -0.1959180431620957,
+        "funding_coverage": 0.3076923076923077,
+        "total_return_on_initial_equity": 0.2794706717461483,
+        "max_drawdown": -0.04733124157399782,
+        "folds": 4,
+        "fold_majority_profit_factor_gt_1": 0.75,
+        "market_states": 6,
+        "market_state_majority_profit_factor_gt_1": 0.8333333333333334,
+        "largest_positive_pnl_share": 0.1515387024979298,
+        "leave_largest_winner_out_expectancy": 0.1598162261013832,
+        "median_notional_usd": 2222.526599401004,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": true,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.2,
+        "hard_stop_exit_rate": 0.4153846153846154,
+        "median_holding_days": 5.833333333333333
+      },
+      "fold_metrics": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2936587544404917,
+          "median_return": -0.001499999999999945,
+          "win_rate": 0.47368421052631576,
+          "profit_factor": 4.8479667172107845,
+          "hard_stop_rate": 0.2631578947368421,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.8565256448784346,
+          "mean_mae": -0.17544596914915997
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.030596745310854195,
+          "median_return": -0.2513749999999999,
+          "win_rate": 0.15789473684210525,
+          "profit_factor": 0.7994633876298214,
+          "hard_stop_rate": 0.5789473684210527,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.38765029863637607,
+          "mean_mae": -0.22659409604166766
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.3025398647853261,
+          "median_return": -0.001499999999999834,
+          "win_rate": 0.4117647058823529,
+          "profit_factor": 3.9154270254945343,
+          "hard_stop_rate": 0.4117647058823529,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7301529911531004,
+          "mean_mae": -0.1982665745809034
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.28531263620483693,
+          "median_return": -0.004027759999999834,
+          "win_rate": 0.4,
+          "profit_factor": 3.813031381853401,
+          "hard_stop_rate": 0.4,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.6549569310877789,
+          "mean_mae": -0.17253797990351372
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.75,
+      "paired_rows": 88,
+      "paired_increment_mean_all_signals": -0.009075342702103022,
+      "independent_event_rows": 67,
+      "independent_event_increment_mean": -0.001861318651393671,
+      "fold_increment_positive_share": 0.75,
+      "fold_increment_means": {
+        "3": 0.013344427028181317,
+        "4": -0.07586780332657443,
+        "5": 0.008320959686365427,
+        "6": 0.04889196562975004
+      },
+      "routed_rows": 21,
+      "routed_increment_mean": -0.03803000751357456,
+      "changed_routed_rows": 6,
+      "changed_routed_positive_share": 0.5,
+      "changed_routed_increment_mean": -0.13310502629751095,
+      "switch_applied_rows": 21,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.0065481866934982095,
+        "mean_delta_lower_95pct": -0.05349132625424492,
+        "mean_delta_upper_95pct": 0.0238976962278393
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.006977587278754534,
+        "mean_delta_lower_95pct": -0.05066578253226941,
+        "mean_delta_upper_95pct": 0.02199001068050038
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.03062176799232173,
+        "mean_delta_lower_95pct": -0.19255135982905938,
+        "mean_delta_upper_95pct": 0.11886344555520166
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.03382228078393737,
+        "mean_delta_lower_95pct": -0.19059938145842503,
+        "mean_delta_upper_95pct": 0.10615828779326501
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.0019192912624902577,
+        "mean_delta_lower_95pct": -0.03313937899859535,
+        "mean_delta_upper_95pct": 0.024990584537803565
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.00186841583196392,
+        "mean_delta_lower_95pct": -0.028510574302544917,
+        "mean_delta_upper_95pct": 0.025687662679526362
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.19698368815291803,
+        "expectancy_lower_95pct": 0.033038371028005095,
+        "expectancy_upper_95pct": 0.38310027940253905,
+        "profit_factor_median": 2.8332658341214874,
+        "profit_factor_lower_95pct": 1.2367572492950734,
+        "profit_factor_upper_95pct": 5.97775644318019
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.19415206002916952,
+        "expectancy_lower_95pct": 0.03887406798342981,
+        "expectancy_upper_95pct": 0.3983127726239056,
+        "profit_factor_median": 2.7800177081693986,
+        "profit_factor_lower_95pct": 1.3120223636218125,
+        "profit_factor_upper_95pct": 5.526820841406495
+      },
+      "leave_largest_winner_out_expectancy": 0.1598162261013832,
+      "largest_positive_pnl_share": 0.1515387024979298
+    },
+    "breakout6_full_runner_a150_t25_wick": {
+      "strategy_summary": {
+        "trades": 65,
+        "expectancy": 0.18704876316168234,
+        "median_return": -0.001500000000000056,
+        "win_rate": 0.35384615384615387,
+        "profit_factor": 2.705863428193742,
+        "cvar_5pct": -0.2585442899999999,
+        "mean_mfe": 0.6149497618675581,
+        "mean_mae": -0.1959180431620957,
+        "funding_coverage": 0.3076923076923077,
+        "total_return_on_initial_equity": 0.2592778877195562,
+        "max_drawdown": -0.04817738102939417,
+        "folds": 4,
+        "fold_majority_profit_factor_gt_1": 0.75,
+        "market_states": 6,
+        "market_state_majority_profit_factor_gt_1": 0.8333333333333334,
+        "largest_positive_pnl_share": 0.10742374440305082,
+        "leave_largest_winner_out_expectancy": 0.1555557458707117,
+        "median_notional_usd": 2232.883481959334,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": true,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.2153846153846154,
+        "hard_stop_exit_rate": 0.4153846153846154,
+        "median_holding_days": 6.0
+      },
+      "fold_metrics": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2809867773192419,
+          "median_return": -0.001499999999999945,
+          "win_rate": 0.47368421052631576,
+          "profit_factor": 4.681919066778122,
+          "hard_stop_rate": 0.2631578947368421,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7543231724711388,
+          "mean_mae": -0.17544596914915997
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.005029753327325908,
+          "median_return": -0.2513749999999999,
+          "win_rate": 0.15789473684210525,
+          "profit_factor": 0.9670340853881033,
+          "hard_stop_rate": 0.5789473684210527,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.39029632187615515,
+          "mean_mae": -0.22659409604166766
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.3025398647853261,
+          "median_return": -0.001499999999999834,
+          "win_rate": 0.4117647058823529,
+          "profit_factor": 3.9154270254945343,
+          "hard_stop_rate": 0.4117647058823529,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7301529911531004,
+          "mean_mae": -0.1982665745809034
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.17718084483124036,
+          "median_return": -0.004027759999999834,
+          "win_rate": 0.4,
+          "profit_factor": 2.7469092270268236,
+          "hard_stop_rate": 0.4,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.581136327918998,
+          "mean_mae": -0.17253797990351372
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.75,
+      "paired_rows": 88,
+      "paired_increment_mean_all_signals": -0.007720085049504383,
+      "independent_event_rows": 67,
+      "independent_event_increment_mean": -0.010750050980482154,
+      "fold_increment_positive_share": 0.5,
+      "fold_increment_means": {
+        "3": 0.004084136054960283,
+        "4": -0.020431335923943937,
+        "5": 0.008320959686365427,
+        "6": -0.034286335426862734
+      },
+      "routed_rows": 21,
+      "routed_increment_mean": -0.03235083258839932,
+      "changed_routed_rows": 6,
+      "changed_routed_positive_share": 0.3333333333333333,
+      "changed_routed_increment_mean": -0.11322791405939762,
+      "switch_applied_rows": 21,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.0073058904511133175,
+        "mean_delta_lower_95pct": -0.021419361095212818,
+        "mean_delta_upper_95pct": 0.004945739335898228
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.007418840707637035,
+        "mean_delta_lower_95pct": -0.023742585860214004,
+        "mean_delta_upper_95pct": 0.0046692961299363055
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.03089387829419432,
+        "mean_delta_lower_95pct": -0.08897799124470829,
+        "mean_delta_upper_95pct": 0.019133999597551035
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.031596328051828756,
+        "mean_delta_lower_95pct": -0.09769885877385923,
+        "mean_delta_upper_95pct": 0.018227919713761663
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": -0.010172433125094494,
+        "mean_delta_lower_95pct": -0.029002678709795744,
+        "mean_delta_upper_95pct": 0.0034067866659237755
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": -0.010012167973117728,
+        "mean_delta_lower_95pct": -0.029383150613032177,
+        "mean_delta_upper_95pct": 0.004164459549723239
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.18345338797122934,
+        "expectancy_lower_95pct": 0.03504062131527983,
+        "expectancy_upper_95pct": 0.368196691373809,
+        "profit_factor_median": 2.7037934527838905,
+        "profit_factor_lower_95pct": 1.2631342231314848,
+        "profit_factor_upper_95pct": 5.646248900093387
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.17956984832591893,
+        "expectancy_lower_95pct": 0.030960135374677376,
+        "expectancy_upper_95pct": 0.3558083922034917,
+        "profit_factor_median": 2.6420672889585557,
+        "profit_factor_lower_95pct": 1.2289259112228883,
+        "profit_factor_upper_95pct": 4.945260243175038
+      },
+      "leave_largest_winner_out_expectancy": 0.1555557458707117,
+      "largest_positive_pnl_share": 0.10742374440305082
+    },
+    "breakout6_full_runner_a150_t30_wick": {
+      "strategy_summary": {
+        "trades": 65,
+        "expectancy": 0.21032567607917993,
+        "median_return": -0.001500000000000056,
+        "win_rate": 0.35384615384615387,
+        "profit_factor": 2.918146224380356,
+        "cvar_5pct": -0.2585442899999999,
+        "mean_mfe": 0.6586476337826054,
+        "mean_mae": -0.1959180431620957,
+        "funding_coverage": 0.3076923076923077,
+        "total_return_on_initial_equity": 0.29534156045170795,
+        "max_drawdown": -0.050335509424183855,
+        "folds": 4,
+        "fold_majority_profit_factor_gt_1": 0.75,
+        "market_states": 6,
+        "market_state_majority_profit_factor_gt_1": 0.8333333333333334,
+        "largest_positive_pnl_share": 0.1476155111407747,
+        "leave_largest_winner_out_expectancy": 0.17038945591833116,
+        "median_notional_usd": 2250.0460343997365,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": true,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.2,
+        "hard_stop_exit_rate": 0.4153846153846154,
+        "median_holding_days": 6.0
+      },
+      "fold_metrics": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.3076872259995507,
+          "median_return": -0.001499999999999945,
+          "win_rate": 0.47368421052631576,
+          "profit_factor": 5.031789235137917,
+          "hard_stop_rate": 0.2631578947368421,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.8565256448784346,
+          "mean_mae": -0.17544596914915997
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.009010126960193718,
+          "median_return": -0.2513749999999999,
+          "win_rate": 0.15789473684210525,
+          "profit_factor": 0.9409459954231969,
+          "hard_stop_rate": 0.5789473684210527,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.3987336201420315,
+          "mean_mae": -0.22659409604166766
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.3025398647853261,
+          "median_return": -0.001499999999999834,
+          "win_rate": 0.4117647058823529,
+          "profit_factor": 3.9154270254945343,
+          "hard_stop_rate": 0.4117647058823529,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7301529911531004,
+          "mean_mae": -0.1982665745809034
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.28531263620483693,
+          "median_return": -0.004027759999999834,
+          "win_rate": 0.4,
+          "profit_factor": 3.813031381853401,
+          "hard_stop_rate": 0.4,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.6549569310877789,
+          "mean_mae": -0.17253797990351372
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.75,
+      "paired_rows": 88,
+      "paired_increment_mean_all_signals": 0.00947308926455634,
+      "independent_event_rows": 67,
+      "independent_event_increment_mean": 0.004260259686853331,
+      "fold_increment_positive_share": 0.75,
+      "fold_increment_means": {
+        "3": 0.02359600239826282,
+        "4": -0.02334007050180888,
+        "5": 0.008320959686365427,
+        "6": 0.04889196562975004
+      },
+      "routed_rows": 21,
+      "routed_increment_mean": 0.039696755013378944,
+      "changed_routed_rows": 6,
+      "changed_routed_positive_share": 0.5,
+      "changed_routed_increment_mean": 0.1389386425468263,
+      "switch_applied_rows": 21,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.008870280238491771,
+        "mean_delta_lower_95pct": -0.011389726015894443,
+        "mean_delta_upper_95pct": 0.033431071161152695
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.00876621328185839,
+        "mean_delta_lower_95pct": -0.010688067564431592,
+        "mean_delta_upper_95pct": 0.03184463580540838
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.04024390675706191,
+        "mean_delta_lower_95pct": -0.04168275837289394,
+        "mean_delta_upper_95pct": 0.15386024157610328
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.03679988925647742,
+        "mean_delta_lower_95pct": -0.04460730309038803,
+        "mean_delta_upper_95pct": 0.13665118413506722
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0032152349993684044,
+        "mean_delta_lower_95pct": -0.016828404592159504,
+        "mean_delta_upper_95pct": 0.028393097879796388
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.0027699931766408314,
+        "mean_delta_lower_95pct": -0.01624260202622759,
+        "mean_delta_upper_95pct": 0.028714341857310786
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.2084249707222592,
+        "expectancy_lower_95pct": 0.04115246183968088,
+        "expectancy_upper_95pct": 0.40805575136920064,
+        "profit_factor_median": 2.906797528252798,
+        "profit_factor_lower_95pct": 1.3069332501305837,
+        "profit_factor_upper_95pct": 6.078033367835968
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.20395316359435475,
+        "expectancy_lower_95pct": 0.041252022883708196,
+        "expectancy_upper_95pct": 0.4018077694237769,
+        "profit_factor_median": 2.871589489609767,
+        "profit_factor_lower_95pct": 1.3199174061007872,
+        "profit_factor_upper_95pct": 5.677542758827207
+      },
+      "leave_largest_winner_out_expectancy": 0.17038945591833116,
+      "largest_positive_pnl_share": 0.1476155111407747
+    },
+    "breakout6_full_runner_a150_t35_wick": {
+      "strategy_summary": {
+        "trades": 65,
+        "expectancy": 0.20191696658379343,
+        "median_return": -0.001500000000000056,
+        "win_rate": 0.35384615384615387,
+        "profit_factor": 2.841459750949434,
+        "cvar_5pct": -0.2585442899999999,
+        "mean_mfe": 0.6586476337826054,
+        "mean_mae": -0.1959180431620957,
+        "funding_coverage": 0.3076923076923077,
+        "total_return_on_initial_equity": 0.28261202501703403,
+        "max_drawdown": -0.052828985908433546,
+        "folds": 4,
+        "fold_majority_profit_factor_gt_1": 0.75,
+        "market_states": 6,
+        "market_state_majority_profit_factor_gt_1": 0.8333333333333334,
+        "largest_positive_pnl_share": 0.15076101389347604,
+        "leave_largest_winner_out_expectancy": 0.16184936033707928,
+        "median_notional_usd": 2227.9735697420906,
+        "maximum_concurrent_positions_constraint": 10,
+        "maximum_gross_exposure_constraint": 0.5,
+        "gate_pass": true,
+        "take_profit_exit_rate": 0.0,
+        "trailing_exit_rate": 0.2,
+        "hard_stop_exit_rate": 0.4153846153846154,
+        "median_holding_days": 6.0
+      },
+      "fold_metrics": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2936587544404917,
+          "median_return": -0.001499999999999945,
+          "win_rate": 0.47368421052631576,
+          "profit_factor": 4.8479667172107845,
+          "hard_stop_rate": 0.2631578947368421,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.8565256448784346,
+          "mean_mae": -0.17544596914915997
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.023748293148509597,
+          "median_return": -0.2513749999999999,
+          "win_rate": 0.15789473684210525,
+          "profit_factor": 0.8443493839233098,
+          "hard_stop_rate": 0.5789473684210527,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.3987336201420315,
+          "mean_mae": -0.22659409604166766
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.3025398647853261,
+          "median_return": -0.001499999999999834,
+          "win_rate": 0.4117647058823529,
+          "profit_factor": 3.9154270254945343,
+          "hard_stop_rate": 0.4117647058823529,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.7301529911531004,
+          "mean_mae": -0.1982665745809034
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.28531263620483693,
+          "median_return": -0.004027759999999834,
+          "win_rate": 0.4,
+          "profit_factor": 3.813031381853401,
+          "hard_stop_rate": 0.4,
+          "failure_to_launch_rate": 0.0,
+          "mean_mfe": 0.6549569310877789,
+          "mean_mae": -0.17253797990351372
+        }
+      ],
+      "fold_profit_factor_gt1_share": 0.75,
+      "paired_rows": 88,
+      "paired_increment_mean_all_signals": 0.0032621106600095114,
+      "independent_event_rows": 67,
+      "independent_event_increment_mean": 8.077972300255929e-05,
+      "fold_increment_positive_share": 0.75,
+      "fold_increment_means": {
+        "3": 0.013344427028181317,
+        "4": -0.03411026887019356,
+        "5": 0.008320959686365427,
+        "6": 0.04889196562975004
+      },
+      "routed_rows": 21,
+      "routed_increment_mean": 0.01366979705146843,
+      "changed_routed_rows": 6,
+      "changed_routed_positive_share": 0.5,
+      "changed_routed_increment_mean": 0.047844289680139505,
+      "switch_applied_rows": 21,
+      "partial_done_before_switch": 0,
+      "trail_active_before_switch": 0,
+      "week_increment_bootstrap_all_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0033401838015697945,
+        "mean_delta_lower_95pct": -0.018357632933167736,
+        "mean_delta_upper_95pct": 0.025442255172381825
+      },
+      "symbol_increment_bootstrap_all_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.003093631556012536,
+        "mean_delta_lower_95pct": -0.01729026024067642,
+        "mean_delta_upper_95pct": 0.02526722148949019
+      },
+      "week_increment_bootstrap_routed_signals": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.014437457856170477,
+        "mean_delta_lower_95pct": -0.0689213850130181,
+        "mean_delta_upper_95pct": 0.1181425676239098
+      },
+      "symbol_increment_bootstrap_routed_signals": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 0.014346872621210649,
+        "mean_delta_lower_95pct": -0.06967238307612429,
+        "mean_delta_upper_95pct": 0.11350151569276618
+      },
+      "week_increment_bootstrap_independent_events": {
+        "cluster": "week",
+        "samples": 3000,
+        "mean_delta_median": 0.0,
+        "mean_delta_lower_95pct": -0.026729573008828635,
+        "mean_delta_upper_95pct": 0.026407641747338947
+      },
+      "symbol_increment_bootstrap_independent_events": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "mean_delta_median": 7.581867835181463e-05,
+        "mean_delta_lower_95pct": -0.024811589250214844,
+        "mean_delta_upper_95pct": 0.027760694455697565
+      },
+      "week_return_bootstrap": {
+        "cluster": "week",
+        "samples": 3000,
+        "expectancy_median": 0.20009365340200902,
+        "expectancy_lower_95pct": 0.03255772018128327,
+        "expectancy_upper_95pct": 0.3950595997010048,
+        "profit_factor_median": 2.835287429692565,
+        "profit_factor_lower_95pct": 1.235415704696302,
+        "profit_factor_upper_95pct": 6.0308835844715
+      },
+      "symbol_return_bootstrap": {
+        "cluster": "symbol",
+        "samples": 3000,
+        "expectancy_median": 0.19268708995457737,
+        "expectancy_lower_95pct": 0.03543076956754098,
+        "expectancy_upper_95pct": 0.3855110211788972,
+        "profit_factor_median": 2.789721620302278,
+        "profit_factor_lower_95pct": 1.2793551723513366,
+        "profit_factor_upper_95pct": 5.45356587657463
+      },
+      "leave_largest_winner_out_expectancy": 0.16184936033707928,
+      "largest_positive_pnl_share": 0.15076101389347604
+    }
+  }
+}

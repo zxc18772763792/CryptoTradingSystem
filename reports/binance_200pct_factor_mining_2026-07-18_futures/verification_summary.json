@@ -1,0 +1,30 @@
+{
+  "definition": {
+    "market": "current TRADING Binance USD-M USDT perpetuals",
+    "window_start_utc": "2026-06-18T04:00:00+00:00",
+    "window_end_utc": "2026-07-18T04:00:00+00:00",
+    "path": "any earlier 4h close/low to strictly later 4h high",
+    "threshold_return": 2.0,
+    "threshold_price_multiple": 3.0
+  },
+  "events": {
+    "total": 19,
+    "close_confirmed": 17,
+    "wick_only": 2,
+    "AKEUSDT_present": true,
+    "BTWUSDT_present": true
+  },
+  "comparison": {
+    "symbol_set_exact_match": true,
+    "classification_exact_match": true,
+    "event_times_exact_match": true,
+    "maximum_absolute_return_difference": 1.7763568394002505e-15
+  },
+  "data_quality": {
+    "panel_rows": 1122828,
+    "panel_symbols": 530,
+    "window_rows": 95631,
+    "duplicate_symbol_time_rows": 0,
+    "invalid_ohlc_rows": 0
+  }
+}

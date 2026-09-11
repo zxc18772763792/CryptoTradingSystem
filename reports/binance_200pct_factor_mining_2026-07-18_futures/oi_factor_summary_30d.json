@@ -1,0 +1,103 @@
+{
+  "generated_at_utc": "2026-07-18T08:05:22.225775+00:00",
+  "scope": {
+    "market": "Binance USD-M USDT perpetuals",
+    "decision_clock": "After UTC day t closes; enter at first 4h open of t+1",
+    "label": "future 14-day high >= 3x entry (+200%)",
+    "history_limit": "public OI history is recent only; this is a 30-day exploratory audit, not the 400-day validation"
+  },
+  "coverage": {
+    "universe_altcoin_symbols": 524,
+    "histories_loaded": 524,
+    "fetch_errors": 0,
+    "eligible_rows_with_oi": 8855,
+    "eligible_symbols_with_oi": 524,
+    "first_decision_date": "2026-06-18T00:00:00+00:00",
+    "last_decision_date": "2026-07-04T00:00:00+00:00",
+    "positive_rows": 89
+  },
+  "factor_metrics": [
+    {
+      "factor": "oi_to_cmc_mcap",
+      "direction": "higher",
+      "n": 8799,
+      "positives": 89,
+      "positive_median": 0.10999135234080835,
+      "negative_median": 0.060270335970477366,
+      "auc": 0.7001857609102284,
+      "base_rate": 0.010114785771110354,
+      "top10_rate": 0.020316027088036117,
+      "top10_lift": 2.0085474421082,
+      "top20_rate": 0.015254237288135594,
+      "top20_lift": 1.5081127404303942,
+      "bootstrap_top10_lift_median": 1.9869074492099323,
+      "bootstrap_top10_lift_lower_95": 1.4974611448672852,
+      "bootstrap_top10_lift_upper_95": 2.743734224356919
+    },
+    {
+      "factor": "oi_change_1d",
+      "direction": "higher",
+      "n": 8332,
+      "positives": 81,
+      "positive_median": 0.0052756606762722,
+      "negative_median": -0.0051909696052225,
+      "auc": 0.5468233554930118,
+      "base_rate": 0.00972155544887182,
+      "top10_rate": 0.02491103202846975,
+      "top10_lift": 2.562453319274197,
+      "top20_rate": 0.01671641791044776,
+      "top20_lift": 1.7195209139487744,
+      "bootstrap_top10_lift_median": 2.5689569019967378,
+      "bootstrap_top10_lift_lower_95": 1.8555218632537998,
+      "bootstrap_top10_lift_upper_95": 3.2414394930623174
+    },
+    {
+      "factor": "oi_change_3d",
+      "direction": "higher",
+      "n": 7286,
+      "positives": 68,
+      "positive_median": 0.01006402350218,
+      "negative_median": -0.011075558506725,
+      "auc": 0.55075750167066,
+      "base_rate": 0.009332967334614329,
+      "top10_rate": 0.023066485753052916,
+      "top10_lift": 2.471506105834464,
+      "top20_rate": 0.017064846416382253,
+      "top20_lift": 1.8284481027906043,
+      "bootstrap_top10_lift_median": 2.5072801488167165,
+      "bootstrap_top10_lift_lower_95": 1.6447444405939322,
+      "bootstrap_top10_lift_upper_95": 3.291517593481724
+    },
+    {
+      "factor": "oi_volatility_3d",
+      "direction": "higher",
+      "n": 8332,
+      "positives": 81,
+      "positive_median": 0.042931426226481,
+      "negative_median": 0.0243487288901154,
+      "auc": 0.6777524909064521,
+      "base_rate": 0.00972155544887182,
+      "top10_rate": 0.027283511269276393,
+      "top10_lift": 2.806496492538406,
+      "top20_rate": 0.02447761194029851,
+      "top20_lift": 2.517869909710706,
+      "bootstrap_top10_lift_median": 2.8216398985629754,
+      "bootstrap_top10_lift_lower_95": 1.7577744901393395,
+      "bootstrap_top10_lift_upper_95": 3.868176071662195
+    }
+  ],
+  "current_close_confirmed_events": {
+    "count": 17,
+    "oi_to_mcap_available": 14,
+    "oi_change_1d_available": 11,
+    "median_oi_to_mcap": 0.0890203391396972,
+    "median_oi_change_1d": -0.0599362733195875,
+    "events_with_positive_oi_change_1d": 2
+  },
+  "errors": [],
+  "limitations": [
+    "Only recent public OI history is available, so the result is exploratory and highly regime-dependent.",
+    "CMC circulating supply embedded in the Binance OI endpoint may be missing or noisy for new listings.",
+    "Futures-only listings have no same-symbol Binance spot pair for a spot-volume comparison."
+  ]
+}

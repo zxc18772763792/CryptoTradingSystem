@@ -1,0 +1,222 @@
+{
+  "generated_at_utc": "2026-07-19T09:46:50.030426+00:00",
+  "scope": "Binance USD-M perpetual +200% within future 14 days; historical multisource incremental mining",
+  "price_baseline": "fixed eight-factor family, refitted inside each training fold; comparison rows are identical",
+  "news": {
+    "factors": [
+      "news_count_1d",
+      "news_count_3d",
+      "news_count_7d",
+      "news_source_breadth_7d",
+      "news_official_7d",
+      "news_listing_7d",
+      "news_risk_7d",
+      "news_acceleration_3d"
+    ],
+    "coverage": {
+      "raw_rows": 221383,
+      "raw_min_fetched_at": "2026-02-22T00:03:03.411415+00:00",
+      "raw_max_fetched_at": "2026-07-19T09:40:00.244592+00:00",
+      "strict_mapped_mentions": 9284,
+      "mapped_news_items": 8465,
+      "mapped_symbols": 377,
+      "mapped_source_keys": 438,
+      "eligible_walk_forward_folds": 3,
+      "limitation": "local archive begins 2026-02-21; only later folds have enough pre-test news history"
+    },
+    "pooled_metrics": {
+      "price_same_rows": {
+        "n": 37643,
+        "positives": 431,
+        "base_rate": 0.011449671917753633,
+        "auc": 0.794542363776074,
+        "average_precision": 0.06263626668847959,
+        "top_2pct_n": 803,
+        "top_2pct_precision": 0.10460772104607721,
+        "top_2pct_lift": 9.136307293126414
+      },
+      "family_only": {
+        "n": 37643,
+        "positives": 431,
+        "base_rate": 0.011449671917753633,
+        "auc": 0.4764734226142155,
+        "average_precision": 0.01163994818793622,
+        "top_2pct_n": 803,
+        "top_2pct_precision": 0.0136986301369863,
+        "top_2pct_lift": 1.1964211931475064
+      },
+      "price_plus_family": {
+        "n": 37643,
+        "positives": 431,
+        "base_rate": 0.011449671917753633,
+        "auc": 0.7788597870157893,
+        "average_precision": 0.060501099830257296,
+        "top_2pct_n": 803,
+        "top_2pct_precision": 0.10087173100871731,
+        "top_2pct_lift": 8.810010604086184
+      }
+    },
+    "decision": {
+      "family": "news",
+      "folds": 3,
+      "fold_majority_ap_and_lift_positive": 0.0,
+      "bootstrap_7d_blocks": {
+        "samples": 2000,
+        "delta_average_precision": {
+          "median": -0.0013828195782148583,
+          "lower_95pct": -0.008150364832286911,
+          "upper_95pct": 0.006978269352345922
+        },
+        "delta_top_2pct_lift": {
+          "median": -0.3270387737673328,
+          "lower_95pct": -1.0824962842171357,
+          "upper_95pct": 0.5176716894431663
+        }
+      },
+      "ranking_eligible": false,
+      "rule": "at least 3 folds, majority improve AP and lift, both 95% increment lower bounds above zero"
+    }
+  },
+  "onchain": {
+    "factors": [
+      "log_tvl_lag1d",
+      "tvl_change_1d_lag1d",
+      "tvl_change_7d_lag1d",
+      "tvl_change_30d_lag1d"
+    ],
+    "coverage": {
+      "unique_coingecko_identities": 289,
+      "ambiguous_identities": 221,
+      "missing_identities": 14,
+      "defillama_matches": 83,
+      "details_loaded": 83,
+      "tvl_rows": 55035,
+      "tvl_symbols": 53,
+      "eligible_walk_forward_folds": 4,
+      "limitation": "current identity maps create survivorship risk; only unique CoinGecko-to-DefiLlama matches are admitted"
+    },
+    "pooled_metrics": {
+      "price_same_rows": {
+        "n": 4330,
+        "positives": 69,
+        "base_rate": 0.015935334872979216,
+        "auc": 0.7893023682948481,
+        "average_precision": 0.049906268870190965,
+        "top_2pct_n": 103,
+        "top_2pct_precision": 0.04854368932038835,
+        "top_2pct_lift": 3.0462923877866888
+      },
+      "family_only": {
+        "n": 4330,
+        "positives": 69,
+        "base_rate": 0.015935334872979216,
+        "auc": 0.7708539534504045,
+        "average_precision": 0.04940734395953553,
+        "top_2pct_n": 103,
+        "top_2pct_precision": 0.11650485436893204,
+        "top_2pct_lift": 7.311101730688054
+      },
+      "price_plus_family": {
+        "n": 4330,
+        "positives": 69,
+        "base_rate": 0.015935334872979216,
+        "auc": 0.8242808893605298,
+        "average_precision": 0.058196578365520495,
+        "top_2pct_n": 103,
+        "top_2pct_precision": 0.06796116504854369,
+        "top_2pct_lift": 4.264809342901365
+      }
+    },
+    "decision": {
+      "family": "onchain",
+      "folds": 4,
+      "fold_majority_ap_and_lift_positive": 0.5,
+      "bootstrap_7d_blocks": {
+        "samples": 2000,
+        "delta_average_precision": {
+          "median": 0.007691724107300544,
+          "lower_95pct": -0.010413423450769971,
+          "upper_95pct": 0.027402379124484143
+        },
+        "delta_top_2pct_lift": {
+          "median": 1.2764386129334584,
+          "lower_95pct": -2.6465775089652253,
+          "upper_95pct": 5.799118337328531
+        }
+      },
+      "ranking_eligible": false,
+      "rule": "at least 3 folds, majority improve AP and lift, both 95% increment lower bounds above zero"
+    }
+  },
+  "exchange": {
+    "prior_long_window_oi_decision": {
+      "ranking_eligible": false,
+      "folds": 5,
+      "fold_majority_both_positive": 0.2,
+      "bootstrap": {
+        "samples": 500,
+        "delta_ap_median": -0.02020774908505879,
+        "delta_ap_lower_95pct": -0.0516315486318213,
+        "delta_ap_upper_95pct": 0.002041296978298857,
+        "delta_lift_median": -3.954676504421611,
+        "delta_lift_lower_95pct": -7.022574323419467,
+        "delta_lift_upper_95pct": -1.5405075565804647
+      },
+      "factor_group_evidence": {
+        "small_cap": {
+          "fold_majority_ap_and_lift_positive": 0.2,
+          "median_delta_average_precision": -0.016337460762406983,
+          "median_delta_top_2pct_lift": -1.3583333333333325,
+          "evidence_tier": "directional_only"
+        },
+        "absolute_oi": {
+          "fold_majority_ap_and_lift_positive": 0.2,
+          "median_delta_average_precision": -0.015519909556332298,
+          "median_delta_top_2pct_lift": -1.5538461538461554,
+          "evidence_tier": "directional_only"
+        },
+        "oi_to_mcap": {
+          "fold_majority_ap_and_lift_positive": 0.2,
+          "median_delta_average_precision": -0.0157750863120016,
+          "median_delta_top_2pct_lift": -3.640037976400379,
+          "evidence_tier": "directional_only"
+        },
+        "oi_growth": {
+          "fold_majority_ap_and_lift_positive": 0.2,
+          "median_delta_average_precision": 0.007975555226957587,
+          "median_delta_top_2pct_lift": 0.0,
+          "evidence_tier": "directional_only"
+        }
+      },
+      "rule": "majority of folds improve AP and top-2% lift, with both 95% lower bounds above zero"
+    },
+    "recent_oi": {
+      "available": true,
+      "observed_rows": 8855,
+      "symbols": 524,
+      "min_date": "2026-06-18T00:00:00+00:00",
+      "max_date": "2026-07-04T00:00:00+00:00",
+      "role": "recent directional sensitivity only; window is too short for walk-forward ranking validation"
+    },
+    "richer_cache_datasets": 11,
+    "richer_cache_primary_model_eligible": false,
+    "reason": "funding/long-short/liquidation/taker caches are narrow requested-symbol cohorts and therefore selection-biased"
+  },
+  "current_event_news": {
+    "events": 19,
+    "events_with_any_prior_7d_news": 2,
+    "events_with_listing_prior_7d": 0,
+    "events_with_official_prior_7d": 1
+  },
+  "strict_strategy_decision": {
+    "new_family_ranking_eligible": false,
+    "auto_trade_eligible": false,
+    "classification": "watchlist_only",
+    "reason": "a family must pass same-row incremental gates before any entry rule is sent to the frozen 4h exit and portfolio simulator"
+  },
+  "data_hashes": {
+    "identities": "7019e54ec129b8257fe6a25cb1dba130d5d62ac20d33d96d7a6918d35847818b",
+    "news_mentions": "58dc00d13a0d102edc99ab0063a8ef848c9b53582a460f73d04f9036c1e972d6",
+    "protocol_mapping": "fee793f79b10c06208a5e6c35c22f742360f6a018a74554d6e1cab78bf932d7a"
+  }
+}

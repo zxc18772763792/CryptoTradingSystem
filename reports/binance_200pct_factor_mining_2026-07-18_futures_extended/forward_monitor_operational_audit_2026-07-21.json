@@ -1,0 +1,51 @@
+{
+  "audit_generated_at_utc": "2026-07-21T16:07:20.8199637+00:00",
+  "scheduled_clock": "08:20 Asia/Shanghai",
+  "audit_through_local_date": "2026-07-21",
+  "immutable_snapshot_dates_present": [
+    "2026-07-18",
+    "2026-07-19"
+  ],
+  "immutable_snapshot_dates_missing": [
+    "2026-07-20",
+    "2026-07-21"
+  ],
+  "punctual_snapshot_dates": [
+    "2026-07-19"
+  ],
+  "late_research_snapshot_dates": [
+    "2026-07-18"
+  ],
+  "automation_status": "ACTIVE",
+  "automation_last_recorded_run_local": "2026-07-19T08:23:44+08:00",
+  "mature_utility_observations": 0,
+  "mature_launch_microstructure_observations": 0,
+  "sequence_24h_observations": 6,
+  "live_public_data_diagnostic": {
+    "requested_as_of_utc": "2026-07-21T00:20:00+00:00",
+    "executed_after_schedule": true,
+    "dry_run": true,
+    "snapshot_written": false,
+    "audit_passed": true,
+    "universe_count": 527,
+    "previous_universe_count": 527,
+    "universe_coverage_vs_previous": 1.0,
+    "valid_price_feature_count": 527,
+    "valid_price_feature_rate": 1.0,
+    "feature_date_utc": "2026-07-20T00:00:00+00:00",
+    "latest_4h_bar_utc": "2026-07-20T20:00:00+00:00",
+    "source_error_count": 0,
+    "candidate_count": 3,
+    "candidate_symbols": [
+      "AKEUSDT",
+      "ESPORTSUSDT",
+      "LABUSDT"
+    ],
+    "candidate_stage": "cooldown_after_200pct_runup",
+    "interpretation": "Operational diagnosis only. The run occurred after the immutable 08:20 decision clock and is excluded from true OOS performance."
+  },
+  "classification": "monitor_operational_gap_no_true_oos_backfill",
+  "historical_backfill_allowed": false,
+  "oos_claim_allowed": false,
+  "automatic_trading_allowed": false
+}

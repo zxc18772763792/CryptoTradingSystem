@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "selected_from_calibration": true,
+    "candidate_family_frozen": true,
+    "confirmation_metrics": true,
+    "exhaustion_trigger_count": true,
+    "all_confirmation_folds_profitable": true,
+    "point_estimate_improves": true,
+    "absolute_return_uncertainty_passes": true,
+    "incremental_uncertainty_fails": true,
+    "conservative_clock_implemented_and_tested": true,
+    "forward_counterfactual_recorded_not_promoted": true
+  },
+  "recomputed": {
+    "trades": 65,
+    "expectancy": 0.17877801344672795,
+    "profit_factor": 2.6259382960783575,
+    "paired_increment": 0.021442764425778114,
+    "blowoff_exits": 10
+  }
+}

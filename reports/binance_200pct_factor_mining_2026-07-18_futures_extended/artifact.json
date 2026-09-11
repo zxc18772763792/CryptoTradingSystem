@@ -1,0 +1,3400 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Binance \u66b4\u6da8\u5e01\u56e0\u5b50\uff1a\u4e25\u683c\u5386\u53f2\u9a8c\u8bc1\u4e0e\u524d\u77bb\u76d1\u63a7\u57fa\u7ebf",
+    "description": "Fixed-factor historical validation, OI incremental evidence, 4h path paper simulation, and immutable forward-monitor handoff.",
+    "generatedAt": "2026-07-18T16:58:50.919432+00:00",
+    "sources": [
+      {
+        "id": "price-validation",
+        "label": "Purged historical walk-forward evidence",
+        "path": "walk_forward_fold_metrics.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('walk_forward_fold_metrics.csv') ORDER BY fold",
+          "description": "Expanding 180-day minimum train, 14-day purge, 30-day test folds using the fixed eight-factor logistic model.",
+          "tables_used": [
+            "daily_feature_panel.csv.gz",
+            "walk_forward_fold_metrics.csv"
+          ],
+          "filters": [
+            "USDT perpetual altcoins",
+            "daily quote volume >= 250,000 USDT",
+            "complete forward horizon"
+          ],
+          "metric_definitions": [
+            "Top-2% lift = precision among each day's top 2% scores divided by the eligible row base rate.",
+            "Entry is the next UTC day's first 4h open; the primary label is future 14-day high return >= 200%."
+          ]
+        }
+      },
+      {
+        "id": "oi-validation",
+        "label": "Lagged long-window OI intersection",
+        "path": "oi_walk_forward_fold_metrics.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('oi_walk_forward_fold_metrics.csv') ORDER BY fold",
+          "description": "Price-only, OI-only, price+OI and factor-group ablations evaluated on identical rows and folds.",
+          "tables_used": [
+            "oi_walk_forward_fold_metrics.csv",
+            "oi_cohort_coverage.csv"
+          ],
+          "filters": [
+            "historical market cap only",
+            "OI and market cap lagged 24 hours",
+            "complete required OI fields"
+          ],
+          "metric_definitions": [
+            "OI ranking gate requires fold-majority AP and lift improvement plus both bootstrap lower bounds above zero."
+          ]
+        }
+      },
+      {
+        "id": "paper-validation",
+        "label": "4h path-dependent 1x paper simulation",
+        "path": "paper_strategy_summary.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('paper_strategy_summary.csv') WHERE slippage_bps_each_side = 5 ORDER BY expectancy DESC",
+          "description": "Four pre-registered exits with conservative same-bar ordering, funding, fees, slippage and portfolio constraints.",
+          "tables_used": [
+            "futures_4h_panel.csv.gz",
+            "paper_strategy_summary.csv"
+          ],
+          "filters": [
+            "first daily top-2% crossing",
+            "at most 3 new signals/day",
+            "14-day cooldown"
+          ],
+          "metric_definitions": [
+            "Default fee is 5 bps each side; displayed default scenario uses 5 bps slippage each side."
+          ]
+        }
+      },
+      {
+        "id": "current-events",
+        "label": "Frozen current 30-day event regression",
+        "path": "current_30d_runups_verified.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('current_30d_runups_verified.csv') ORDER BY close_return DESC",
+          "description": "Any earlier 4h close to any later 4h high reaches 3x; wick-only uses earlier low when close confirmation fails.",
+          "tables_used": [
+            "futures_4h_panel.csv.gz",
+            "current_30d_runups_verified.csv"
+          ],
+          "metric_definitions": [
+            "+200% return means later high / earlier reference price - 1 >= 2.0."
+          ]
+        }
+      },
+      {
+        "id": "sensitivity-validation",
+        "label": "Threshold and horizon sensitivity matrix",
+        "path": "threshold_horizon_surface.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('threshold_horizon_surface.csv') ORDER BY horizon_days, threshold_pct",
+          "description": "Same frozen price scores evaluated across seven return thresholds and four horizons.",
+          "tables_used": [
+            "threshold_horizon_surface.csv"
+          ],
+          "metric_definitions": [
+            "BH-adjusted one-sided Fisher exact p-values control the threshold-by-horizon matrix."
+          ]
+        }
+      },
+      {
+        "id": "candidate-validation",
+        "label": "Frozen current research watchlist",
+        "path": "current_research_watchlist.csv",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('current_research_watchlist.csv') ORDER BY ranking_score_pctile DESC",
+          "description": "Top frozen price ranks with OI annotations that never affect rank.",
+          "tables_used": [
+            "current_research_watchlist.csv"
+          ],
+          "metric_definitions": [
+            "Ranking percentile is computed within the latest eligible altcoin cross-section."
+          ]
+        }
+      },
+      {
+        "id": "continuation-utility-validation",
+        "label": "Frozen 8h continuation utility challenger",
+        "path": "continuation_entry_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('continuation_utility_strategy_folds.csv') ORDER BY fold",
+          "description": "A time-isolated 8h continuation model trained on positive net 14-day path utility, then simulated with the frozen 30-day exit and portfolio constraints.",
+          "tables_used": [
+            "continuation_utility_strategy_folds.csv",
+            "continuation_utility_strategy_trades.csv.gz",
+            "continuation_utility_forward_model.json"
+          ],
+          "filters": [
+            "features use only completed 4h bars before P0+8h",
+            "calibration windows precede confirmation folds",
+            "daily top three new signals and stage vetoes"
+          ],
+          "metric_definitions": [
+            "Profit factor is gross positive trade PnL divided by absolute gross negative trade PnL after fees, funding, and slippage.",
+            "This is a secondary paper-entry challenger; it is rank-neutral and is not permission for automatic trading."
+          ]
+        }
+      },
+      {
+        "id": "intensity-exit-frontier-validation",
+        "label": "Multi-threshold intensity and right-tail exit frontier",
+        "path": "extreme_intensity_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('extreme_intensity_confirmation_folds.csv') ORDER BY fold",
+          "description": "Calibration-only selection of richer extreme-return targets and right-tail exit variants, followed by confirmation-fold and paired-increment validation.",
+          "tables_used": [
+            "extreme_intensity_confirmation_folds.csv",
+            "utility_failure_exit_calibration.csv",
+            "utility_tail_exit_folds.csv",
+            "utility_tail_exit_paired_deltas.csv"
+          ],
+          "filters": [
+            "same P0 checkpoint clock and fixed early-path features",
+            "confirmation folds 3-6 never used for candidate selection",
+            "right-tail variant recorded as a read-only counterfactual only"
+          ],
+          "metric_definitions": [
+            "Ordinal intensity is a fixed 10/20/30/40% weighting of +50/+100/+150/+200% probabilities.",
+            "Exit increment is the paired net-return difference versus the frozen exit for the same signal."
+          ]
+        }
+      },
+      {
+        "id": "utility-intensity-router-validation",
+        "label": "Rejected 8h-entry / 20h-intensity router",
+        "path": "utility_intensity_router_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_intensity_router_recognition_folds.csv') ORDER BY validation_split",
+          "description": "The frozen 8h utility entry is followed by the already-selected 20h ordinal score; low-intensity trades exit at that decision open.",
+          "tables_used": [
+            "utility_intensity_router_recognition_folds.csv",
+            "utility_intensity_router_trade_folds.csv",
+            "utility_intensity_router_paired_deltas.csv"
+          ],
+          "filters": [
+            "8h utility q70 entry unchanged",
+            "20h ordinal q80 router reused without retuning",
+            "forced exit fills at the decision open before same-bar extremes"
+          ],
+          "metric_definitions": [
+            "Paired increment is routed net return minus frozen-exit net return for the same signal.",
+            "A negative clustered 95% upper bound is treated as strong rejection, not inconclusive evidence."
+          ]
+        }
+      },
+      {
+        "id": "utility-exhaustion-exit-validation",
+        "label": "Profit-side volume-backed upper-wick exit challenger",
+        "path": "utility_exhaustion_exit_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_exhaustion_exit_folds.csv') ORDER BY fold",
+          "description": "After the frozen 8h entry, profit-side exhaustion policies are selected on 14-day calibration paths and restored to 30 days on confirmation folds.",
+          "tables_used": [
+            "utility_exhaustion_exit_calibration.csv",
+            "utility_exhaustion_exit_folds.csv",
+            "utility_exhaustion_exit_paired_deltas.csv"
+          ],
+          "filters": [
+            "position has at least doubled before exhaustion can trigger",
+            "completed 4h reversal bar and next-open execution",
+            "paired increment versus the same signal under the frozen exit"
+          ],
+          "metric_definitions": [
+            "Blow-off reversal requires upper wick >=35% of range, close location <=35%, and volume ratio >=1.5.",
+            "The challenger remains unpromoted when either clustered paired-increment lower bound is non-positive."
+          ]
+        }
+      },
+      {
+        "id": "utility-exhaustion-attribution-validation",
+        "label": "Fixed attribution of static trail width versus upper-wick timing",
+        "path": "utility_exhaustion_attribution_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_exhaustion_attribution_folds.csv') ORDER BY policy, fold",
+          "description": "No-reselection factorial attribution on the same frozen 8h entries, with first-signal 14-day event de-duplication.",
+          "tables_used": [
+            "utility_exhaustion_attribution_summary.csv",
+            "utility_exhaustion_attribution_folds.csv",
+            "utility_exhaustion_attribution_paired_deltas.csv",
+            "utility_exhaustion_attribution_event_deltas.csv",
+            "utility_exhaustion_attribution_verification.json"
+          ],
+          "filters": [
+            "same confirmation signals and default costs for every policy",
+            "one first signal per symbol per 14-day event window",
+            "30pct-trail plus wick combination is explicitly post-hoc and prospective-only"
+          ],
+          "metric_definitions": [
+            "Pure wick increment compares the wick exit to an otherwise identical static 35pct-trail policy.",
+            "Event increment keeps only the first signal in each symbol's non-overlapping 14-day window."
+          ]
+        }
+      },
+      {
+        "id": "utility-entry-timing-validation",
+        "label": "Execution timing after the frozen 8h utility score",
+        "path": "utility_entry_timing_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_entry_timing_confirmation_folds.csv') ORDER BY fold",
+          "description": "Nine time-safe immediate, pullback, reclaim, and breakout entries selected only on mature calibration windows and confirmed on folds 3-6.",
+          "tables_used": [
+            "utility_entry_timing_calibration.csv",
+            "utility_entry_timing_confirmation_folds.csv",
+            "utility_entry_timing_recognition_paired.csv",
+            "utility_entry_timing_trade_paired_deltas.csv",
+            "utility_entry_timing_verification.json"
+          ],
+          "filters": [
+            "frozen 8h utility q70 signals only",
+            "maximum 24h trigger window",
+            "completed 4h trigger and next-open entry",
+            "independent-event de-duplication uses first signal per symbol per 14 days"
+          ],
+          "metric_definitions": [
+            "Fill rate is the share of frozen 8h signals that trigger the delayed entry rule.",
+            "Recognition precision is recomputed from the actual delayed entry open; missing triggers remain in retention denominators."
+          ]
+        }
+      },
+      {
+        "id": "utility-entry-frontier-validation",
+        "label": "Full fixed entry-rule frontier with multiple-testing control",
+        "path": "utility_entry_frontier_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_entry_frontier_summary.csv') ORDER BY actual_200pct_precision DESC",
+          "description": "All nine fixed entry rules are inspected on confirmation with row/event de-duplication, clustered intervals, and catalog-wide BH control.",
+          "tables_used": [
+            "utility_entry_frontier_summary.csv",
+            "utility_entry_frontier_folds.csv",
+            "utility_entry_frontier_paired_deltas.csv",
+            "utility_entry_frontier_verification.json"
+          ],
+          "filters": [
+            "confirmation-only winners are hypothesis-generating and cannot be historically promoted",
+            "completed 4h trigger and next-open entry within 24 hours",
+            "same frozen 8h signals for matched trade-return comparisons"
+          ],
+          "metric_definitions": [
+            "Breakout recognition and post-breakout execution are evaluated separately.",
+            "BH-adjusted row/event tests and event-cluster intervals must pass before a new entry rule is considered."
+          ]
+        }
+      },
+      {
+        "id": "utility-breakout-hold-router-validation",
+        "label": "Breakout-confirmed prospective hold-management router",
+        "path": "utility_breakout_hold_router_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_breakout_hold_router_folds.csv') ORDER BY route, fold",
+          "description": "The frozen 8h entry is retained; a completed six-bar breakout may switch only profit-side management at the next 4h open.",
+          "tables_used": [
+            "utility_breakout_hold_router_summary.csv",
+            "utility_breakout_hold_router_folds.csv",
+            "utility_breakout_hold_router_paired_deltas.csv",
+            "utility_breakout_hold_router_verification.json"
+          ],
+          "filters": [
+            "entry and downside stops remain frozen",
+            "all pre-switch partial-fill and trailing state is preserved",
+            "first signal per symbol per 14 days for independent-event increments",
+            "confirmation-mined result is prospective-only"
+          ],
+          "metric_definitions": [
+            "Paired increment compares routed and frozen exit returns for the same 8h signal.",
+            "Prospective diagnostic requires positive week/symbol lower bounds for rows and independent events."
+          ]
+        }
+      },
+      {
+        "id": "utility-breakout-add-validation",
+        "label": "Risk-neutral breakout-add allocation validation",
+        "path": "utility_breakout_add_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_breakout_add_summary.csv') ORDER BY breakout_add_fraction",
+          "description": "A fixed total planned position is split between the original 8h entry and a possible next-open breakout add; unused reserve remains cash.",
+          "tables_used": [
+            "utility_breakout_add_calibration.csv",
+            "utility_breakout_add_summary.csv",
+            "utility_breakout_add_folds.csv",
+            "utility_breakout_add_paired_deltas.csv",
+            "utility_breakout_add_verification.json"
+          ],
+          "filters": [
+            "no additional leverage or gross exposure",
+            "allocation selected on 14-day calibration windows only",
+            "30-day confirmation is held out from allocation selection",
+            "completed six-bar breakout enters the reserved tranche at the next 4h open"
+          ],
+          "metric_definitions": [
+            "Mean deployed fraction includes idle cash when no breakout add occurs.",
+            "Paired increment compares the split allocation with the full initial position on the same signal."
+          ]
+        }
+      },
+      {
+        "id": "utility-taker-flow-validation",
+        "label": "8h taker-buy-share prospective diagnostic",
+        "path": "utility_taker_flow_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_taker_flow_confirmation_folds.csv') ORDER BY fold",
+          "description": "A semantic 50% taker-buy quote-volume threshold is applied at the frozen 8h decision clock without delaying entry.",
+          "tables_used": [
+            "utility_taker_flow_calibration_splits.csv",
+            "utility_taker_flow_confirmation_folds.csv",
+            "utility_taker_flow_strategy_summary.csv",
+            "utility_taker_flow_strategy_folds.csv",
+            "utility_taker_flow_verification.json"
+          ],
+          "filters": [
+            "frozen 8h utility-selected signals only",
+            "two completed 4h bars after P0",
+            "taker buy quote-volume share >= 50%",
+            "rank, original stage veto and paper eligibility remain unchanged"
+          ],
+          "metric_definitions": [
+            "Taker buy share is taker-buy quote volume divided by total quote volume across the completed 8h path.",
+            "Independent events retain the first signal in each symbol's non-overlapping 14-day window."
+          ]
+        }
+      },
+      {
+        "id": "utility-taker-robustness-validation",
+        "label": "8h taker-flow price-path matched audit",
+        "path": "utility_taker_flow_robustness_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_taker_flow_price_matched_permutation.csv')",
+          "description": "Nearby semantic thresholds and within-fold price-path matched permutations test whether taker flow adds information beyond early momentum.",
+          "tables_used": [
+            "utility_taker_flow_robustness_definitions.csv",
+            "utility_taker_flow_price_matched_permutation.csv",
+            "utility_strategy_iteration_verification.json"
+          ],
+          "filters": [
+            "frozen 8h utility signals",
+            "confirmation folds 3-6",
+            "rank-neutral diagnostic"
+          ],
+          "metric_definitions": [
+            "One-sided p is the share of within-stratum shuffled flags with precision increment at least as large as observed."
+          ]
+        }
+      },
+      {
+        "id": "utility-breakout-runner-validation",
+        "label": "Breakout full-position runner rejection",
+        "path": "utility_breakout_runner_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_breakout_runner_calibration.csv') ORDER BY policy",
+          "description": "Six no-partial-sale exit policies are selected only on mature calibration windows and compared with the current half-at-150% breakout router.",
+          "tables_used": [
+            "utility_breakout_runner_calibration.csv",
+            "utility_breakout_runner_30d_calibration_sensitivity.csv",
+            "utility_breakout_runner_confirmation.csv",
+            "utility_breakout_runner_calibration_paired.csv",
+            "utility_strategy_iteration_verification.json"
+          ],
+          "filters": [
+            "same original 8h entry",
+            "same stop and wick exit",
+            "no confirmation-set rescue"
+          ],
+          "metric_definitions": [
+            "Paired increment compares raw outcomes for the same signal; portfolio expectancy also enforces concurrency and exposure constraints."
+          ]
+        }
+      },
+      {
+        "id": "utility-breakout-partial-fraction-validation",
+        "label": "Breakout partial-sale fraction nonstationarity",
+        "path": "utility_breakout_partial_fraction_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_breakout_partial_fraction_confirmation.csv') WHERE slippage_bps_each_side = 5 ORDER BY partial_fraction",
+          "description": "The already-fixed breakout router sells 25%, 50%, or 75% at +150%; all other clocks and controls remain identical.",
+          "tables_used": [
+            "utility_breakout_partial_fraction_calibration.csv",
+            "utility_breakout_partial_fraction_confirmation.csv",
+            "utility_breakout_partial_fraction_calibration_paired.csv",
+            "utility_strategy_iteration_verification.json"
+          ],
+          "filters": [
+            "same 8h entry and breakout clock",
+            "same +150% target and 30% trail",
+            "calibration selection followed by confirmation audit"
+          ],
+          "metric_definitions": [
+            "Temporal reversal means the calibration-selected fraction has a negative paired increment in confirmation."
+          ]
+        }
+      },
+      {
+        "id": "utility-regime-partial-router-validation",
+        "label": "Regime-conditioned partial-sale routing rejection",
+        "path": "utility_regime_partial_router_decision.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "sql": "SELECT * FROM read_csv_auto('utility_regime_partial_router_confirmation.csv') WHERE slippage_bps_each_side = 5 ORDER BY route",
+          "description": "Frozen BTC trend, volatility and altcoin breadth states route only the already-fixed partial-sale fraction; calibration defines every rule and confirmation only audits it.",
+          "tables_used": [
+            "utility_regime_partial_router_calibration.csv",
+            "utility_regime_partial_router_confirmation.csv",
+            "utility_regime_partial_fraction_segments.csv",
+            "utility_regime_partial_state_support.csv",
+            "utility_strategy_iteration_verification.json"
+          ],
+          "filters": [
+            "minimum five fraction-sensitive calibration signals",
+            "same entry, target, trail and costs",
+            "no confirmation-set rescue"
+          ],
+          "metric_definitions": [
+            "Paired increment is routed net return minus the fixed 50% partial-sale return for the same signal."
+          ]
+        }
+      },
+      {
+        "id": "forward-operational-audit",
+        "label": "Immutable forward-monitor operational audit",
+        "path": "forward_monitor_operational_audit_2026-07-21.json",
+        "query": {
+          "engine": "python",
+          "language": "json",
+          "description": "Snapshot dates, mature-label counts and a late read-only public-data dry-run are reconciled without backfilling missed decision clocks.",
+          "tables_used": [
+            "forward_monitor_operational_audit_2026-07-21.json",
+            "utility_strategy_iteration_verification.json"
+          ],
+          "filters": [
+            "08:20 Asia/Shanghai immutable clock",
+            "dry-run probe excluded from OOS",
+            "no order routing"
+          ],
+          "metric_definitions": [
+            "A true OOS snapshot must exist at the scheduled decision clock; a later reconstruction is diagnostic only."
+          ]
+        }
+      }
+    ],
+    "charts": [
+      {
+        "id": "fold-lift",
+        "title": "Walk-forward top-2% lift",
+        "type": "bar",
+        "dataset": "fold_metrics",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "price_top_2pct_lift",
+            "type": "quantitative",
+            "title": "Lift"
+          }
+        },
+        "sourceId": "price-validation"
+      },
+      {
+        "id": "sensitivity-lift",
+        "title": "Threshold and horizon lift",
+        "type": "line",
+        "dataset": "sensitivity",
+        "encodings": {
+          "x": {
+            "field": "threshold_pct",
+            "type": "quantitative",
+            "title": "Threshold (%)"
+          },
+          "y": {
+            "field": "lift",
+            "type": "quantitative",
+            "title": "Lift"
+          },
+          "color": {
+            "field": "horizon_days",
+            "type": "nominal",
+            "title": "Horizon (days)"
+          }
+        },
+        "sourceId": "sensitivity-validation"
+      },
+      {
+        "id": "oi-fold-lift",
+        "title": "Price-only and price+OI lift",
+        "type": "bar",
+        "dataset": "oi_fold_comparison",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "top_2pct_lift",
+            "type": "quantitative",
+            "title": "Lift"
+          },
+          "color": {
+            "field": "model",
+            "type": "nominal",
+            "title": "Model"
+          }
+        },
+        "options": {
+          "grouping": "grouped"
+        },
+        "sourceId": "oi-validation"
+      },
+      {
+        "id": "continuation-fold-pf",
+        "title": "8h utility challenger profit factor by confirmation fold",
+        "type": "bar",
+        "dataset": "continuation_utility_folds",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "profit_factor",
+            "type": "quantitative",
+            "title": "Profit factor"
+          }
+        },
+        "sourceId": "continuation-utility-validation"
+      },
+      {
+        "id": "intensity-fold-ap",
+        "title": "Price and ordinal-intensity average precision by confirmation fold",
+        "type": "line",
+        "dataset": "extreme_intensity_folds",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "fields": [
+              "price_average_precision",
+              "intensity_average_precision"
+            ],
+            "type": "quantitative",
+            "title": "Average precision"
+          }
+        },
+        "sourceId": "intensity-exit-frontier-validation"
+      },
+      {
+        "id": "tail-exit-fold-pf",
+        "title": "Right-tail exit profit factor by confirmation fold",
+        "type": "bar",
+        "dataset": "utility_tail_exit_folds",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "profit_factor",
+            "type": "quantitative",
+            "title": "Profit factor"
+          }
+        },
+        "sourceId": "intensity-exit-frontier-validation"
+      },
+      {
+        "id": "utility-intensity-router-precision",
+        "title": "8h entries and 20h high-intensity precision by fold",
+        "type": "bar",
+        "dataset": "utility_intensity_router_folds",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "precision",
+            "type": "quantitative",
+            "title": "Remaining +200% precision"
+          },
+          "color": {
+            "field": "group",
+            "type": "nominal",
+            "title": "Group"
+          }
+        },
+        "options": {
+          "grouping": "grouped"
+        },
+        "sourceId": "utility-intensity-router-validation"
+      },
+      {
+        "id": "utility-exhaustion-exit-pf",
+        "title": "Volume-backed upper-wick exit profit factor by fold",
+        "type": "bar",
+        "dataset": "utility_exhaustion_exit_folds",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "profit_factor",
+            "type": "quantitative",
+            "title": "Profit factor"
+          }
+        },
+        "sourceId": "utility-exhaustion-exit-validation"
+      },
+      {
+        "id": "utility-exhaustion-attribution-pf",
+        "title": "Static-tail and upper-wick policy profit factor by fold",
+        "type": "line",
+        "dataset": "utility_exhaustion_attribution_folds",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "profit_factor",
+            "type": "quantitative",
+            "title": "Profit factor"
+          },
+          "color": {
+            "field": "policy",
+            "type": "nominal",
+            "title": "Policy"
+          }
+        },
+        "sourceId": "utility-exhaustion-attribution-validation"
+      },
+      {
+        "id": "utility-entry-timing-pf",
+        "title": "5% dip-and-reclaim entry profit factor by fold",
+        "type": "bar",
+        "dataset": "utility_entry_timing_folds",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "profit_factor",
+            "type": "quantitative",
+            "title": "Profit factor"
+          }
+        },
+        "sourceId": "utility-entry-timing-validation"
+      },
+      {
+        "id": "utility-entry-frontier-precision",
+        "title": "Fixed entry-rule +200% precision frontier",
+        "type": "bar",
+        "dataset": "utility_entry_frontier",
+        "encodings": {
+          "x": {
+            "field": "entry_rule",
+            "type": "nominal",
+            "title": "Entry rule"
+          },
+          "y": {
+            "field": "actual_200pct_precision",
+            "type": "quantitative",
+            "title": "+200% precision"
+          }
+        },
+        "sourceId": "utility-entry-frontier-validation"
+      },
+      {
+        "id": "utility-breakout-hold-router-pf",
+        "title": "Breakout hold-router profit factor by fold",
+        "type": "line",
+        "dataset": "utility_breakout_hold_router_folds",
+        "encodings": {
+          "x": {
+            "field": "fold",
+            "type": "nominal",
+            "title": "Fold"
+          },
+          "y": {
+            "field": "profit_factor",
+            "type": "quantitative",
+            "title": "Profit factor"
+          },
+          "color": {
+            "field": "route",
+            "type": "nominal",
+            "title": "Exit route"
+          }
+        },
+        "sourceId": "utility-breakout-hold-router-validation"
+      },
+      {
+        "id": "utility-breakout-add-expectancy",
+        "title": "Breakout reserve allocation and confirmation expectancy",
+        "type": "bar",
+        "dataset": "utility_breakout_add",
+        "encodings": {
+          "x": {
+            "field": "reserved_for_breakout",
+            "type": "nominal",
+            "title": "Position reserved for breakout"
+          },
+          "y": {
+            "field": "expectancy",
+            "type": "quantitative",
+            "title": "Portfolio trade expectancy"
+          }
+        },
+        "sourceId": "utility-breakout-add-validation"
+      },
+      {
+        "id": "utility-taker-flow-precision",
+        "title": "8h taker-buy-share and +200% precision",
+        "type": "bar",
+        "dataset": "utility_taker_flow_recognition",
+        "encodings": {
+          "x": {
+            "field": "sample",
+            "type": "nominal",
+            "title": "Evidence sample"
+          },
+          "y": {
+            "field": "precision",
+            "type": "quantitative",
+            "title": "+200% precision"
+          },
+          "color": {
+            "field": "group",
+            "type": "nominal",
+            "title": "Signal group"
+          }
+        },
+        "options": {
+          "grouping": "grouped"
+        },
+        "sourceId": "utility-taker-flow-validation"
+      },
+      {
+        "id": "utility-taker-matched-p",
+        "title": "Taker-flow price-path matched permutation p-values",
+        "type": "bar",
+        "dataset": "utility_taker_matched_permutation",
+        "encodings": {
+          "x": {
+            "field": "schema",
+            "type": "nominal",
+            "title": "Matched price information"
+          },
+          "y": {
+            "field": "one_sided_p",
+            "type": "quantitative",
+            "title": "One-sided p-value"
+          }
+        },
+        "sourceId": "utility-taker-robustness-validation"
+      },
+      {
+        "id": "utility-breakout-runner-expectancy",
+        "title": "Partial exit versus full-position runner expectancy",
+        "type": "bar",
+        "dataset": "utility_breakout_runner_expectancy",
+        "encodings": {
+          "x": {
+            "field": "policy",
+            "type": "nominal",
+            "title": "Exit policy"
+          },
+          "y": {
+            "field": "expectancy",
+            "type": "quantitative",
+            "title": "Trade expectancy"
+          },
+          "color": {
+            "field": "period",
+            "type": "nominal",
+            "title": "Evidence period"
+          }
+        },
+        "options": {
+          "grouping": "grouped"
+        },
+        "sourceId": "utility-breakout-runner-validation"
+      },
+      {
+        "id": "utility-breakout-partial-fraction-expectancy",
+        "title": "Partial-sale fraction expectancy by evidence period",
+        "type": "bar",
+        "dataset": "utility_breakout_partial_fraction_expectancy",
+        "encodings": {
+          "x": {
+            "field": "sale_fraction",
+            "type": "nominal",
+            "title": "Fraction sold at +150%"
+          },
+          "y": {
+            "field": "expectancy",
+            "type": "quantitative",
+            "title": "Trade expectancy"
+          },
+          "color": {
+            "field": "period",
+            "type": "nominal",
+            "title": "Evidence period"
+          }
+        },
+        "options": {
+          "grouping": "grouped"
+        },
+        "sourceId": "utility-breakout-partial-fraction-validation"
+      },
+      {
+        "id": "utility-regime-partial-router-increment",
+        "title": "Regime-router paired increment by evidence period",
+        "type": "bar",
+        "dataset": "utility_regime_partial_router_increment",
+        "encodings": {
+          "x": {
+            "field": "route",
+            "type": "nominal",
+            "title": "Frozen route"
+          },
+          "y": {
+            "field": "paired_increment_mean",
+            "type": "quantitative",
+            "title": "Paired return increment"
+          },
+          "color": {
+            "field": "period",
+            "type": "nominal",
+            "title": "Evidence period"
+          }
+        },
+        "options": {
+          "grouping": "grouped"
+        },
+        "sourceId": "utility-regime-partial-router-validation"
+      }
+    ],
+    "tables": [
+      {
+        "id": "paper-table",
+        "title": "Paper strategy policies at default costs",
+        "dataset": "paper_default",
+        "columns": [
+          {
+            "field": "policy",
+            "label": "Policy",
+            "type": "text"
+          },
+          {
+            "field": "trades",
+            "label": "Trades",
+            "type": "number"
+          },
+          {
+            "field": "expectancy",
+            "label": "Expectancy",
+            "type": "percent"
+          },
+          {
+            "field": "profit_factor",
+            "label": "Profit factor",
+            "type": "number"
+          },
+          {
+            "field": "max_drawdown",
+            "label": "Max drawdown",
+            "type": "percent"
+          },
+          {
+            "field": "gate_pass",
+            "label": "Gate pass",
+            "type": "text"
+          }
+        ],
+        "defaultSort": {
+          "field": "expectancy",
+          "direction": "desc"
+        },
+        "sourceId": "paper-validation"
+      },
+      {
+        "id": "event-table",
+        "title": "Current 30-day +200% events",
+        "dataset": "current_events",
+        "columns": [
+          {
+            "field": "symbol",
+            "label": "Symbol",
+            "type": "text"
+          },
+          {
+            "field": "classification",
+            "label": "Class",
+            "type": "text"
+          },
+          {
+            "field": "close_return",
+            "label": "Close reference return",
+            "type": "percent"
+          },
+          {
+            "field": "low_return",
+            "label": "Wick reference return",
+            "type": "percent"
+          },
+          {
+            "field": "peak_time",
+            "label": "Peak time",
+            "type": "date"
+          }
+        ],
+        "defaultSort": {
+          "field": "close_return",
+          "direction": "desc"
+        },
+        "sourceId": "current-events"
+      },
+      {
+        "id": "candidate-table",
+        "title": "Current read-only research candidates",
+        "dataset": "candidates",
+        "columns": [
+          {
+            "field": "symbol",
+            "label": "Symbol",
+            "type": "text"
+          },
+          {
+            "field": "ranking_score_pctile",
+            "label": "Score percentile",
+            "type": "number"
+          },
+          {
+            "field": "research_stage",
+            "label": "Stage",
+            "type": "text"
+          },
+          {
+            "field": "oi_annotation",
+            "label": "OI annotation",
+            "type": "text"
+          },
+          {
+            "field": "return_7d",
+            "label": "7d return",
+            "type": "percent"
+          }
+        ],
+        "defaultSort": {
+          "field": "ranking_score_pctile",
+          "direction": "desc"
+        },
+        "sourceId": "candidate-validation"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# Binance \u66b4\u6da8\u5e01\u56e0\u5b50\uff1a\u4e25\u683c\u5386\u53f2\u9a8c\u8bc1\u4e0e\u524d\u77bb\u76d1\u63a7\u57fa\u7ebf\n\n\u56fa\u5b9a 8 \u56e0\u5b50\u3001\u65e0\u6d4b\u8bd5\u96c6\u9009\u6a21\u3001OI \u540c\u884c\u6bd4\u8f83\u30014h \u8def\u5f84\u7ec4\u5408\u56de\u6d4b\u4e0e\u771f\u6b63 OOS \u76d1\u63a7\u3002"
+      },
+      {
+        "id": "summary",
+        "type": "markdown",
+        "sourceId": "price-validation",
+        "body": "## Executive Summary\n\n\u5386\u53f2 walk-forward top-2% lift \u4e3a **8.94x**\uff087 \u65e5\u5757 95% \u533a\u95f4 7.04\u201310.52x\uff09\uff0c\u72ec\u7acb\u4e8b\u4ef6\u6355\u83b7\u7387 39.4%\uff08\u4e8b\u4ef6 bootstrap 95% \u533a\u95f4 30.3%\u201349.5%\uff09\u3002\u8fd9\u4e9b\u662f\u5df2\u67e5\u770b\u8fc7\u7684\u5386\u53f2\u9a8c\u8bc1\uff0c\u4e0d\u662f\u771f\u6b63 OOS\u3002"
+      },
+      {
+        "id": "fold-chart-block",
+        "type": "chart",
+        "chartId": "fold-lift"
+      },
+      {
+        "id": "sensitivity-heading",
+        "type": "markdown",
+        "body": "## \u9608\u503c\u4e0e\u5468\u671f\u654f\u611f\u6027\n\n+200% / 14 \u65e5\u4e3a\u4e3b\u6807\u7b7e\uff1b+900% \u53ea\u63a2\u7d22\u5341\u500d\u5e01\uff0c\u4e0d\u53c2\u4e0e\u8c03\u53c2\u3002"
+      },
+      {
+        "id": "sensitivity-chart-block",
+        "type": "chart",
+        "chartId": "sensitivity-lift"
+      },
+      {
+        "id": "oi-heading",
+        "type": "markdown",
+        "sourceId": "oi-validation",
+        "body": "## \u5c0f\u5e02\u503c\u4e0e OI\n\n\u5b8c\u6574 OI \u7ec4\u5408\u6392\u5e8f\u8d44\u683c\u4e3a **False**\uff1b\u591a\u6570\u6298\u540c\u65f6\u6539\u5584 AP \u4e0e lift \u7684\u6bd4\u4f8b\u4e3a 20%\u3002\u672a\u901a\u8fc7\u65f6 OI \u53ea\u4f5c\u62e5\u6324\u5ea6\u6216\u6570\u636e\u8d28\u91cf\u6ce8\u91ca\u3002"
+      },
+      {
+        "id": "oi-chart-block",
+        "type": "chart",
+        "chartId": "oi-fold-lift"
+      },
+      {
+        "id": "paper-heading",
+        "type": "markdown",
+        "sourceId": "paper-validation",
+        "body": "## 1x \u6c38\u7eed\u7eb8\u9762\u53ef\u884c\u6027\n\n\u6700\u7ec8\u5206\u7c7b\u4e3a **paper_trade_candidate**\u3002\u53ea\u6709\u6210\u672c\u540e\u671f\u671b\u3001\u5229\u6da6\u56e0\u5b50\u3001\u56de\u64a4\u3001\u8de8\u6298/\u5e02\u573a\u72b6\u6001\u3001\u6700\u5927\u4e8b\u4ef6\u5254\u9664\u548c\u5229\u6da6\u96c6\u4e2d\u5ea6\u540c\u65f6\u901a\u8fc7\uff0c\u624d\u79f0\u7eb8\u9762\u5019\u9009\uff1b\u672c\u9879\u76ee\u6c38\u4e0d\u81ea\u52a8\u4e0b\u5355\u3002"
+      },
+      {
+        "id": "paper-table-block",
+        "type": "table",
+        "tableId": "paper-table"
+      },
+      {
+        "id": "continuation-utility-heading",
+        "type": "markdown",
+        "sourceId": "continuation-utility-validation",
+        "body": "## 8h continuation utility challenger\n\nThe direct +200% identification gate still fails, but the frozen P0+8h utility challenger is classified as **paper_candidate_pending_true_oos**. At default costs its constrained simulation has 65 trades, 16.5% expectancy, profit factor 2.50, and -4.3% maximum drawdown. 75% of confirmation folds and 83% of market states have profit factor above one. Week-cluster and symbol-cluster bootstrap profit-factor lower bounds are 1.14 and 1.20. This remains historical evidence pending immutable true-OOS observations; no automatic trading is allowed."
+      },
+      {
+        "id": "continuation-utility-chart-block",
+        "type": "chart",
+        "chartId": "continuation-fold-pf"
+      },
+      {
+        "id": "intensity-exit-frontier-heading",
+        "type": "markdown",
+        "sourceId": "intensity-exit-frontier-validation",
+        "body": "## Multi-threshold recognition and right-tail exit frontier\n\nThe calibration-selected ordinal intensity challenger raises confirmation AP to 0.114 and retains 31.8% of remaining +200% labels, but its clustered incremental bounds cross zero, so classification remains **watchlist_only**. Failure-to-launch exits are rejected. The +150% half / 30% trail counterfactual has 19.3% expectancy and profit factor 2.81, but paired incremental bounds also cross zero; the frozen exit remains primary and automatic trading remains disabled."
+      },
+      {
+        "id": "intensity-fold-ap-block",
+        "type": "chart",
+        "chartId": "intensity-fold-ap"
+      },
+      {
+        "id": "tail-exit-fold-pf-block",
+        "type": "chart",
+        "chartId": "tail-exit-fold-pf"
+      },
+      {
+        "id": "utility-intensity-router-heading",
+        "type": "markdown",
+        "sourceId": "utility-intensity-router-validation",
+        "body": "## Rejected 8h-entry / 20h-intensity router\n\nThe pooled remaining +200% precision rises from 11.4% to 15.8%, but only 30% of positives remain and two of four folds select no winner. Forcing low-intensity exits changes expectancy from 16.5% to -1.1% and profit factor from 2.50 to 0.84. Both clustered paired-increment upper bounds are negative. The router is strongly rejected and is not added to forward labels."
+      },
+      {
+        "id": "utility-intensity-router-chart-block",
+        "type": "chart",
+        "chartId": "utility-intensity-router-precision"
+      },
+      {
+        "id": "utility-exhaustion-exit-heading",
+        "type": "markdown",
+        "sourceId": "utility-exhaustion-exit-validation",
+        "body": "## Profit-side volume-backed upper-wick exit\n\nCalibration selects half at +150%, a 35% trail, and next-open exit after a doubled position prints a volume-backed upper-wick reversal. Confirmation expectancy is 17.9% versus 16.5%, PF is 2.63 versus 2.50, and all four fold PF values exceed one. Paired mean increment is 2.1%, but both clustered incremental lower bounds remain negative. It is frozen as a forward counterfactual only; the primary exit is unchanged."
+      },
+      {
+        "id": "utility-exhaustion-exit-chart-block",
+        "type": "chart",
+        "chartId": "utility-exhaustion-exit-pf"
+      },
+      {
+        "id": "utility-exhaustion-attribution-heading",
+        "type": "markdown",
+        "sourceId": "utility-exhaustion-attribution-validation",
+        "body": "## Exit-factor attribution: trail width versus upper-wick timing\n\nWidening the trail from 30% to 35% changes 12 paths and harms all 12; mean paired increment is -1.3% and both clustered upper bounds are negative. The pure upper-wick timing effect is +2.0% per signal row and +1.3% per independent event, but all row/event clustered lower bounds cross zero. The derived 30%-trail plus wick policy has 18.5% expectancy and PF 2.68; it was generated after inspecting confirmation and is prospective-label-only. The primary exit and automatic-trading prohibition remain unchanged."
+      },
+      {
+        "id": "utility-exhaustion-attribution-chart-block",
+        "type": "chart",
+        "chartId": "utility-exhaustion-attribution-pf"
+      },
+      {
+        "id": "utility-entry-timing-heading",
+        "type": "markdown",
+        "sourceId": "utility-entry-timing-validation",
+        "body": "## Entry execution after the frozen 8h score\n\nCalibration selects a 5% dip followed by a positive higher-close reclaim, entered at the next 4h open within 24 hours. Confirmation filters 88 signals to 54, raises row precision from 11.4% to 14.8%, and retains all five positive independent events. Event-cluster precision intervals are positive, but row-cluster intervals cross zero. Trade expectancy is 15.0% and PF 2.28; absolute and paired trade intervals also cross zero. The 8h score open remains primary; the reclaim rule is recorded prospectively only."
+      },
+      {
+        "id": "utility-entry-timing-chart-block",
+        "type": "chart",
+        "chartId": "utility-entry-timing-pf"
+      },
+      {
+        "id": "utility-entry-frontier-heading",
+        "type": "markdown",
+        "sourceId": "utility-entry-frontier-validation",
+        "body": "## Full fixed entry-rule frontier\n\nA completed six-bar breakout raises confirmation row precision to 28.6% and independent-event precision to 27.8%, but it had zero calibration positives, misses catalog-level BH gates, and event intervals cross zero. Waiting for the breakout before buying reduces matched trade return by 17.8%; both week and symbol upper bounds are negative. Breakout is therefore a hold-strength annotation, not a new buy trigger."
+      },
+      {
+        "id": "utility-entry-frontier-chart-block",
+        "type": "chart",
+        "chartId": "utility-entry-frontier-precision"
+      },
+      {
+        "id": "utility-breakout-hold-router-heading",
+        "type": "markdown",
+        "sourceId": "utility-breakout-hold-router-validation",
+        "body": "## Breakout-confirmed hold management\n\nThe frozen 8h entry stays unchanged. A completed breakout within 24 hours switches profit-side management only at the next 4h open to +150% half-sale, a 30% trail, and the volume-backed upper-wick next-open exit after a double. Historical expectancy is 19.6%, PF 2.79, and paired all-row / independent-event increments are 3.0% / 2.3%; all four clustered lower bounds are positive. Because the router was discovered after confirmation inspection, it is frozen only as a non-ranking forward counterfactual; primary entry, primary exit, and automatic-trading authority remain unchanged."
+      },
+      {
+        "id": "utility-breakout-hold-router-chart-block",
+        "type": "chart",
+        "chartId": "utility-breakout-hold-router-pf"
+      },
+      {
+        "id": "utility-breakout-add-heading",
+        "type": "markdown",
+        "sourceId": "utility-breakout-add-validation",
+        "body": "## Risk-neutral breakout add allocation\n\nTotal planned position risk is held fixed: reserve that is not triggered remains cash, so no result comes from extra leverage. All 10%/25%/50% reserve choices lose to the full initial position in every calibration split, so the selected reserve is **0%**. On confirmation, full initial deployment has 19.6% expectancy; a 10% reserve lowers it to 18.4%, with paired all-row / independent-event increments of -1.0% / -0.9%. The higher reported profit factor at larger reserves is explained by lower capital deployment, not incremental alpha. Breakout may manage an existing winner, but should not delay or enlarge the buy."
+      },
+      {
+        "id": "utility-breakout-add-chart-block",
+        "type": "chart",
+        "chartId": "utility-breakout-add-expectancy"
+      },
+      {
+        "id": "utility-taker-flow-heading",
+        "type": "markdown",
+        "sourceId": "utility-taker-flow-validation",
+        "body": "## 8h taker-buy-share prospective annotation\n\nRequiring completed-path taker buy share of at least 50% retains 9/10 confirmation +200% rows and raises row precision from 11.4% to 18.8%. Row week/symbol lower bounds are positive, but independent-event lower bounds cross zero. The filtered frozen-exit portfolio has 18.7% expectancy and PF 2.75; the filtered breakout-router combination has 22.1% and PF 3.07, but fold 6 and symbol-cluster gates fail. The field is therefore recorded prospectively without changing rank, stage veto, paper eligibility, primary entry/exit, or trading authority."
+      },
+      {
+        "id": "utility-taker-flow-chart-block",
+        "type": "chart",
+        "chartId": "utility-taker-flow-precision"
+      },
+      {
+        "id": "utility-taker-robustness-heading",
+        "type": "markdown",
+        "sourceId": "utility-taker-robustness-validation",
+        "body": "## Taker-flow independence audit\n\nThe 48%-51% nearby taker-share thresholds all improve +200% precision in calibration and confirmation. However, matching both early return and path efficiency gives p=0.069; the 50% field is directionally useful but not independently identified. It remains a rank-neutral forward annotation and cannot become a buy gate."
+      },
+      {
+        "id": "utility-taker-matched-chart-block",
+        "type": "chart",
+        "chartId": "utility-taker-matched-p"
+      },
+      {
+        "id": "utility-breakout-runner-heading",
+        "type": "markdown",
+        "sourceId": "utility-breakout-runner-validation",
+        "body": "## Breakout full-position runner rejected\n\nAll six no-partial-sale candidates fail calibration against `breakout6_half150_trail30_wick`. Confirmation's best point estimate (`breakout6_full_runner_a150_t30_wick`) is explicitly posthoc-only and cannot rescue the rejected family. The current half-at-150%, 30% trailing router and all safety constraints remain unchanged."
+      },
+      {
+        "id": "utility-breakout-runner-chart-block",
+        "type": "chart",
+        "chartId": "utility-breakout-runner-expectancy"
+      },
+      {
+        "id": "utility-breakout-partial-fraction-heading",
+        "type": "markdown",
+        "sourceId": "utility-breakout-partial-fraction-validation",
+        "body": "## Partial-sale fraction is not stable through time\n\nCalibration selects selling 75% at +150%, but confirmation favors 25%; the calibration-selected fraction reverses to a negative paired increment. The neutral 50% partial sale is retained, with no adaptive switch or forward rule change."
+      },
+      {
+        "id": "utility-breakout-partial-fraction-chart-block",
+        "type": "chart",
+        "chartId": "utility-breakout-partial-fraction-expectancy"
+      },
+      {
+        "id": "utility-regime-partial-router-heading",
+        "type": "markdown",
+        "sourceId": "utility-regime-partial-router-validation",
+        "body": "## Market state does not yet identify the sale fraction\n\nOnly 3 calibration signals and 6 confirmation signals change return when the partial-sale fraction changes. The semantic volatility rule reverses direction across periods, while the learned state rule falls back to 50% because no state reaches five affected calibration signals. The fixed 50% sale remains the only forward rule."
+      },
+      {
+        "id": "utility-regime-partial-router-chart-block",
+        "type": "chart",
+        "chartId": "utility-regime-partial-router-increment"
+      },
+      {
+        "id": "forward-operational-audit-heading",
+        "type": "markdown",
+        "sourceId": "forward-operational-audit",
+        "body": "## Forward-monitor operations are incomplete\n\nImmutable snapshots exist for 2026-07-18, 2026-07-19; 2026-07-20, 2026-07-21 are missing. The late live-data dry-run passed 527/527 price-feature coverage but wrote no snapshot and is excluded from true OOS. Mature 8h utility and launch-microstructure observations remain zero, so the paper candidate cannot be promoted."
+      },
+      {
+        "id": "current-heading",
+        "type": "markdown",
+        "body": "## \u5f53\u524d\u4e8b\u4ef6\u4e0e\u89c2\u5bdf\u540d\u5355\n\nAKE\u3001BTW \u4e0e 17 \u4e2a\u6536\u76d8\u786e\u8ba4\u30012 \u4e2a\u63d2\u9488\u4e8b\u4ef6\u7531\u72ec\u7acb\u9a8c\u8bc1\u5668\u590d\u7b97\u3002"
+      },
+      {
+        "id": "event-table-block",
+        "type": "table",
+        "tableId": "event-table"
+      },
+      {
+        "id": "candidate-table-block",
+        "type": "table",
+        "tableId": "candidate-table"
+      },
+      {
+        "id": "forward-microstructure",
+        "type": "markdown",
+        "body": "## \u771f\u6b63\u524d\u77bb\u7684\u542f\u52a8\u7ed3\u6784\u9a8c\u8bc1\n\n\u6bcf\u5929 12:05\uff08Asia/Shanghai\uff09\u5728 24 \u5c0f\u65f6\u542f\u52a8\u786e\u8ba4\u540e\u51bb\u7ed3\u76d8\u53e3\u6df1\u5ea6\u4e0e\u51b2\u51fb\u6210\u672c\u3001\u8d44\u91d1\u8d39\u7387\u3001OI \u53ca\u5176 1/4/24 \u5c0f\u65f6\u53d8\u5316\u3001\u591a\u7a7a\u6bd4\u548c\u4e3b\u52a8\u4e70\u5356\u7ed3\u6784\u3002\u91c7\u96c6\u53ea\u5141\u8bb8\u5728\u786e\u8ba4\u540e 15 \u5206\u949f\u5185\u5b8c\u6210\uff1b\u8fdf\u5230\u6216\u6570\u636e\u4e0d\u5b8c\u6574\u65f6 fail-closed\uff0c\u4e0d\u80fd\u4e8b\u540e\u56de\u586b\u3002\u9996\u8f6e\u5ba1\u8ba1\u62d2\u7edd\u4e86\u5df2\u8fdf\u5230\u7684 AKE \u4e0e ESPORTS\uff0c\u56e0\u6b64\u5f53\u524d\u6709\u6548\u5fae\u89c2\u7ed3\u6784\u6837\u672c\u4e3a 0\u3002\u6ee1 30 \u5929\u540e\u8ffd\u52a0\u5b9e\u9645\u8d44\u91d1\u8d39\u7387\u4e0e\u4e24\u5957\u51bb\u7ed3\u9000\u51fa\u7ed3\u679c\u3002\u6240\u6709\u5b57\u6bb5\u4ec5\u4f5c\u524d\u77bb\u7814\u7a76\uff0c\u4e0d\u6539\u53d8\u6392\u540d\u3001\u9636\u6bb5\u5426\u51b3\u6216\u4ea4\u6613\u6743\u9650\u3002"
+      },
+      {
+        "id": "limits",
+        "type": "markdown",
+        "body": "## \u9650\u5236\u4e0e\u4e0b\u4e00\u6b65\n\n\u5386\u53f2\u4e0b\u67b6\u5408\u7ea6\u4ecd\u6709\u8986\u76d6\u7f3a\u53e3\uff0c\u957f\u7a97 OI \u4f9d\u8d56\u5df2\u6709\u7f13\u5b58\uff0c\u671f\u8d27/\u73b0\u8d27\u6210\u4ea4\u6bd4\u4e0d\u53ef\u6062\u590d\u3002\u6bcf\u65e5 08:20\uff08Asia/Shanghai\uff09\u53ea\u8bfb\u76d1\u63a7\u4fdd\u5b58\u4e0d\u53ef\u8986\u76d6\u5feb\u7167\uff1b30/60/90 \u5929\u590d\u76d8\u524d\u4e0d\u91cd\u8bad\u3001\u4e0d\u6539\u9608\u503c\u3002"
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "status": "ready",
+    "generatedAt": "2026-07-18T16:58:50.919432+00:00",
+    "datasets": {
+      "fold_metrics": [
+        {
+          "fold": 0,
+          "test_start": "2025-12-24 00:00:00+00:00",
+          "test_end": "2026-01-22 00:00:00+00:00",
+          "test_rows": 14366,
+          "test_positives": 103,
+          "price_top_2pct_precision": 0.1033333333333333,
+          "price_top_2pct_lift": 14.412491909385114,
+          "price_auc": 0.7500988707967999,
+          "simple_top_2pct_lift": 12.08789644012945
+        },
+        {
+          "fold": 1,
+          "test_start": "2026-01-23 00:00:00+00:00",
+          "test_end": "2026-02-21 00:00:00+00:00",
+          "test_rows": 14797,
+          "test_positives": 79,
+          "price_top_2pct_precision": 0.0433333333333333,
+          "price_top_2pct_lift": 8.116497890295358,
+          "price_auc": 0.7791140100557141,
+          "simple_top_2pct_lift": 9.36518987341772
+        },
+        {
+          "fold": 2,
+          "test_start": "2026-02-22 00:00:00+00:00",
+          "test_end": "2026-03-23 00:00:00+00:00",
+          "test_rows": 14998,
+          "test_positives": 81,
+          "price_top_2pct_precision": 0.04375,
+          "price_top_2pct_lift": 8.100771604938272,
+          "price_auc": 0.6349909830278984,
+          "simple_top_2pct_lift": 7.522145061728396
+        },
+        {
+          "fold": 3,
+          "test_start": "2026-03-24 00:00:00+00:00",
+          "test_end": "2026-04-22 00:00:00+00:00",
+          "test_rows": 15177,
+          "test_positives": 330,
+          "price_top_2pct_precision": 0.1424242424242424,
+          "price_top_2pct_lift": 6.550220385674931,
+          "price_auc": 0.8006386352921007,
+          "simple_top_2pct_lift": 4.599090909090909
+        },
+        {
+          "fold": 4,
+          "test_start": "2026-04-23 00:00:00+00:00",
+          "test_end": "2026-05-22 00:00:00+00:00",
+          "test_rows": 15358,
+          "test_positives": 145,
+          "price_top_2pct_precision": 0.106060606060606,
+          "price_top_2pct_lift": 11.233646812957158,
+          "price_auc": 0.8222096800150506,
+          "simple_top_2pct_lift": 7.061149425287356
+        },
+        {
+          "fold": 5,
+          "test_start": "2026-05-23 00:00:00+00:00",
+          "test_end": "2026-06-21 00:00:00+00:00",
+          "test_rows": 15503,
+          "test_positives": 221,
+          "price_top_2pct_precision": 0.1545454545454545,
+          "price_top_2pct_lift": 10.84125874125874,
+          "price_auc": 0.7993034125854745,
+          "simple_top_2pct_lift": 9.353242835595776
+        },
+        {
+          "fold": 6,
+          "test_start": "2026-06-22 00:00:00+00:00",
+          "test_end": "2026-07-03 00:00:00+00:00",
+          "test_rows": 6258,
+          "test_positives": 56,
+          "price_top_2pct_precision": 0.0075757575757575,
+          "price_top_2pct_lift": 0.8465909090909092,
+          "price_auc": 0.7066729626387802,
+          "simple_top_2pct_lift": 0.0
+        }
+      ],
+      "sensitivity": [
+        {
+          "horizon_days": 3,
+          "threshold_pct": 50,
+          "rows": 96457,
+          "positive_rows": 1982,
+          "selected_rows": 2042,
+          "base_rate": 0.0205480162144789,
+          "precision": 0.1645445641527913,
+          "lift": 8.00780778228345,
+          "p_value_bh": 1.3423595368769755e-197
+        },
+        {
+          "horizon_days": 3,
+          "threshold_pct": 100,
+          "rows": 96457,
+          "positive_rows": 501,
+          "selected_rows": 2042,
+          "base_rate": 0.0051940242802492,
+          "precision": 0.0563173359451518,
+          "lift": 10.84271711229842,
+          "p_value_bh": 7.031049080831279e-82
+        },
+        {
+          "horizon_days": 3,
+          "threshold_pct": 150,
+          "rows": 96457,
+          "positive_rows": 220,
+          "selected_rows": 2042,
+          "base_rate": 0.0022808090651793,
+          "precision": 0.0308521057786483,
+          "lift": 13.526825304959486,
+          "p_value_bh": 7.961807644919576e-52
+        },
+        {
+          "horizon_days": 3,
+          "threshold_pct": 200,
+          "rows": 96457,
+          "positive_rows": 134,
+          "selected_rows": 2042,
+          "base_rate": 0.0013892200669728,
+          "precision": 0.0190989226248775,
+          "lift": 13.74794611662549,
+          "p_value_bh": 6.694458360553598e-33
+        },
+        {
+          "horizon_days": 3,
+          "threshold_pct": 300,
+          "rows": 96457,
+          "positive_rows": 63,
+          "selected_rows": 2042,
+          "base_rate": 0.0006531407777558,
+          "precision": 0.0078354554358472,
+          "lift": 11.9965797615161,
+          "p_value_bh": 2.684433598193528e-13
+        },
+        {
+          "horizon_days": 3,
+          "threshold_pct": 500,
+          "rows": 96457,
+          "positive_rows": 20,
+          "selected_rows": 2042,
+          "base_rate": 0.0002073462786526,
+          "precision": 0.0009794319294809,
+          "lift": 4.723653281096964,
+          "p_value_bh": 0.0712661587520849
+        },
+        {
+          "horizon_days": 3,
+          "threshold_pct": 900,
+          "rows": 96457,
+          "positive_rows": 5,
+          "selected_rows": 2042,
+          "base_rate": 5.183656966316597e-05,
+          "precision": 0.0,
+          "lift": 0.0,
+          "p_value_bh": 1.0
+        },
+        {
+          "horizon_days": 7,
+          "threshold_pct": 50,
+          "rows": 96457,
+          "positive_rows": 4825,
+          "selected_rows": 2042,
+          "base_rate": 0.0500222897249551,
+          "precision": 0.2791380999020568,
+          "lift": 5.580274342435791,
+          "p_value_bh": 2.6421793851596338e-261
+        },
+        {
+          "horizon_days": 7,
+          "threshold_pct": 100,
+          "rows": 96457,
+          "positive_rows": 1475,
+          "selected_rows": 2042,
+          "base_rate": 0.0152917880506339,
+          "precision": 0.122918707149853,
+          "lift": 8.038216769866699,
+          "p_value_bh": 1.15462807258245e-146
+        },
+        {
+          "horizon_days": 7,
+          "threshold_pct": 150,
+          "rows": 96457,
+          "positive_rows": 696,
+          "selected_rows": 2042,
+          "base_rate": 0.0072156504971127,
+          "precision": 0.0675808031341821,
+          "lift": 9.36586426424398,
+          "p_value_bh": 3.647859945009211e-89
+        },
+        {
+          "horizon_days": 7,
+          "threshold_pct": 200,
+          "rows": 96457,
+          "positive_rows": 457,
+          "selected_rows": 2042,
+          "base_rate": 0.0047378624672133,
+          "precision": 0.048971596474045,
+          "lift": 10.336221621656376,
+          "p_value_bh": 3.7222940735439717e-69
+        },
+        {
+          "horizon_days": 7,
+          "threshold_pct": 300,
+          "rows": 96457,
+          "positive_rows": 222,
+          "selected_rows": 2042,
+          "base_rate": 0.0023015436930445,
+          "precision": 0.0254652301665034,
+          "lift": 11.064413090857752,
+          "p_value_bh": 3.967956355813758e-38
+        },
+        {
+          "horizon_days": 7,
+          "threshold_pct": 500,
+          "rows": 96457,
+          "positive_rows": 82,
+          "selected_rows": 2042,
+          "base_rate": 0.0008501197424759,
+          "precision": 0.0063663075416258,
+          "lift": 7.4887186163732355,
+          "p_value_bh": 2.2145980016080962e-08
+        },
+        {
+          "horizon_days": 7,
+          "threshold_pct": 900,
+          "rows": 96457,
+          "positive_rows": 26,
+          "selected_rows": 2042,
+          "base_rate": 0.0002695501622484,
+          "precision": 0.0,
+          "lift": 0.0,
+          "p_value_bh": 1.0
+        },
+        {
+          "horizon_days": 14,
+          "threshold_pct": 50,
+          "rows": 96457,
+          "positive_rows": 9182,
+          "selected_rows": 2042,
+          "base_rate": 0.0951926765294379,
+          "precision": 0.3765915768854064,
+          "lift": 3.95609820645128,
+          "p_value_bh": 2.905068629741473e-263
+        },
+        {
+          "horizon_days": 14,
+          "threshold_pct": 100,
+          "rows": 96457,
+          "positive_rows": 3256,
+          "selected_rows": 2042,
+          "base_rate": 0.0337559741646536,
+          "precision": 0.2027424094025465,
+          "lift": 6.006119343900931,
+          "p_value_bh": 1.1215714461410954e-196
+        },
+        {
+          "horizon_days": 14,
+          "threshold_pct": 150,
+          "rows": 96457,
+          "positive_rows": 1630,
+          "selected_rows": 2042,
+          "base_rate": 0.0168987217101921,
+          "precision": 0.1297747306562194,
+          "lift": 7.67955901528034,
+          "p_value_bh": 6.654186423365715e-150
+        },
+        {
+          "horizon_days": 14,
+          "threshold_pct": 200,
+          "rows": 96457,
+          "positive_rows": 1015,
+          "selected_rows": 2042,
+          "base_rate": 0.0105228236416226,
+          "precision": 0.0940254652301665,
+          "lift": 8.935383546508543,
+          "p_value_bh": 2.3519130644831467e-120
+        },
+        {
+          "horizon_days": 14,
+          "threshold_pct": 300,
+          "rows": 96457,
+          "positive_rows": 535,
+          "selected_rows": 2042,
+          "base_rate": 0.0055465129539587,
+          "precision": 0.0563173359451518,
+          "lift": 10.153647239741137,
+          "p_value_bh": 1.6779184708049324e-78
+        },
+        {
+          "horizon_days": 14,
+          "threshold_pct": 500,
+          "rows": 96457,
+          "positive_rows": 206,
+          "selected_rows": 2042,
+          "base_rate": 0.0021356666701224,
+          "precision": 0.0215475024485798,
+          "lift": 10.08935652273138,
+          "p_value_bh": 1.1270293292521171e-30
+        },
+        {
+          "horizon_days": 14,
+          "threshold_pct": 900,
+          "rows": 96457,
+          "positive_rows": 85,
+          "selected_rows": 2042,
+          "base_rate": 0.0008812216842738,
+          "precision": 0.004407443682664,
+          "lift": 5.00151523880855,
+          "p_value_bh": 9.129720582784816e-05
+        },
+        {
+          "horizon_days": 30,
+          "threshold_pct": 50,
+          "rows": 88125,
+          "positive_rows": 15472,
+          "selected_rows": 1866,
+          "base_rate": 0.1755687943262411,
+          "precision": 0.4844587352625938,
+          "lift": 2.7593669884317524,
+          "p_value_bh": 1.4725861954733954e-209
+        },
+        {
+          "horizon_days": 30,
+          "threshold_pct": 100,
+          "rows": 88125,
+          "positive_rows": 6521,
+          "selected_rows": 1866,
+          "base_rate": 0.0739971631205673,
+          "precision": 0.2995712754555198,
+          "lift": 4.048415680036449,
+          "p_value_bh": 2.6808259513793434e-189
+        },
+        {
+          "horizon_days": 30,
+          "threshold_pct": 150,
+          "rows": 88125,
+          "positive_rows": 3478,
+          "selected_rows": 1866,
+          "base_rate": 0.0394666666666666,
+          "precision": 0.2047159699892818,
+          "lift": 5.187060050404102,
+          "p_value_bh": 1.3227870221511498e-159
+        },
+        {
+          "horizon_days": 30,
+          "threshold_pct": 200,
+          "rows": 88125,
+          "positive_rows": 2294,
+          "selected_rows": 1866,
+          "base_rate": 0.0260312056737588,
+          "precision": 0.1554126473740621,
+          "lift": 5.970243918848835,
+          "p_value_bh": 2.874824639975424e-135
+        },
+        {
+          "horizon_days": 30,
+          "threshold_pct": 300,
+          "rows": 88125,
+          "positive_rows": 1206,
+          "selected_rows": 1866,
+          "base_rate": 0.0136851063829787,
+          "precision": 0.1071811361200428,
+          "lift": 7.831954909269301,
+          "p_value_bh": 1.720750959369744e-114
+        },
+        {
+          "horizon_days": 30,
+          "threshold_pct": 500,
+          "rows": 88125,
+          "positive_rows": 593,
+          "selected_rows": 1866,
+          "base_rate": 0.0067290780141843,
+          "precision": 0.0541264737406216,
+          "lift": 8.043668631352922,
+          "p_value_bh": 6.820831029332327e-59
+        },
+        {
+          "horizon_days": 30,
+          "threshold_pct": 900,
+          "rows": 88125,
+          "positive_rows": 294,
+          "selected_rows": 1866,
+          "base_rate": 0.0033361702127659,
+          "precision": 0.02518756698821,
+          "lift": 7.549844696721132,
+          "p_value_bh": 7.743696998637702e-27
+        }
+      ],
+      "oi_fold_comparison": [
+        {
+          "fold": 0,
+          "model": "price-only",
+          "top_2pct_lift": 36.3625,
+          "test_rows": 2909,
+          "test_positives": 12,
+          "delta_average_precision": -0.056759605775773,
+          "delta_top_2pct_lift": -32.32222222222222
+        },
+        {
+          "fold": 0,
+          "model": "price+OI",
+          "top_2pct_lift": 4.040277777777778,
+          "test_rows": 2909,
+          "test_positives": 12,
+          "delta_average_precision": -0.056759605775773,
+          "delta_top_2pct_lift": -32.32222222222222
+        },
+        {
+          "fold": 1,
+          "model": "price-only",
+          "top_2pct_lift": 7.470833333333332,
+          "test_rows": 2934,
+          "test_positives": 72,
+          "delta_average_precision": -0.0516193660430263,
+          "delta_top_2pct_lift": -6.791666666666666
+        },
+        {
+          "fold": 1,
+          "model": "price+OI",
+          "top_2pct_lift": 0.6791666666666667,
+          "test_rows": 2934,
+          "test_positives": 72,
+          "delta_average_precision": -0.0516193660430263,
+          "delta_top_2pct_lift": -6.791666666666666
+        },
+        {
+          "fold": 2,
+          "model": "price-only",
+          "top_2pct_lift": 6.4711786247117855,
+          "test_rows": 2982,
+          "test_positives": 101,
+          "delta_average_precision": -0.0315335729734875,
+          "delta_top_2pct_lift": -4.044486640444866
+        },
+        {
+          "fold": 2,
+          "model": "price+OI",
+          "top_2pct_lift": 2.4266919842669195,
+          "test_rows": 2982,
+          "test_positives": 101,
+          "delta_average_precision": -0.0315335729734875,
+          "delta_top_2pct_lift": -4.044486640444866
+        },
+        {
+          "fold": 3,
+          "model": "price-only",
+          "top_2pct_lift": 8.287179487179488,
+          "test_rows": 3030,
+          "test_positives": 65,
+          "delta_average_precision": 0.0200201139066238,
+          "delta_top_2pct_lift": -2.0717948717948724
+        },
+        {
+          "fold": 3,
+          "model": "price+OI",
+          "top_2pct_lift": 6.215384615384616,
+          "test_rows": 3030,
+          "test_positives": 65,
+          "delta_average_precision": 0.0200201139066238,
+          "delta_top_2pct_lift": -2.0717948717948724
+        },
+        {
+          "fold": 4,
+          "model": "price-only",
+          "top_2pct_lift": 5.22005772005772,
+          "test_rows": 2894,
+          "test_positives": 99,
+          "delta_average_precision": 0.0004197094702279,
+          "delta_top_2pct_lift": 0.3480038480038478
+        },
+        {
+          "fold": 4,
+          "model": "price+OI",
+          "top_2pct_lift": 5.568061568061568,
+          "test_rows": 2894,
+          "test_positives": 99,
+          "delta_average_precision": 0.0004197094702279,
+          "delta_top_2pct_lift": 0.3480038480038478
+        }
+      ],
+      "paper_default": [
+        {
+          "policy": "hold_14d",
+          "trades": 130,
+          "expectancy": 0.0166796674541526,
+          "win_rate": 0.3692307692307692,
+          "profit_factor": 1.0839023506168584,
+          "cvar_5pct": -0.800388974535638,
+          "mean_mfe": 0.6689473429775701,
+          "mean_mae": -0.3472310217231793,
+          "max_drawdown": -0.2248915397621418,
+          "fold_majority_profit_factor_gt_1": 0.2857142857142857,
+          "market_state_majority_profit_factor_gt_1": 0.3333333333333333,
+          "largest_positive_pnl_share": 0.1380669701985686,
+          "leave_largest_winner_out_expectancy": -0.0126142559720239,
+          "gate_pass": false
+        },
+        {
+          "policy": "stop20_time14",
+          "trades": 228,
+          "expectancy": 0.041002360836936,
+          "win_rate": 0.2324561403508772,
+          "profit_factor": 1.2931673050646284,
+          "cvar_5pct": -0.2167700216666666,
+          "mean_mfe": 0.6021600454474832,
+          "mean_mae": -0.2084458826787601,
+          "max_drawdown": -0.1819001913181672,
+          "fold_majority_profit_factor_gt_1": 0.4285714285714285,
+          "market_state_majority_profit_factor_gt_1": 0.4285714285714285,
+          "largest_positive_pnl_share": 0.1837468156231158,
+          "leave_largest_winner_out_expectancy": 0.0090249841104127,
+          "gate_pass": false
+        },
+        {
+          "policy": "stop20_trail25_after50_time30",
+          "trades": 238,
+          "expectancy": 0.0499577600491684,
+          "win_rate": 0.3277310924369748,
+          "profit_factor": 1.3791479950036285,
+          "cvar_5pct": -0.2135569683333332,
+          "mean_mfe": 0.4550163907394769,
+          "mean_mae": -0.1940840721091599,
+          "max_drawdown": -0.1084394691807079,
+          "fold_majority_profit_factor_gt_1": 0.7142857142857143,
+          "market_state_majority_profit_factor_gt_1": 0.7142857142857143,
+          "largest_positive_pnl_share": 0.0702358667038627,
+          "leave_largest_winner_out_expectancy": 0.0375825464665657,
+          "gate_pass": true
+        },
+        {
+          "policy": "stop20_half_at100_trail25_time30",
+          "trades": 238,
+          "expectancy": 0.0508624567389157,
+          "win_rate": 0.3277310924369748,
+          "profit_factor": 1.3860140741806466,
+          "cvar_5pct": -0.2135569683333332,
+          "mean_mfe": 0.4550163907394769,
+          "mean_mae": -0.1940840721091599,
+          "max_drawdown": -0.1016434304058381,
+          "fold_majority_profit_factor_gt_1": 0.7142857142857143,
+          "market_state_majority_profit_factor_gt_1": 0.7142857142857143,
+          "largest_positive_pnl_share": 0.0477267266784022,
+          "leave_largest_winner_out_expectancy": 0.0426466391320629,
+          "gate_pass": true
+        }
+      ],
+      "continuation_utility_folds": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2489187660091419,
+          "win_rate": 0.4736842105263157,
+          "profit_factor": 4.261714872820031,
+          "mean_mfe": 0.7543231724711388,
+          "mean_mae": -0.1754459691491599
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.0111690422238509,
+          "win_rate": 0.1578947368421052,
+          "profit_factor": 0.9267960736269558,
+          "mean_mfe": 0.3792130003704997,
+          "mean_mae": -0.2265940960416676
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.2810635244312531,
+          "win_rate": 0.4117647058823529,
+          "profit_factor": 3.7084701567810128,
+          "mean_mfe": 0.7767396279326558,
+          "mean_mae": -0.1982665745809034
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.1426996851993636,
+          "win_rate": 0.4,
+          "profit_factor": 2.406943267518713,
+          "mean_mfe": 0.581136327918998,
+          "mean_mae": -0.1725379799035137
+        }
+      ],
+      "extreme_intensity_folds": [
+        {
+          "fold": 3,
+          "test_rows": 87,
+          "test_positives": 8,
+          "selected_rows": 24,
+          "selected_positives": 2,
+          "price_average_precision": 0.0910025771623725,
+          "intensity_average_precision": 0.1150263103977017
+        },
+        {
+          "fold": 4,
+          "test_rows": 85,
+          "test_positives": 4,
+          "selected_rows": 12,
+          "selected_positives": 1,
+          "price_average_precision": 0.0844543804692226,
+          "intensity_average_precision": 0.1330465587044534
+        },
+        {
+          "fold": 5,
+          "test_rows": 78,
+          "test_positives": 9,
+          "selected_rows": 19,
+          "selected_positives": 4,
+          "price_average_precision": 0.142316338523803,
+          "intensity_average_precision": 0.1959082881597501
+        },
+        {
+          "fold": 6,
+          "test_rows": 31,
+          "test_positives": 1,
+          "selected_rows": 7,
+          "selected_positives": 0,
+          "price_average_precision": 0.04,
+          "intensity_average_precision": 0.0454545454545454
+        }
+      ],
+      "utility_tail_exit_folds": [
+        {
+          "fold": 3,
+          "trades": 18,
+          "expectancy": 0.1891314549305139,
+          "win_rate": 0.3333333333333333,
+          "profit_factor": 3.6544238031083913,
+          "mean_mfe": 0.9090272897265688,
+          "mean_mae": -0.214073981083505
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.002238387187046,
+          "win_rate": 0.1578947368421052,
+          "profit_factor": 0.9853292048189262,
+          "mean_mfe": 0.3987336201420315,
+          "mean_mae": -0.2265940960416676
+        },
+        {
+          "fold": 5,
+          "trades": 16,
+          "expectancy": 0.407556229151722,
+          "win_rate": 0.375,
+          "profit_factor": 5.2551791756063215,
+          "mean_mfe": 1.1864760664778389,
+          "mean_mae": -0.2041675299890036
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.2263688921838268,
+          "win_rate": 0.4,
+          "profit_factor": 3.231877305046253,
+          "mean_mfe": 0.7180416394943789,
+          "mean_mae": -0.1725379799035137
+        }
+      ],
+      "utility_intensity_router_folds": [
+        {
+          "fold": "fold_3",
+          "group": "all 8h entries",
+          "precision": 0.0769230769230769
+        },
+        {
+          "fold": "fold_3",
+          "group": "20h high intensity",
+          "precision": 0.0
+        },
+        {
+          "fold": "fold_4",
+          "group": "all 8h entries",
+          "precision": 0.1153846153846153
+        },
+        {
+          "fold": "fold_4",
+          "group": "20h high intensity",
+          "precision": 0.2
+        },
+        {
+          "fold": "fold_5",
+          "group": "all 8h entries",
+          "precision": 0.1739130434782608
+        },
+        {
+          "fold": "fold_5",
+          "group": "20h high intensity",
+          "precision": 0.4
+        },
+        {
+          "fold": "fold_6",
+          "group": "all 8h entries",
+          "precision": 0.0769230769230769
+        },
+        {
+          "fold": "fold_6",
+          "group": "20h high intensity",
+          "precision": 0.0
+        }
+      ],
+      "utility_exhaustion_exit_folds": [
+        {
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2531361275183876,
+          "win_rate": 0.4736842105263157,
+          "profit_factor": 4.316977201889508,
+          "mean_mfe": 0.8418405185644807,
+          "mean_mae": -0.1754459691491599
+        },
+        {
+          "fold": 4,
+          "trades": 19,
+          "expectancy": 0.0121229071537526,
+          "win_rate": 0.1578947368421052,
+          "profit_factor": 1.0794557299475034,
+          "mean_mfe": 0.3987336201420315,
+          "mean_mae": -0.2265940960416676
+        },
+        {
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.235786627959223,
+          "win_rate": 0.3529411764705882,
+          "profit_factor": 3.2470511920682754,
+          "mean_mfe": 0.6289382566265298,
+          "mean_mae": -0.2071688646164654
+        },
+        {
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.2572276539959856,
+          "win_rate": 0.4,
+          "profit_factor": 3.536128341864757,
+          "mean_mfe": 0.7180416394943789,
+          "mean_mae": -0.1725379799035137
+        }
+      ],
+      "utility_exhaustion_attribution_folds": [
+        {
+          "policy": "baseline_half100_trail25",
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2489187660091419,
+          "profit_factor": 4.261714872820031
+        },
+        {
+          "policy": "baseline_half100_trail25",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.0111690422238509,
+          "profit_factor": 0.9267960736269558
+        },
+        {
+          "policy": "baseline_half100_trail25",
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.2810635244312531,
+          "profit_factor": 3.7084701567810128
+        },
+        {
+          "policy": "baseline_half100_trail25",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.1426996851993636,
+          "profit_factor": 2.406943267518713
+        },
+        {
+          "policy": "half150_trail30",
+          "fold": 3,
+          "trades": 18,
+          "expectancy": 0.1891314549305139,
+          "profit_factor": 3.6544238031083913
+        },
+        {
+          "policy": "half150_trail30",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.002238387187046,
+          "profit_factor": 0.9853292048189262
+        },
+        {
+          "policy": "half150_trail30",
+          "fold": 5,
+          "trades": 16,
+          "expectancy": 0.407556229151722,
+          "profit_factor": 5.2551791756063215
+        },
+        {
+          "policy": "half150_trail30",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.2263688921838268,
+          "profit_factor": 3.231877305046253
+        },
+        {
+          "policy": "half150_trail35",
+          "fold": 3,
+          "trades": 18,
+          "expectancy": 0.1782187546605773,
+          "profit_factor": 3.501266141611263
+        },
+        {
+          "policy": "half150_trail35",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.0096074702812039,
+          "profit_factor": 0.9370308990689828
+        },
+        {
+          "policy": "half150_trail35",
+          "fold": 5,
+          "trades": 16,
+          "expectancy": 0.3811520775026997,
+          "profit_factor": 4.979500905443888
+        },
+        {
+          "policy": "half150_trail35",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.2089741000734425,
+          "profit_factor": 3.060373873799008
+        },
+        {
+          "policy": "half150_trail35_wick",
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2531361275183876,
+          "profit_factor": 4.316977201889508
+        },
+        {
+          "policy": "half150_trail35_wick",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": 0.0121229071537526,
+          "profit_factor": 1.0794557299475034
+        },
+        {
+          "policy": "half150_trail35_wick",
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.235786627959223,
+          "profit_factor": 3.2470511920682754
+        },
+        {
+          "policy": "half150_trail35_wick",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.2572276539959856,
+          "profit_factor": 3.536128341864757
+        },
+        {
+          "policy": "half150_trail30_wick_posthoc",
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2634744751425381,
+          "profit_factor": 4.4524460648712445
+        },
+        {
+          "policy": "half150_trail30_wick_posthoc",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": 0.0194919902479106,
+          "profit_factor": 1.1277540356974467
+        },
+        {
+          "policy": "half150_trail30_wick_posthoc",
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.235786627959223,
+          "profit_factor": 3.2470511920682754
+        },
+        {
+          "policy": "half150_trail30_wick_posthoc",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.2638065860758981,
+          "profit_factor": 3.6009931254440914
+        }
+      ],
+      "utility_entry_timing_folds": [
+        {
+          "fold": 3,
+          "trades": 13,
+          "expectancy": 0.1430533442291514,
+          "win_rate": 0.3076923076923077,
+          "profit_factor": 3.008276426052852,
+          "mean_mfe": 0.6657628538841217,
+          "mean_mae": -0.2156657781756232
+        },
+        {
+          "fold": 4,
+          "trades": 15,
+          "expectancy": -0.0233274747170469,
+          "win_rate": 0.2,
+          "profit_factor": 0.8406325550260589,
+          "mean_mfe": 0.3762489282169106,
+          "mean_mae": -0.2474412543244921
+        },
+        {
+          "fold": 5,
+          "trades": 11,
+          "expectancy": 0.3525470725005272,
+          "win_rate": 0.4545454545454545,
+          "profit_factor": 3.5712035786546013,
+          "mean_mfe": 0.9858370445789336,
+          "mean_mae": -0.2061606460563836
+        },
+        {
+          "fold": 6,
+          "trades": 5,
+          "expectancy": 0.2394883904439031,
+          "win_rate": 0.4,
+          "profit_factor": 3.367356332353552,
+          "mean_mfe": 0.8018240040871936,
+          "mean_mae": -0.3033415150558795
+        }
+      ],
+      "utility_entry_frontier": [
+        {
+          "entry_rule": "breakout6",
+          "fill_rate": 0.2386363636363636,
+          "actual_200pct_precision": 0.2857142857142857,
+          "event_precision": 0.2777777777777778,
+          "paired_trade_increment_mean": -0.1779692990298461,
+          "row_fisher_p_bh": 0.0607311798703222,
+          "event_fisher_p_bh": 0.2069235352817442
+        },
+        {
+          "entry_rule": "prelaunch_high_break",
+          "fill_rate": 0.4318181818181818,
+          "actual_200pct_precision": 0.2105263157894736,
+          "event_precision": 0.1724137931034483,
+          "paired_trade_increment_mean": -0.1912530109216141,
+          "row_fisher_p_bh": 0.0607311798703222,
+          "event_fisher_p_bh": 0.2069235352817442
+        },
+        {
+          "entry_rule": "controlled_pullback5",
+          "fill_rate": 0.4772727272727273,
+          "actual_200pct_precision": 0.1666666666666666,
+          "event_precision": 0.1176470588235294,
+          "paired_trade_increment_mean": -0.0227947631450549,
+          "row_fisher_p_bh": 0.3240819937246451,
+          "event_fisher_p_bh": 0.3023460784654815
+        },
+        {
+          "entry_rule": "discount5_touch",
+          "fill_rate": 0.7386363636363636,
+          "actual_200pct_precision": 0.1538461538461538,
+          "event_precision": 0.1153846153846153,
+          "paired_trade_increment_mean": 0.0323127702240346,
+          "row_fisher_p_bh": 0.3240819937246451,
+          "event_fisher_p_bh": 0.3159169189019935
+        },
+        {
+          "entry_rule": "discount5_reclaim",
+          "fill_rate": 0.6136363636363636,
+          "actual_200pct_precision": 0.1481481481481481,
+          "event_precision": 0.1111111111111111,
+          "paired_trade_increment_mean": 0.0191256992866772,
+          "row_fisher_p_bh": 0.3240819937246451,
+          "event_fisher_p_bh": 0.2069235352817442
+        },
+        {
+          "entry_rule": "wait4h",
+          "fill_rate": 1.0,
+          "actual_200pct_precision": 0.1363636363636363,
+          "event_precision": 0.1044776119402985,
+          "paired_trade_increment_mean": -0.0310073028566234,
+          "row_fisher_p_bh": 1.0,
+          "event_fisher_p_bh": 1.0
+        },
+        {
+          "entry_rule": "discount10_reclaim",
+          "fill_rate": 0.2954545454545454,
+          "actual_200pct_precision": 0.0769230769230769,
+          "event_precision": 0.0769230769230769,
+          "paired_trade_increment_mean": 0.0321786718387721,
+          "row_fisher_p_bh": 1.0,
+          "event_fisher_p_bh": 1.0
+        },
+        {
+          "entry_rule": "launch_open",
+          "fill_rate": 1.0,
+          "actual_200pct_precision": 0.1136363636363636,
+          "event_precision": 0.0746268656716417,
+          "paired_trade_increment_mean": 0.0,
+          "row_fisher_p_bh": null,
+          "event_fisher_p_bh": null
+        },
+        {
+          "entry_rule": "discount10_touch",
+          "fill_rate": 0.3977272727272727,
+          "actual_200pct_precision": 0.0571428571428571,
+          "event_precision": 0.0588235294117647,
+          "paired_trade_increment_mean": 0.0396211331825004,
+          "row_fisher_p_bh": 1.0,
+          "event_fisher_p_bh": 1.0
+        }
+      ],
+      "utility_breakout_hold_router_folds": [
+        {
+          "route": "baseline_no_router",
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2489187660091419,
+          "profit_factor": 4.261714872820031
+        },
+        {
+          "route": "baseline_no_router",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.0111690422238509,
+          "profit_factor": 0.9267960736269558
+        },
+        {
+          "route": "baseline_no_router",
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.2810635244312531,
+          "profit_factor": 3.7084701567810128
+        },
+        {
+          "route": "baseline_no_router",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.1426996851993636,
+          "profit_factor": 2.406943267518713
+        },
+        {
+          "route": "breakout6_half100_trail30",
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2622689903492962,
+          "profit_factor": 4.436649956999928
+        },
+        {
+          "route": "breakout6_half100_trail30",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.0156504512236675,
+          "profit_factor": 0.8974241070880948
+        },
+        {
+          "route": "breakout6_half100_trail30",
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.3819344778405839,
+          "profit_factor": 4.680513638937109
+        },
+        {
+          "route": "breakout6_half100_trail30",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.1593278869940905,
+          "profit_factor": 2.570888524534164
+        },
+        {
+          "route": "breakout6_half150_trail30",
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2753979595598225,
+          "profit_factor": 4.608685817635672
+        },
+        {
+          "route": "breakout6_half150_trail30",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": -0.002238387187046,
+          "profit_factor": 0.9853292048189262
+        },
+        {
+          "route": "breakout6_half150_trail30",
+          "fold": 5,
+          "trades": 16,
+          "expectancy": 0.4371335077056203,
+          "profit_factor": 5.623458022336757
+        },
+        {
+          "route": "breakout6_half150_trail30",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.1843153869940905,
+          "profit_factor": 2.81725203155948
+        },
+        {
+          "route": "breakout6_half150_trail30_wick",
+          "fold": 3,
+          "trades": 19,
+          "expectancy": 0.2753979595598225,
+          "profit_factor": 4.608685817635672
+        },
+        {
+          "route": "breakout6_half150_trail30_wick",
+          "fold": 4,
+          "trades": 19,
+          "expectancy": 0.0194919902479106,
+          "profit_factor": 1.1277540356974467
+        },
+        {
+          "route": "breakout6_half150_trail30_wick",
+          "fold": 5,
+          "trades": 17,
+          "expectancy": 0.2912820957978905,
+          "profit_factor": 3.806941474421676
+        },
+        {
+          "route": "breakout6_half150_trail30_wick",
+          "fold": 6,
+          "trades": 10,
+          "expectancy": 0.2217530808861619,
+          "profit_factor": 3.1863678519573173
+        }
+      ],
+      "utility_breakout_add": [
+        {
+          "breakout_add_fraction": 0.0,
+          "initial_fraction": 1.0,
+          "trades": 65,
+          "expectancy": 0.1964959305195798,
+          "profit_factor": 2.792020519122662,
+          "total_return_on_initial_equity": 0.274021493184109,
+          "max_drawdown": -0.0455099233828859,
+          "paired_increment_mean": 0.0,
+          "independent_event_increment_mean": 0.0,
+          "fold_increment_positive_share": 0.0,
+          "mean_deployed_fraction": 1.0,
+          "reserved_for_breakout": "0%"
+        },
+        {
+          "breakout_add_fraction": 0.1,
+          "initial_fraction": 0.9,
+          "trades": 65,
+          "expectancy": 0.183770332080174,
+          "profit_factor": 2.8287500726515877,
+          "total_return_on_initial_equity": 0.2554885110100125,
+          "max_drawdown": -0.0402775793406109,
+          "paired_increment_mean": -0.0095356830201416,
+          "independent_event_increment_mean": -0.0088178378257595,
+          "fold_increment_positive_share": 0.25,
+          "mean_deployed_fraction": 0.9238636363636364,
+          "reserved_for_breakout": "10%"
+        },
+        {
+          "breakout_add_fraction": 0.25,
+          "initial_fraction": 0.75,
+          "trades": 65,
+          "expectancy": 0.1646819344210654,
+          "profit_factor": 2.8983897767817437,
+          "total_return_on_initial_equity": 0.2278020767825489,
+          "max_drawdown": -0.0323423214184022,
+          "paired_increment_mean": -0.0238392075503541,
+          "independent_event_increment_mean": -0.0220445945643989,
+          "fold_increment_positive_share": 0.25,
+          "mean_deployed_fraction": 0.8096590909090909,
+          "reserved_for_breakout": "25%"
+        },
+        {
+          "breakout_add_fraction": 0.5,
+          "initial_fraction": 0.5,
+          "trades": 65,
+          "expectancy": 0.132867938322551,
+          "profit_factor": 3.0810231192463697,
+          "total_return_on_initial_equity": 0.182100403717808,
+          "max_drawdown": -0.0238881474417465,
+          "paired_increment_mean": -0.0476784151007083,
+          "independent_event_increment_mean": -0.0440891891287978,
+          "fold_increment_positive_share": 0.25,
+          "mean_deployed_fraction": 0.6193181818181818,
+          "reserved_for_breakout": "50%"
+        }
+      ],
+      "utility_taker_flow_recognition": [
+        {
+          "sample": "Calibration rows",
+          "group": "All 8h signals",
+          "precision": 0.07142857142857142
+        },
+        {
+          "sample": "Calibration rows",
+          "group": "Taker buy share >=50%",
+          "precision": 0.14285714285714285
+        },
+        {
+          "sample": "Confirmation rows",
+          "group": "All 8h signals",
+          "precision": 0.11363636363636363
+        },
+        {
+          "sample": "Confirmation rows",
+          "group": "Taker buy share >=50%",
+          "precision": 0.1875
+        },
+        {
+          "sample": "Confirmation events",
+          "group": "All 8h signals",
+          "precision": 0.07462686567164178
+        },
+        {
+          "sample": "Confirmation events",
+          "group": "Taker buy share >=50%",
+          "precision": 0.12121212121212122
+        }
+      ],
+      "utility_taker_matched_permutation": [
+        {
+          "schema": "return_only",
+          "match_features": "['early_close_return']",
+          "rows": 88,
+          "strata": 12,
+          "observed_precision_increment": 0.0738636363636363,
+          "permutations": 5000,
+          "one_sided_p": 0.0451909618076384,
+          "null_median": 0.0113636363636363,
+          "null_upper_95pct": 0.053030303030303
+        },
+        {
+          "schema": "return_and_efficiency",
+          "match_features": "['early_close_return', 'early_path_efficiency']",
+          "rows": 88,
+          "strata": 28,
+          "observed_precision_increment": 0.0738636363636363,
+          "permutations": 5000,
+          "one_sided_p": 0.0691861627674465,
+          "null_median": 0.0321969696969697,
+          "null_upper_95pct": 0.0738636363636363
+        },
+        {
+          "schema": "return_and_model_score",
+          "match_features": "['early_close_return', 'continuation_score']",
+          "rows": 88,
+          "strata": 36,
+          "observed_precision_increment": 0.0738636363636363,
+          "permutations": 5000,
+          "one_sided_p": 0.0133973205358928,
+          "null_median": 0.0113636363636363,
+          "null_upper_95pct": 0.053030303030303
+        }
+      ],
+      "utility_breakout_runner_expectancy": [
+        {
+          "policy": "breakout6_half150_trail30_wick",
+          "expectancy": 0.0476540162024635,
+          "period": "Calibration 14d"
+        },
+        {
+          "policy": "breakout6_full_runner_a100_t25_wick",
+          "expectancy": 0.0297091594114398,
+          "period": "Calibration 14d"
+        },
+        {
+          "policy": "breakout6_full_runner_a100_t30_wick",
+          "expectancy": 0.0297091594114398,
+          "period": "Calibration 14d"
+        },
+        {
+          "policy": "breakout6_full_runner_a100_t35_wick",
+          "expectancy": 0.0295230339273155,
+          "period": "Calibration 14d"
+        },
+        {
+          "policy": "breakout6_full_runner_a150_t25_wick",
+          "expectancy": 0.0297091594114398,
+          "period": "Calibration 14d"
+        },
+        {
+          "policy": "breakout6_full_runner_a150_t30_wick",
+          "expectancy": 0.0297091594114398,
+          "period": "Calibration 14d"
+        },
+        {
+          "policy": "breakout6_full_runner_a150_t35_wick",
+          "expectancy": 0.0295230339273155,
+          "period": "Calibration 14d"
+        },
+        {
+          "policy": "breakout6_half150_trail30_wick",
+          "expectancy": 0.1964959305195798,
+          "period": "Confirmation 30d"
+        },
+        {
+          "policy": "breakout6_full_runner_a100_t25_wick",
+          "expectancy": 0.1847322821956844,
+          "period": "Confirmation 30d"
+        },
+        {
+          "policy": "breakout6_full_runner_a100_t30_wick",
+          "expectancy": 0.2081619148186075,
+          "period": "Confirmation 30d"
+        },
+        {
+          "policy": "breakout6_full_runner_a100_t35_wick",
+          "expectancy": 0.1999151113363388,
+          "period": "Confirmation 30d"
+        },
+        {
+          "policy": "breakout6_full_runner_a150_t25_wick",
+          "expectancy": 0.1870487631616823,
+          "period": "Confirmation 30d"
+        },
+        {
+          "policy": "breakout6_full_runner_a150_t30_wick",
+          "expectancy": 0.2103256760791799,
+          "period": "Confirmation 30d"
+        },
+        {
+          "policy": "breakout6_full_runner_a150_t35_wick",
+          "expectancy": 0.2019169665837934,
+          "period": "Confirmation 30d"
+        }
+      ],
+      "utility_breakout_partial_fraction_expectancy": [
+        {
+          "partial_fraction": 0.25,
+          "expectancy": 0.0386815878069517,
+          "period": "Calibration 14d",
+          "sale_fraction": "Sell 25%"
+        },
+        {
+          "partial_fraction": 0.5,
+          "expectancy": 0.0476540162024635,
+          "period": "Calibration 14d",
+          "sale_fraction": "Sell 50%"
+        },
+        {
+          "partial_fraction": 0.75,
+          "expectancy": 0.0566264445979753,
+          "period": "Calibration 14d",
+          "sale_fraction": "Sell 75%"
+        },
+        {
+          "partial_fraction": 0.25,
+          "expectancy": 0.2034108032993798,
+          "period": "Confirmation 30d",
+          "sale_fraction": "Sell 25%"
+        },
+        {
+          "partial_fraction": 0.5,
+          "expectancy": 0.1964959305195798,
+          "period": "Confirmation 30d",
+          "sale_fraction": "Sell 50%"
+        },
+        {
+          "partial_fraction": 0.75,
+          "expectancy": 0.1895810577397797,
+          "period": "Confirmation 30d",
+          "sale_fraction": "Sell 75%"
+        }
+      ],
+      "utility_regime_partial_router_increment": [
+        {
+          "route": "baseline_sell50",
+          "paired_increment_mean": 0.0,
+          "period": "Calibration"
+        },
+        {
+          "route": "semantic_vol_high25_low75",
+          "paired_increment_mean": -0.0097399909615091,
+          "period": "Calibration"
+        },
+        {
+          "route": "calibration_vol_high75_low50",
+          "paired_increment_mean": 0.0097399909615091,
+          "period": "Calibration"
+        },
+        {
+          "route": "semantic_risk_bull25_bear_narrow75",
+          "paired_increment_mean": 0.0,
+          "period": "Calibration"
+        },
+        {
+          "route": "calibration_market_state_min5",
+          "paired_increment_mean": 0.0,
+          "period": "Calibration"
+        },
+        {
+          "route": "baseline_sell50",
+          "paired_increment_mean": 0.0,
+          "period": "Confirmation"
+        },
+        {
+          "route": "semantic_vol_high25_low75",
+          "paired_increment_mean": 0.0068243088213596,
+          "period": "Confirmation"
+        },
+        {
+          "route": "calibration_vol_high75_low50",
+          "paired_increment_mean": -0.0057804267268189,
+          "period": "Confirmation"
+        },
+        {
+          "route": "semantic_risk_bull25_bear_narrow75",
+          "paired_increment_mean": -0.004660928390144,
+          "period": "Confirmation"
+        },
+        {
+          "route": "calibration_market_state_min5",
+          "paired_increment_mean": 0.0,
+          "period": "Confirmation"
+        }
+      ],
+      "current_events": [
+        {
+          "symbol": "AKEUSDT",
+          "classification": "close-confirmed",
+          "close_return": 9.47563559322034,
+          "low_return": 10.438982070561018,
+          "entry_time": "2026-07-10 08:00:00+00:00",
+          "peak_time": "2026-07-18 04:00:00+00:00"
+        },
+        {
+          "symbol": "TAIKOUSDT",
+          "classification": "close-confirmed",
+          "close_return": 7.722495894909688,
+          "low_return": 7.868113522537563,
+          "entry_time": "2026-06-25 16:00:00+00:00",
+          "peak_time": "2026-07-01 20:00:00+00:00"
+        },
+        {
+          "symbol": "SYNUSDT",
+          "classification": "close-confirmed",
+          "close_return": 6.713875292615451,
+          "low_return": 7.6955739474631155,
+          "entry_time": "2026-06-18 04:00:00+00:00",
+          "peak_time": "2026-06-30 12:00:00+00:00"
+        },
+        {
+          "symbol": "EVAAUSDT",
+          "classification": "close-confirmed",
+          "close_return": 5.262609827530101,
+          "low_return": 5.416069344890816,
+          "entry_time": "2026-06-18 20:00:00+00:00",
+          "peak_time": "2026-07-08 08:00:00+00:00"
+        },
+        {
+          "symbol": "VELVETUSDT",
+          "classification": "close-confirmed",
+          "close_return": 4.984831770546057,
+          "low_return": 5.88920634920635,
+          "entry_time": "2026-06-18 04:00:00+00:00",
+          "peak_time": "2026-06-29 00:00:00+00:00"
+        },
+        {
+          "symbol": "TLMUSDT",
+          "classification": "close-confirmed",
+          "close_return": 4.183233532934132,
+          "low_return": 4.336621454993836,
+          "entry_time": "2026-07-01 04:00:00+00:00",
+          "peak_time": "2026-07-06 12:00:00+00:00"
+        },
+        {
+          "symbol": "SLXUSDT",
+          "classification": "close-confirmed",
+          "close_return": 3.930729498337225,
+          "low_return": 3.998278582699757,
+          "entry_time": "2026-06-18 12:00:00+00:00",
+          "peak_time": "2026-06-27 16:00:00+00:00"
+        },
+        {
+          "symbol": "USUSDT",
+          "classification": "close-confirmed",
+          "close_return": 3.7800259884908094,
+          "low_return": 3.9504950495049496,
+          "entry_time": "2026-07-01 00:00:00+00:00",
+          "peak_time": "2026-07-17 20:00:00+00:00"
+        },
+        {
+          "symbol": "BTWUSDT",
+          "classification": "close-confirmed",
+          "close_return": 3.345338983050848,
+          "low_return": 4.004880429477794,
+          "entry_time": "2026-06-18 04:00:00+00:00",
+          "peak_time": "2026-06-20 16:00:00+00:00"
+        },
+        {
+          "symbol": "INUSDT",
+          "classification": "close-confirmed",
+          "close_return": 2.8278145695364243,
+          "low_return": 2.8662207357859533,
+          "entry_time": "2026-06-19 04:00:00+00:00",
+          "peak_time": "2026-06-30 16:00:00+00:00"
+        },
+        {
+          "symbol": "DEXEUSDT",
+          "classification": "close-confirmed",
+          "close_return": 2.700222057735011,
+          "low_return": 2.719494047619048,
+          "entry_time": "2026-06-22 00:00:00+00:00",
+          "peak_time": "2026-07-12 12:00:00+00:00"
+        },
+        {
+          "symbol": "BICOUSDT",
+          "classification": "close-confirmed",
+          "close_return": 2.571428571428572,
+          "low_return": 2.592652620205295,
+          "entry_time": "2026-06-18 12:00:00+00:00",
+          "peak_time": "2026-06-20 16:00:00+00:00"
+        },
+        {
+          "symbol": "TACUSDT",
+          "classification": "close-confirmed",
+          "close_return": 2.539959808316586,
+          "low_return": 2.733289859797848,
+          "entry_time": "2026-06-22 08:00:00+00:00",
+          "peak_time": "2026-06-30 12:00:00+00:00"
+        },
+        {
+          "symbol": "VANRYUSDT",
+          "classification": "close-confirmed",
+          "close_return": 2.362922499146466,
+          "low_return": 2.8222739619712844,
+          "entry_time": "2026-07-03 04:00:00+00:00",
+          "peak_time": "2026-07-06 12:00:00+00:00"
+        },
+        {
+          "symbol": "TAGUSDT",
+          "classification": "close-confirmed",
+          "close_return": 2.3132183908045976,
+          "low_return": 2.569659442724458,
+          "entry_time": "2026-07-08 12:00:00+00:00",
+          "peak_time": "2026-07-09 12:00:00+00:00"
+        },
+        {
+          "symbol": "MUSDT",
+          "classification": "close-confirmed",
+          "close_return": 2.281439258995369,
+          "low_return": 3.540793689918659,
+          "entry_time": "2026-06-29 12:00:00+00:00",
+          "peak_time": "2026-07-03 08:00:00+00:00"
+        },
+        {
+          "symbol": "LABUSDT",
+          "classification": "close-confirmed",
+          "close_return": 2.013226184496903,
+          "low_return": 2.26109802500453,
+          "entry_time": "2026-07-03 20:00:00+00:00",
+          "peak_time": "2026-07-05 04:00:00+00:00"
+        },
+        {
+          "symbol": "HMSTRUSDT",
+          "classification": "wick-only",
+          "close_return": 1.9986357435197812,
+          "low_return": 2.1671469740634004,
+          "entry_time": "2026-06-25 12:00:00+00:00",
+          "peak_time": "2026-07-04 12:00:00+00:00"
+        },
+        {
+          "symbol": "AGLDUSDT",
+          "classification": "wick-only",
+          "close_return": 1.1868399675060926,
+          "low_return": 2.090700344431688,
+          "entry_time": "2026-06-25 12:00:00+00:00",
+          "peak_time": "2026-06-27 00:00:00+00:00"
+        }
+      ],
+      "candidates": [
+        {
+          "symbol": "ESPORTSUSDT",
+          "ranking_score_pctile": 1.0,
+          "research_stage": "reject_chase",
+          "oi_annotation": "crowded",
+          "return_1d": 0.3720724701723377,
+          "return_7d": 0.8136682242990656,
+          "oi_usd": 13656116.1696283,
+          "oi_change_3d": 1.123545977928933
+        },
+        {
+          "symbol": "HOMEUSDT",
+          "ranking_score_pctile": 0.9980916030534353,
+          "research_stage": "reject_chase",
+          "oi_annotation": "crowded",
+          "return_1d": -0.1823708206686929,
+          "return_7d": -0.4879441624365481,
+          "oi_usd": 8334666.86721836,
+          "oi_change_3d": 1.030376010754404
+        },
+        {
+          "symbol": "AKEUSDT",
+          "ranking_score_pctile": 0.9961832061068704,
+          "research_stage": "cooldown_after_200pct_runup",
+          "oi_annotation": "crowded",
+          "return_1d": 0.4077764751856194,
+          "return_7d": 6.439339184305628,
+          "oi_usd": 52033768.6115577,
+          "oi_change_3d": 15.57387006801465
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "price-validation",
+      "label": "Purged historical walk-forward evidence",
+      "path": "walk_forward_fold_metrics.csv",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('walk_forward_fold_metrics.csv') ORDER BY fold",
+        "description": "Expanding 180-day minimum train, 14-day purge, 30-day test folds using the fixed eight-factor logistic model.",
+        "tables_used": [
+          "daily_feature_panel.csv.gz",
+          "walk_forward_fold_metrics.csv"
+        ],
+        "filters": [
+          "USDT perpetual altcoins",
+          "daily quote volume >= 250,000 USDT",
+          "complete forward horizon"
+        ],
+        "metric_definitions": [
+          "Top-2% lift = precision among each day's top 2% scores divided by the eligible row base rate.",
+          "Entry is the next UTC day's first 4h open; the primary label is future 14-day high return >= 200%."
+        ]
+      }
+    },
+    {
+      "id": "oi-validation",
+      "label": "Lagged long-window OI intersection",
+      "path": "oi_walk_forward_fold_metrics.csv",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('oi_walk_forward_fold_metrics.csv') ORDER BY fold",
+        "description": "Price-only, OI-only, price+OI and factor-group ablations evaluated on identical rows and folds.",
+        "tables_used": [
+          "oi_walk_forward_fold_metrics.csv",
+          "oi_cohort_coverage.csv"
+        ],
+        "filters": [
+          "historical market cap only",
+          "OI and market cap lagged 24 hours",
+          "complete required OI fields"
+        ],
+        "metric_definitions": [
+          "OI ranking gate requires fold-majority AP and lift improvement plus both bootstrap lower bounds above zero."
+        ]
+      }
+    },
+    {
+      "id": "paper-validation",
+      "label": "4h path-dependent 1x paper simulation",
+      "path": "paper_strategy_summary.csv",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('paper_strategy_summary.csv') WHERE slippage_bps_each_side = 5 ORDER BY expectancy DESC",
+        "description": "Four pre-registered exits with conservative same-bar ordering, funding, fees, slippage and portfolio constraints.",
+        "tables_used": [
+          "futures_4h_panel.csv.gz",
+          "paper_strategy_summary.csv"
+        ],
+        "filters": [
+          "first daily top-2% crossing",
+          "at most 3 new signals/day",
+          "14-day cooldown"
+        ],
+        "metric_definitions": [
+          "Default fee is 5 bps each side; displayed default scenario uses 5 bps slippage each side."
+        ]
+      }
+    },
+    {
+      "id": "current-events",
+      "label": "Frozen current 30-day event regression",
+      "path": "current_30d_runups_verified.csv",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('current_30d_runups_verified.csv') ORDER BY close_return DESC",
+        "description": "Any earlier 4h close to any later 4h high reaches 3x; wick-only uses earlier low when close confirmation fails.",
+        "tables_used": [
+          "futures_4h_panel.csv.gz",
+          "current_30d_runups_verified.csv"
+        ],
+        "metric_definitions": [
+          "+200% return means later high / earlier reference price - 1 >= 2.0."
+        ]
+      }
+    },
+    {
+      "id": "sensitivity-validation",
+      "label": "Threshold and horizon sensitivity matrix",
+      "path": "threshold_horizon_surface.csv",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('threshold_horizon_surface.csv') ORDER BY horizon_days, threshold_pct",
+        "description": "Same frozen price scores evaluated across seven return thresholds and four horizons.",
+        "tables_used": [
+          "threshold_horizon_surface.csv"
+        ],
+        "metric_definitions": [
+          "BH-adjusted one-sided Fisher exact p-values control the threshold-by-horizon matrix."
+        ]
+      }
+    },
+    {
+      "id": "candidate-validation",
+      "label": "Frozen current research watchlist",
+      "path": "current_research_watchlist.csv",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('current_research_watchlist.csv') ORDER BY ranking_score_pctile DESC",
+        "description": "Top frozen price ranks with OI annotations that never affect rank.",
+        "tables_used": [
+          "current_research_watchlist.csv"
+        ],
+        "metric_definitions": [
+          "Ranking percentile is computed within the latest eligible altcoin cross-section."
+        ]
+      }
+    },
+    {
+      "id": "continuation-utility-validation",
+      "label": "Frozen 8h continuation utility challenger",
+      "path": "continuation_entry_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('continuation_utility_strategy_folds.csv') ORDER BY fold",
+        "description": "A time-isolated 8h continuation model trained on positive net 14-day path utility, then simulated with the frozen 30-day exit and portfolio constraints.",
+        "tables_used": [
+          "continuation_utility_strategy_folds.csv",
+          "continuation_utility_strategy_trades.csv.gz",
+          "continuation_utility_forward_model.json"
+        ],
+        "filters": [
+          "features use only completed 4h bars before P0+8h",
+          "calibration windows precede confirmation folds",
+          "daily top three new signals and stage vetoes"
+        ],
+        "metric_definitions": [
+          "Profit factor is gross positive trade PnL divided by absolute gross negative trade PnL after fees, funding, and slippage.",
+          "This is a secondary paper-entry challenger; it is rank-neutral and is not permission for automatic trading."
+        ]
+      }
+    },
+    {
+      "id": "intensity-exit-frontier-validation",
+      "label": "Multi-threshold intensity and right-tail exit frontier",
+      "path": "extreme_intensity_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('extreme_intensity_confirmation_folds.csv') ORDER BY fold",
+        "description": "Calibration-only selection of richer extreme-return targets and right-tail exit variants, followed by confirmation-fold and paired-increment validation.",
+        "tables_used": [
+          "extreme_intensity_confirmation_folds.csv",
+          "utility_failure_exit_calibration.csv",
+          "utility_tail_exit_folds.csv",
+          "utility_tail_exit_paired_deltas.csv"
+        ],
+        "filters": [
+          "same P0 checkpoint clock and fixed early-path features",
+          "confirmation folds 3-6 never used for candidate selection",
+          "right-tail variant recorded as a read-only counterfactual only"
+        ],
+        "metric_definitions": [
+          "Ordinal intensity is a fixed 10/20/30/40% weighting of +50/+100/+150/+200% probabilities.",
+          "Exit increment is the paired net-return difference versus the frozen exit for the same signal."
+        ]
+      }
+    },
+    {
+      "id": "utility-intensity-router-validation",
+      "label": "Rejected 8h-entry / 20h-intensity router",
+      "path": "utility_intensity_router_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_intensity_router_recognition_folds.csv') ORDER BY validation_split",
+        "description": "The frozen 8h utility entry is followed by the already-selected 20h ordinal score; low-intensity trades exit at that decision open.",
+        "tables_used": [
+          "utility_intensity_router_recognition_folds.csv",
+          "utility_intensity_router_trade_folds.csv",
+          "utility_intensity_router_paired_deltas.csv"
+        ],
+        "filters": [
+          "8h utility q70 entry unchanged",
+          "20h ordinal q80 router reused without retuning",
+          "forced exit fills at the decision open before same-bar extremes"
+        ],
+        "metric_definitions": [
+          "Paired increment is routed net return minus frozen-exit net return for the same signal.",
+          "A negative clustered 95% upper bound is treated as strong rejection, not inconclusive evidence."
+        ]
+      }
+    },
+    {
+      "id": "utility-exhaustion-exit-validation",
+      "label": "Profit-side volume-backed upper-wick exit challenger",
+      "path": "utility_exhaustion_exit_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_exhaustion_exit_folds.csv') ORDER BY fold",
+        "description": "After the frozen 8h entry, profit-side exhaustion policies are selected on 14-day calibration paths and restored to 30 days on confirmation folds.",
+        "tables_used": [
+          "utility_exhaustion_exit_calibration.csv",
+          "utility_exhaustion_exit_folds.csv",
+          "utility_exhaustion_exit_paired_deltas.csv"
+        ],
+        "filters": [
+          "position has at least doubled before exhaustion can trigger",
+          "completed 4h reversal bar and next-open execution",
+          "paired increment versus the same signal under the frozen exit"
+        ],
+        "metric_definitions": [
+          "Blow-off reversal requires upper wick >=35% of range, close location <=35%, and volume ratio >=1.5.",
+          "The challenger remains unpromoted when either clustered paired-increment lower bound is non-positive."
+        ]
+      }
+    },
+    {
+      "id": "utility-exhaustion-attribution-validation",
+      "label": "Fixed attribution of static trail width versus upper-wick timing",
+      "path": "utility_exhaustion_attribution_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_exhaustion_attribution_folds.csv') ORDER BY policy, fold",
+        "description": "No-reselection factorial attribution on the same frozen 8h entries, with first-signal 14-day event de-duplication.",
+        "tables_used": [
+          "utility_exhaustion_attribution_summary.csv",
+          "utility_exhaustion_attribution_folds.csv",
+          "utility_exhaustion_attribution_paired_deltas.csv",
+          "utility_exhaustion_attribution_event_deltas.csv",
+          "utility_exhaustion_attribution_verification.json"
+        ],
+        "filters": [
+          "same confirmation signals and default costs for every policy",
+          "one first signal per symbol per 14-day event window",
+          "30pct-trail plus wick combination is explicitly post-hoc and prospective-only"
+        ],
+        "metric_definitions": [
+          "Pure wick increment compares the wick exit to an otherwise identical static 35pct-trail policy.",
+          "Event increment keeps only the first signal in each symbol's non-overlapping 14-day window."
+        ]
+      }
+    },
+    {
+      "id": "utility-entry-timing-validation",
+      "label": "Execution timing after the frozen 8h utility score",
+      "path": "utility_entry_timing_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_entry_timing_confirmation_folds.csv') ORDER BY fold",
+        "description": "Nine time-safe immediate, pullback, reclaim, and breakout entries selected only on mature calibration windows and confirmed on folds 3-6.",
+        "tables_used": [
+          "utility_entry_timing_calibration.csv",
+          "utility_entry_timing_confirmation_folds.csv",
+          "utility_entry_timing_recognition_paired.csv",
+          "utility_entry_timing_trade_paired_deltas.csv",
+          "utility_entry_timing_verification.json"
+        ],
+        "filters": [
+          "frozen 8h utility q70 signals only",
+          "maximum 24h trigger window",
+          "completed 4h trigger and next-open entry",
+          "independent-event de-duplication uses first signal per symbol per 14 days"
+        ],
+        "metric_definitions": [
+          "Fill rate is the share of frozen 8h signals that trigger the delayed entry rule.",
+          "Recognition precision is recomputed from the actual delayed entry open; missing triggers remain in retention denominators."
+        ]
+      }
+    },
+    {
+      "id": "utility-entry-frontier-validation",
+      "label": "Full fixed entry-rule frontier with multiple-testing control",
+      "path": "utility_entry_frontier_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_entry_frontier_summary.csv') ORDER BY actual_200pct_precision DESC",
+        "description": "All nine fixed entry rules are inspected on confirmation with row/event de-duplication, clustered intervals, and catalog-wide BH control.",
+        "tables_used": [
+          "utility_entry_frontier_summary.csv",
+          "utility_entry_frontier_folds.csv",
+          "utility_entry_frontier_paired_deltas.csv",
+          "utility_entry_frontier_verification.json"
+        ],
+        "filters": [
+          "confirmation-only winners are hypothesis-generating and cannot be historically promoted",
+          "completed 4h trigger and next-open entry within 24 hours",
+          "same frozen 8h signals for matched trade-return comparisons"
+        ],
+        "metric_definitions": [
+          "Breakout recognition and post-breakout execution are evaluated separately.",
+          "BH-adjusted row/event tests and event-cluster intervals must pass before a new entry rule is considered."
+        ]
+      }
+    },
+    {
+      "id": "utility-breakout-hold-router-validation",
+      "label": "Breakout-confirmed prospective hold-management router",
+      "path": "utility_breakout_hold_router_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_breakout_hold_router_folds.csv') ORDER BY route, fold",
+        "description": "The frozen 8h entry is retained; a completed six-bar breakout may switch only profit-side management at the next 4h open.",
+        "tables_used": [
+          "utility_breakout_hold_router_summary.csv",
+          "utility_breakout_hold_router_folds.csv",
+          "utility_breakout_hold_router_paired_deltas.csv",
+          "utility_breakout_hold_router_verification.json"
+        ],
+        "filters": [
+          "entry and downside stops remain frozen",
+          "all pre-switch partial-fill and trailing state is preserved",
+          "first signal per symbol per 14 days for independent-event increments",
+          "confirmation-mined result is prospective-only"
+        ],
+        "metric_definitions": [
+          "Paired increment compares routed and frozen exit returns for the same 8h signal.",
+          "Prospective diagnostic requires positive week/symbol lower bounds for rows and independent events."
+        ]
+      }
+    },
+    {
+      "id": "utility-breakout-add-validation",
+      "label": "Risk-neutral breakout-add allocation validation",
+      "path": "utility_breakout_add_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_breakout_add_summary.csv') ORDER BY breakout_add_fraction",
+        "description": "A fixed total planned position is split between the original 8h entry and a possible next-open breakout add; unused reserve remains cash.",
+        "tables_used": [
+          "utility_breakout_add_calibration.csv",
+          "utility_breakout_add_summary.csv",
+          "utility_breakout_add_folds.csv",
+          "utility_breakout_add_paired_deltas.csv",
+          "utility_breakout_add_verification.json"
+        ],
+        "filters": [
+          "no additional leverage or gross exposure",
+          "allocation selected on 14-day calibration windows only",
+          "30-day confirmation is held out from allocation selection",
+          "completed six-bar breakout enters the reserved tranche at the next 4h open"
+        ],
+        "metric_definitions": [
+          "Mean deployed fraction includes idle cash when no breakout add occurs.",
+          "Paired increment compares the split allocation with the full initial position on the same signal."
+        ]
+      }
+    },
+    {
+      "id": "utility-taker-flow-validation",
+      "label": "8h taker-buy-share prospective diagnostic",
+      "path": "utility_taker_flow_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_taker_flow_confirmation_folds.csv') ORDER BY fold",
+        "description": "A semantic 50% taker-buy quote-volume threshold is applied at the frozen 8h decision clock without delaying entry.",
+        "tables_used": [
+          "utility_taker_flow_calibration_splits.csv",
+          "utility_taker_flow_confirmation_folds.csv",
+          "utility_taker_flow_strategy_summary.csv",
+          "utility_taker_flow_strategy_folds.csv",
+          "utility_taker_flow_verification.json"
+        ],
+        "filters": [
+          "frozen 8h utility-selected signals only",
+          "two completed 4h bars after P0",
+          "taker buy quote-volume share >= 50%",
+          "rank, original stage veto and paper eligibility remain unchanged"
+        ],
+        "metric_definitions": [
+          "Taker buy share is taker-buy quote volume divided by total quote volume across the completed 8h path.",
+          "Independent events retain the first signal in each symbol's non-overlapping 14-day window."
+        ]
+      }
+    },
+    {
+      "id": "utility-taker-robustness-validation",
+      "label": "8h taker-flow price-path matched audit",
+      "path": "utility_taker_flow_robustness_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_taker_flow_price_matched_permutation.csv')",
+        "description": "Nearby semantic thresholds and within-fold price-path matched permutations test whether taker flow adds information beyond early momentum.",
+        "tables_used": [
+          "utility_taker_flow_robustness_definitions.csv",
+          "utility_taker_flow_price_matched_permutation.csv",
+          "utility_strategy_iteration_verification.json"
+        ],
+        "filters": [
+          "frozen 8h utility signals",
+          "confirmation folds 3-6",
+          "rank-neutral diagnostic"
+        ],
+        "metric_definitions": [
+          "One-sided p is the share of within-stratum shuffled flags with precision increment at least as large as observed."
+        ]
+      }
+    },
+    {
+      "id": "utility-breakout-runner-validation",
+      "label": "Breakout full-position runner rejection",
+      "path": "utility_breakout_runner_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_breakout_runner_calibration.csv') ORDER BY policy",
+        "description": "Six no-partial-sale exit policies are selected only on mature calibration windows and compared with the current half-at-150% breakout router.",
+        "tables_used": [
+          "utility_breakout_runner_calibration.csv",
+          "utility_breakout_runner_30d_calibration_sensitivity.csv",
+          "utility_breakout_runner_confirmation.csv",
+          "utility_breakout_runner_calibration_paired.csv",
+          "utility_strategy_iteration_verification.json"
+        ],
+        "filters": [
+          "same original 8h entry",
+          "same stop and wick exit",
+          "no confirmation-set rescue"
+        ],
+        "metric_definitions": [
+          "Paired increment compares raw outcomes for the same signal; portfolio expectancy also enforces concurrency and exposure constraints."
+        ]
+      }
+    },
+    {
+      "id": "utility-breakout-partial-fraction-validation",
+      "label": "Breakout partial-sale fraction nonstationarity",
+      "path": "utility_breakout_partial_fraction_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_breakout_partial_fraction_confirmation.csv') WHERE slippage_bps_each_side = 5 ORDER BY partial_fraction",
+        "description": "The already-fixed breakout router sells 25%, 50%, or 75% at +150%; all other clocks and controls remain identical.",
+        "tables_used": [
+          "utility_breakout_partial_fraction_calibration.csv",
+          "utility_breakout_partial_fraction_confirmation.csv",
+          "utility_breakout_partial_fraction_calibration_paired.csv",
+          "utility_strategy_iteration_verification.json"
+        ],
+        "filters": [
+          "same 8h entry and breakout clock",
+          "same +150% target and 30% trail",
+          "calibration selection followed by confirmation audit"
+        ],
+        "metric_definitions": [
+          "Temporal reversal means the calibration-selected fraction has a negative paired increment in confirmation."
+        ]
+      }
+    },
+    {
+      "id": "utility-regime-partial-router-validation",
+      "label": "Regime-conditioned partial-sale routing rejection",
+      "path": "utility_regime_partial_router_decision.json",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "SELECT * FROM read_csv_auto('utility_regime_partial_router_confirmation.csv') WHERE slippage_bps_each_side = 5 ORDER BY route",
+        "description": "Frozen BTC trend, volatility and altcoin breadth states route only the already-fixed partial-sale fraction; calibration defines every rule and confirmation only audits it.",
+        "tables_used": [
+          "utility_regime_partial_router_calibration.csv",
+          "utility_regime_partial_router_confirmation.csv",
+          "utility_regime_partial_fraction_segments.csv",
+          "utility_regime_partial_state_support.csv",
+          "utility_strategy_iteration_verification.json"
+        ],
+        "filters": [
+          "minimum five fraction-sensitive calibration signals",
+          "same entry, target, trail and costs",
+          "no confirmation-set rescue"
+        ],
+        "metric_definitions": [
+          "Paired increment is routed net return minus the fixed 50% partial-sale return for the same signal."
+        ]
+      }
+    },
+    {
+      "id": "forward-operational-audit",
+      "label": "Immutable forward-monitor operational audit",
+      "path": "forward_monitor_operational_audit_2026-07-21.json",
+      "query": {
+        "engine": "python",
+        "language": "json",
+        "description": "Snapshot dates, mature-label counts and a late read-only public-data dry-run are reconciled without backfilling missed decision clocks.",
+        "tables_used": [
+          "forward_monitor_operational_audit_2026-07-21.json",
+          "utility_strategy_iteration_verification.json"
+        ],
+        "filters": [
+          "08:20 Asia/Shanghai immutable clock",
+          "dry-run probe excluded from OOS",
+          "no order routing"
+        ],
+        "metric_definitions": [
+          "A true OOS snapshot must exist at the scheduled decision clock; a later reconstruction is diagnostic only."
+        ]
+      }
+    }
+  ]
+}

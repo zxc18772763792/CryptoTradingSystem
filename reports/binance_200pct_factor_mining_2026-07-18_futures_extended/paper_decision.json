@@ -1,0 +1,8 @@
+{
+  "paper_trade_candidate": true,
+  "best_policy": "stop20_half_at100_trail25_time30",
+  "best_policy_expectancy": 0.05086245673891571,
+  "best_policy_profit_factor": 1.3860140741806466,
+  "best_policy_max_drawdown": -0.10164343040583812,
+  "final_classification": "paper_trade_candidate"
+}

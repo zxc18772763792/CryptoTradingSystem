@@ -1,0 +1,42 @@
+{
+  "generated_at_utc": "2026-07-19T09:58:17.418803+00:00",
+  "verification_passed": true,
+  "files": {
+    "multisource_analysis_summary.json": {
+      "sha256": "431283323dc18368bcfaaebea6119036cd666d8941e9d58c7ae0e8fa98d1bb8b",
+      "bytes": 8127
+    },
+    "multisource_news_fold_metrics.csv": {
+      "sha256": "949e9f06ec7d96118f7621024b2fb38fc82a35c5383f133365a4dc752fc0e96a",
+      "bytes": 2040
+    },
+    "multisource_onchain_fold_metrics.csv": {
+      "sha256": "74f7c74d1fcda08b8777ab1c03e8ec85bab2828f0efe355217e5907692820507",
+      "bytes": 2314
+    },
+    "multisource_catalyst_strategy_decision.json": {
+      "sha256": "afa698e5d1c5a8421a46385fdae3605249d86ce1c87db675e1d34d37417be161",
+      "bytes": 3784
+    },
+    "multisource_catalyst_strategy_trades.csv.gz": {
+      "sha256": "2933cdc42271ac3729fabfa7e437409fdec5cd33c63fc7b66639f4241f4d8fe3",
+      "bytes": 4001
+    },
+    "multisource_verification_summary.json": {
+      "sha256": "cb575ff6cd97766b5947e8a513014c726bd618c3bc421c453286022726f4bb6a",
+      "bytes": 2443
+    },
+    "REPORT.md": {
+      "sha256": "f4b4a638e291c75511177889eb48a988961788c1af84a59a21a259d18885b1ed",
+      "bytes": 12644
+    },
+    "artifact.json": {
+      "sha256": "6fd7760dc2a2495255b5ec7b1575d91e81fee9ba053b4624214f127cede77071",
+      "bytes": 112800
+    },
+    "binance_runup_research.ipynb": {
+      "sha256": "a6d04055fe55db42f0d33c43a4e94b54f31f0b6550a26ff996c47a8d16cc4745",
+      "bytes": 62785
+    }
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "passed": true,
+  "checks": {
+    "news_family": true,
+    "onchain_family": true,
+    "strategy": true,
+    "identity_counts": true,
+    "news_counts": true,
+    "news_uses_fetched_time": true,
+    "ake_btw_event_regression": true,
+    "btw_early_catalyst_signal": true,
+    "current_events_complete": true,
+    "no_unvalidated_family_promoted": true
+  },
+  "news": {
+    "passed": true,
+    "fold_checks": [
+      {
+        "fold": 4,
+        "rows_match": true,
+        "positives_match": true,
+        "price_ap_match": true,
+        "combo_ap_match": true,
+        "price_lift_match": true,
+        "combo_lift_match": true
+      },
+      {
+        "fold": 5,
+        "rows_match": true,
+        "positives_match": true,
+        "price_ap_match": true,
+        "combo_ap_match": true,
+        "price_lift_match": true,
+        "combo_lift_match": true
+      },
+      {
+        "fold": 6,
+        "rows_match": true,
+        "positives_match": true,
+        "price_ap_match": true,
+        "combo_ap_match": true,
+        "price_lift_match": true,
+        "combo_lift_match": true
+      }
+    ]
+  },
+  "onchain": {
+    "passed": true,
+    "fold_checks": [
+      {
+        "fold": 0,
+        "rows_match": true,
+        "positives_match": true,
+        "price_ap_match": true,
+        "combo_ap_match": true,
+        "price_lift_match": true,
+        "combo_lift_match": true
+      },
+      {
+        "fold": 4,
+        "rows_match": true,
+        "positives_match": true,
+        "price_ap_match": true,
+        "combo_ap_match": true,
+        "price_lift_match": true,
+        "combo_lift_match": true
+      },
+      {
+        "fold": 5,
+        "rows_match": true,
+        "positives_match": true,
+        "price_ap_match": true,
+        "combo_ap_match": true,
+        "price_lift_match": true,
+        "combo_lift_match": true
+      },
+      {
+        "fold": 6,
+        "rows_match": true,
+        "positives_match": true,
+        "price_ap_match": true,
+        "combo_ap_match": true,
+        "price_lift_match": true,
+        "combo_lift_match": true
+      }
+    ]
+  },
+  "strategy": {
+    "passed": true,
+    "checks": {
+      "trade_count": true,
+      "expectancy": true,
+      "profit_factor": true,
+      "same_bar_stop_conservative": true,
+      "cost_scenarios": true,
+      "failed_gate_is_not_promoted": true
+    }
+  }
+}

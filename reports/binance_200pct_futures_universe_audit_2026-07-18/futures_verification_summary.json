@@ -1,0 +1,13 @@
+{
+  "event_count": 19,
+  "close_confirmed": 17,
+  "wick_only": 2,
+  "symbol_set_exact_match": true,
+  "classification_exact_match": true,
+  "event_times_exact_match": true,
+  "maximum_absolute_return_difference": 8.881784197001252e-16,
+  "required_examples": {
+    "AKEUSDT_present": true,
+    "BTWUSDT_present": true
+  }
+}

@@ -1,0 +1,157 @@
+{
+  "generated_at_utc": "2026-07-19T03:37:29.623528+00:00",
+  "entry_model_changed": false,
+  "selection_information_cutoff_utc": "2026-03-24T00:00:00+00:00",
+  "calibration_scope": "matured accepted trades strictly exited before fold 3",
+  "confirmation_scope": "walk-forward folds 3-6; selected exit policy frozen",
+  "catalog_policies": 52,
+  "selected_policy": "stop20_half100_trail25_time30",
+  "selected_policy_family": "partial_then_trailing",
+  "selection_was_eligible": true,
+  "default_cost_confirmation": {
+    "trades": 121,
+    "expectancy": 0.04500115348720436,
+    "median_return": -0.2013999999999999,
+    "win_rate": 0.2396694214876033,
+    "profit_factor": 1.3008344911770102,
+    "cvar_5pct": -0.21281262571428552,
+    "mean_mfe": 0.4956238893397838,
+    "mean_mae": -0.2020665793339156,
+    "total_return_on_initial_equity": 0.13371384859132654,
+    "max_drawdown": -0.062135966298454304,
+    "funding_coverage": 0.33884297520661155,
+    "fold_majority_profit_factor_gt_1": 0.5,
+    "market_state_majority_profit_factor_gt_1": 0.6666666666666666,
+    "largest_positive_pnl_share": 0.08539968499500114,
+    "leave_largest_winner_out_expectancy": 0.02872606951990598,
+    "median_holding_days": 4.0,
+    "take_profit_exit_rate": 0.0,
+    "trailing_exit_rate": 0.1652892561983471,
+    "hard_stop_exit_rate": 0.7520661157024794
+  },
+  "stress_costs": [
+    {
+      "slippage_bps_each_side": 5.0,
+      "trades": 121,
+      "expectancy": 0.04500115348720436,
+      "profit_factor": 1.3008344911770102,
+      "max_drawdown": -0.062135966298454304
+    },
+    {
+      "slippage_bps_each_side": 15.0,
+      "trades": 122,
+      "expectancy": 0.043256737929925806,
+      "profit_factor": 1.2871589745996086,
+      "max_drawdown": -0.06249440748085622
+    },
+    {
+      "slippage_bps_each_side": 30.0,
+      "trades": 122,
+      "expectancy": 0.04129183715831372,
+      "profit_factor": 1.2724124118819045,
+      "max_drawdown": -0.06303176464688431
+    }
+  ],
+  "week_block_bootstrap": {
+    "cluster": "week",
+    "samples": 2000,
+    "expectancy_median": 0.04438355484511439,
+    "expectancy_lower_95pct": -0.057969222258331725,
+    "expectancy_upper_95pct": 0.16397250238223185,
+    "profit_factor_median": 1.299291126960302,
+    "profit_factor_lower_95pct": 0.6494071601098331,
+    "profit_factor_upper_95pct": 2.2476866448748107
+  },
+  "symbol_cluster_bootstrap": {
+    "cluster": "symbol",
+    "samples": 2000,
+    "expectancy_median": 0.04380985983739881,
+    "expectancy_lower_95pct": -0.047928088590047886,
+    "expectancy_upper_95pct": 0.14980778634549877,
+    "profit_factor_median": 1.2924411430506826,
+    "profit_factor_lower_95pct": 0.708925817551454,
+    "profit_factor_upper_95pct": 2.1035041796965808
+  },
+  "point_gate_pass": false,
+  "uncertainty_gate_pass": false,
+  "final_classification": "watchlist_only",
+  "adaptive_time_forward_summary": {
+    "trades": 164,
+    "expectancy": 0.06350148668655656,
+    "median_return": -0.2013999999999999,
+    "win_rate": 0.2621951219512195,
+    "profit_factor": 1.4439357040864236,
+    "cvar_5pct": -0.21737355777777756,
+    "mean_mfe": 0.5177454016505116,
+    "mean_mae": -0.20562190026272986,
+    "funding_coverage": 0.3475609756097561,
+    "total_return_on_initial_equity": 0.2788815818709647,
+    "max_drawdown": -0.07705043828377289,
+    "folds": 5,
+    "fold_majority_profit_factor_gt_1": 0.8,
+    "market_states": 6,
+    "market_state_majority_profit_factor_gt_1": 0.8333333333333334,
+    "largest_positive_pnl_share": 0.06165661066378007,
+    "leave_largest_winner_out_expectancy": 0.051633328754799174,
+    "median_notional_usd": 2688.8477830093516,
+    "maximum_concurrent_positions_constraint": 10,
+    "maximum_gross_exposure_constraint": 0.5,
+    "gate_pass": true,
+    "take_profit_exit_rate": 0.012195121951219513,
+    "trailing_exit_rate": 0.15853658536585366,
+    "hard_stop_exit_rate": 0.7073170731707317,
+    "median_holding_days": 3.8333333333333335
+  },
+  "adaptive_stress_costs": [
+    {
+      "slippage_bps_each_side": 5.0,
+      "trades": 164,
+      "expectancy": 0.06350148668655656,
+      "profit_factor": 1.4439357040864236,
+      "max_drawdown": -0.07705043828377289
+    },
+    {
+      "slippage_bps_each_side": 15.0,
+      "trades": 162,
+      "expectancy": 0.06706846232453424,
+      "profit_factor": 1.473309479597302,
+      "max_drawdown": -0.07743648372867651
+    },
+    {
+      "slippage_bps_each_side": 30.0,
+      "trades": 162,
+      "expectancy": 0.06500466964802686,
+      "profit_factor": 1.4557419242337082,
+      "max_drawdown": -0.0780152341805983
+    }
+  ],
+  "adaptive_week_block_bootstrap": {
+    "cluster": "week",
+    "samples": 2000,
+    "expectancy_median": 0.06413066084330535,
+    "expectancy_lower_95pct": -0.01573404421607855,
+    "expectancy_upper_95pct": 0.1557787015570983,
+    "profit_factor_median": 1.4471630915067308,
+    "profit_factor_lower_95pct": 0.9006360173917837,
+    "profit_factor_upper_95pct": 2.2408885207278906
+  },
+  "adaptive_symbol_cluster_bootstrap": {
+    "cluster": "symbol",
+    "samples": 2000,
+    "expectancy_median": 0.06217719144952866,
+    "expectancy_lower_95pct": -0.014841432980604115,
+    "expectancy_upper_95pct": 0.15620867041966655,
+    "profit_factor_median": 1.4363068506896186,
+    "profit_factor_lower_95pct": 0.9033678211684165,
+    "profit_factor_upper_95pct": 2.222930754545278
+  },
+  "adaptive_point_gate_pass": true,
+  "adaptive_uncertainty_gate_pass": false,
+  "adaptive_classification": "adaptive_promising_but_unconfirmed",
+  "catalog_hash": "d836079303b8d9d67af6482e94b0bd352c3330c289f1da0fa5d8a133445c7bf3",
+  "source_hashes": {
+    "historical_walk_forward_scored.csv.gz": "3d7408933011c86f1e9aac4da7e80f70d984e851a6363428047d226df6d0f25c",
+    "futures_4h_panel.csv.gz": "ae4636245e239d89ec4fb2ff2c5e1e55f408740d7c7e370862a61fca64d7beaa",
+    "walk_forward_fold_metrics.csv": "e5f739f5deedf037621c8906994778009d258abaf1273fda1fc27deadfdfb13c"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "semantic_threshold_and_clock_are_fixed": true,
+    "calibration_counts_and_precision_recomputed": true,
+    "confirmation_counts_and_precision_recomputed": true,
+    "independent_events_recomputed": true,
+    "row_gate_passes_but_event_gate_fails": true,
+    "strategy_metrics_recomputed": true,
+    "filtered_strategy_has_all_four_folds": true,
+    "filtered_router_pair_recomputed": true,
+    "no_historical_promotion": true,
+    "forward_annotation_is_rank_and_gate_neutral": true
+  },
+  "recomputed": {
+    "selected_rows": 48,
+    "selected_positives": 9,
+    "selected_precision": 0.1875,
+    "selected_events": 33,
+    "selected_positive_events": 4,
+    "taker50_frozen_expectancy": 0.1867703667306577,
+    "taker50_breakout_router_expectancy": 0.2213375373757564
+  }
+}

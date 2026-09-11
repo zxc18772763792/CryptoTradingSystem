@@ -1,0 +1,130 @@
+{
+  "passed": true,
+  "sections": {
+    "sequence_model": {
+      "passed": true,
+      "checks": {
+        "selected_from_calibration": true,
+        "confirmation_rows": true,
+        "confirmation_positives": true,
+        "selected_rows": true,
+        "selected_positives": true,
+        "sequence_ap": true,
+        "price_ap": true,
+        "not_promoted_when_calibration_ineligible": true
+      }
+    },
+    "simple_rule": {
+      "passed": true,
+      "checks": {
+        "rule_selected_from_calibration": true,
+        "mode_selected_from_calibration": true,
+        "rows": true,
+        "selected_rows": true,
+        "selected_positives": true,
+        "precision": true,
+        "event_clusters": true,
+        "event_positive_count": true,
+        "event_precision": true,
+        "event_retention": true,
+        "secondary_evidence_not_promoted": true
+      }
+    },
+    "stop_width": {
+      "passed": true,
+      "checks": {
+        "selected_from_calibration": true,
+        "risk_equal": true,
+        "trade_count": true,
+        "expectancy": true,
+        "profit_factor": true,
+        "failed_gate_not_promoted": true
+      }
+    },
+    "stateful_exit": {
+      "passed": true,
+      "checks": {
+        "selected_from_calibration": true,
+        "trade_count": true,
+        "expectancy": true,
+        "profit_factor": true,
+        "fold_gate_failed": true,
+        "uncertainty_gate_failed": true,
+        "failed_gate_not_promoted": true
+      }
+    },
+    "postlaunch_entry": {
+      "passed": true,
+      "checks": {
+        "selected_from_calibration": true,
+        "actual_label_consistency": true,
+        "baseline_entries": true,
+        "selected_entries": true,
+        "selected_positives": true,
+        "selected_precision": true,
+        "recognition_deteriorated": true,
+        "trade_count": true,
+        "expectancy": true,
+        "profit_factor": true,
+        "largest_winner_dependency_failed": true,
+        "regime_direction_reversed": true,
+        "regime_not_used_for_selection": true,
+        "failed_gate_not_promoted": true
+      }
+    },
+    "hybrid_stop": {
+      "passed": true,
+      "checks": {
+        "selected_from_calibration": true,
+        "baseline_hard25_retained": true,
+        "winner_path_count": true,
+        "winner_stop_before_50_share": true,
+        "winner_close_below_20_share": true,
+        "trade_count": true,
+        "expectancy": true,
+        "profit_factor": true,
+        "no_increment": true,
+        "failed_gate_not_promoted": true
+      }
+    },
+    "staged_entry": {
+      "passed": true,
+      "checks": {
+        "selected_from_calibration": true,
+        "confirmation_only_retained": true,
+        "trade_count": true,
+        "expectancy": true,
+        "profit_factor": true,
+        "no_increment": true,
+        "failed_gate_not_promoted": true
+      }
+    },
+    "lifecycle_factor": {
+      "passed": true,
+      "checks": {
+        "rows": true,
+        "positives": true,
+        "price_ap": true,
+        "combo_ap": true,
+        "price_precision": true,
+        "combo_precision": true,
+        "fold_joint_share": true,
+        "coefficients_all_negative": true,
+        "price_events": true,
+        "combo_events": true,
+        "increment_failed": true,
+        "failed_gate_not_promoted": true
+      }
+    },
+    "robustness": {
+      "passed": true,
+      "checks": {
+        "permutation_ap_significant": true,
+        "permutation_precision_significant": true,
+        "leave_one_symbol_ap_positive": true,
+        "leave_one_symbol_precision_positive": true,
+        "status_is_secondary": true
+      }
+    }
+  }
+}

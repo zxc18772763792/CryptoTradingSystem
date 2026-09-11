@@ -1,0 +1,23 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "catalog_fixed_but_confirmation_is_hypothesis_only": true,
+    "all_nine_rules_and_four_folds_recomputed": true,
+    "breakout_is_strong_point_estimate_in_every_fold": true,
+    "breakout_fails_catalog_and_event_uncertainty": true,
+    "breakout_trade_metrics_recomputed": true,
+    "waiting_for_breakout_is_strongly_rejected_as_entry": true,
+    "second_breakout_family_confirms_chase_penalty": true,
+    "no_forward_buy_rule_added": true
+  },
+  "recomputed": {
+    "rules": 9,
+    "breakout_entries": 21,
+    "breakout_precision": 0.2857142857142857,
+    "breakout_event_precision": 0.2777777777777778,
+    "breakout_expectancy": 0.2499567901435745,
+    "breakout_profit_factor": 3.991788416805899,
+    "breakout_paired_trade_increment": -0.1779692990298461
+  }
+}

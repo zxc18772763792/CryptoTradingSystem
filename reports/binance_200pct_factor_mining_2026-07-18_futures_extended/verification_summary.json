@@ -1,0 +1,27 @@
+{
+  "passed": true,
+  "errors": [],
+  "checks": {
+    "manifest_files": 411,
+    "folds": 7,
+    "purge_days": 14,
+    "recomputed_metrics": {
+      "n": 96457,
+      "positives": 1015,
+      "auc": 0.7632448995665797,
+      "average_precision": 0.05426954419134844,
+      "top_2pct_n": 2042,
+      "top_2pct_precision": 0.0940254652301665,
+      "top_2pct_lift": 8.935383546508543
+    },
+    "current_close_confirmed_events": 17,
+    "current_wick_only_events": 2,
+    "ake_btw_present": true,
+    "threshold_horizon_cells": 28,
+    "next_4h_open_entry_utc_hour": 4,
+    "exit_policy_verification_passed": true,
+    "exit_catalog_policies": 52,
+    "fixed_exit_classification": "watchlist_only",
+    "adaptive_exit_classification": "adaptive_promising_but_unconfirmed"
+  }
+}

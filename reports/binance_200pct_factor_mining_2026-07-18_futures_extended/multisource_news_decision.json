@@ -1,0 +1,20 @@
+{
+  "family": "news",
+  "folds": 3,
+  "fold_majority_ap_and_lift_positive": 0.0,
+  "bootstrap_7d_blocks": {
+    "samples": 2000,
+    "delta_average_precision": {
+      "median": -0.0013828195782148583,
+      "lower_95pct": -0.008150364832286911,
+      "upper_95pct": 0.006978269352345922
+    },
+    "delta_top_2pct_lift": {
+      "median": -0.3270387737673328,
+      "lower_95pct": -1.0824962842171357,
+      "upper_95pct": 0.5176716894431663
+    }
+  },
+  "ranking_eligible": false,
+  "rule": "at least 3 folds, majority improve AP and lift, both 95% increment lower bounds above zero"
+}

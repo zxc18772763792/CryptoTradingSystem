@@ -1,0 +1,57 @@
+{
+  "generated_at_utc": "2026-07-20T01:14:18.060281+00:00",
+  "evidence_class": "posthoc_confirmation_matched_robustness_prospective_only",
+  "fixed_definition": "mean_ge_50pct",
+  "nearby_thresholds_all_positive_both_periods": true,
+  "fixed_calibration_precision_increment": 0.07142857142857142,
+  "fixed_confirmation_precision_increment": 0.07386363636363637,
+  "fixed_calibration_utility_expectancy_14d": 0.08132184313012096,
+  "matched_permutation": [
+    {
+      "schema": "return_only",
+      "match_features": [
+        "early_close_return"
+      ],
+      "rows": 88,
+      "strata": 12,
+      "observed_precision_increment": 0.07386363636363637,
+      "permutations": 5000,
+      "one_sided_p": 0.04519096180763847,
+      "null_median": 0.011363636363636367,
+      "null_upper_95pct": 0.053030303030303025
+    },
+    {
+      "schema": "return_and_efficiency",
+      "match_features": [
+        "early_close_return",
+        "early_path_efficiency"
+      ],
+      "rows": 88,
+      "strata": 28,
+      "observed_precision_increment": 0.07386363636363637,
+      "permutations": 5000,
+      "one_sided_p": 0.0691861627674465,
+      "null_median": 0.03219696969696971,
+      "null_upper_95pct": 0.07386363636363637
+    },
+    {
+      "schema": "return_and_model_score",
+      "match_features": [
+        "early_close_return",
+        "continuation_score"
+      ],
+      "rows": 88,
+      "strata": 36,
+      "observed_precision_increment": 0.07386363636363637,
+      "permutations": 5000,
+      "one_sided_p": 0.013397320535892822,
+      "null_median": 0.011363636363636367,
+      "null_upper_95pct": 0.053030303030303025
+    }
+  ],
+  "independent_after_all_price_path_matches": false,
+  "classification": "robust_directional_annotation_not_independently_identified",
+  "ranking_change_allowed": false,
+  "buy_gate_change_allowed": false,
+  "automatic_trading_allowed": false
+}

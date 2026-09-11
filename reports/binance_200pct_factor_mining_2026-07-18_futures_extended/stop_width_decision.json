@@ -1,0 +1,120 @@
+{
+  "generated_at_utc": "2026-07-19T10:50:55.557751+00:00",
+  "widths_tested": [
+    0.15,
+    0.2,
+    0.25,
+    0.3
+  ],
+  "risk_rule": "0.5% equity risk divided by hard-stop width; maximum gross exposure remains 50%",
+  "selection_information_cutoff_utc": "2026-03-24T00:00:00+00:00",
+  "selected_hard_stop_pct": 0.2,
+  "selection_eligible": true,
+  "confirmation_selected": {
+    "hard_stop_pct": 0.2,
+    "trades": 121.0,
+    "expectancy": 0.045001153487204494,
+    "profit_factor": 1.3008344911770113,
+    "win_rate": 0.2396694214876033,
+    "folds": 4.0,
+    "fold_expectancy_mean": 0.018288886247652486,
+    "fold_expectancy_std": 0.09012620840883037,
+    "selection_score": -0.0267742179567627,
+    "leave_largest_winner_out_expectancy": 0.028726069519906118,
+    "largest_positive_pnl_share": 0.08539968499500115,
+    "hard_stop_rate": 0.7520661157024794,
+    "median_notional_usd": 2573.285798176897,
+    "max_drawdown": -0.062135966298454304,
+    "total_return_on_initial_equity": 0.13371384859132696
+  },
+  "confirmation_baseline_stop20": {
+    "hard_stop_pct": 0.2,
+    "trades": 121.0,
+    "expectancy": 0.045001153487204494,
+    "profit_factor": 1.3008344911770113,
+    "win_rate": 0.2396694214876033,
+    "folds": 4.0,
+    "fold_expectancy_mean": 0.018288886247652486,
+    "fold_expectancy_std": 0.09012620840883037,
+    "selection_score": -0.0267742179567627,
+    "leave_largest_winner_out_expectancy": 0.028726069519906118,
+    "largest_positive_pnl_share": 0.08539968499500115,
+    "hard_stop_rate": 0.7520661157024794,
+    "median_notional_usd": 2573.285798176897,
+    "max_drawdown": -0.062135966298454304,
+    "total_return_on_initial_equity": 0.13371384859132696
+  },
+  "selected_fold_metrics": [
+    {
+      "fold": 3,
+      "trades": 36,
+      "expectancy": 0.05536109690502526,
+      "median_return": -0.2013999999999999,
+      "win_rate": 0.3055555555555556,
+      "profit_factor": 1.3945023064081299,
+      "hard_stop_rate": 0.6944444444444444,
+      "failure_to_launch_rate": 0.0,
+      "mean_mfe": 0.47270128834072245,
+      "mean_mae": -0.1991234487207829
+    },
+    {
+      "fold": 4,
+      "trades": 28,
+      "expectancy": -0.040893456448691676,
+      "median_return": -0.2013999999999999,
+      "win_rate": 0.17857142857142858,
+      "profit_factor": 0.7492398251156162,
+      "hard_stop_rate": 0.7857142857142857,
+      "failure_to_launch_rate": 0.0,
+      "mean_mfe": 0.41502216599268,
+      "mean_mae": -0.2088763929628236
+    },
+    {
+      "fold": 5,
+      "trades": 41,
+      "expectancy": 0.14632601565543113,
+      "median_return": -0.2013999999999999,
+      "win_rate": 0.2682926829268293,
+      "profit_factor": 2.0198764790140205,
+      "hard_stop_rate": 0.7560975609756098,
+      "failure_to_launch_rate": 0.0,
+      "mean_mfe": 0.6458075131358137,
+      "mean_mae": -0.20127023996297633
+    },
+    {
+      "fold": 6,
+      "trades": 16,
+      "expectancy": -0.08763811112115477,
+      "median_return": -0.2013999999999999,
+      "win_rate": 0.125,
+      "profit_factor": 0.460596538561059,
+      "hard_stop_rate": 0.8125,
+      "failure_to_launch_rate": 0.0,
+      "mean_mfe": 0.30340722146777654,
+      "mean_mae": -0.1988120690009071
+    }
+  ],
+  "selected_fold_majority_profit_factor_gt_1": 0.5,
+  "week_block_bootstrap": {
+    "cluster": "week",
+    "samples": 2000,
+    "expectancy_median": 0.04266159767512304,
+    "expectancy_lower_95pct": -0.05622150184761387,
+    "expectancy_upper_95pct": 0.16069327286105592,
+    "profit_factor_median": 1.2857707176500377,
+    "profit_factor_lower_95pct": 0.660283510936927,
+    "profit_factor_upper_95pct": 2.1786154178839423
+  },
+  "symbol_bootstrap": {
+    "cluster": "symbol",
+    "samples": 2000,
+    "expectancy_median": 0.043037641330558776,
+    "expectancy_lower_95pct": -0.047462349720233867,
+    "expectancy_upper_95pct": 0.14742902110651193,
+    "profit_factor_median": 1.2887217093980727,
+    "profit_factor_lower_95pct": 0.7170040234003312,
+    "profit_factor_upper_95pct": 2.1119321129740047
+  },
+  "confirmation_improved": false,
+  "classification": "no_stop_upgrade"
+}

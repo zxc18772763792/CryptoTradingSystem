@@ -1,0 +1,46 @@
+{
+  "generated_at_utc": "2026-07-19T10:49:46.184579+00:00",
+  "thresholds_tested": [
+    0.95,
+    0.97,
+    0.98,
+    0.985,
+    0.99,
+    0.995
+  ],
+  "selection_information_cutoff_utc": "2026-03-24T00:00:00+00:00",
+  "selected_threshold": 0.985,
+  "selection_eligible": true,
+  "confirmation_selected": {
+    "rank_threshold": 0.985,
+    "selected_on_calibration": true,
+    "signals": 257,
+    "actual_200pct_entries": 26,
+    "actual_200pct_precision": 0.10116731517509728,
+    "actual_positive_retention_vs_98pct": 1.0,
+    "wilson_precision_lower": 0.06997734234037184,
+    "trades": 122,
+    "expectancy": 0.034395486043415927,
+    "profit_factor": 1.2376667963864496,
+    "leave_largest_winner_out_expectancy": 0.022950721648994487,
+    "largest_positive_pnl_share": 0.06483336722462664
+  },
+  "confirmation_baseline_98pct": {
+    "rank_threshold": 0.98,
+    "selected_on_calibration": false,
+    "signals": 283,
+    "actual_200pct_entries": 26,
+    "actual_200pct_precision": 0.09187279151943463,
+    "actual_positive_retention_vs_98pct": 1.0,
+    "wilson_precision_lower": 0.06346746075304258,
+    "trades": 121,
+    "expectancy": 0.045001153487204494,
+    "profit_factor": 1.3008344911770113,
+    "leave_largest_winner_out_expectancy": 0.028726069519906118,
+    "largest_positive_pnl_share": 0.08539968499500115
+  },
+  "confirmation_fold_precision_improvement_rate": 0.5,
+  "confirmation_improved": false,
+  "classification": "no_threshold_upgrade",
+  "note": "threshold selection changes neither the frozen factors nor the exit policy"
+}

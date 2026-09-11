@@ -1,0 +1,69 @@
+{
+  "passed": true,
+  "sections": {
+    "entry_exit": {
+      "passed": true,
+      "checks": {
+        "entry_selection": true,
+        "exit_selection": true,
+        "next_open_delay_zero": true,
+        "one_bar_wait_delay_four": true,
+        "recognition_signal_count": true,
+        "recognition_positive_count": true,
+        "trade_count": true,
+        "trade_expectancy": true,
+        "trade_profit_factor": true,
+        "failed_gate_not_promoted": true,
+        "source_score_hash": true,
+        "source_panel_hash": true
+      }
+    },
+    "microstructure": {
+      "passed": true,
+      "checks": {
+        "row_count": true,
+        "positive_count": true,
+        "price_ap": true,
+        "micro_ap": true,
+        "selected_precision": true,
+        "no_fold_precision_improvement": true,
+        "failed_gate_not_promoted": true
+      }
+    },
+    "rank_thresholds": {
+      "passed": true,
+      "checks": {
+        "selection": true,
+        "selected_signals": true,
+        "selected_positives": true,
+        "baseline_signals": true,
+        "selected_expectancy": true,
+        "selected_profit_factor": true,
+        "baseline_expectancy": true,
+        "not_promoted": true
+      }
+    },
+    "stop_widths": {
+      "passed": true,
+      "checks": {
+        "selection": true,
+        "selected_trade_count": true,
+        "selected_expectancy": true,
+        "selected_profit_factor": true,
+        "risk_equal_sizing": true,
+        "not_promoted": true
+      }
+    },
+    "path_timing": {
+      "passed": true,
+      "checks": {
+        "signal_count": true,
+        "winner_count": true,
+        "median_mfe_1d": true,
+        "median_hours_50": true,
+        "winner_stop_before_50": true,
+        "loser_stop_share": true
+      }
+    }
+  }
+}

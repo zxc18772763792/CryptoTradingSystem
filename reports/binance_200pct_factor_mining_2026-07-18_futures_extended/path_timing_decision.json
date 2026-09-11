@@ -1,0 +1,20 @@
+{
+  "generated_at_utc": "2026-07-19T10:42:21.427624+00:00",
+  "scope": "next-open top-2% candidates in confirmation folds 3-6",
+  "signals": 283,
+  "actual_200pct_signals": 26,
+  "winner_launch_speed": {
+    "median_mfe_1d": 0.3093150738768855,
+    "median_mfe_3d": 1.2268740817118429,
+    "median_hours_to_50pct": 44.0,
+    "median_hours_to_100pct": 64.0,
+    "share_below_10pct_mfe_at_3d": 0.07692307692307693,
+    "share_below_20pct_mfe_at_5d": 0.038461538461538464
+  },
+  "stop_path_risk": {
+    "winner_share_stop20_before_50pct": 0.11538461538461539,
+    "winner_share_stop20_before_100pct": 0.11538461538461539,
+    "loser_share_hit_stop20_within_14d": 0.7470817120622568
+  },
+  "interpretation": "failure-to-launch and hard-stop rules must trade off fast loser removal against stopping future +200% paths before ignition"
+}
