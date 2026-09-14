@@ -6269,6 +6269,16 @@ async def run_ai_research_loop_once(request: Request):
     return loop.request_run()
 
 
+@router.post("/research-loop/reset-budget", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
+async def reset_ai_research_loop_budget(request: Request):
+    from core.ai.autonomous_research_loop import get_research_loop
+    from core.ai.research_loop_evaluation import ResearchStageError
+    try:
+        return get_research_loop(request.app).reset_daily_budget()
+    except ResearchStageError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 async def _build_operating_mode_payload() -> Dict[str, Any]:
     from core.runtime.operating_mode import validate_operating_mode
     from core.runtime.state import runtime_state
