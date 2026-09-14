@@ -371,7 +371,7 @@ def _openai_failover_primary_retry_sec() -> int:
         or ""
     ).strip()
     if not raw:
-        return 0
+        return 300
     try:
         return max(0, int(float(raw)))
     except Exception:
@@ -384,7 +384,7 @@ def _failover_entry_should_retry_primary(raw_entry: Mapping[str, Any]) -> bool:
         return False
     if str(raw_entry.get("mode") or "").strip().lower() != "backup":
         return False
-    raw_updated_at = str(raw_entry.get("updated_at") or "").strip()
+    raw_updated_at = str(raw_entry.get("primary_retry_started_at") or raw_entry.get("updated_at") or "").strip()
     if not raw_updated_at:
         return False
     try:
@@ -514,6 +514,21 @@ def _failover_entry_matches_targets(raw_entry: Mapping[str, Any], base_urls: Seq
     return normalized_raw == normalized_current
 
 
+def _preserve_primary_retry_clock(entry: Dict[str, Any], previous: Mapping[str, Any], *, primary_failed: bool = False) -> None:
+    """Backup activity and status reads must not postpone the next primary probe."""
+    if entry.get("mode") != "backup":
+        return
+    same_outage = (
+        not primary_failed
+        and previous.get("mode") == "backup"
+        and previous.get("day") == entry.get("day")
+        and _failover_entry_matches_targets(previous, entry.get("base_urls") or [])
+    )
+    entry["primary_retry_started_at"] = (
+        (previous.get("primary_retry_started_at") or previous.get("updated_at")) if same_outage else None
+    ) or entry["updated_at"]
+
+
 def _load_scope_failover_entry(
     scope: str,
     canonical: Sequence[Mapping[str, Any]],
@@ -542,7 +557,7 @@ def _load_scope_failover_entry(
                 ):
                     raw_mode = "primary"
                     raw_preferred = ""
-                    raw_chat_preferred: Sequence[str] = ()
+                    raw_chat_preferred: Sequence[str] = (raw_entry.get("chat_preferred_base_urls") or ()) if _failover_entry_matches_targets(raw_entry, base_urls) else ()
                 else:
                     raw_mode = str(raw_entry.get("mode") or "primary").strip().lower()
                     raw_preferred = str(raw_entry.get("preferred_base_url") or "").rstrip("/")
@@ -554,6 +569,7 @@ def _load_scope_failover_entry(
                     preferred_base_url=raw_preferred,
                     chat_preferred_base_urls=raw_chat_preferred,
                 )
+                _preserve_primary_retry_clock(entry, raw_entry)
                 if raw_entry != entry:
                     scopes[normalized_scope] = entry
                     _save_openai_failover_state(
@@ -573,7 +589,7 @@ def _load_scope_failover_entry(
         ):
             raw_mode = "primary"
             raw_preferred = ""
-            raw_chat_preferred = ()
+            raw_chat_preferred = (raw_entry.get("chat_preferred_base_urls") or ()) if _failover_entry_matches_targets(raw_entry, base_urls) else ()
         else:
             raw_mode = str(raw_entry.get("mode") or "primary").strip().lower()
             raw_preferred = str(raw_entry.get("preferred_base_url") or "").rstrip("/")
@@ -585,6 +601,7 @@ def _load_scope_failover_entry(
             preferred_base_url=raw_preferred,
             chat_preferred_base_urls=raw_chat_preferred,
         )
+        _preserve_primary_retry_clock(entry, raw_entry)
         if raw_entry != entry:
             _OPENAI_SCOPED_FAILOVER_STATE[normalized_scope] = entry
         return entry
@@ -629,7 +646,7 @@ def _remember_scope_failover_state(
                 ):
                     raw_mode = "primary"
                     raw_preferred = ""
-                    raw_chat_preferred: Sequence[str] = ()
+                    raw_chat_preferred: Sequence[str] = (raw_entry.get("chat_preferred_base_urls") or ()) if _failover_entry_matches_targets(raw_entry, base_urls) else ()
                 else:
                     raw_mode = str(raw_entry.get("mode") or "primary")
                     raw_preferred = str(raw_entry.get("preferred_base_url") or "")
@@ -685,6 +702,7 @@ def _remember_scope_failover_state(
                             chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
                         )
 
+                _preserve_primary_retry_clock(entry, raw_entry, primary_failed=normalized_failure == primary_base_url)
                 scopes[normalized_scope] = entry
                 _save_openai_failover_state(
                     path,
@@ -703,7 +721,7 @@ def _remember_scope_failover_state(
         ):
             raw_mode = "primary"
             raw_preferred = ""
-            raw_chat_preferred = ()
+            raw_chat_preferred = (raw_entry.get("chat_preferred_base_urls") or ()) if _failover_entry_matches_targets(raw_entry, base_urls) else ()
         else:
             raw_mode = str(raw_entry.get("mode") or "primary")
             raw_preferred = str(raw_entry.get("preferred_base_url") or "")
@@ -759,6 +777,7 @@ def _remember_scope_failover_state(
                     chat_preferred_base_urls=entry.get("chat_preferred_base_urls") or (),
                 )
 
+        _preserve_primary_retry_clock(entry, raw_entry, primary_failed=normalized_failure == primary_base_url)
         _OPENAI_SCOPED_FAILOVER_STATE[normalized_scope] = entry
 
 
@@ -795,7 +814,7 @@ def _remember_scope_chat_preference(
                 if raw_day != today:
                     raw_mode = "primary"
                     raw_preferred = ""
-                    raw_chat_preferred: Sequence[str] = ()
+                    raw_chat_preferred: Sequence[str] = (raw_entry.get("chat_preferred_base_urls") or ()) if _failover_entry_matches_targets(raw_entry, base_urls) else ()
                 else:
                     raw_mode = str(raw_entry.get("mode") or "primary")
                     raw_preferred = str(raw_entry.get("preferred_base_url") or "")
@@ -819,6 +838,7 @@ def _remember_scope_chat_preference(
                     preferred_base_url=str(entry.get("preferred_base_url") or ""),
                     chat_preferred_base_urls=chat_preferred,
                 )
+                _preserve_primary_retry_clock(entry, raw_entry)
                 scopes[normalized_scope] = entry
                 _save_openai_failover_state(
                     path,
@@ -833,7 +853,7 @@ def _remember_scope_chat_preference(
         if raw_day != today:
             raw_mode = "primary"
             raw_preferred = ""
-            raw_chat_preferred = ()
+            raw_chat_preferred = (raw_entry.get("chat_preferred_base_urls") or ()) if _failover_entry_matches_targets(raw_entry, base_urls) else ()
         else:
             raw_mode = str(raw_entry.get("mode") or "primary")
             raw_preferred = str(raw_entry.get("preferred_base_url") or "")
@@ -850,13 +870,15 @@ def _remember_scope_chat_preference(
             chat_preferred = [item for item in chat_preferred if item != normalized_clear]
         if normalized_prefer and normalized_prefer not in chat_preferred:
             chat_preferred.append(normalized_prefer)
-        _OPENAI_SCOPED_FAILOVER_STATE[normalized_scope] = _build_scope_failover_entry(
+        entry = _build_scope_failover_entry(
             base_urls,
             day=today,
             mode=str(entry.get("mode") or "primary"),
             preferred_base_url=str(entry.get("preferred_base_url") or ""),
             chat_preferred_base_urls=chat_preferred,
         )
+        _preserve_primary_retry_clock(entry, raw_entry)
+        _OPENAI_SCOPED_FAILOVER_STATE[normalized_scope] = entry
 
 
 def _rotate_targets(
@@ -891,7 +913,9 @@ def prioritize_openai_targets(
             backup_targets = canonical[1:]
             if backup_targets:
                 preferred_base_url = str(entry.get("preferred_base_url") or "").rstrip("/")
-                return _rotate_targets(backup_targets, preferred_base_url)
+                # Keep primary as the last resort when backups also fail. The
+                # full chain also preserves its identity in caller state updates.
+                return _rotate_targets(backup_targets, preferred_base_url) + canonical[:1]
         preferred_base_url = str(entry.get("preferred_base_url") or "").rstrip("/")
         return _rotate_targets(canonical, preferred_base_url)
     if not _ENABLE_CROSS_REQUEST_FAILOVER_CACHE:
@@ -1171,6 +1195,7 @@ def build_chat_completions_payload(
     temperature: float | None = None,
     response_format: str | Dict[str, Any] | None = None,
     stream: bool | None = None,
+    reasoning_effort: str | None = None,
 ) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "model": str(model or "").strip(),
@@ -1193,6 +1218,11 @@ def build_chat_completions_payload(
         payload["response_format"] = fmt
     if stream is not None:
         payload["stream"] = bool(stream)
+    # Reasoning models spend the completion budget on chain-of-thought before
+    # emitting any content. Without this the caller's max_tokens can be fully
+    # consumed by reasoning, leaving an empty or truncated response.
+    if reasoning_effort:
+        payload["reasoning_effort"] = str(reasoning_effort).strip()
 
     return payload
 

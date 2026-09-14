@@ -1,5 +1,7 @@
 import json
-from datetime import datetime
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -10,7 +12,12 @@ from core.utils.openai_responses import build_target_headers, openai_endpoint_ta
 
 
 @pytest.fixture(autouse=True)
-def _clear_news_llm_overrides(monkeypatch):
+def _clear_news_llm_overrides(monkeypatch, tmp_path):
+    # Even in-memory preference tests call reset(), which also clears its file.
+    monkeypatch.delenv("OPENAI_FAILOVER_STATE_PATH", raising=False)
+    monkeypatch.setattr(openai_responses, "_openai_failover_state_path", lambda: Path(
+        os.getenv("OPENAI_FAILOVER_STATE_PATH") or tmp_path / "isolated_failover.json"
+    ))
     for name in (
         "NEWS_LLM_API_KEY",
         "NEWS_LLM_BASE_URL",
@@ -227,7 +234,8 @@ def test_news_failover_supports_anthropic_style_backup(monkeypatch, tmp_path):
     assert "api-key" not in calls[1]["headers"]
 
 
-def test_scoped_openai_failover_sticks_to_backup_until_next_day(monkeypatch, tmp_path):
+def test_scoped_openai_failover_keeps_primary_as_last_resort_until_next_day(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENAI_FAILOVER_PRIMARY_RETRY_SEC", "0")
     state_path = tmp_path / "openai_failover_state.json"
     monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(state_path))
     monkeypatch.setenv("OPENAI_FAILOVER_TZ", "Asia/Shanghai")
@@ -254,12 +262,14 @@ def test_scoped_openai_failover_sticks_to_backup_until_next_day(monkeypatch, tmp
     assert [item["base_url"] for item in openai_responses.prioritize_openai_targets(targets, scope="news")] == [
         "https://backup-a.test/v1",
         "https://backup-b.test/v1",
+        "https://primary.test/v1",
     ]
 
     openai_responses.remember_openai_target_failure(targets, "https://backup-a.test/v1", scope="news")
     assert [item["base_url"] for item in openai_responses.prioritize_openai_targets(targets, scope="news")] == [
         "https://backup-b.test/v1",
         "https://backup-a.test/v1",
+        "https://primary.test/v1",
     ]
 
     monkeypatch.setattr(openai_responses, "_openai_failover_now", lambda: day_two)
@@ -268,6 +278,34 @@ def test_scoped_openai_failover_sticks_to_backup_until_next_day(monkeypatch, tmp
         "https://backup-a.test/v1",
         "https://backup-b.test/v1",
     ]
+
+
+@pytest.mark.parametrize("persisted", [False, True])
+def test_primary_retry_clock_survives_backup_activity(monkeypatch, tmp_path, persisted):
+    monkeypatch.delenv("OPENAI_FAILOVER_PRIMARY_RETRY_SEC", raising=False)
+    monkeypatch.delenv("OPENAI_FAILOVER_RETRY_PRIMARY_SEC", raising=False)
+    if persisted:
+        monkeypatch.setenv("OPENAI_FAILOVER_STATE_PATH", str(tmp_path / "state.json"))
+    else:
+        monkeypatch.delenv("OPENAI_FAILOVER_STATE_PATH", raising=False)
+    openai_responses.reset_openai_target_preferences()
+    now = datetime(2026, 4, 6, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    monkeypatch.setattr(openai_responses, "_openai_failover_now", lambda: now)
+    targets = openai_endpoint_targets(primary_base_url="https://primary.test/v1", backup_base_urls="https://backup.test/v1")
+    primary, backup = [t["base_url"] for t in targets]
+    openai_responses.remember_openai_target_failure(targets, primary, scope="agent")
+    for tick in range(1, 5):
+        now += timedelta(seconds=60)
+        ordered = openai_responses.prioritize_openai_targets(targets, scope="agent")
+        assert [t["base_url"] for t in ordered] == [backup, primary]
+        # Pass the real prioritized chain back, as the production callers do.
+        record = openai_responses.remember_openai_target_success if tick % 2 else openai_responses.remember_openai_target_failure
+        record(ordered, backup, scope="agent")
+        openai_responses.remember_openai_target_chat_preference(ordered, primary, scope="agent")
+        assert openai_responses.prioritize_openai_targets(targets, scope="agent")[0]["base_url"] == backup
+    now += timedelta(seconds=60)
+    assert openai_responses.prioritize_openai_targets(targets, scope="agent")[0]["base_url"] == primary
+    assert openai_responses.should_prefer_openai_target_chat_completions(targets, primary, scope="agent")
 
 
 def test_scoped_openai_failover_resets_when_target_chain_changes(monkeypatch, tmp_path):
@@ -387,10 +425,11 @@ def test_scoped_openai_failover_uses_in_memory_state_without_env(monkeypatch):
 
     assert [item["base_url"] for item in openai_responses.prioritize_openai_targets(targets, scope="news")] == [
         "https://backup.test/v1",
+        "https://primary.test/v1",
     ]
 
 
-def test_scoped_openai_chat_preference_resets_next_day(monkeypatch):
+def test_scoped_openai_chat_preference_survives_next_day(monkeypatch):
     monkeypatch.delenv("OPENAI_FAILOVER_STATE_PATH", raising=False)
     day_one = datetime(2026, 4, 6, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     day_two = datetime(2026, 4, 7, 0, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -442,7 +481,7 @@ def test_scoped_openai_chat_preference_resets_next_day(monkeypatch):
         targets,
         "https://primary.test/v1",
         scope="news",
-    ) is False
+    ) is True
 
 
 def test_scoped_openai_failover_is_isolated_per_scope(monkeypatch, tmp_path):
@@ -467,6 +506,7 @@ def test_scoped_openai_failover_is_isolated_per_scope(monkeypatch, tmp_path):
 
     assert [item["base_url"] for item in openai_responses.prioritize_openai_targets(targets, scope="news")] == [
         "https://backup.test/v1",
+        "https://primary.test/v1",
     ]
     assert [item["base_url"] for item in openai_responses.prioritize_openai_targets(targets, scope="ai_research")] == [
         "https://primary.test/v1",

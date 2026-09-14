@@ -17,12 +17,14 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import settings
+from core.ai.model_endpoints import research_agent_endpoint_targets
 from core.ai.autonomous_learning import (
     build_blocked_symbol_side_map,
     build_learning_memory,
     coerce_learning_memory,
     default_learning_memory,
     normalize_symbol,
+    parse_dt,
 )
 from core.ai.model_feedback_errors import (
     classify_model_feedback_error as _shared_classify_model_feedback_error,
@@ -92,6 +94,7 @@ _MODEL_FEEDBACK_OUTAGE_ALERT_SEC = 30 * 60
 # Keep a hard ceiling on per-round model time so one bad provider hop
 # cannot monopolize the agent for several minutes.
 _MODEL_FEEDBACK_HARD_TIMEOUT_SEC = 45.0
+_MODEL_RECOVERY_PROBE_INTERVAL_SEC = 300.0
 _AUTO_SYMBOL_SCAN_MAX_ITEMS = 48
 _AUTO_SYMBOL_SCAN_CONCURRENCY = 4
 _DEFAULT_AUTO_UNIVERSE = [
@@ -683,6 +686,7 @@ class AutonomousTradingAgent:
         self._submitted_count: int = 0
         self._last_submit_at: Optional[float] = None
         self._last_model_feedback_at: Optional[float] = None
+        self._last_model_attempt_at: Optional[float] = None
         self._model_feedback_outage_started_at: Optional[float] = None
         self._model_feedback_failure_streak: int = 0
         self._model_feedback_last_failure_kind: Optional[str] = None
@@ -693,6 +697,8 @@ class AutonomousTradingAgent:
     def _provider_base_url(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
+            if settings.AI_MODEL_BASE_URL.strip():
+                return settings.AI_MODEL_BASE_URL.rstrip("/")
             return str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL).rstrip("/")
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_BASE_URL", "") or _DEFAULT_ANTHROPIC_BASE_URL).rstrip("/")
@@ -701,6 +707,8 @@ class AutonomousTradingAgent:
     def _provider_model(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
+            if settings.AI_MODEL_BASE_URL.strip():
+                return str(self._get("AI_AUTONOMOUS_AGENT_MODEL", "") or settings.OPENAI_MODEL)
             return str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL)
         if provider == "claude":
             return str(getattr(settings, "ANTHROPIC_MODEL", "") or _DEFAULT_ANTHROPIC_MODEL)
@@ -709,6 +717,8 @@ class AutonomousTradingAgent:
     def _provider_api_key(self, provider: str) -> str:
         provider = _normalize_provider(provider)
         if provider == "codex":
+            if settings.AI_MODEL_BASE_URL.strip():
+                return settings.AI_MODEL_API_KEY.strip()
             primary = str(getattr(settings, "OPENAI_API_KEY", "") or "").strip()
             if primary:
                 return primary
@@ -720,13 +730,8 @@ class AutonomousTradingAgent:
     def _provider_endpoint_targets(self, provider: str) -> List[Dict[str, Any]]:
         provider = _normalize_provider(provider)
         if provider == "codex":
-            return openai_endpoint_targets(
-                primary_base_url=str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL),
-                backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
-                primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
-                backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
-                primary_model=str(getattr(settings, "OPENAI_MODEL", "") or _DEFAULT_OPENAI_MODEL).strip() or _DEFAULT_OPENAI_MODEL,
-                backup_model=str(getattr(settings, "OPENAI_BACKUP_MODEL", "") or "").strip(),
+            return research_agent_endpoint_targets(
+                primary_model=self._provider_model(provider),
             )
         return [
             {
@@ -1344,6 +1349,9 @@ class AutonomousTradingAgent:
     def _model_feedback_guard_status(self) -> Dict[str, Any]:
         last_failure_issue = _describe_model_feedback_issue(self._model_feedback_last_failure_error or "")
         return {
+            "last_attempt_at": _utc_iso_from_unix(self._last_model_attempt_at),
+            "recovery_probe_interval_sec": _MODEL_RECOVERY_PROBE_INTERVAL_SEC,
+            "recovery_successes_required": 3,
             "last_success_at": _utc_iso_from_unix(self._last_model_feedback_at),
             "outage_started_at": _utc_iso_from_unix(self._model_feedback_outage_started_at),
             "failure_streak": int(self._model_feedback_failure_streak),
@@ -1753,6 +1761,9 @@ class AutonomousTradingAgent:
                 temperature=temperature_value if temperature_value is not None else 0.0,
                 response_format={"type": "json_object"},
                 stream=False,
+                # The decision loop runs under a 45s hard guard with a small
+                # token budget, so a reasoning model must not spend it thinking.
+                reasoning_effort="none",
             )
             payload_variants = build_responses_payload_variants(
                 model=model,
@@ -1776,9 +1787,14 @@ class AutonomousTradingAgent:
                 max_tokens=int(max_tokens),
                 temperature=temperature_value if temperature_value is not None else 0.0,
             )
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=False) as session:
                 last_exc: Optional[BaseException] = None
                 total_targets = len(targets)
+                # Share a single budget and reserve time for every fallback.
+                # Compatibility retries on one endpoint share its deadline too.
+                deadline = time.monotonic() + min(
+                    timeout.total, max(0.001, _MODEL_FEEDBACK_HARD_TIMEOUT_SEC - 1.0)
+                )
                 for idx, target in enumerate(targets):
                     target_base_url = str(target.get("base_url") or "").rstrip("/")
                     target_api_key = str(target.get("api_key") or "").strip()
@@ -1788,6 +1804,15 @@ class AutonomousTradingAgent:
                     headers = build_target_headers({**dict(target), "api_key": target_api_key})
                     transport = target_transport(target)
                     advance_to_next_target = False
+                    remaining = deadline - time.monotonic()
+                    target_deadline = time.monotonic() + remaining / (total_targets - idx)
+
+                    def request_timeout():
+                        remaining_sec = target_deadline - time.monotonic()
+                        if remaining_sec <= 0:
+                            raise asyncio.TimeoutError("codex_request_timeout: endpoint budget exhausted")
+                        return aiohttp.ClientTimeout(total=remaining_sec, ceil_threshold=float("inf"))
+
                     try:
                         if transport == "anthropic":
                             request_anthropic_payload = dict(
@@ -1796,7 +1821,7 @@ class AutonomousTradingAgent:
                                 max_tokens=int(max_tokens),
                             )
                             url = anthropic_messages_endpoint(target_base_url)
-                            async with session.post(url, headers=headers, json=request_anthropic_payload) as resp:
+                            async with session.post(url, headers=headers, json=request_anthropic_payload, timeout=request_timeout()) as resp:
                                 if resp.status >= 400:
                                     body = (await resp.text())[:300]
                                     err = RuntimeError(f"{provider}_anthropic_http_{resp.status}:{body}")
@@ -1835,22 +1860,23 @@ class AutonomousTradingAgent:
                                         else:
                                             raise err
                                     else:
+                                        parsed_decision = _extract_json_obj(text)
                                         remember_openai_target_success(
                                             targets,
                                             target_base_url,
                                             scope=_OPENAI_FAILOVER_SCOPE,
                                         )
-                                        return _extract_json_obj(text)
+                                        return parsed_decision
                             if advance_to_next_target:
                                 continue
-                        if should_prefer_openai_target_chat_completions(
+                        if target.get("force_chat_completions") or should_prefer_openai_target_chat_completions(
                             targets,
                             target_base_url,
                             scope=_OPENAI_FAILOVER_SCOPE,
                         ):
-                            request_chat_payload = dict(chat_payload, model=target_model)
+                            request_chat_payload = dict(chat_payload, model=target_model, **target.get("chat_options", {}))
                             chat_url = chat_completions_endpoint(target_base_url)
-                            async with session.post(chat_url, headers=headers, json=request_chat_payload) as chat_resp:
+                            async with session.post(chat_url, headers=headers, json=request_chat_payload, timeout=request_timeout()) as chat_resp:
                                 if chat_resp.status >= 400:
                                     chat_body = (await chat_resp.text())[:300]
                                     err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
@@ -1890,17 +1916,18 @@ class AutonomousTradingAgent:
                                 target_base_url,
                                 scope=_OPENAI_FAILOVER_SCOPE,
                             )
+                            parsed_decision = _extract_json_obj(text)
                             remember_openai_target_success(
                                 targets,
                                 target_base_url,
                                 scope=_OPENAI_FAILOVER_SCOPE,
                             )
-                            return _extract_json_obj(text)
+                            return parsed_decision
                         for payload_index, payload in enumerate(payload_variants):
                             url = responses_endpoint(target_base_url)
                             request_payload = dict(payload, model=target_model)
-                            request_chat_payload = dict(chat_payload, model=target_model)
-                            async with session.post(url, headers=headers, json=request_payload) as resp:
+                            request_chat_payload = dict(chat_payload, model=target_model, **target.get("chat_options", {}))
+                            async with session.post(url, headers=headers, json=request_payload, timeout=request_timeout()) as resp:
                                 if resp.status >= 400:
                                     body = (await resp.text())[:300]
                                     if responses_api_unavailable(resp.status, body):
@@ -1914,7 +1941,7 @@ class AutonomousTradingAgent:
                                             "autonomous_agent codex relay does not support Responses API; "
                                             "retrying via chat/completions"
                                         )
-                                        async with session.post(chat_url, headers=headers, json=request_chat_payload) as chat_resp:
+                                        async with session.post(chat_url, headers=headers, json=request_chat_payload, timeout=request_timeout()) as chat_resp:
                                             if chat_resp.status >= 400:
                                                 chat_body = (await chat_resp.text())[:300]
                                                 err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
@@ -1956,12 +1983,13 @@ class AutonomousTradingAgent:
                                             target_base_url,
                                             scope=_OPENAI_FAILOVER_SCOPE,
                                         )
+                                        parsed_decision = _extract_json_obj(text)
                                         remember_openai_target_success(
                                             targets,
                                             target_base_url,
                                             scope=_OPENAI_FAILOVER_SCOPE,
                                         )
-                                        return _extract_json_obj(text)
+                                        return parsed_decision
                                     err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
                                     unsupported_param = unsupported_responses_parameter(body)
                                     if resp.status == 400 and unsupported_param in {
@@ -2029,26 +2057,35 @@ class AutonomousTradingAgent:
                                 target_base_url,
                                 scope=_OPENAI_FAILOVER_SCOPE,
                             )
+                            parsed_decision = _extract_json_obj(text)
                             remember_openai_target_success(
                                 targets,
                                 target_base_url,
                                 scope=_OPENAI_FAILOVER_SCOPE,
                             )
-                            return _extract_json_obj(text)
+                            return parsed_decision
+                    except ValueError as exc:
+                        remember_openai_target_failure(targets, target_base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                        last_exc = ValueError("codex_invalid_model_json")
+                        if idx + 1 < total_targets:
+                            continue
+                        raise last_exc from exc
                     except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                        error = (asyncio.TimeoutError("codex_request_timeout: endpoint budget exhausted")
+                                 if isinstance(exc, asyncio.TimeoutError) else exc)
                         remember_openai_target_failure(
                             targets,
                             target_base_url,
                             scope=_OPENAI_FAILOVER_SCOPE,
                         )
                         if idx + 1 < total_targets:
-                            last_exc = exc
+                            last_exc = error
                             logger.warning(
                                 f"autonomous_agent codex endpoint transport failure; "
                                 f"trying backup {idx + 2}/{total_targets}: {exc}"
                             )
                             continue
-                        raise
+                        raise error from exc
                     if advance_to_next_target:
                         continue
                 if last_exc is not None:
@@ -3464,10 +3501,17 @@ class AutonomousTradingAgent:
         adaptive = dict(adaptive_risk or {})
         if not adaptive:
             adaptive = dict((memory or {}).get("adaptive_risk") or {})
-        # Treat the learned instability flag as a hard guardrail for fresh entries.
-        # It is derived from recent journal issue-rate/latency statistics and should
-        # continue to block opening risk even after a transient outage has just recovered.
+        # Recovery requires three consecutive provider successes in learning memory.
         return bool(adaptive.get("avoid_new_entries_during_service_instability"))
+
+    def _model_recovery_probe_due(self, cfg: Dict[str, Any]) -> bool:
+        summary = (cfg.get("learning_memory") or {}).get("summary") or {}
+        persisted_attempt = parse_dt(summary.get("last_model_attempt_at"))
+        last_attempt = max(
+            self._last_model_attempt_at or 0.0,
+            persisted_attempt.timestamp() if persisted_attempt else 0.0,
+        )
+        return time.time() - last_attempt >= _MODEL_RECOVERY_PROBE_INTERVAL_SEC
 
     def _fresh_entry_guard_reason(
         self,
@@ -3556,6 +3600,7 @@ class AutonomousTradingAgent:
         *,
         cfg: Dict[str, Any],
         context_payload: Dict[str, Any],
+        force_recovery_probe: bool = False,
     ) -> Optional[Dict[str, Any]]:
         agg = dict(context_payload.get("aggregated_signal") or {})
         direction = str(agg.get("direction") or "FLAT").strip().upper() or "FLAT"
@@ -3590,6 +3635,15 @@ class AutonomousTradingAgent:
                 cfg=cfg,
                 reason=risk_reason or "aggregated_risk_blocked",
                 confidence=confidence,
+            )
+
+        if self._service_instability_guard_active(learning_memory=cfg.get("learning_memory")):
+            # A probe only checks provider recovery; run_once forces it to HOLD.
+            # Keep sampling even if the aggregate is flat, without opening risk.
+            if force_recovery_probe or self._model_recovery_probe_due(cfg):
+                return None
+            return self._build_hold_decision(
+                cfg=cfg, reason="review_service_instability", confidence=confidence,
             )
 
         if direction not in {"LONG", "SHORT"}:
@@ -5185,10 +5239,21 @@ class AutonomousTradingAgent:
                 13,
             )
         elif decision_reason == "review_service_instability":
+            last_issue_kind = str(learning_summary.get("last_model_issue_kind") or "")
+            issue_labels = {
+                "quota_exhausted": "供应商额度不足",
+                "permission_denied": "模型访问被拒绝",
+                "rate_limit": "供应商限流",
+                "timeout": "模型响应超时",
+                "service_unavailable": "模型服务不可用",
+                "bad_request": "模型请求参数错误",
+            }
+            successes = min(3, int(learning_summary.get("recent_model_success_streak") or 0))
             add_item(
                 "review_service_instability",
-                "模型服务稳定性不足，暂停新开仓",
-                "learning memory instability guard active",
+                (f"{issue_labels.get(last_issue_kind, '模型异常保护中')}，暂停新开仓" if successes == 0
+                 else "模型恢复验证中，暂停新开仓"),
+                f"历史请求异常触发保护；连续成功 {successes}/3。每 5 分钟可探测一次，探测不下单。",
                 "warn",
                 14,
             )
@@ -5798,6 +5863,7 @@ class AutonomousTradingAgent:
         context_payload, market_data = await self._build_context(context_cfg)
         research_context = context_payload.get("research_context") if isinstance(context_payload, dict) else {}
         raw_decision_source = "synthetic"
+        recovery_probe = False
         market_structure = dict(context_payload.get("market_structure") or {}) if isinstance(context_payload, dict) else {}
         live_connector = exchange_manager.get_exchange(
             str(context_payload.get("exchange") or effective_cfg.get("exchange") or "binance")
@@ -5829,10 +5895,15 @@ class AutonomousTradingAgent:
             raw_decision = self._maybe_build_fast_path_hold(
                 cfg=effective_cfg,
                 context_payload=context_payload,
+                force_recovery_probe=bool(force and trigger == "api_manual"),
             )
             if raw_decision is not None:
                 raw_decision_source = "rule_based"
             else:
+                recovery_probe = (
+                    not bool((context_payload.get("position") or {}).get("side"))
+                    and self._service_instability_guard_active(learning_memory=effective_cfg.get("learning_memory"))
+                )
                 try:
                     context_payload["event_summary"] = await asyncio.wait_for(
                         self._build_event_summary(
@@ -5870,6 +5941,7 @@ class AutonomousTradingAgent:
                                 f"{provider}_live_trading_not_permitted:"
                                 f"{policy.get('reason') or 'live trading is not permitted'}"
                             )
+                    self._last_model_attempt_at = time.time()
                     raw_decision = await asyncio.wait_for(
                         self._call_provider(
                             provider=provider,
@@ -5886,7 +5958,7 @@ class AutonomousTradingAgent:
                     self._record_model_feedback_success()
                 except Exception as exc:
                     normalized_exc: Exception = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
-                    if isinstance(exc, asyncio.TimeoutError) and "guard_timeout" not in str(exc or "").lower():
+                    if isinstance(exc, asyncio.TimeoutError) and not str(exc).strip():
                         normalized_exc = TimeoutError(
                             f"model_feedback_guard_timeout({int(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC)}s)"
                         )
@@ -5957,6 +6029,9 @@ class AutonomousTradingAgent:
                         }
                         raw_decision_source = "fallback"
             decision = self._normalize_decision(raw_decision, effective_cfg, context_payload)
+
+        if recovery_probe and raw_decision_source == "provider":
+            decision = dict(decision, action="hold", reason="review_service_instability")
 
         decision = self._apply_learning_entry_guards(
             decision=decision,
@@ -6064,7 +6139,7 @@ class AutonomousTradingAgent:
         self._last_diagnostics = diagnostics
         self._last_symbol_scan = selection
         self._tick_count += 1
-        if bool(execution.get("submitted")):
+        if bool(execution.get("submitted")) or raw_decision_source in {"provider", "fallback"}:
             self._refresh_learning_memory(cfg=effective_cfg, force=True)
 
         return {

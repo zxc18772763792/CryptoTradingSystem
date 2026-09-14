@@ -14,8 +14,10 @@ from typing import Any, Dict, Optional
 
 import aiohttp
 from loguru import logger
+from pydantic import ValidationError
 
 from config.settings import settings
+from core.ai.model_endpoints import research_agent_endpoint_targets
 from core.governance.schemas import LLMResearchOutput
 from core.utils.openai_responses import (
     anthropic_messages_endpoint,
@@ -225,15 +227,28 @@ def _fill_defaults(payload: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[Dict[str, Any]]:
+def _validated_provider_output(raw, data, target_model, *, validate_output):
+    try:
+        parsed = _parse_json_payload(raw)
+    except (ValueError, TypeError) as exc:
+        raise ResearchGenerationError('invalid_model_json', '研究模型输出不是有效 JSON') from exc
+    if validate_output:
+        try:
+            parsed = LLMResearchOutput.model_validate(_fill_defaults(parsed)).model_dump(mode="json")
+        except ValidationError as exc:
+            # Never log Pydantic's raw input_value: it contains the model payload.
+            raise ResearchGenerationError(
+                'invalid_model_schema', '研究模型输出未通过结构或交易指令校验'
+            ) from exc
+    return {**parsed, "_generation": {"requested_model": target_model,
+            "response_model": data.get("model"), "usage": data.get("usage", {})}}
+
+
+async def _call_openai_responses_json(prompt: str, *, timeout: int, validate_output: bool = False) -> Optional[Dict[str, Any]]:
     _last_generation_error.set(None)
     _generation_errors.set(())
     targets = prioritize_openai_targets(
-        openai_endpoint_targets(
-            primary_base_url=str(getattr(settings, "OPENAI_BASE_URL", "") or _DEFAULT_OPENAI_BASE_URL),
-            backup_base_urls=getattr(settings, "OPENAI_BACKUP_BASE_URL", "") or "",
-            primary_api_key=str(getattr(settings, "OPENAI_API_KEY", "") or "").strip(),
-            backup_api_key=str(getattr(settings, "OPENAI_BACKUP_API_KEY", "") or "").strip(),
+        research_agent_endpoint_targets(
             primary_model=str(settings.AI_RESEARCH_MODEL or _DEFAULT_OPENAI_MODEL),
             backup_model=str(settings.AI_RESEARCH_BACKUP_MODEL or settings.AI_RESEARCH_MODEL),
         ),
@@ -265,6 +280,10 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
         temperature=0.2,
         response_format={"type": "json_object"},
         stream=False,
+        # Mirror the Responses payload above: relays without Responses API
+        # support fall back here, and an unbounded chain-of-thought eats the
+        # 6000-token budget and truncates the JSON mid-string.
+        reasoning_effort="low",
     )
     anthropic_payload = build_anthropic_messages_payload(
         model=model,
@@ -274,7 +293,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
     )
     timeout_cfg = aiohttp.ClientTimeout(total=max(5, int(timeout)))
 
-    async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+    async with aiohttp.ClientSession(timeout=timeout_cfg, trust_env=False) as session:
         total_targets = len(targets)
         for idx, target in enumerate(targets):
             base_url = str(target.get("base_url") or "").rstrip("/")
@@ -284,7 +303,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                 continue
             transport = target_transport(target)
             request_payload = dict(payload, model=target_model)
-            request_chat_payload = dict(chat_payload, model=target_model)
+            request_chat_payload = dict(chat_payload, model=target_model, **target.get("chat_options", {}))
             request_anthropic_payload = dict(anthropic_payload, model=target_model)
             headers = build_target_headers({**dict(target), "api_key": api_key})
             try:
@@ -308,18 +327,14 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                                 continue
                             return None
                         data = await read_aiohttp_responses_json(resp)
-                        remember_openai_target_success(
-                            targets,
-                            base_url,
-                            scope=_OPENAI_FAILOVER_SCOPE,
-                        )
                 else:
-                    url = responses_endpoint(base_url)
-                    async with session.post(url, headers=headers, json=request_payload) as resp:
+                    use_chat = bool(target.get("force_chat_completions"))
+                    url = chat_completions_endpoint(base_url) if use_chat else responses_endpoint(base_url)
+                    async with session.post(url, headers=headers, json=request_chat_payload if use_chat else request_payload) as resp:
                         if resp.status >= 400:
                             body = (await resp.text())[:400]
                             _record_provider_error(resp.status, body)
-                            if responses_api_unavailable(resp.status, body):
+                            if not use_chat and responses_api_unavailable(resp.status, body):
                                 logger.warning(
                                     "research_context_generator: relay does not support Responses API; "
                                     "retrying via chat/completions"
@@ -359,17 +374,14 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                                     if idx + 1 < total_targets:
                                         continue
                                     return None
+                                result = _validated_provider_output(raw, data, target_model, validate_output=validate_output)
                                 remember_openai_target_success(
                                     targets,
                                     base_url,
                                     scope=_OPENAI_FAILOVER_SCOPE,
                                 )
-                                try:
-                                    return {**_parse_json_payload(raw), "_generation": {"requested_model": target_model, "response_model": data.get("model"), "usage": data.get("usage", {})}}
-                                except Exception as exc:
-                                    _set_generation_error(('invalid_model_json', '研究模型输出不是有效 JSON'))
-                                    logger.debug(f"research_context_generator: failed to parse chat payload: {exc}")
-                                    return None
+                                _last_generation_error.set(None)
+                                return result
                             if should_failover_openai_status(resp.status):
                                 remember_openai_target_failure(
                                     targets,
@@ -384,11 +396,12 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                                 continue
                             return None
                         data = await read_aiohttp_responses_json(resp)
-                        remember_openai_target_success(
-                            targets,
-                            base_url,
-                            scope=_OPENAI_FAILOVER_SCOPE,
-                        )
+            except ResearchGenerationError as exc:
+                _set_generation_error((exc.code, str(exc)))
+                remember_openai_target_failure(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                if idx + 1 < total_targets:
+                    continue
+                return None
             except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                 _set_generation_error(('provider_timeout' if isinstance(exc, asyncio.TimeoutError) else 'provider_connection', '研究模型请求超时或连接失败'))
                 logger.debug(f"research_context_generator: openai transport error: {exc}")
@@ -418,10 +431,13 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int) -> Optional[
                     continue
                 return None
             try:
-                return {**_parse_json_payload(raw), "_generation": {"requested_model": target_model, "response_model": data.get("model"), "usage": data.get("usage", {})}}
-            except Exception as exc:  # noqa: BLE001
-                _set_generation_error(('invalid_model_json', '研究模型输出不是有效 JSON'))
-                logger.debug(f"research_context_generator: JSON parse error: {exc}")
+                result = _validated_provider_output(raw, data, target_model, validate_output=validate_output)
+                remember_openai_target_success(targets, base_url, scope=_OPENAI_FAILOVER_SCOPE)
+                _last_generation_error.set(None)
+                return result
+            except ResearchGenerationError as exc:
+                _set_generation_error((exc.code, str(exc)))
+                logger.debug(f"research_context_generator: {exc.code}")
                 remember_openai_target_failure(
                     targets,
                     base_url,
@@ -449,7 +465,7 @@ async def generate_research_context(
             market_summary=market_str,
             goals=goals_str,
         )
-        parsed = await _call_openai_responses_json(prompt, timeout=timeout)
+        parsed = await _call_openai_responses_json(prompt, timeout=timeout, validate_output=True)
         if not isinstance(parsed, dict):
             if raise_on_error:
                 code, message = _last_generation_error.get() or ('provider_unavailable', '研究模型未返回可用内容')
@@ -467,7 +483,7 @@ async def generate_research_context(
             validated["_generation"] = parsed["_generation"]
         return validated
     except Exception as exc:  # noqa: BLE001
-        logger.debug(f"research_context_generator: unexpected error: {exc}")
+        logger.debug(f"research_context_generator: generation failed ({type(exc).__name__})")
         if raise_on_error:
             if isinstance(exc, ResearchGenerationError):
                 raise
