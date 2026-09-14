@@ -2732,6 +2732,7 @@ if(hasBalanceSnapshot){
   if(pie)pie.innerHTML='<div class=\"list-item\">资产分布暂未返回，稍后自动刷新...</div>';
 }
 drawEquity(historyRows);
+if(state.currentTab==='dashboard'||document.getElementById('dashboard')?.classList.contains('active'))void loadEquityAttribution(activeType);
 renderRisk(mergedRisk);
 if(sr.status==='rejected'&&br.status==='rejected'){const ex=document.getElementById('exchanges-list');if(ex)ex.innerHTML='<div class=\"list-item\">资产接口暂时不可用，系统正在自动重试...</div>';}
 }catch(e){console.error(e);const ex=document.getElementById('exchanges-list');if(ex)ex.innerHTML='<div class=\"list-item\">资产加载失败，正在重试...</div>';}
@@ -2740,6 +2741,23 @@ finally{summaryLoadPromise=null;}
 return summaryLoadPromise;
 }
 async function loadStats(){return loadSummary();}
+async function loadEquityAttribution(mode){
+  return runRequestSingleFlight('equityAttribution',async()=>{
+    const el=document.getElementById('equity-attribution');if(!el)return;
+    try{
+      const data=await api('/trading/balances/attribution',{timeoutMs:8000});
+      if(data.mode!==mode){el.textContent='账户模式已变化，等待重新核对。';return;}
+      if(data.mode!=='paper'){el.textContent=data.scope_note||'暂无完整归因';return;}
+      const money=value=>{const raw=Number(value),n=Math.abs(raw)<0.00005?0:raw;return Number.isFinite(n)?`${n>=0?'+':''}${n.toFixed(4)} USDT`:'--';};
+      const rows=Array.isArray(data.strategies)?data.strategies:[];
+      el.innerHTML=`<div class="list-item"><span>账户初始资金</span><span>${esc(Number(data.initial_equity).toFixed(2))} USDT</span></div>
+        <div class="list-item"><span>下表策略净贡献</span><span>${esc(money(data.attributed_pnl))}</span></div>
+        <div class="list-item"><span>历史结转 / 未归因差额</span><span>${esc(money(data.carry_forward_difference))}</span></div>
+        <div style="overflow-x:auto;margin-top:10px;"><table style="width:100%;min-width:500px;"><thead><tr><th>策略</th><th>已实现</th><th>当前浮盈</th><th>已扣手续费</th><th>净贡献</th></tr></thead><tbody>${rows.map(row=>`<tr><td>${esc(row.strategy==='AI_AutonomousAgent'?'AI 自治代理':row.strategy)}<small style="display:block;">平仓 ${Number(row.closed_count)} · 持仓 ${Number(row.open_count)}</small></td><td>${esc(money(row.realized_pnl))}</td><td>${esc(money(row.unrealized_pnl))}</td><td>${esc(money(-row.fees))}</td><td>${esc(money(row.net_pnl))}</td></tr>`).join('')||'<tr><td colspan="5">暂无可归属的策略记录</td></tr>'}</tbody></table></div>
+        <p style="color:var(--text-secondary);font-size:12px;line-height:1.6;">${esc(data.scope_note)} 结转差额不计作策略盈利。</p>`;
+    }catch(err){el.textContent=`策略归因暂不可用：${err.message||err}`;}
+  });
+}
 async function loadBalances(){return loadSummary();}
 async function loadBanlances(){return loadSummary();}
 async function loadRisk(){try{return await loadSummary();}catch{}}
@@ -3684,6 +3702,7 @@ return true;
 }catch(e){console.error('autoBackfillData failed',e);return false;}}
 async function fetchKlinesChunk({exchange,symbol,timeframe,limit,startTime,endTime,align='tail',timeoutMs}){let u=`/data/klines?exchange=${exchange}&symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}&limit=${limit}&align=${align}`;if(startTime)u+=`&start_time=${encodeURIComponent(startTime)}`;if(endTime)u+=`&end_time=${encodeURIComponent(endTime)}`;const r=await api(u,{timeoutMs:Math.max(3000,Number(timeoutMs||22000))});return r.data||[];}
 function renderKlineChart(preserveRange=true){
+updateDataBoardSummary();
 const c=document.getElementById('candlestick-chart');
 if(!c)return;
 const bars=marketDataState.bars||[];
@@ -3858,10 +3877,21 @@ if(!data.length){throw new Error(`${s} ${tf} 暂无可用数据，已触发后�
 marketDataState.exchange=actualExchange;
 await drawK(data);
 updateDataBoardSummary();
+void loadDataHistoryCoverage({exchange:actualExchange,symbol:s,timeframe:tf,loadSeq});
 if(loadSeq===marketDataState.loadSeq)scheduleKlineRealtime();
 if(!managedSource&&hasLargeGap(marketDataState.bars,marketDataState.timeframe)){
   const range=inferBackfillRangeFromBars(marketDataState.bars, marketDataState.timeframe);
   await autoBackfillData({exchange:actualExchange,symbol:s,timeframe:tf,reason:'gap-check',...range});
+}
+
+}catch(err){
+if(loadSeq===marketDataState.loadSeq){
+  resetKlineChartForSwitch(`行情加载失败: ${err?.message||err}`);
+}
+throw err;
+}finally{
+if(loadSeq===marketDataState.loadSeq)marketDataState.isLoading=false;
+}
 }
 function updateDataBoardSummary(){
   const bars=Array.isArray(marketDataState.bars)?marketDataState.bars:[];
@@ -3879,14 +3909,18 @@ function updateDataBoardSummary(){
   } else { put('data-board-coverage','--'); put('data-board-coverage-note','加载行情后显示起止时间与跨度'); }
   const status=document.getElementById('data-board-source-status'); if(status)status.textContent=bars.length?'数据可用':'等待数据';
 }
-}catch(err){
-if(loadSeq===marketDataState.loadSeq){
-  resetKlineChartForSwitch(`行情加载失败: ${err?.message||err}`);
-}
-throw err;
-}finally{
-if(loadSeq===marketDataState.loadSeq)marketDataState.isLoading=false;
-}
+async function loadDataHistoryCoverage({exchange,symbol,timeframe,loadSeq}){
+  const range=document.getElementById('data-board-history'),note=document.getElementById('data-board-history-note');
+  if(!range||!note)return;
+  range.textContent='查询中…';note.textContent='本地历史库，独立于图表加载条数';
+  try{
+    const data=await api(`/data/coverage?exchange=${encodeURIComponent(exchange)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`,{timeoutMs:30000});
+    if(loadSeq!==marketDataState.loadSeq)return;
+    // Historical parquet indexes are UTC even when the API omits the offset.
+    const utc=value=>/(?:Z|[+-]\d{2}:?\d{2})$/i.test(String(value))?value:`${value}Z`;
+    range.textContent=data.has_data?`${fmtDateTime(utc(data.start))} → ${fmtDateTime(utc(data.end))}`:'暂无本地历史数据';
+    note.textContent=data.has_data?`${Number(data.count).toLocaleString('zh-CN')} 根 K 线 · 首末跨度 ${Number(data.days)} 天 · 上海时间（不代表中间无缺口）`:'图表中的实时行情不等于已保存的历史数据';
+  }catch(err){if(loadSeq!==marketDataState.loadSeq)return;range.textContent='查询失败';note.textContent='历史库范围暂不可用，图表行情仍可查看';}
 }
 async function loadDataSymbolOptions(exchange, selectIds=['data-symbol','download-symbol']){
 try{

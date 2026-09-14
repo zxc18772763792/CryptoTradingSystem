@@ -176,6 +176,12 @@ class ExecutionEngine:
         self._paper_equity_anchor: float = 0.0
         self._paper_total_fees_usd: float = 0.0
         self._paper_fee_applied_orders: set[str] = set()
+        self._paper_fee_ledger: Dict[str, Dict[str, Any]] = {}
+        self._paper_fee_ledger_path = Path(settings.CACHE_PATH) / "runtime_state" / "paper_fees.json"
+        if self._paper_fee_ledger_path.exists():
+            self._paper_fee_ledger = json.loads(self._paper_fee_ledger_path.read_text(encoding="utf-8"))
+            self._paper_fee_applied_orders = set(self._paper_fee_ledger)
+            self._paper_total_fees_usd = sum(float(row.get("paper_fee_usd") or 0) for row in self._paper_fee_ledger.values())
         self._signal_diagnostics: Dict[str, Any] = {
             "submitted": 0,
             "executed": 0,
@@ -1034,11 +1040,8 @@ class ExecutionEngine:
         if sync_runtime_state:
             runtime_state.initialize_mode(mode, reason="execution_engine.set_paper_trading")
         if self._default_paper_trading and self._paper_equity_anchor < 100:
-            report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
-            seed = float(self._cached_equity or 0.0)
-            if report_eq > 0:
-                seed = max(seed, report_eq)
-            self._paper_equity_anchor = max(seed, float(getattr(settings, "PAPER_INITIAL_EQUITY", 10000.0) or 10000.0))
+            # A marked equity snapshot already includes PnL; it is not principal.
+            self._paper_equity_anchor = float(settings.PAPER_INITIAL_EQUITY)
         logger.info(f"Execution engine default trading mode: {mode}")
 
     def get_trading_mode(self) -> str:
@@ -1363,12 +1366,7 @@ class ExecutionEngine:
             return await self._get_account_equity(force=force)
 
         if self._paper_equity_anchor < 100:
-            report_eq = float((risk_manager.get_risk_report().get("equity") or {}).get("current") or 0.0)
-            seed = float(self._paper_equity_anchor or 0.0)
-            seed = max(seed, float(self._cached_equity or 0.0))
-            if report_eq > 0:
-                seed = max(seed, report_eq)
-            self._paper_equity_anchor = max(seed, float(getattr(settings, "PAPER_INITIAL_EQUITY", 10000.0) or 10000.0))
+            self._paper_equity_anchor = float(settings.PAPER_INITIAL_EQUITY)
 
         realized = float(position_manager.get_total_realized_pnl() or 0.0)
         unrealized = float(position_manager.get_total_pnl() or 0.0)
@@ -2625,6 +2623,13 @@ class ExecutionEngine:
                 decimals = 8
         return min_amount, decimals
 
+    def _persist_paper_fee_ledger(self) -> None:
+        path = self._paper_fee_ledger_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(self._paper_fee_ledger, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+
     def _consume_paper_order_cost(self, order_id: Optional[str]) -> Dict[str, float]:
         if self._current_trading_mode() == "live":
             return {"fee_usd": 0.0, "slippage_cost_usd": 0.0}
@@ -2640,6 +2645,8 @@ class ExecutionEngine:
         # an attribution metric and must not be charged a second time.
         if fee_usd > 0:
             self._paper_total_fees_usd += float(fee_usd)
+        self._paper_fee_ledger[oid] = {"strategy": meta.get("strategy"), "paper_fee_usd": float(fee_usd)}
+        self._persist_paper_fee_ledger()
         return {
             "fee_usd": float(fee_usd),
             "slippage_cost_usd": float(slippage_cost_usd),
@@ -6857,6 +6864,8 @@ class ExecutionEngine:
         self._last_bg_check_at = None
         self._paper_total_fees_usd = 0.0
         self._paper_fee_applied_orders.clear()
+        self._paper_fee_ledger.clear()
+        self._persist_paper_fee_ledger()
         if self._current_trading_mode() == "paper":
             # A paper reset is an explicit new-account operation. Do not carry
             # the previous risk/equity snapshot into the new virtual account;
