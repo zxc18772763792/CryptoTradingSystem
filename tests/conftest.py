@@ -41,6 +41,20 @@ def _isolate_shared_ai_endpoints(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _reset_research_generation_errors():
+    # These are ContextVars, so a test that records an error outside
+    # asyncio.run() leaves it visible to every later test in the process.
+    gen = importlib.import_module("core.ai.research_context_generator")
+    tokens = [
+        (gen._last_generation_error, gen._last_generation_error.set(None)),
+        (gen._generation_errors, gen._generation_errors.set(())),
+    ]
+    yield
+    for var, token in tokens:
+        var.reset(token)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_runtime_side_effect_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     original_base_dir = settings.BASE_DIR
     # Research registries, reports and latest.json resolve beside historical data.
