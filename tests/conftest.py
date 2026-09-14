@@ -30,6 +30,17 @@ os.environ.setdefault(
 
 
 @pytest.fixture(autouse=True)
+def _isolate_shared_ai_endpoints(monkeypatch):
+    # Local provider overrides must not replace the mock endpoints in tests.
+    for name in (
+        "AI_MODEL_BASE_URL", "AI_MODEL_API_KEY", "AI_MODEL_BACKUP_BASE_URL",
+        "AI_MODEL_BACKUP_API_KEY", "AI_MODEL_BACKUP_MODEL",
+    ):
+        monkeypatch.setattr(settings, name, "")
+    monkeypatch.setattr(settings, "AI_MODEL_FORCE_CHAT_COMPLETIONS", False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_runtime_side_effect_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     original_base_dir = settings.BASE_DIR
     # Research registries, reports and latest.json resolve beside historical data.

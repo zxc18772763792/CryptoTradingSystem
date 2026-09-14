@@ -124,6 +124,14 @@ class Settings(BaseSettings):
     OPENAI_BACKUP_MODEL: str = "gpt-5.5"
     AI_RESEARCH_MODEL: str = "gpt-5.6-sol"
     AI_RESEARCH_BACKUP_MODEL: str = "gpt-5.6-sol"
+    # Dedicated endpoints for research and the autonomous agent. Empty keeps
+    # the legacy OPENAI endpoint configuration; news has its own overrides.
+    AI_MODEL_BASE_URL: str = ""
+    AI_MODEL_API_KEY: str = ""
+    AI_MODEL_BACKUP_BASE_URL: str = ""
+    AI_MODEL_BACKUP_API_KEY: str = ""
+    AI_MODEL_BACKUP_MODEL: str = ""
+    AI_MODEL_FORCE_CHAT_COMPLETIONS: bool = False
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_BASE_URL: str = ""
     ANTHROPIC_MODEL: str = ""

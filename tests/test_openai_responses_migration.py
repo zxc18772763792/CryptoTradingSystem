@@ -2,13 +2,74 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
 
 from config.settings import settings
+
+
+@pytest.fixture(autouse=True)
+def _isolate_failover_file(monkeypatch, tmp_path):
+    import core.utils.openai_responses as helpers
+    monkeypatch.delenv("OPENAI_FAILOVER_STATE_PATH", raising=False)
+    monkeypatch.setattr(helpers, "_openai_failover_state_path", lambda: Path(
+        os.getenv("OPENAI_FAILOVER_STATE_PATH") or tmp_path / "isolated_failover.json"
+    ))
+
+
+@pytest.mark.parametrize("consumer", ["agent", "research"])
+@pytest.mark.parametrize("primary_status", [200, 503, "invalid_json"])
+def test_dedicated_ai_models_use_direct_chat_and_gpt_backup(monkeypatch, tmp_path, consumer, primary_status):
+    import core.ai.autonomous_agent as agent_module
+    import core.ai.research_context_generator as research_module
+    import core.utils.openai_responses as helpers
+
+    monkeypatch.setenv("AI_AGENT_CONFIG_PATH", str(tmp_path / "agent.json"))
+    for name, value in {
+        "AI_MODEL_BASE_URL": "https://primary.test/v1",
+        "AI_MODEL_API_KEY": "primary-key",
+        "AI_MODEL_BACKUP_BASE_URL": "https://backup.test/v1",
+        "AI_MODEL_BACKUP_API_KEY": "backup-key",
+        "AI_MODEL_BACKUP_MODEL": "gpt-5.6-sol",
+        "AI_MODEL_FORCE_CHAT_COMPLETIONS": True,
+        "AI_AUTONOMOUS_AGENT_MODEL": "deepseek-v4.1-flash-特价",
+        "AI_RESEARCH_MODEL": "deepseek-v4.1-flash-特价",
+        "AI_RESEARCH_BACKUP_MODEL": "gpt-5.6-sol",
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    helpers.reset_openai_target_preferences()
+    content = '{"action":"hold","reason":"test"}'
+    responses = [_FakeResponse({"choices": [{"message": {"content": content}}]})]
+    if primary_status != 200:
+        responses.insert(0, _FakeResponse({"choices": [{"message": {"content": "invalid JSON"}}]})
+                         if primary_status == "invalid_json" else _FakeResponse({"error": "unavailable"}, status=primary_status))
+    capture = {}
+    monkeypatch.setattr(agent_module.aiohttp, "ClientSession", lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs))
+    if consumer == "agent":
+        agent = agent_module.AutonomousTradingAgent(cache_root=tmp_path)
+        result = asyncio.run(agent._call_provider(provider="codex", model=settings.AI_AUTONOMOUS_AGENT_MODEL, timeout_ms=5000, max_tokens=420, temperature=0.15, system_prompt="JSON only", user_prompt="test"))
+        assert agent._provider_base_url("codex") == "https://primary.test/v1"
+    else:
+        result = asyncio.run(research_module._call_openai_responses_json("test", timeout=5))
+    assert result["action"] == "hold"
+    assert capture["session_kwargs"]["trust_env"] is False
+    requests = capture["requests"]
+    assert requests[0]["url"] == "https://primary.test/v1/chat/completions"
+    assert requests[0]["json"]["model"] == "deepseek-v4.1-flash-特价"
+    assert requests[0]["json"]["thinking"] == {"type": "disabled"}
+    assert requests[0]["headers"]["Authorization"] == "Bearer primary-key"
+    if primary_status != 200:
+        assert requests[1]["url"] == "https://backup.test/v1/chat/completions"
+        assert requests[1]["json"]["model"] == "gpt-5.6-sol"
+        assert "thinking" not in requests[1]["json"]
+        assert requests[1]["headers"]["Authorization"] == "Bearer backup-key"
+    else:
+        assert len(requests) == 1
 
 
 class _FakeResponse:
@@ -87,6 +148,73 @@ class _FakeSequenceSession:
 
     def post(self, url, *, headers=None, json=None, timeout=None):
         return self.request("POST", url, headers=headers, json=json, timeout=timeout)
+
+
+@pytest.mark.parametrize("compatibility_fallback", [False, True])
+@pytest.mark.parametrize("bad_content", ['{"hypothesis":"Go long BTC now"}', 'not valid JSON'])
+def test_full_research_generation_retries_invalid_primary(monkeypatch, compatibility_fallback, bad_content):
+    import core.ai.research_context_generator as module
+    for name, value in {"OPENAI_API_KEY": "test-key", "OPENAI_BASE_URL": "https://primary.test/v1",
+                        "OPENAI_BACKUP_BASE_URL": "https://backup.test/v1", "OPENAI_BACKUP_API_KEY": "test-backup"}.items():
+        monkeypatch.setattr(settings, name, value)
+    def response(content):
+        return _FakeResponse({"choices": [{"message": {"content": content}}]})
+    responses = [response(bad_content), response(json.dumps({"hypothesis": "Compare long-term trends",
+        "proposed_strategy_changes": [{"program": {"execution_mode": "stateful_long"}}]}))]
+    if compatibility_fallback:
+        responses.insert(0, _FakeResponse({"error": "unknown endpoint /responses"}, status=404))
+    capture = {}
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda **kw: _FakeSequenceSession(capture=capture, responses=responses, **kw))
+    result = asyncio.run(module.generate_research_context({}, timeout=10, raise_on_error=True))
+    assert result["hypothesis"] == "Compare long-term trends"
+    assert capture["requests"][-1]["url"].startswith("https://backup.test/")
+    assert len(capture["requests"]) == (3 if compatibility_fallback else 2)
+    assert module._last_generation_error.get() is None
+
+
+def test_full_research_rejects_invalid_schema_on_both_targets(monkeypatch):
+    import core.ai.research_context_generator as module
+    for name, value in {"OPENAI_API_KEY": "test-key", "OPENAI_BASE_URL": "https://primary.test/v1",
+                        "OPENAI_BACKUP_BASE_URL": "https://backup.test/v1", "OPENAI_BACKUP_API_KEY": "test-backup"}.items():
+        monkeypatch.setattr(settings, name, value)
+    capture = {}
+    responses = [_FakeResponse({"choices": [{"message": {"content": '{"hypothesis":"Go long BTC now"}'}}]}) for _ in range(2)]
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda **kw: _FakeSequenceSession(capture=capture, responses=responses, **kw))
+    with pytest.raises(module.ResearchGenerationError) as raised:
+        asyncio.run(module.generate_research_context({}, timeout=10, raise_on_error=True))
+    assert raised.value.code == "invalid_model_schema"
+    assert "BTC" not in str(raised.value)
+    assert len(capture["requests"]) == 2
+
+
+@pytest.mark.parametrize("backup_times_out", [False, True])
+def test_agent_reserves_backup_timeout_budget(monkeypatch, tmp_path, backup_times_out):
+    import core.ai.autonomous_agent as module
+    from types import SimpleNamespace
+    clock = [100.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    targets = [{"base_url": f"https://{name}.test/v1", "api_key": "test", "model": name,
+                "force_chat_completions": True} for name in ("primary", "backup")]
+    monkeypatch.setattr(module, "prioritize_openai_targets", lambda targets, **kw: targets)
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path / "agent")
+    monkeypatch.setattr(agent, "_provider_endpoint_targets", lambda provider: targets)
+    capture = {}
+    class TimedOutResponse(_FakeResponse):
+        async def __aenter__(self):
+            clock[0] += capture["requests"][-1]["timeout"].total
+            raise asyncio.TimeoutError()
+    responses = [TimedOutResponse({}), TimedOutResponse({}) if backup_times_out else
+        _FakeResponse({"choices": [{"message": {"content": '{"action":"hold"}'}}]})]
+    monkeypatch.setattr(module.aiohttp, "ClientSession", lambda **kw: _FakeSequenceSession(capture=capture, responses=responses, **kw))
+    call = agent._call_provider(provider="codex", model="primary", timeout_ms=40000, max_tokens=400,
+                                temperature=0.1, system_prompt="JSON", user_prompt="test")
+    if backup_times_out:
+        with pytest.raises(asyncio.TimeoutError, match="codex_request_timeout"):
+            asyncio.run(call)
+    else:
+        assert asyncio.run(call)["action"] == "hold"
+    assert [r["timeout"].total for r in capture["requests"]] == pytest.approx([20, 20])
+    assert clock[0] <= 140
 
 
 class _SyncResponse:
