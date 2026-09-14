@@ -143,6 +143,8 @@
                     <div class="card wide">
                         <h3>资产净值曲线</h3>
                         <canvas id="equity-chart"></canvas>
+                        <h4 style="margin-top:20px;">净值来源 · 按策略归因</h4>
+                        <div id="equity-attribution" aria-live="polite">正在核对策略盈亏…</div>
                     </div>
 
                     <!-- 第三行：持仓分布 + 资产明细 + 运行策略 -->
@@ -727,7 +729,7 @@
                         <div id="data-board-summary" class="data-board-summary">
                             <div class="data-board-kpi"><span>当前标的</span><strong id="data-board-symbol">--</strong><small id="data-board-exchange">--</small></div>
                             <div class="data-board-kpi"><span>本地K线</span><strong id="data-board-bars">--</strong><small id="data-board-timeframe">--</small></div>
-                            <div class="data-board-kpi data-board-kpi-coverage"><span>数据覆盖范围</span><strong id="data-board-coverage">--</strong><small id="data-board-coverage-note">加载行情后显示起止时间与跨度</small></div>
+                            <div class="data-board-kpi data-board-kpi-coverage"><span>本地历史数据范围</span><strong id="data-board-history">--</strong><small id="data-board-history-note">按当前交易所、币种和周期查询</small><span style="margin-top:8px;">当前图表加载范围</span><strong id="data-board-coverage">--</strong><small id="data-board-coverage-note">加载行情后显示起止时间与跨度</small></div>
                         </div>
                         <div class="data-board-quick-actions" aria-label="数据快捷操作">
                             <button type="button" class="btn btn-primary btn-sm" data-data-preset="BTC/USDT|1h">BTC · 1h</button>
@@ -3555,12 +3557,12 @@
     </div>
 
     <script defer charset="utf-8" src="{{ static_asset_url('js/altcoin_radar.js') }}"></script>
-    <script defer charset="utf-8" src="{{ static_asset_url('js/app.js') }}&bt_modes=20260525d"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/app.js') }}&bt_modes=20260911_attribution"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/research_workbench.js') }}"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research.js') }}"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research_diagnostics.js') }}"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research_runtime.js') }}"></script>
-    <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research_agent.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research_agent.js') }}&recovery=20260911"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/news_tab_runtime.js') }}"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/dashboard_unstructured_news.js') }}"></script>
 </body>

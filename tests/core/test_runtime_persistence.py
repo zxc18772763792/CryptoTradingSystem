@@ -420,7 +420,7 @@ def test_position_manager_skips_persisted_test_stub_position(tmp_path, monkeypat
     assert restored.get_all_positions()[0].symbol == "ETH/USDT"
 
 
-def test_position_manager_throttles_open_close_persistence_and_trims_history(tmp_path, monkeypatch):
+def test_position_manager_persists_trade_transitions_and_trims_history(tmp_path, monkeypatch):
     monkeypatch.setattr(position_module.settings, "CACHE_PATH", tmp_path, raising=False)
     monkeypatch.setattr(position_module.settings, "TRADING_MODE", "paper", raising=False)
     monkeypatch.setattr(position_module.settings, "POSITION_HISTORY_LIMIT", 100, raising=False)
@@ -455,7 +455,7 @@ def test_position_manager_throttles_open_close_persistence_and_trims_history(tmp
         )
 
     assert writes
-    assert all(force is False for force in writes)
+    assert all(force is True for force in writes)
     assert len(manager.get_closed_positions()) == 100
     assert manager.get_closed_positions()[0].symbol == "COIN5/USDT"
 

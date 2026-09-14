@@ -572,7 +572,7 @@ class PositionManager:
 
         self._positions[key] = position
         self._dirty = True
-        self._persist_scope_state()
+        self._persist_scope_state(force=True)
         logger.info(
             f"Position opened: {symbol} {side.value} "
             f"{qty} @ {price} (leverage: {lev}x)"
@@ -639,7 +639,7 @@ class PositionManager:
 
             position.realized_pnl += realized_piece
             position.quantity = origin_qty - closing_qty
-            position.value = close_px * position.quantity
+            position.update_price(close_px)
             position.updated_at = datetime.now(timezone.utc)
 
             logger.info(
@@ -655,7 +655,7 @@ class PositionManager:
             except RuntimeError:
                 pass
             self._dirty = True
-            self._persist_scope_state()
+            self._persist_scope_state(force=True)
             return position
 
         position.update_price(close_px)
@@ -670,7 +670,7 @@ class PositionManager:
         self._trim_position_history()
         del self._positions[key]
         self._dirty = True
-        self._persist_scope_state()
+        self._persist_scope_state(force=True)
 
         try:
             asyncio.get_running_loop()
@@ -766,7 +766,7 @@ class PositionManager:
         return sum(p.unrealized_pnl for p in self._positions.values())
 
     def get_total_realized_pnl(self) -> float:
-        return sum(p.realized_pnl for p in self._position_history)
+        return sum(p.realized_pnl for p in self._position_history) + sum(p.realized_pnl for p in self._positions.values())
 
     def get_closed_positions(
         self,

@@ -13,6 +13,25 @@ from web.api.auth import require_sensitive_ops_permissions
 
 
 router = APIRouter()
+
+
+@router.get("/balances/attribution", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
+async def get_balance_attribution():
+    if not trading_api.execution_engine.is_paper_mode():
+        return {"mode": "live", "strategies": [], "scope_note": "实盘净值还受充提、币价估值及外部交易影响，暂不能用本地策略记录完整归因。"}
+    from core.trading.equity_attribution import build_paper_equity_attribution
+    engine = trading_api.execution_engine
+    equity = await engine.get_account_equity_snapshot()
+    return build_paper_equity_attribution(
+        equity=equity,
+        initial_equity=trading_api.settings.PAPER_INITIAL_EQUITY,
+        closed_positions=trading_api.position_manager.get_closed_positions(scope="paper"),
+        open_positions=trading_api.position_manager.get_all_positions(scope="paper"),
+        fee_rows=list(engine._paper_fee_ledger.values()),
+        total_fees=engine._paper_total_fees_usd,
+    )
+
+
 _BALANCE_RESPONSE_CACHE_TTL_SEC = 45.0
 _BALANCE_RESPONSE_STALE_TTL_SEC = 180.0
 _BALANCE_RESPONSE_TIMEOUT_SEC = 5.0
