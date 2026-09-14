@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -54,8 +55,6 @@ _FORBIDDEN_TRADE_TERMS = [
     "市价",
     "限价",
     "杠杆",
-    "long",
-    "short",
     "market order",
     "limit order",
 ]
@@ -69,7 +68,11 @@ def _contains_forbidden_trade_instruction(value: Any) -> bool:
     if isinstance(value, list):
         return any(_contains_forbidden_trade_instruction(v) for v in value)
     text = str(value).lower()
-    return any(term in text for term in _FORBIDDEN_TRADE_TERMS)
+    # DSL identifiers (stateful_long, short_ema) and time horizons are research
+    # vocabulary. Standalone directional instructions remain prohibited.
+    return any(term in text for term in _FORBIDDEN_TRADE_TERMS) or bool(
+        re.search(r"(?<![\w-])(?:long|short)(?![\w-])", text)
+    )
 
 
 class LLMResearchOutput(BaseModel):
