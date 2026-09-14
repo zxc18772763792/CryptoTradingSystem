@@ -48,7 +48,7 @@ function Import-EnvFileValues {
         if (-not (Test-Path $path)) {
             continue
         }
-        foreach ($line in Get-Content $path) {
+        foreach ($line in Get-Content -LiteralPath $path -Encoding UTF8) {
             $text = [string]$line
             if (-not $text) {
                 continue

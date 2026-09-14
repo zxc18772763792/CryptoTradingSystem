@@ -149,7 +149,7 @@ function Normalize-ProcessEnvironment {
 function Import-DotEnvFile {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return }
-    foreach ($line in Get-Content $Path) {
+    foreach ($line in Get-Content -LiteralPath $Path -Encoding UTF8) {
         $text = [string]$line
         if (-not $text) { continue }
         $trimmed = $text.Trim()
