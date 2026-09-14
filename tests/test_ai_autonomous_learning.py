@@ -5,6 +5,37 @@ from datetime import datetime, timedelta, timezone
 from core.ai.autonomous_learning import build_blocked_symbol_side_map, build_learning_memory
 
 
+def test_service_recovery_counts_only_consecutive_provider_responses():
+    now = datetime.now(timezone.utc)
+    def row(minutes, source, failed=False):
+        return {
+            "timestamp": (now - timedelta(minutes=minutes)).isoformat(),
+            "decision": {"action": "hold", "reason": "model_error:quota" if failed else "review_service_instability"},
+            "diagnostics": {"model_output": {"source": source}, "model_feedback": {"kind": "quota_exhausted" if failed else None}},
+        }
+    rows = [row(60 + i, "fallback", True) for i in range(12)]
+    rows += [row(30 + i / 100, "rule_based") for i in range(100)]
+    def memory():
+        # Journal input may be newest first, as returned by the API.
+        return build_learning_memory(journal_rows=list(reversed(rows)), now=now)
+    assert memory()["adaptive_risk"]["avoid_new_entries_during_service_instability"]
+    assert memory()["summary"]["recent_model_attempt_count"] == 12
+    for i in range(3):
+        rows.append(row(20 - 5 * i, "provider"))
+        rows.append(row(19 - 5 * i, "rule_based"))
+        result = memory()
+        assert result["summary"]["recent_model_success_streak"] == i + 1
+        assert result["adaptive_risk"]["avoid_new_entries_during_service_instability"] == (i < 2)
+    # Recovery does not erase historical failures or their conservative sizing.
+    assert result["summary"]["recent_model_issue_count"] == 12
+    assert result["adaptive_risk"]["entry_size_scale"] < 1
+    rows.append(row(1, "fallback", True))
+    result = memory()
+    assert result["summary"]["recent_model_success_streak"] == 0
+    assert result["summary"]["last_model_issue_kind"] == "quota_exhausted"
+    assert result["adaptive_risk"]["avoid_new_entries_during_service_instability"]
+
+
 def _iso(hours_ago: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
 

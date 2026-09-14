@@ -286,6 +286,7 @@ def build_learning_memory(
     no_price_count = 0
     recent_executed_entry_count = 0
     recent_issue_labels: defaultdict[str, int] = defaultdict(int)
+    model_attempts = []
 
     for row in recent_journal:
         latency = safe_float(row.get("latency_ms"), -1.0)
@@ -299,6 +300,13 @@ def build_learning_memory(
         primary = diagnostics.get("primary") if isinstance(diagnostics.get("primary"), dict) else {}
 
         reason = str(decision.get("reason") or row.get("rejection_reason") or "").strip().lower()
+        source = str((diagnostics.get("model_output") or {}).get("source") or "")
+        failed = reason.startswith("model_error:") or source == "fallback"
+        if failed or source == "provider":
+            model_attempts.append((
+                _row_timestamp(row), not failed,
+                str((diagnostics.get("model_feedback") or {}).get("kind") or ""),
+            ))
         price = safe_float(context.get("price"), 0.0)
         market_structure = context.get("market_structure") if isinstance(context.get("market_structure"), dict) else {}
         if reason.startswith("model_error:"):
@@ -404,7 +412,15 @@ def build_learning_memory(
             current_open_losing_count += 1
 
     recent_journal_rows = len(recent_journal)
-    model_issue_rate = model_issue_count / max(1, recent_journal_rows)
+    # Rule-based holds do not demonstrate provider health or dilute its failure rate.
+    model_issue_rate = model_issue_count / max(1, len(model_attempts))
+    model_attempts.sort(key=lambda item: item[0] or datetime.min.replace(tzinfo=timezone.utc))
+    model_success_streak = 0
+    for _, succeeded, _ in reversed(model_attempts):
+        if not succeeded:
+            break
+        model_success_streak += 1
+    service_instability = model_issue_rate >= 0.25 and model_success_streak < 3
     avg_latency_ms = sum(latency_values) / len(latency_values) if latency_values else 0.0
 
     effective_min_confidence = float(base_min_confidence or 0.58)
@@ -535,7 +551,7 @@ def build_learning_memory(
         guardrails.append("block fresh entries during active loss streak")
     if no_price_count > 0:
         guardrails.append("close losing positions when market data is unavailable")
-    if model_issue_rate >= 0.25:
+    if service_instability:
         guardrails.append("avoid fresh entries while model service is unstable")
 
     symbol_side_rows = []
@@ -561,7 +577,7 @@ def build_learning_memory(
             "entry_size_scale": float(entry_size_scale),
             "require_research_for_new_entries": False,
             "force_close_on_data_outage_losing_position": bool(no_price_count > 0),
-            "avoid_new_entries_during_service_instability": bool(model_issue_rate >= 0.25),
+            "avoid_new_entries_during_service_instability": bool(service_instability),
             "avoid_new_entries_during_loss_streak": bool(recent_close_loss_streak_count >= 3),
             "data_quality_hold_bias": bool(no_price_count > 0 or model_issue_rate >= 0.35),
         }
@@ -582,6 +598,10 @@ def build_learning_memory(
         "recent_close_loss_streak_count": int(recent_close_loss_streak_count),
         "recent_close_net_pnl": round(float(recent_close_net_pnl), 6),
         "recent_model_issue_count": int(model_issue_count),
+        "recent_model_attempt_count": len(model_attempts),
+        "recent_model_success_streak": model_success_streak,
+        "last_model_attempt_at": model_attempts[-1][0].isoformat() if model_attempts and model_attempts[-1][0] else None,
+        "last_model_issue_kind": model_attempts[-1][2] if model_attempts else None,
         "recent_no_price_count": int(no_price_count),
         "recent_researchless_entry_count": 0,
         "recent_same_direction_reentry_count": int(recent_same_direction_reentry_count),
