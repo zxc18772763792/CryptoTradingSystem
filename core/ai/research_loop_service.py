@@ -80,10 +80,11 @@ class AutonomousResearchLoop:
 
     def status(self):
         now = ev.utc_now()
-        attempts = sum(str(r.get('started_at', '')).startswith(now.date().isoformat()) for r in self.state['rounds'])
+        today_rounds = [r for r in self.state['rounds'] if str(r.get('started_at', '')).startswith(now.date().isoformat())]
+        attempts = sum(not r.get('budget_reset_id') for r in today_rounds)
         reset = datetime.combine(now.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc)
         payload = json.loads(json.dumps(self.state))
-        payload.update(rounds=payload['rounds'][-10:], attempts_today=attempts, budget_reset_at=reset.isoformat(),
+        payload.update(rounds=payload['rounds'][-10:], attempts_today=attempts, total_attempts_today=len(today_rounds), budget_reset_at=reset.isoformat(),
                        configured_model=settings.AI_RESEARCH_MODEL, busy=self.lock.locked(),
                        completed_rounds=sum(r.get('status') == 'completed' for r in self.state['rounds']),
                        round_count=len(self.state['rounds']),
@@ -91,6 +92,25 @@ class AutonomousResearchLoop:
         if attempts >= self.state['config']['max_rounds_per_day']:
             payload['next_run_at'] = reset.isoformat()
         return payload
+
+    def reset_daily_budget(self):
+        """Explicit operator reset; keep attempts, outcomes and reset audit intact."""
+        if self.lock.locked() or (self.task and not self.task.done()):
+            raise ev.ResearchStageError('research_busy', '研究正在执行，请完成后再重置额度')
+        now = ev.utc_now()
+        reset_id, released = uuid4().hex, 0
+        for row in self.state['rounds']:
+            if str(row.get('started_at', '')).startswith(now.date().isoformat()) and not row.get('budget_reset_id'):
+                row['budget_reset_id'] = reset_id
+                released += 1
+        if released:
+            self.state.setdefault('budget_resets', []).append({
+                'reset_id': reset_id, 'reset_at': now.isoformat(), 'released_attempts': released,
+            })
+        self.state.update(status='waiting' if self.state['config']['enabled'] else 'paused',
+                          next_run_at=now.isoformat(), last_error=None, last_error_code=None)
+        self._save()
+        return self.status()
 
     def configure(self, config):
         self.revision += 1

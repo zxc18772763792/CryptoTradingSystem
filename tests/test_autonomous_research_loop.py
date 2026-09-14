@@ -103,6 +103,56 @@ def test_daily_cap_survives_restart_and_manual_run(app, monkeypatch):
     model.assert_not_awaited()
 
 
+def test_explicit_budget_reset_retains_history_and_new_attempts_still_hit_cap(app, monkeypatch):
+    loop, model = setup_round(monkeypatch, app)
+    loop.configure(ResearchLoopConfig(enabled=True, max_rounds_per_day=1))
+    loop.state['rounds'] = [{'round_id': 'old', 'started_at': ev.utc_now().isoformat(), 'status': 'failed', 'error_code': 'invalid_model_schema'}]
+    result = loop.reset_daily_budget()
+    assert result['attempts_today'] == 0
+    assert result['total_attempts_today'] == 1
+    assert result['rounds'][0]['error_code'] == 'invalid_model_schema'
+    assert result['budget_resets'][0]['released_attempts'] == 1
+    restored = AutonomousResearchLoop(app)
+    assert restored.status()['attempts_today'] == 0
+    asyncio.run(restored.tick(force=True))
+    assert restored.status()['attempts_today'] == 1
+    assert restored.status()['total_attempts_today'] == 2
+    asyncio.run(restored.tick(force=True))
+    assert restored.state['status'] == 'daily_budget_reached'
+    assert model.await_count == 1
+    tomorrow = ev.utc_now() + timedelta(days=1)
+    monkeypatch.setattr(ev, 'utc_now', lambda: tomorrow)
+    assert restored.status()['attempts_today'] == 0
+    assert restored.state['config']['max_rounds_per_day'] == 1
+
+
+def test_budget_reset_rejects_running_research_and_keeps_pause(app):
+    loop = AutonomousResearchLoop(app)
+    async def check():
+        async with loop.lock:
+            with pytest.raises(ev.ResearchStageError, match='研究正在执行'):
+                loop.reset_daily_budget()
+    asyncio.run(check())
+    assert loop.reset_daily_budget()['status'] == 'paused'
+    assert not loop.state.get('budget_resets')
+
+
+def test_budget_reset_api_refuses_busy_loop(app, monkeypatch):
+    from fastapi import HTTPException
+    from web.api.ai_research import reset_ai_research_loop_budget
+    from core.ai import autonomous_research_loop as public
+    loop = AutonomousResearchLoop(app)
+    monkeypatch.setattr(public, 'get_research_loop', lambda app: loop)
+    request = SimpleNamespace(app=app)
+    async def check():
+        async with loop.lock:
+            with pytest.raises(HTTPException) as error:
+                await reset_ai_research_loop_budget(request)
+            assert error.value.status_code == 409
+        assert (await reset_ai_research_loop_budget(request))['attempts_today'] == 0
+    asyncio.run(check())
+
+
 def test_pause_during_model_call_prevents_publication(app, monkeypatch):
     import core.ai.research_context_generator as generator
     loop, _ = setup_round(monkeypatch, app)
