@@ -841,9 +841,22 @@
       };
     }
 
+    const instabilityGuard = status.learning_memory?.adaptive_risk?.avoid_new_entries_during_service_instability
+      ?? diagnostics.learning_memory?.avoid_new_entries_during_service_instability;
+    if (instabilityGuard) {
+      const primary = diagnostics.primary || {};
+      const learning = status.learning_memory?.summary || {};
+      const successes = Math.min(3, Number(learning.recent_model_success_streak || 0));
+      return {
+        summary: primary.code === 'review_service_instability' ? primary.label : '模型恢复验证中',
+        detail: `历史异常保护，连续成功 ${successes}/3；每 5 分钟可验证一次，验证请求不下单。`,
+        tone: 'warn',
+      };
+    }
+
     if (lastSuccessAt !== '--') {
       return {
-        summary: '模型反馈正常',
+        summary: '上次模型请求成功',
         detail: `最近成功 ${lastSuccessAt}`,
         tone: 'good',
       };

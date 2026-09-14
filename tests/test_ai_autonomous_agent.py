@@ -3732,7 +3732,9 @@ def test_agent_no_price_closes_losing_position_when_learning_memory_requires(mon
     assert submit_mock.await_count == 1
 
 
-def test_agent_learning_guard_blocks_fresh_entry_when_service_instability_flag_active(monkeypatch, tmp_path: Path):
+@pytest.mark.parametrize("manual_probe", [False, True])
+@pytest.mark.parametrize("probe_due,probe_fails", [(False, False), (True, False), (True, True)])
+def test_agent_learning_guard_blocks_fresh_entry_when_service_instability_flag_active(monkeypatch, tmp_path: Path, probe_due, probe_fails, manual_probe):
     import core.ai.autonomous_agent as module
 
     agent = module.AutonomousTradingAgent(cache_root=tmp_path)
@@ -3809,9 +3811,11 @@ def test_agent_learning_guard_blocks_fresh_entry_when_service_instability_flag_a
             )
         ),
     )
-    provider_mock = AsyncMock(
-        side_effect=AssertionError("service instability fast-path hold should skip provider")
-    )
+    agent._last_model_attempt_at = time.time() - (600 if probe_due else 0)
+    provider_mock = AsyncMock(return_value={"action": "buy", "confidence": 0.95, "reason": "entry"})
+    if probe_fails:
+        provider_mock.side_effect = RuntimeError("codex_http_403:insufficient_user_quota")
+    monkeypatch.setattr(agent, "_build_event_summary", AsyncMock(return_value={"available": False}))
     monkeypatch.setattr(
         agent,
         "_call_provider",
@@ -3822,13 +3826,41 @@ def test_agent_learning_guard_blocks_fresh_entry_when_service_instability_flag_a
     monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
 
     asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
-    result = asyncio.run(agent.run_once(trigger="test", force=True))
+    result = asyncio.run(agent.run_once(trigger="api_manual" if manual_probe else "test", force=True))
 
     assert result["decision"]["action"] == "hold"
-    assert result["decision"]["reason"] == "review_service_instability"
+    if probe_fails:
+        assert result["diagnostics"]["model_feedback"]["kind"] == "quota_exhausted"
+    else:
+        assert result["decision"]["reason"] == "review_service_instability"
     assert result["execution"]["submitted"] is False
-    assert provider_mock.await_count == 0
+    assert provider_mock.await_count == int(probe_due or manual_probe)
     assert submit_mock.await_count == 0
+    # Automatic rounds respect the interval; explicit probes still cannot place orders.
+    second = asyncio.run(agent.run_once(trigger="api_manual" if manual_probe else "test", force=True))
+    assert second["decision"]["action"] == "hold"
+    assert provider_mock.await_count == (2 if manual_probe else int(probe_due))
+    assert submit_mock.await_count == 0
+
+
+def test_model_recovery_probe_respects_persisted_attempt_and_risk(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    now = time.time()
+    monkeypatch.setattr(module.time, "time", lambda: now)
+    memory = {
+        "adaptive_risk": {"avoid_new_entries_during_service_instability": True},
+        "summary": {"last_model_attempt_at": datetime.fromtimestamp(now - 60, timezone.utc).isoformat()},
+    }
+    cfg = {"learning_memory": memory, "min_confidence": 0.7}
+    context = {"aggregated_signal": {"direction": "FLAT", "confidence": 0.1}, "position": {}}
+    assert agent._maybe_build_fast_path_hold(cfg=cfg, context_payload=context)["reason"] == "review_service_instability"
+    memory["summary"]["last_model_attempt_at"] = datetime.fromtimestamp(now - 600, timezone.utc).isoformat()
+    assert agent._maybe_build_fast_path_hold(cfg=cfg, context_payload=context) is None
+    context["aggregated_signal"].update(blocked_by_risk=True, risk_reason="risk_halt")
+    assert agent._maybe_build_fast_path_hold(cfg=cfg, context_payload=context)["reason"] == "risk_halt"
+    assert agent._maybe_build_fast_path_hold(cfg=cfg, context_payload=context, force_recovery_probe=True)["reason"] == "risk_halt"
 
 
 def test_agent_learning_guard_blocks_fresh_entry_when_loss_streak_flag_active(monkeypatch, tmp_path: Path):
