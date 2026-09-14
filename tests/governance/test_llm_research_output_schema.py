@@ -34,3 +34,19 @@ def test_llm_research_output_rejects_direct_trade_instruction():
             }
         )
 
+
+def test_research_dsl_identifiers_and_time_horizons_are_not_trade_commands():
+    output = LLMResearchOutput.model_validate({
+        "hypothesis": "Compare long-term and short-term trends.",
+        "proposed_strategy_changes": [{"program": {
+            "execution_mode": "stateful_long", "left": "short_ema", "right": "long_ema",
+        }}],
+    })
+    assert output.proposed_strategy_changes[0]["program"]["execution_mode"] == "stateful_long"
+
+
+@pytest.mark.parametrize("instruction", ["Go long BTC now", "short ETH immediately", "market order BTC", "立即买入 BTC"])
+def test_direct_commands_remain_blocked_inside_nested_drafts(instruction):
+    with pytest.raises(ValueError, match="direct trading instruction"):
+        LLMResearchOutput.model_validate({"hypothesis": "Research", "proposed_strategy_changes": [{"thesis": instruction}]})
+
