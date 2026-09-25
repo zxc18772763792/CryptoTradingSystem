@@ -2213,10 +2213,12 @@ async def lifespan(app: FastAPI):
     # Warm the process-wide TLS context off-loop so no later httpx client
     # construction ever does a blocking CA-bundle read on the event loop
     # (the 2026-07-02 service freeze; see core/utils/shared_ssl.py).
-    from core.utils.shared_ssl import warm_shared_ssl_context
+    from core.utils.shared_ssl import negative_cache_missing_optional_modules, warm_shared_ssl_context
 
     with contextlib.suppress(Exception):
         await warm_shared_ssl_context()
+    with contextlib.suppress(Exception):
+        negative_cache_missing_optional_modules()
 
     await runtime_bootstrap.initialize_shared_runtime(
         include_news=True,

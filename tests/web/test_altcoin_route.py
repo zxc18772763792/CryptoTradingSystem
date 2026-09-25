@@ -1345,6 +1345,79 @@ def test_get_altcoin_scan_snapshot_force_refresh_awaits_new_payload(monkeypatch)
     altcoin_api._clear_altcoin_scan_cache()
 
 
+def test_evict_altcoin_scan_cache_keeps_newest_entries():
+    from web.api.altcoin import cache as cache_module
+
+    altcoin_api._clear_altcoin_scan_cache()
+    limit = cache_module._ALTCOIN_SCAN_CACHE_MAX_ENTRIES
+    for idx in range(limit + 3):
+        altcoin_api._ALTCOIN_SCAN_CACHE[f"k{idx}"] = {"stored_at": float(idx), "payload": {}}
+
+    cache_module._evict_altcoin_scan_cache()
+
+    assert len(altcoin_api._ALTCOIN_SCAN_CACHE) == limit
+    assert "k0" not in altcoin_api._ALTCOIN_SCAN_CACHE
+    assert f"k{limit + 2}" in altcoin_api._ALTCOIN_SCAN_CACHE
+    altcoin_api._clear_altcoin_scan_cache()
+
+
+def test_get_altcoin_scan_snapshot_serves_sibling_universe_while_refreshing(monkeypatch):
+    altcoin_api._clear_altcoin_scan_cache()
+    state = {"compute_calls": 0, "gate": None}
+
+    async def fake_resolve_universe(**kwargs):
+        return ["AAA/USDT", "BBB/USDT"], ["AAA/USDT", "BBB/USDT"], [], []
+
+    async def fake_compute_scan_payload(**kwargs):
+        state["compute_calls"] += 1
+        await state["gate"].wait()
+        return {
+            "exchange": "binance",
+            "timeframe": "4h",
+            "rows": [{"symbol": "BBB/USDT", "tags": ["fresh"], "data_quality": {}}],
+            "symbols_requested": ["AAA/USDT", "BBB/USDT"],
+            "symbols_used": ["AAA/USDT", "BBB/USDT"],
+            "excluded_retired": [],
+            "warnings": [],
+            "generated_at": "2026-04-21T12:00:00+00:00",
+            "universe_meta": {},
+        }
+
+    monkeypatch.setattr(altcoin_api.scan, "_resolve_universe", fake_resolve_universe)
+    monkeypatch.setattr(altcoin_api.scan, "_compute_scan_payload", fake_compute_scan_payload)
+
+    key_args = dict(exchange="binance", timeframe="4h", exclude_retired=True, mode="combined", view="4h", universe_scope="research")
+    old_key = altcoin_api._cache_key(symbols=["AAA/USDT"], **key_args)
+    new_key = altcoin_api._cache_key(symbols=["AAA/USDT", "BBB/USDT"], **key_args)
+    other_tf_key = altcoin_api._cache_key(symbols=["AAA/USDT"], **dict(key_args, timeframe="1h", view="1h"))
+    altcoin_api._ALTCOIN_SCAN_CACHE[other_tf_key] = {
+        "stored_at": time.time(),
+        "payload": {"rows": [{"symbol": "AAA/USDT", "tags": ["wrong_timeframe"]}], "warnings": []},
+    }
+    altcoin_api._ALTCOIN_SCAN_CACHE[old_key] = {
+        "stored_at": time.time() - 60.0,
+        "payload": {"rows": [{"symbol": "AAA/USDT", "tags": ["previous_universe"]}], "warnings": []},
+    }
+
+    async def runner():
+        state["gate"] = asyncio.Event()
+        payload = await altcoin_api.get_altcoin_scan_snapshot(symbols=[], refresh=False, **key_args)
+        task = altcoin_api._ALTCOIN_SCAN_REFRESH_TASKS.get(new_key)
+        assert task is not None and task.done() is False
+        state["gate"].set()
+        await asyncio.shield(task)
+        return payload
+
+    payload = asyncio.run(runner())
+
+    assert payload["rows"][0]["tags"] == ["previous_universe"]
+    assert payload["cache"]["cache_key"] == new_key
+    assert payload["cache"]["served_mode"] == "universe_changed_refresh"
+    assert payload["cache"]["refreshing"] is True
+    assert state["compute_calls"] == 1
+    altcoin_api._clear_altcoin_scan_cache()
+
+
 def test_get_altcoin_scan_snapshot_does_not_cache_all_stale_market_data(monkeypatch):
     altcoin_api._clear_altcoin_scan_cache()
     state = {"compute_calls": 0}

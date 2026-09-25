@@ -386,6 +386,75 @@ def test_autonomous_agent_run_once_submit_signal(monkeypatch, tmp_path: Path):
     assert signal.take_profit is not None
 
 
+def test_autonomous_agent_does_not_report_submit_when_strategy_breaker_tripped(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+    cb_module = importlib.import_module("core.risk.circuit_breaker")
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.72}
+
+    def _evaluate(*, strategy_name, is_reduce_only):
+        if is_reduce_only:
+            return cb_module.Decision(action=cb_module.DECISION_ALLOW)
+        return cb_module.Decision(
+            action=cb_module.DECISION_CLOSE_ONLY,
+            scope="strategy",
+            reason="24h_dd 0.0527 >= 0.0500",
+            strategy_name=strategy_name,
+            tripped_at="2026-09-18T11:36:51+00:00",
+        )
+
+    monkeypatch.setattr(cb_module.circuit_breaker, "evaluate", _evaluate)
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+    monkeypatch.setattr(
+        agent,
+        "_call_provider",
+        AsyncMock(
+            return_value={
+                "action": "buy",
+                "confidence": 0.83,
+                "strength": 0.76,
+                "leverage": 1,
+                "stop_loss_pct": 0.02,
+                "take_profit_pct": 0.05,
+                "reason": "trend_following",
+            }
+        ),
+    )
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+
+    # Flat symbol: the model is not consulted at all while the breaker is tripped.
+    skipped = asyncio.run(agent.run_once(trigger="test", force=True))
+    assert agent._call_provider.await_count == 0
+    assert skipped["decision"]["action"] == "hold"
+    assert skipped["execution"]["submitted"] is False
+    assert agent.get_status()["last_diagnostics"]["primary"]["code"] == "circuit_breaker_blocked"
+
+    # When the fast path does not apply (e.g. adding to an open position), the
+    # submit-time gate still refuses the fresh entry instead of reporting it.
+    monkeypatch.setattr(agent, "_maybe_build_fast_path_hold", lambda **kwargs: None)
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+    status = agent.get_status()
+
+    assert agent._call_provider.await_count == 1
+    assert result["decision"]["action"] == "buy"
+    assert result["execution"]["submitted"] is False
+    assert result["execution"]["reason"] == "circuit_breaker_blocked"
+    assert submit_mock.await_count == 0
+    assert status["submitted_count"] == 0
+    assert status["last_diagnostics"]["primary"]["code"] == "circuit_breaker_blocked"
+    assert status["circuit_breaker"]["scope"] == "strategy"
+
+
 def test_autonomous_agent_run_once_low_confidence_forces_hold(monkeypatch, tmp_path: Path):
     import core.ai.autonomous_agent as module
 
@@ -4493,3 +4562,29 @@ def test_compact_prompt_context_emits_structured_blocked_symbol_sides(tmp_path: 
 
     # The whole compact context stays JSON-serializable (it is sent via json.dumps).
     json.dumps(compact, ensure_ascii=False)
+
+
+def test_read_jsonl_tail_reads_only_requested_rows_across_blocks(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    path = tmp_path / "journal.jsonl"
+    rows = [{"i": idx, "pad": "x" * (idx % 37)} for idx in range(500)]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows) + "not-json\n", encoding="utf-8")
+
+    # A tiny block size forces many backward reads and a partial first line.
+    tail = module._read_jsonl_tail(path, 25, block_size=64)
+    assert [row["i"] for row in tail] == list(range(476, 500))
+    assert module._read_jsonl_tail(path, 10_000)[0]["i"] == 0
+
+
+def test_autonomous_agent_journal_rotates_to_archive(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(module, "_JOURNAL_ROTATE_BYTES", 200)
+    for idx in range(3):
+        agent._append_journal({"i": idx, "pad": "y" * 100})
+
+    archived = list((tmp_path / "journal_archive").glob("autonomous_agent_journal.*.jsonl"))
+    assert len(archived) == 1
+    assert [row["i"] for row in agent.read_journal(limit=50)] == [2]

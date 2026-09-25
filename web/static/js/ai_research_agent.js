@@ -1309,6 +1309,7 @@
     const code = String(gate?.code || '').trim().toLowerCase();
     if (code === 'execution_gate_open') return '执行安全门禁打开';
     if (code === 'live_mode_blocked') return '实盘安全门禁阻止提交';
+    if (code === 'circuit_breaker_blocked') return String(gate?.label || '熔断：仅允许平仓');
     if (code === 'provider_live_execution_restricted') return 'Provider 不允许实盘提交';
     if (code === 'mode_not_execute') return 'Agent 只提示不执行';
     if (code === 'agent_disabled') return 'Agent 未启用';

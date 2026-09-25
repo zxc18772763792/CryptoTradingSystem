@@ -935,7 +935,7 @@ def test_autonomous_agent_review_endpoint_includes_learning_memory(monkeypatch):
     monkeypatch.setattr(
         ai_module.ai_research_module,
         "_build_autonomous_agent_review",
-        lambda limit=12: {"summary": {"submitted_count": 0}, "insights": [], "items": []},
+        lambda limit=12, **_kwargs: {"summary": {"submitted_count": 0}, "insights": [], "items": []},
     )
     monkeypatch.setattr(
         ai_module.ai_research_module.autonomous_trading_agent,
@@ -995,7 +995,7 @@ def test_build_autonomous_agent_scorecard_aggregates_live_trade_metrics(monkeypa
     monkeypatch.setattr(
         ai_module,
         "_build_autonomous_agent_review",
-        lambda limit=30: {
+        lambda limit=30, **_kwargs: {
             "summary": {
                 "submitted_count": 3,
                 "entry_count": 1,
@@ -1152,7 +1152,7 @@ def test_autonomous_agent_scorecard_endpoint_proxies_payload(monkeypatch):
     monkeypatch.setattr(
         ai_module.ai_research_module,
         "_build_autonomous_agent_scorecard",
-        lambda limit=200, hours=24 * 7: {
+        lambda limit=200, hours=24 * 7, **_kwargs: {
             "metrics": {"trades": 4, "net_pnl_usd": 1.23},
             "window": {"hours": hours, "trade_limit": limit},
         },
@@ -1607,7 +1607,6 @@ def test_build_autonomous_agent_review_includes_profit_curve(monkeypatch, tmp_pa
     )
 
     monkeypatch.setattr(ai_module.autonomous_trading_agent, "_journal_path", journal_path)
-    monkeypatch.setattr(ai_module.autonomous_trading_agent, "read_journal", lambda limit=500: [])
     monkeypatch.setattr(ai_module.order_manager, "get_recent_orders", lambda limit=5000: [])
     monkeypatch.setattr(ai_module.position_manager, "get_all_positions", lambda: [])
 
@@ -1668,7 +1667,6 @@ def test_build_autonomous_agent_review_falls_back_to_journal_signal_order(monkey
     )
 
     monkeypatch.setattr(ai_module.autonomous_trading_agent, "_journal_path", journal_path)
-    monkeypatch.setattr(ai_module.autonomous_trading_agent, "read_journal", lambda limit=500: [])
     monkeypatch.setattr(ai_module.order_manager, "get_recent_orders", lambda limit=5000: [])
     monkeypatch.setattr(ai_module.position_manager, "get_all_positions", lambda: [])
 
@@ -1738,7 +1736,6 @@ def test_build_autonomous_agent_review_marks_binance_merged_position_fallback(mo
     )
 
     monkeypatch.setattr(ai_module.autonomous_trading_agent, "_journal_path", journal_path)
-    monkeypatch.setattr(ai_module.autonomous_trading_agent, "read_journal", lambda limit=500: [])
     monkeypatch.setattr(ai_module.order_manager, "get_recent_orders", lambda limit=5000: [])
     monkeypatch.setattr(ai_module.position_manager, "get_all_positions", lambda: [])
 

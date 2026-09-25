@@ -197,4 +197,26 @@ def _evict_altcoin_scan_cache() -> None:
     )
     for key, _ in oldest_first[: len(_ALTCOIN_SCAN_CACHE) - _ALTCOIN_SCAN_CACHE_MAX_ENTRIES]:
         _ALTCOIN_SCAN_CACHE.pop(key, None)
-    _ALTCOIN_SCAN_CACHE.clear()
+
+
+def _find_sibling_cache_entry(cache_key: str) -> Optional[Dict[str, Any]]:
+    """Newest cached scan that differs from ``cache_key`` only by universe hash.
+
+    The research universe is rebuilt hourly from radar symbols, so the exact
+    key misses after every rebuild and the page would pay the full ~60s cold
+    compute. A snapshot of the neighbouring universe is a far better answer
+    to serve while the exact key refreshes in the background.
+    """
+    parts = str(cache_key or "").split("|")
+    if len(parts) < 3:
+        return None
+    best: Optional[Dict[str, Any]] = None
+    for key, entry in list(_ALTCOIN_SCAN_CACHE.items()):
+        other = str(key).split("|")
+        if key == cache_key or len(other) != len(parts):
+            continue
+        if other[:2] != parts[:2] or other[3:] != parts[3:]:
+            continue
+        if best is None or float((entry or {}).get("stored_at", 0.0)) > float(best.get("stored_at", 0.0)):
+            best = entry
+    return best

@@ -1894,21 +1894,27 @@ def _build_autonomy_order_fallback(
     }
 
 
-def _build_autonomous_agent_review(limit: int = 12) -> Dict[str, Any]:
+# Rows are ~40KB each, so the review works on a recent tail (a few days of
+# ticks) instead of parsing the whole journal on every request.
+_AUTONOMOUS_REVIEW_JOURNAL_ROWS = 2000
+
+
+def _load_autonomous_agent_review_journal() -> List[Dict[str, Any]]:
+    return autonomous_trading_agent.read_journal(
+        limit=_AUTONOMOUS_REVIEW_JOURNAL_ROWS,
+        max_limit=_AUTONOMOUS_REVIEW_JOURNAL_ROWS,
+    )
+
+
+def _build_autonomous_agent_review(
+    limit: int = 12,
+    *,
+    journal_rows: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     review_limit = max(1, min(int(limit or 12), 30))
-    journal_rows: List[Dict[str, Any]] = []
-    journal_path = getattr(autonomous_trading_agent, "_journal_path", None)
-    try:
-        if journal_path is not None and journal_path.exists():
-            for line in journal_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                item = json.loads(line)
-                if isinstance(item, dict):
-                    journal_rows.append(item)
-    except Exception:
-        journal_rows = autonomous_trading_agent.read_journal(limit=500)
+    if journal_rows is None:
+        journal_rows = _load_autonomous_agent_review_journal()
+    journal_rows = [row for row in journal_rows if isinstance(row, dict)]
     if not journal_rows:
         return {
             "summary": {
@@ -2692,6 +2698,20 @@ def _build_autonomous_agent_execution_gate(
         label = "模型供应商不允许实盘执行"
         detail = "当前 provider 的 autonomous_live_execution 策略受限；需要切换到允许实盘执行的 provider，或回到 paper。"
         reason_codes = list(dict.fromkeys([*reason_codes, "provider_live_execution_restricted"]))
+    elif isinstance(status.get("circuit_breaker"), dict):
+        breaker = status["circuit_breaker"]
+        scope_label = "组合" if breaker.get("scope") == "portfolio" else "策略"
+        blocked = True
+        code = "circuit_breaker_blocked"
+        source = "circuit_breaker"
+        tone = "danger"
+        label = f"{scope_label}熔断：仅允许平仓"
+        detail = (
+            f"{breaker.get('reason') or 'tripped'}（触发于 {breaker.get('tripped_at') or '--'}）。"
+            "新开仓信号会被执行引擎丢弃，熔断不会自动恢复；确认回撤原因后在风控页手动复位。"
+        )
+        reason_codes = list(dict.fromkeys([*reason_codes, "circuit_breaker_blocked"]))
+        recommendations = list(dict.fromkeys([*recommendations, "review_and_reset_circuit_breaker"]))
     elif not running:
         tone = "info"
         label = "提交门禁允许，代理未持续运行"
@@ -2867,7 +2887,12 @@ def _autonomous_scorecard_row_gross_pnl_usd(row: Dict[str, Any]) -> float:
     return recorded_pnl + fee_usd
 
 
-def _build_autonomous_agent_scorecard(limit: int = 200, hours: int = 24 * 7) -> Dict[str, Any]:
+def _build_autonomous_agent_scorecard(
+    limit: int = 200,
+    hours: int = 24 * 7,
+    *,
+    journal_rows: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     trade_limit = max(1, min(int(limit or 200), 2000))
     lookback_hours = max(1, min(int(hours or 24 * 7), 24 * 365))
 
@@ -2884,7 +2909,10 @@ def _build_autonomous_agent_scorecard(limit: int = 200, hours: int = 24 * 7) -> 
         else {}
     )
 
-    review_payload = _build_autonomous_agent_review(limit=min(max(trade_limit, 12), 30))
+    review_payload = _build_autonomous_agent_review(
+        limit=min(max(trade_limit, 12), 30),
+        journal_rows=journal_rows,
+    )
     review_summary = (
         dict(review_payload.get("summary") or {})
         if isinstance(review_payload, dict)
@@ -3333,13 +3361,15 @@ async def get_ai_autonomous_agent_journal(request: Request, limit: int = 50):
 
 
 async def get_ai_autonomous_agent_review(request: Request, limit: int = 12):
-    payload = _build_autonomous_agent_review(limit=limit)
+    journal_rows = await asyncio.to_thread(_load_autonomous_agent_review_journal)
+    payload = _build_autonomous_agent_review(limit=limit, journal_rows=journal_rows)
     payload["learning_memory"] = _get_autonomous_agent_learning_memory()
     return payload
 
 
 async def get_ai_autonomous_agent_scorecard(request: Request, limit: int = 200, hours: int = 24 * 7):
-    return _build_autonomous_agent_scorecard(limit=limit, hours=hours)
+    journal_rows = await asyncio.to_thread(_load_autonomous_agent_review_journal)
+    return _build_autonomous_agent_scorecard(limit=limit, hours=hours, journal_rows=journal_rows)
 
 
 async def get_ai_autonomous_agent_risk_status(request: Request):

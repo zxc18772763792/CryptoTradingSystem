@@ -108,6 +108,9 @@ def _isolate_runtime_side_effect_paths(tmp_path: Path, monkeypatch: pytest.Monke
     ai_module = sys.modules.get("web.api.ai_research")
     if ai_module is not None and hasattr(ai_module, "_reset_operating_mode_cache_for_tests"):
         ai_module._reset_operating_mode_cache_for_tests()
+    research_module = sys.modules.get("web.api.research")
+    if research_module is not None and hasattr(research_module, "_clear_workbench_module_cache"):
+        research_module._clear_workbench_module_cache()
     yield
     position_module = sys.modules.get("core.trading.position_manager")
     if position_module is not None:

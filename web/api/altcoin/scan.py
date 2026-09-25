@@ -67,6 +67,7 @@ from .cache import (
     _cache_key,
     _cache_lock,
     _evict_altcoin_scan_cache,
+    _find_sibling_cache_entry,
     _finalize_scan_payload,
     _should_cache_scan_payload,
     build_altcoin_notification_config_key,
@@ -1009,6 +1010,36 @@ async def get_altcoin_scan_snapshot(
         pre_warnings,
     )
     symbols_to_scan = filtered_symbols or requested_symbols
+
+    sibling_entry = None if (cached_entry or refresh) else _find_sibling_cache_entry(cache_key)
+    if sibling_entry:
+        refresh_task = _ensure_altcoin_scan_refresh_task(
+            cache_key=cache_key,
+            exchange=normalized_exchange,
+            timeframe=normalized_timeframe,
+            symbols=symbols_to_scan,
+            exclude_retired=exclude_retired,
+            refresh=refresh,
+            mode=normalized_mode,
+            view=normalized_view,
+            universe_scope=normalized_scope,
+            resolved_universe=resolved_universe,
+            pre_warnings=pre_warnings,
+            ttl=ttl,
+        )
+        return _build_cached_scan_payload(
+            cached_entry=sibling_entry,
+            cache_key=cache_key,
+            ttl=ttl,
+            now_ts=now_ts,
+            stale=True,
+            refreshing=not refresh_task.done(),
+            served_mode="universe_changed_refresh",
+            warnings=[
+                *pre_warnings,
+                "Radar universe changed; serving the previous universe's snapshot while the new one computes.",
+            ],
+        )
 
     if cached_entry:
         age_sec = _cache_age_sec(cached_entry, now_ts)
