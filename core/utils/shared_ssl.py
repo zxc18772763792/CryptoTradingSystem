@@ -40,3 +40,35 @@ def get_shared_ssl_context() -> ssl.SSLContext:
 async def warm_shared_ssl_context() -> ssl.SSLContext:
     """Create the shared context in a worker thread (startup warm-up)."""
     return await asyncio.to_thread(get_shared_ssl_context)
+
+
+# Optional modules that httpx/httpcore try to import on hot paths. httpcore's
+# ``current_async_library()`` does ``import sniffio`` inside a try/except on
+# every connection/lock operation; when it is not installed each attempt walks
+# sys.path on disk, on the event loop (seen as multi-second loop stalls in the
+# research workbench under disk contention).
+_OPTIONAL_HOT_PATH_MODULES = ("sniffio",)
+
+
+def negative_cache_missing_optional_modules(names=_OPTIONAL_HOT_PATH_MODULES) -> list:
+    """Make ``import <name>`` fail fast for optional modules that are absent.
+
+    A ``None`` entry in ``sys.modules`` makes the import system raise
+    ImportError immediately — the same outcome as today, minus the path scan.
+    Installed modules are left untouched. Returns the names that were cached.
+    """
+    import importlib.util
+    import sys
+
+    cached = []
+    for name in names:
+        if name in sys.modules:
+            continue
+        try:
+            missing = importlib.util.find_spec(name) is None
+        except (ImportError, ValueError):
+            missing = False
+        if missing:
+            sys.modules[name] = None
+            cached.append(name)
+    return cached

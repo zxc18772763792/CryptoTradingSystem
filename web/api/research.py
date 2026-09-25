@@ -3262,7 +3262,85 @@ async def _build_module(module_name: str, profile: ResearchProfile) -> Dict[str,
     )
 
 
+# Workbench modules fan out to a dozen slow upstreams (each module burns its
+# own timeout when a source is down), so an uncached overview costs 15-20s per
+# page load. Serve a recent result instantly and refresh behind it.
+_WORKBENCH_MODULE_FRESH_SEC = 60.0
+_WORKBENCH_MODULE_STALE_MAX_SEC = 600.0
+_WORKBENCH_MODULE_CACHE_MAX_ENTRIES = 64
+_WORKBENCH_MODULE_CACHE: Dict[str, Dict[str, Any]] = {}
+_WORKBENCH_MODULE_REFRESH_TASKS: Dict[str, "asyncio.Task[Dict[str, Any]]"] = {}
+
+
+def _clear_workbench_module_cache() -> Dict[str, int]:
+    cleared = len(_WORKBENCH_MODULE_CACHE)
+    _WORKBENCH_MODULE_CACHE.clear()
+    _WORKBENCH_MODULE_REFRESH_TASKS.clear()
+    return {"entries": cleared}
+
+
+def _workbench_module_cache_key(module_name: str, profile: ResearchProfile) -> str:
+    return f"{module_name}|{profile.model_dump_json()}"
+
+
+def _with_workbench_cache_meta(result: Dict[str, Any], *, age_sec: float, served_mode: str) -> Dict[str, Any]:
+    payload = dict(result)
+    payload["cache"] = {
+        "hit": served_mode != "live_compute",
+        "age_sec": round(max(0.0, age_sec), 3),
+        "fresh_sec": _WORKBENCH_MODULE_FRESH_SEC,
+        "served_mode": served_mode,
+    }
+    return payload
+
+
+async def _build_and_cache_module(module_name: str, profile: ResearchProfile, cache_key: str) -> Dict[str, Any]:
+    result = await _capture_module_build_uncached(module_name, profile)
+    if str((result or {}).get("status") or "") in {"ok", "degraded"}:
+        _WORKBENCH_MODULE_CACHE[cache_key] = {"stored_at": time.time(), "result": result}
+        if len(_WORKBENCH_MODULE_CACHE) > _WORKBENCH_MODULE_CACHE_MAX_ENTRIES:
+            oldest = min(_WORKBENCH_MODULE_CACHE, key=lambda k: _WORKBENCH_MODULE_CACHE[k]["stored_at"])
+            _WORKBENCH_MODULE_CACHE.pop(oldest, None)
+    return result
+
+
+def _ensure_workbench_module_refresh(module_name: str, profile: ResearchProfile, cache_key: str) -> "asyncio.Task[Dict[str, Any]]":
+    task = _WORKBENCH_MODULE_REFRESH_TASKS.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.create_task(_build_and_cache_module(module_name, profile, cache_key))
+
+        def _consume(finished: "asyncio.Task[Dict[str, Any]]", key: str = cache_key) -> None:
+            if not finished.cancelled():
+                finished.exception()
+            if _WORKBENCH_MODULE_REFRESH_TASKS.get(key) is finished:
+                _WORKBENCH_MODULE_REFRESH_TASKS.pop(key, None)
+
+        task.add_done_callback(_consume)
+        _WORKBENCH_MODULE_REFRESH_TASKS[cache_key] = task
+    return task
+
+
 async def _capture_module_build(
+    module_name: str, profile: ResearchProfile
+) -> Dict[str, Any]:
+    if module_name not in _MODULE_ORDER:
+        # Let the uncached path raise its 404 without creating cache entries.
+        return await _capture_module_build_uncached(module_name, profile)
+    cache_key = _workbench_module_cache_key(module_name, profile)
+    entry = _WORKBENCH_MODULE_CACHE.get(cache_key)
+    if entry:
+        age_sec = time.time() - float(entry.get("stored_at") or 0.0)
+        if age_sec <= _WORKBENCH_MODULE_FRESH_SEC:
+            return _with_workbench_cache_meta(entry["result"], age_sec=age_sec, served_mode="cache_hit")
+        if age_sec <= _WORKBENCH_MODULE_STALE_MAX_SEC:
+            _ensure_workbench_module_refresh(module_name, profile, cache_key)
+            return _with_workbench_cache_meta(entry["result"], age_sec=age_sec, served_mode="stale_refresh")
+    task = _ensure_workbench_module_refresh(module_name, profile, cache_key)
+    result = await asyncio.shield(task)
+    return _with_workbench_cache_meta(result, age_sec=0.0, served_mode="live_compute")
+
+
+async def _capture_module_build_uncached(
     module_name: str, profile: ResearchProfile
 ) -> Dict[str, Any]:
     try:
@@ -3918,7 +3996,7 @@ async def get_market_state_snapshot(
     symbol: str = "BTC/USDT",
 ) -> Dict[str, Any]:
     profile = ResearchProfile(exchange=exchange, primary_symbol=_normalize_symbol(symbol))
-    module = await _build_market_state_module(profile)
+    module = await _capture_module_build("market_state", profile)
     payload = _extract_module_payload(module)
     regime = dict(payload.get("regime") or {})
     return {

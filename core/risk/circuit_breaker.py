@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -803,6 +804,20 @@ def _resolve_active_strategy_names() -> Set[str]:
                 names.add(name)
     except Exception as exc:
         logger.debug(f"circuit_breaker: failed to resolve open-position strategies: {exc}")
+
+    # The autonomous agent is not a strategy_manager strategy; while flat it
+    # would otherwise drop out of the active set and a trip on it becomes
+    # invisible in the risk view even though every fresh entry is refused.
+    # Only consult it if already loaded — never import the agent from here.
+    agent_module = sys.modules.get("core.ai.autonomous_agent")
+    agent = getattr(agent_module, "autonomous_trading_agent", None) if agent_module else None
+    if agent is not None:
+        try:
+            if agent.is_running():
+                cfg = agent.get_runtime_config()
+                names.add(str(cfg.get("strategy_name") or "AI_AutonomousAgent").strip())
+        except Exception as exc:
+            logger.debug(f"circuit_breaker: failed to resolve autonomous agent strategy: {exc}")
 
     return names
 

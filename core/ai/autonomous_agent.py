@@ -413,6 +413,68 @@ def _format_exception_short(exc: Exception) -> str:
     return exc.__class__.__name__
 
 
+_JOURNAL_ROTATE_BYTES = 128 * 1024 * 1024
+
+
+def _read_jsonl_tail(path: Path, limit: int, *, block_size: int = 1 << 20) -> List[Dict[str, Any]]:
+    """Parse the last ``limit`` JSON-object lines of ``path``.
+
+    Reads backwards from EOF so the cost scales with the rows requested, not
+    the file size (journal rows are ~40KB each; the file reached ~500MB).
+    """
+    if limit <= 0:
+        return []
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        chunks: List[bytes] = []
+        newlines = 0
+        while pos > 0 and newlines <= limit:
+            step = min(block_size, pos)
+            pos -= step
+            fh.seek(pos)
+            chunk = fh.read(step)
+            chunks.append(chunk)
+            newlines += chunk.count(b"\n")
+    lines = b"".join(reversed(chunks)).splitlines()
+    if pos > 0 and lines:
+        lines = lines[1:]  # first line is partial when we stopped mid-file
+    rows: List[Dict[str, Any]] = []
+    for raw in lines[-limit:]:
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            item = json.loads(raw.decode("utf-8"))
+        except Exception:
+            continue
+        if isinstance(item, dict):
+            rows.append(item)
+    return rows
+
+
+def _circuit_breaker_decision(strategy_name: str, *, is_reduce_only: bool) -> Optional[Dict[str, Any]]:
+    """Mirror the execution engine's breaker gate before submitting.
+
+    ``execution_engine.submit_signal`` only enqueues; the breaker drops the
+    signal later, so without this the agent records a fresh entry as
+    "submitted" while nothing is ever filled. Returns the blocking decision
+    dict, or None when the signal would pass.
+    """
+    try:
+        from core.risk.circuit_breaker import circuit_breaker  # noqa: PLC0415
+
+        decision = circuit_breaker.evaluate(strategy_name=strategy_name, is_reduce_only=is_reduce_only)
+    except Exception as exc:
+        # Same fail-closed rule as the engine: fresh entries are refused.
+        if is_reduce_only:
+            return None
+        return {"action": "block", "scope": "evaluation_error", "reason": _format_exception_short(exc), "tripped_at": None}
+    if decision.is_allow:
+        return None
+    return decision.to_dict()
+
+
 def _utc_iso_from_unix(value: Optional[float]) -> Optional[str]:
     if value is None:
         return None
@@ -1338,6 +1400,10 @@ class AutonomousTradingAgent:
             "preview_symbol_scan_meta": preview_symbol_scan_meta,
             "preview_symbol_scan_running": bool(self._preview_symbol_scan_task and not self._preview_symbol_scan_task.done()),
             "model_feedback_guard": self._model_feedback_guard_status(),
+            "circuit_breaker": _circuit_breaker_decision(
+                str(runtime_cfg.get("strategy_name") or "AI_AutonomousAgent"),
+                is_reduce_only=False,
+            ),
             "profile": dict(self._profile or _default_profile()),
             "learning_memory": dict(self._learning_memory or {}),
             "journal_path": str(self._journal_path),
@@ -3630,6 +3696,21 @@ class AutonomousTradingAgent:
         if has_position:
             return None
 
+        # Flat symbol + tripped breaker: the only actions the model could take
+        # here are fresh entries, and the engine refuses those, so skip the
+        # (paid, ~5s) model call. Shadow mode still asks the model on purpose.
+        if str(cfg.get("mode") or "shadow") == "execute":
+            breaker_block = _circuit_breaker_decision(
+                str(cfg.get("strategy_name") or "AI_AutonomousAgent"),
+                is_reduce_only=False,
+            )
+            if breaker_block is not None:
+                return self._build_hold_decision(
+                    cfg=cfg,
+                    reason=f"circuit_breaker_close_only({breaker_block.get('reason') or 'tripped'})",
+                    confidence=0.0,
+                )
+
         if bool(agg.get("blocked_by_risk")):
             return self._build_hold_decision(
                 cfg=cfg,
@@ -5323,6 +5404,24 @@ class AutonomousTradingAgent:
             add_item("live_mode_blocked", "实盘执行被禁止", "交易引擎在 live，但 agent 未允许 live", "danger", 9)
         elif execution_reason == "submit_rejected":
             add_item("submit_rejected", "执行引擎拒绝了信号", "submit_signal returned false", "danger", 12)
+        elif action == "hold" and decision_reason.startswith("circuit_breaker_close_only"):
+            add_item(
+                "circuit_breaker_blocked",
+                "熔断：仅允许平仓（已跳过模型调用）",
+                f"{decision_reason}；需在风控页确认后手动复位",
+                "danger",
+                8,
+            )
+        elif execution_reason == "circuit_breaker_blocked":
+            breaker = dict(execution.get("circuit_breaker") or {})
+            scope_label = "组合" if breaker.get("scope") == "portfolio" else "策略"
+            add_item(
+                "circuit_breaker_blocked",
+                f"{scope_label}熔断：仅允许平仓",
+                f"{breaker.get('reason') or 'tripped'}；需在风控页确认后手动复位",
+                "danger",
+                8,
+            )
 
         if model_output.get("source") == "provider" and bool(model_output.get("action_changed")):
             raw_action = str(model_output.get("raw_action") or "--")
@@ -5372,6 +5471,7 @@ class AutonomousTradingAgent:
             "aggregated_risk_blocked",
             "live_mode_blocked",
             "submit_rejected",
+            "circuit_breaker_blocked",
         }
         for item in items:
             code = str(item.get("code") or "").strip() or "diagnostic"
@@ -5711,29 +5811,38 @@ class AutonomousTradingAgent:
             self._cache_root.mkdir(parents=True, exist_ok=True)
             with self._journal_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                size = f.tell()
         except Exception as exc:
             logger.warning(f"append autonomous journal failed: {exc}")
+            return
+        if size >= _JOURNAL_ROTATE_BYTES:
+            self._rotate_journal()
 
-    def read_journal(self, limit: int = 50) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
-        size = max(1, min(int(limit or 50), 500))
-        if not self._journal_path.exists():
-            return rows
+    def _rotate_journal(self) -> None:
+        """Move the live journal into journal_archive/ so tail reads stay cheap.
+
+        Archives are never deleted here; the live file restarts empty and the
+        next row lands in it. Readers only look at the recent tail anyway.
+        """
+        archive_dir = self._journal_path.parent / "journal_archive"
+        stamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
+        target = archive_dir / f"{self._journal_path.stem}.{stamp}{self._journal_path.suffix}"
         try:
-            lines = self._journal_path.read_text(encoding="utf-8").splitlines()
-            for line in lines[-size:]:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    item = json.loads(line)
-                    if isinstance(item, dict):
-                        rows.append(item)
-                except Exception:
-                    continue
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            os.replace(self._journal_path, target)
+            logger.info(f"autonomous journal rotated -> {target}")
+        except Exception as exc:
+            logger.warning(f"rotate autonomous journal failed: {exc}")
+
+    def read_journal(self, limit: int = 50, *, max_limit: int = 500) -> List[Dict[str, Any]]:
+        size = max(1, min(int(limit or 50), int(max_limit)))
+        if not self._journal_path.exists():
+            return []
+        try:
+            return _read_jsonl_tail(self._journal_path, size)
         except Exception as exc:
             logger.debug(f"read autonomous journal failed: {exc}")
-        return rows
+            return []
 
     async def run_once(
         self,
@@ -6062,8 +6171,19 @@ class AutonomousTradingAgent:
                 execution["reason"] = "shadow_mode"
             else:
                 trading_mode = execution_engine.get_trading_mode()
+                signal_meta = signal.metadata or {}
+                breaker_block = _circuit_breaker_decision(
+                    str(signal.strategy_name or ""),
+                    is_reduce_only=(
+                        signal.signal_type in (SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT)
+                        or bool(signal_meta.get("close_only") or signal_meta.get("reduce_only"))
+                    ),
+                )
                 if trading_mode == "live" and not bool(effective_cfg.get("allow_live")):
                     execution["reason"] = "live_mode_blocked"
+                elif breaker_block is not None:
+                    execution["reason"] = "circuit_breaker_blocked"
+                    execution["circuit_breaker"] = breaker_block
                 else:
                     accepted = await execution_engine.submit_signal(signal)
                     execution["submitted"] = bool(accepted)
