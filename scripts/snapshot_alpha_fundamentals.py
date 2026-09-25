@@ -98,6 +98,14 @@ def main() -> None:
                 "online_airdrop": bool(t.get("onlineAirdrop")),
                 "fully_delisted": bool(t.get("fullyDelisted")),
                 "offline": bool(t.get("offline")),
+                # Promotion to the main Binance exchange is the catalyst an
+                # Alpha-listing forecast would target. Graduates also leave
+                # Alpha (fully_delisted), so without these fields a success
+                # is indistinguishable from a dead coin. Added 2026-09-25.
+                "listing_cex": bool(t.get("listingCex")),
+                "cex_states": str(t.get("cexStates") if t.get("cexStates") is not None else ""),
+                "cex_coin_name": str(t.get("cexCoinName") or ""),
+                "bn_exclusive": bool(t.get("bnExclusiveState")),
             }
         )
 
