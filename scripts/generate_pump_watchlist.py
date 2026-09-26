@@ -221,6 +221,28 @@ async def fetch_oi_daily(client: CoinglassClient, base: str) -> Optional[pd.Seri
     return None
 
 
+def _write_weekly_archive(parts: List[pd.DataFrame]) -> None:
+    """Keep this week's daily inputs: forward evidence for research loop v2.
+
+    Without it every week of fresh data is thrown away after scoring and no
+    formula frozen by the loop can ever be judged on post-freeze data.
+    mcap is today's value repeated over history; core.research.xs_panel only
+    trusts it on the snapshot's last day. Best-effort: never fails the run.
+    """
+    if not parts:
+        return
+    try:
+        from core.research.xs_panel import PANEL_COLUMNS, WEEKLY_ARCHIVE_DIR  # noqa: PLC0415
+
+        WEEKLY_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        frame = pd.concat(parts, ignore_index=True)[PANEL_COLUMNS]
+        target = WEEKLY_ARCHIVE_DIR / f"{datetime.now(timezone.utc):%Y-%m-%d}.parquet"
+        frame.to_parquet(target, index=False)
+        logger.info(f"weekly archive -> {target} ({frame['base'].nunique()} coins, {len(frame)} rows)")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"weekly archive write failed: {exc}")
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--top", type=int, default=15)
@@ -253,6 +275,7 @@ async def main() -> None:
 
     feature_rows: Dict[str, Dict[str, float]] = {}
     skipped: Dict[str, str] = {}
+    archive_parts: List[pd.DataFrame] = []
     async with CoinglassClient() as client:
         for i, row in enumerate(universe):
             base, symbol = row["base"], row["symbol"]
@@ -280,6 +303,7 @@ async def main() -> None:
             daily["oi"] = oi.reindex(daily.index, method="ffill")
             daily["mcap"] = float(mcap)
             daily["funding"] = funding.reindex(daily.index).ffill(limit=3) if funding is not None else float("nan")
+            archive_parts.append(daily.assign(base=base).rename_axis("date").reset_index())
             features = latest_feature_row(daily)
             if features is None:
                 skipped[base] = "feature_nan"
@@ -288,6 +312,7 @@ async def main() -> None:
             if i % 10 == 0:
                 logger.info(f"features {i + 1}/{len(universe)} ({base})")
 
+    _write_weekly_archive(archive_parts)
     scored = score_universe(feature_rows, model)
     logger.info(f"scored {len(scored)} symbols, skipped {len(skipped)}")
 
