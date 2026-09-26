@@ -244,7 +244,13 @@ def _validated_provider_output(raw, data, target_model, *, validate_output):
             "response_model": data.get("model"), "usage": data.get("usage", {})}}
 
 
-async def _call_openai_responses_json(prompt: str, *, timeout: int, validate_output: bool = False) -> Optional[Dict[str, Any]]:
+async def _call_openai_responses_json(
+    prompt: str,
+    *,
+    timeout: int,
+    validate_output: bool = False,
+    system_prompt: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     _last_generation_error.set(None)
     _generation_errors.set(())
     targets = prioritize_openai_targets(
@@ -261,7 +267,7 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int, validate_out
 
     model = str(settings.AI_RESEARCH_MODEL or _DEFAULT_OPENAI_MODEL)
     messages = [
-        {"role": "system", "content": _CONTEXT_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt or _CONTEXT_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
     payload = build_responses_payload(
@@ -447,6 +453,22 @@ async def _call_openai_responses_json(prompt: str, *, timeout: int, validate_out
                     continue
                 return None
     return None
+
+
+async def generate_json(prompt: str, *, system_prompt: str, timeout: int = 180) -> Dict[str, Any]:
+    """Free-form JSON from the research model (same endpoints/failover as drafting).
+
+    Used by research loop v2, whose output is validated by its own DSL rather
+    than LLMResearchOutput. Raises ResearchGenerationError on any failure.
+    """
+    parsed = await _call_openai_responses_json(prompt, timeout=timeout, validate_output=False, system_prompt=system_prompt)
+    if not isinstance(parsed, dict):
+        code, message = _last_generation_error.get() or ('provider_unavailable', '研究模型未返回可用内容')
+        failures = list(dict.fromkeys(message for _, message in _generation_errors.get()))
+        if failures:
+            message = '；'.join(failures[-3:])
+        raise ResearchGenerationError(code, message)
+    return parsed
 
 
 async def generate_research_context(

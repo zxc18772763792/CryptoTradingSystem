@@ -6419,9 +6419,88 @@ ${confirmHint}`,
     } catch (err) { notify(err?.message || '无法启动研究', true); await refreshAutonomousResearchCockpit(); }
   }
 
+  function ensureResearchLoopV2Panel() {
+    const cockpit = document.getElementById('ai-iteration-cockpit');
+    if (!cockpit) return null;
+    let panel = document.getElementById('ai-research-loop-v2');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'ai-research-loop-v2';
+      panel.className = 'card';
+      panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
+      panel.addEventListener('click', (event) => {
+        const action = event.target?.closest?.('[data-v2-action]')?.getAttribute('data-v2-action');
+        if (action === 'toggle') toggleResearchLoopV2().catch((err) => notify(err?.message || '操作失败', true));
+        if (action === 'run') runResearchLoopV2Once().catch((err) => notify(err?.message || '无法启动研究', true));
+      });
+      cockpit.insertAdjacentElement('afterend', panel);
+    }
+    return panel;
+  }
+
+  function renderResearchLoopV2(payload) {
+    const panel = ensureResearchLoopV2Panel();
+    if (!panel) return;
+    const config = payload?.config || {};
+    const statusNames = {
+      paused: '已暂停', waiting: '已启用 · 等待下一轮', generating: '模型正在提出特征公式', evaluating: '横截面评估中',
+      observing: '检查冻结公式的新增数据', daily_budget_reached: '今日预算已用完', retry_scheduled: '本轮失败 · 已安排重试', interrupted: '上次运行中断',
+    };
+    const reasonNames = {
+      insufficient_sample: '样本不足', low_coverage: '覆盖率不足', no_development_signal: '开发期无信号', no_holdout_signal: '留出期无信号',
+      shortlist_below_multiplicity_bar: '新增信息未过多重检验门槛', no_gain_over_existing_model: '对现有模型无增量', carried_by_few_coins: '依赖少数币',
+    };
+    const num = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : Number(v).toFixed(d));
+    const formulas = Array.isArray(payload?.top_formulas) ? payload.top_formulas : [];
+    const frozen = Array.isArray(payload?.frozen) ? payload.frozen : [];
+    const busy = !!payload?.busy;
+    const budgetLeft = Number(config.max_rounds_per_day || 0) - Number(payload?.attempts_today || 0);
+    panel.innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;">
+        <h3 style="margin:0;">研究循环 v2 · 周度横截面特征</h3>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-sm" data-v2-action="toggle">${config.enabled ? '暂停 v2' : '启用 v2'}</button>
+          <button class="btn btn-sm btn-primary" data-v2-action="run" ${busy || budgetLeft <= 0 ? 'disabled' : ''}>${busy ? '研究进行中…' : '立即研究一轮'}</button>
+        </div>
+      </div>
+      <div style="margin-top:6px;color:var(--text-sub);">${esc(statusNames[payload?.status] || payload?.status || '--')} · 今日 ${Number(payload?.attempts_today || 0)}/${Number(config.max_rounds_per_day || 0)} 轮 · 台账 ${Number(payload?.ledger_size || 0)} 个公式 · 当前新增信息门槛 z ≥ ${num(payload?.holdout_z_bar)}${config.enabled && payload?.next_run_at ? ` · 下一轮 ${esc(fmtTs(payload.next_run_at))}` : ''}</div>
+      ${payload?.last_error ? `<div style="margin-top:4px;color:var(--warning);">最近失败：${esc(payload.last_error)}</div>` : ''}
+      <div class="u-note" style="margin-top:4px;">模型只看到开发期结果；留出期闸门与结论对模型隐藏。通过者冻结后只用新增周度数据终审，不注册、不下单。</div>
+      <div style="margin-top:10px;font-weight:600;color:var(--text-main);">冻结观察（${frozen.length}）</div>
+      ${frozen.length ? frozen.slice(-6).map((row) => `<div style="padding:4px 0;border-top:1px solid var(--border-subtle);"><b>${esc(row.name)}</b> · ${esc(row.status === 'forward_observing' ? '前向观察中' : row.status === 'forward_passed' ? '前向确认 · 待人工决定' : '前向未确认')} · ${esc(row.forward_note || '')}</div>`).join('') : '<div class="u-note">尚无公式通过闸门。多数公式会在"对现有模型无增量"被淘汰，这是预期结果。</div>'}
+      <div style="margin-top:10px;font-weight:600;color:var(--text-main);">台账（按留出期 z 排序，前 ${Math.min(10, formulas.length)}）</div>
+      ${formulas.length ? `<div style="overflow-x:auto;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>公式</th><th>方向</th><th>开发期 提升/z</th><th>留出期 提升/z</th><th>短名单增量 提升/z</th><th>结论</th></tr></thead><tbody>
+        ${formulas.map((row) => `<tr><td title="${esc(row.thesis || '')}">${esc(row.name)}</td><td>${row.direction === 'low' ? '低值' : '高值'}</td><td>${num(row.dev?.lift)} / ${num(row.dev?.z)}</td><td>${num(row.holdout?.lift)} / ${num(row.holdout?.z)}</td><td>${num(row.holdout?.shortlist_lift)} / ${num(row.holdout?.shortlist_z)}</td><td style="color:${row.decision === 'frozen' ? 'var(--positive)' : 'var(--text-faint)'};">${row.decision === 'frozen' ? '冻结观察' : esc((row.reasons || []).map((r) => reasonNames[r] || r).join('；'))}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="u-note">台账为空。启用后每轮由模型提出 1–5 个公式。</div>'}`;
+  }
+
+  async function refreshResearchLoopV2() {
+    if (!document.getElementById('ai-iteration-cockpit')) return;
+    try {
+      renderResearchLoopV2(await aiApi('/research-loop-v2', { timeoutMs: 12000 }));
+    } catch (err) {
+      const panel = ensureResearchLoopV2Panel();
+      if (panel) panel.textContent = `研究循环 v2 状态不可用：${err?.message || err}`;
+    }
+  }
+
+  async function toggleResearchLoopV2() {
+    const current = await aiApi('/research-loop-v2', { timeoutMs: 12000 });
+    const enabled = !current?.config?.enabled;
+    renderResearchLoopV2(await aiApi('/research-loop-v2', { method: 'PATCH', body: JSON.stringify({ enabled }), timeoutMs: 15000 }));
+    notify(enabled ? '研究循环 v2 已启用' : '研究循环 v2 已暂停');
+  }
+
+  async function runResearchLoopV2Once() {
+    const payload = await aiApi('/research-loop-v2/run', { method: 'POST', timeoutMs: 15000 });
+    renderResearchLoopV2({ ...payload, busy: true });
+    notify(payload.requested ? '已安排一轮 v2 研究' : '已有 v2 研究正在执行');
+  }
+
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
+    refreshResearchLoopV2().catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);

@@ -10,7 +10,7 @@ ASSET_VERSIONS: Final[dict[str, int]] = {
     "js/app.js": 150,
     "js/altcoin_radar.js": 30,
     "js/research_workbench.js": 12,
-    "js/ai_research.js": 60,
+    "js/ai_research.js": 62,
     "js/ai_research_diagnostics.js": 7,
     "js/ai_research_runtime.js": 9,
     "js/ai_research_agent.js": 21,

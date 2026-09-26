@@ -6309,6 +6309,36 @@ async def reset_ai_research_loop_budget(request: Request):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.get("/research-loop-v2")
+async def get_ai_research_loop_v2(request: Request):
+    from core.ai.research_loop_v2 import get_cross_sectional_loop
+    return get_cross_sectional_loop(request.app).status()
+
+
+@router.patch("/research-loop-v2", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
+async def configure_ai_research_loop_v2(request: Request, payload: Dict[str, Any]):
+    from core.ai.research_loop_v2 import CrossSectionalLoopConfig, get_cross_sectional_loop
+    from pydantic import ValidationError
+    loop = get_cross_sectional_loop(request.app)
+    if set(payload) - set(CrossSectionalLoopConfig.model_fields):
+        raise HTTPException(status_code=422, detail="Unknown research loop v2 configuration field")
+    try:
+        config = CrossSectionalLoopConfig.model_validate({**loop.state["config"], **payload})
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return loop.configure(config)
+
+
+@router.post("/research-loop-v2/run", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
+async def run_ai_research_loop_v2_once(request: Request):
+    from core.ai.research_loop_v2 import get_cross_sectional_loop
+    loop = get_cross_sectional_loop(request.app)
+    snapshot = loop.status()
+    if snapshot["attempts_today"] >= snapshot["config"]["max_rounds_per_day"]:
+        raise HTTPException(status_code=409, detail="今日研究预算已用完，请等待预算重置")
+    return loop.request_run()
+
+
 async def _build_operating_mode_payload() -> Dict[str, Any]:
     from core.runtime.operating_mode import validate_operating_mode
     from core.runtime.state import runtime_state
