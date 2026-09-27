@@ -6523,6 +6523,36 @@ ${confirmHint}`,
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每 6 小时检查未来 60 天的大额解锁。</div>'}`;
   }
 
+  function renderSupplyFactorTracker(payload) {
+    const anchor = document.getElementById('ai-unlock-short-tracker') || document.getElementById('ai-listing-short-tracker');
+    if (!anchor) return;
+    let panel = document.getElementById('ai-supply-factor-tracker');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'ai-supply-factor-tracker';
+      panel.className = 'card';
+      panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
+      anchor.insertAdjacentElement('afterend', panel);
+    }
+    const s = payload?.summary || {};
+    const months = Array.isArray(payload?.months) ? payload.months : [];
+    const pct = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
+    const names = (leg) => Object.keys(leg || {}).map((t) => esc(t)).join('、');
+    panel.innerHTML = `
+      <h3 style="margin:0;">供给通胀因子 · 月度多空纸面跟踪</h3>
+      <div style="margin-top:6px;color:var(--text-sub);">前向：持有中 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)} 个月 · 平均多空差 ${pct(s.forward_mean_spread_pct)}/月 · 正收益月份 ${s.forward_positive_months == null ? '--' : `${(Number(s.forward_positive_months) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '不足 12 个月，暂不评估'}</div>
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。每月初按排期未来 90 天新增供给排序，做多最低三分之一、做空最高三分之一，持有 30 天，扣 0.4% 成本。纸面记录，不下单；启动前开始的月份标为"回填"，不计入前向统计。</div>
+      ${months.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>调仓日</th><th>状态</th><th>多空差</th><th>多头</th><th>空头</th><th>做多（低供给）</th><th>做空（高供给）</th><th></th></tr></thead><tbody>
+        ${months.map((m) => `<tr><td>${esc(m.rebalance_day)}</td><td>${m.status === 'closed' ? '已结算' : '持有中'}</td><td style="color:${Number(m.spread_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.spread_pct)}</td><td>${pct(m.long_return_pct)}</td><td>${pct(m.short_return_pct)}</td><td title="${names(m.long)}">${Object.keys(m.long || {}).length} 个</td><td title="${names(m.short)}">${Object.keys(m.short || {}).length} 个</td><td>${m.backfill ? '回填' : ''}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；每月 1 日收盘后建仓。</div>'}`;
+  }
+
+  async function refreshSupplyFactorTracker() {
+    try {
+      renderSupplyFactorTracker(await aiApi('/supply-factor', { timeoutMs: 12000 }));
+    } catch (err) { /* optional panel */ }
+  }
+
   async function refreshUnlockShortTracker() {
     try {
       renderUnlockShortTracker(await aiApi('/unlock-short', { timeoutMs: 12000 }));
@@ -6561,7 +6591,7 @@ ${confirmHint}`,
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
-    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).catch(() => {});
+    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);
