@@ -29,6 +29,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from core.research import retirement
 from core.research.unlock_events import LLAMA_DATASETS, cliff_events, entry_price, entry_ticker, unlocked_series
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -169,6 +170,7 @@ async def tick(client, state_path: Path = STATE_PATH) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"unlock tracker: update failed for {key}: {exc}")
     state["updated_at"] = now.isoformat()
+    retirement.register(state, "unlock_short", now.isoformat())
     save_state(state, state_path)
     return summary(state)
 
@@ -241,4 +243,5 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "forward_win_rate": round(float(np.mean([h > 0 for h in hedged])), 3) if hedged else None,
         "backtest_reference": BACKTEST_REFERENCE,
         "evaluation_ready": len(hedged) >= 20,
+        "retirement": retirement.verdict(hedged, state.get("retirement_rule") or retirement.RULES["unlock_short"]),
     }

@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
+from core.research import retirement
 from core.research import unlock_short_tracker as ut
 from core.research.unlock_events import LLAMA_DATASETS, entry_price, entry_ticker, unlocked_series
 
@@ -163,6 +164,7 @@ async def tick(client, state_path: Path = STATE_PATH, now: Optional[pd.Timestamp
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"supply factor: close {month['rebalance_day']} failed: {exc}")
     state["updated_at"] = now.isoformat()
+    retirement.register(state, "supply_factor", now.isoformat())
     save_state(state, state_path)
     return summary(state)
 
@@ -182,4 +184,5 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "forward_positive_months": round(float(np.mean([s > 0 for s in spreads])), 3) if spreads else None,
         "backtest_reference": BACKTEST_REFERENCE,
         "evaluation_ready": len(done) >= 12,
+        "retirement": retirement.verdict(spreads, state.get("retirement_rule") or retirement.RULES["supply_factor"]),
     }

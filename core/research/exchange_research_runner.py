@@ -2,7 +2,9 @@
 
 Called from the research scheduler tick (every ~5 min) and rate-limited here:
 announcements every 30 min (flags + one-time alerts for held / watchlisted
-coins), the listing tracker every 60 min. Research and risk annotation only:
+coins), the listing tracker every 60 min. Each paper tracker's pre-registered
+retirement verdict (core/research/retirement.py) alerts once when it turns
+"retire" or "confirmed". Research and risk annotation only:
 nothing here places or closes orders.
 """
 from __future__ import annotations
@@ -22,6 +24,9 @@ UNLOCK_INTERVAL_SEC = 6 * 3600
 DELIST_RISK_INTERVAL_SEC = 24 * 3600
 ALERT_STATE_PATH = exchange_notices.ANNOUNCEMENT_DIR / "guard_alerts.json"
 WATCHLIST_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "pump_watchlist" / "latest.json"
+VERDICT_STATE_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "tracker_verdicts.json"
+TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解锁前做空", "supply_factor": "供给通胀因子"}
+ALERT_VERDICTS = {"retire", "confirmed"}
 
 _last_run: Dict[str, float] = {"notices": 0.0, "tracker": 0.0, "unlock": 0.0, "delist_risk": 0.0, "supply": 0.0}
 _status: Dict[str, Any] = {}
@@ -82,6 +87,33 @@ async def _alert(new: Dict[str, Dict[str, Any]], watched: Dict[str, str]) -> Set
     return sent
 
 
+async def _verdict_alert(tracker: str, summary: Dict[str, Any]) -> None:
+    """Alert once per verdict change into retire/confirmed; remember every verdict seen."""
+    result = (summary or {}).get("retirement") or {}
+    current = result.get("verdict")
+    if not current:
+        return
+    seen = json.loads(VERDICT_STATE_PATH.read_text(encoding="utf-8")) if VERDICT_STATE_PATH.exists() else {}
+    if seen.get(tracker) == current:
+        return
+    if current in ALERT_VERDICTS:
+        try:
+            from core.notifications import notification_manager  # noqa: PLC0415
+
+            ci = result.get("ci90_pct") or ["--", "--"]
+            await notification_manager.send_message(
+                f"纸面跟踪判定：{TRACKER_NAMES.get(tracker, tracker)} {result.get('label')}",
+                f"{result.get('reason')}。前向 {result.get('n')} 个样本，均值 {result.get('mean_pct')}%，90% 区间 [{ci[0]}, {ci[1]}]。"
+                "规则在首个前向结果之前登记，仅为研究判定，不涉及下单。",
+            )
+        except Exception as exc:
+            logger.warning(f"tracker verdict alert failed: {exc}")
+            return  # retry on the next tick
+    seen[tracker] = current
+    VERDICT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VERDICT_STATE_PATH.write_text(json.dumps(seen, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
 async def _refresh_notices(client) -> None:
     history = exchange_notices.load_history()
     added = await exchange_notices.refresh_history(client, history)
@@ -126,6 +158,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
                 _status["tracker"] = await listing_short_tracker.tick(
                     client, llm_extract=_llm_extract, history=exchange_notices.load_history()
                 )
+                await _verdict_alert("listing_short", _status["tracker"])
             except Exception as exc:
                 _status["tracker_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
                 logger.warning(f"listing short tracker failed: {exc}")
@@ -133,6 +166,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _last_run["unlock"] = now
             try:
                 _status["unlock_tracker"] = await unlock_short_tracker.tick(client)
+                await _verdict_alert("unlock_short", _status["unlock_tracker"])
             except Exception as exc:
                 _status["unlock_tracker_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
                 logger.warning(f"unlock short tracker failed: {exc}")
@@ -140,6 +174,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _last_run["supply"] = now
             try:
                 _status["supply_factor"] = await supply_factor_tracker.tick(client)
+                await _verdict_alert("supply_factor", _status["supply_factor"])
             except Exception as exc:
                 _status["supply_factor_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
                 logger.warning(f"supply factor tracker failed: {exc}")

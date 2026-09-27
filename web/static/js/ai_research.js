@@ -6474,6 +6474,15 @@ ${confirmHint}`,
       </tbody></table></div>` : '<div class="u-note">台账为空。启用后每轮由模型提出 1–5 个公式。</div>'}`;
   }
 
+  // Pre-registered retirement verdict (core/research/retirement.py), shown on every paper-tracker card.
+  function trackerVerdictLine(s) {
+    const r = s?.retirement;
+    if (!r) return '';
+    const colors = { retire: 'var(--negative)', watch: 'var(--warning)', confirmed: 'var(--positive)', on_track: 'var(--positive)', collecting: 'var(--text-faint)' };
+    const ci = Array.isArray(r.ci90_pct) ? ` · 90% 区间 [${r.ci90_pct[0]}, ${r.ci90_pct[1]}]%` : '';
+    return `<div style="margin-top:4px;">退役判定：<b style="color:${colors[r.verdict] || 'var(--text-sub)'};">${esc(r.label || r.verdict || '--')}</b> · ${esc(r.reason || '')} · 前向 ${Number(r.n || 0)}/${Number(r.min_n || 0)} ${r.unit === 'month' ? '个月' : '笔'}${ci}<span class="u-note">（规则在首个前向结果前登记：满样本后均值≤0、90% 区间上沿&lt;0 或低于回测均值 1/4 即退役）</span></div>`;
+  }
+
   function renderListingShortTracker(payload) {
     const anchor = document.getElementById('ai-research-loop-v2') || document.getElementById('ai-iteration-cockpit');
     if (!anchor) return;
@@ -6493,6 +6502,7 @@ ${confirmHint}`,
     panel.innerHTML = `
       <h3 style="margin:0;">新上市永续 D2→D14 做空 · 纸面跟踪</h3>
       <div style="margin-top:6px;color:var(--text-sub);">前向 ${Number(s.forward_trades || 0)} 笔（完成 ${Number(s.forward_completed || 0)} / 持有 ${Number(s.forward_open || 0)}）· 前向均值 ${pct(s.forward_mean_return_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '样本不足 30 笔，暂不评估'}</div>
+      ${trackerVerdictLine(s)}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。纸面记录，不下单；启动前已上线的币标为"回填"，不计入前向统计。流通占比由研究模型从上币公告提取（正则兜底）。</div>
       ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>合约</th><th>上线</th><th>状态</th><th>收益（空头）</th><th>最大不利</th><th>上市流通占比</th><th></th></tr></thead><tbody>
         ${trades.map((t) => `<tr><td>${esc(t.symbol)}</td><td>${esc(t.onboard_ms ? fmtTs(new Date(Number(t.onboard_ms))) : '--')}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td><td style="color:${Number(t.return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.return_pct)}</td><td>${pct(t.max_adverse_pct)}</td><td>${floatOf(t) == null ? '--' : `${Number(floatOf(t)).toFixed(0)}%${t?.tokenomics?.available_before_entry === false ? '（公告晚于入场）' : ''}`}</td><td>${t.backfilled ? '回填' : ''}</td></tr>`).join('')}
@@ -6517,6 +6527,7 @@ ${confirmHint}`,
     panel.innerHTML = `
       <h3 style="margin:0;">大额解锁前做空 · 纸面跟踪</h3>
       <div style="margin-top:6px;color:var(--text-sub);">前向：待入场 ${Number(s.forward_scheduled || 0)} · 持有 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)}（排期变更 ${Number(s.forward_schedule_changed || 0)}）· 对冲后均值 ${pct(s.forward_mean_hedged_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '样本不足 20 笔，暂不评估'}</div>
+      ${trackerVerdictLine(s)}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。解锁前 30 天收盘做空永续、前 1 天平仓，+40% 止损，篮子对冲。纸面记录，不下单；启动时已过入场日的标为"迟到"，不计入前向统计。</div>
       ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>代币</th><th>解锁日</th><th>规模</th><th>类型</th><th>入场日</th><th>状态</th><th>对冲后</th><th>仅空头</th><th></th></tr></thead><tbody>
         ${trades.map((t) => `<tr><td>${esc(t.token)}</td><td>${esc(t.unlock_date)}</td><td>${Number(t.size_pct).toFixed(1)}%</td><td>${t.insider ? '团队/投资人' : '生态/其他'}</td><td>${esc(t.entry_day)}</td><td>${esc(statusNames[t.status] || t.status)}</td><td style="color:${Number(t.hedged_return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.hedged_return_pct)}</td><td>${pct(t.short_return_pct ?? t.mark_return_pct)}</td><td>${t.late ? '迟到' : ''}</td></tr>`).join('')}
@@ -6541,6 +6552,7 @@ ${confirmHint}`,
     panel.innerHTML = `
       <h3 style="margin:0;">供给通胀因子 · 月度多空纸面跟踪</h3>
       <div style="margin-top:6px;color:var(--text-sub);">前向：持有中 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)} 个月 · 平均多空差 ${pct(s.forward_mean_spread_pct)}/月 · 正收益月份 ${s.forward_positive_months == null ? '--' : `${(Number(s.forward_positive_months) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '不足 12 个月，暂不评估'}</div>
+      ${trackerVerdictLine(s)}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。每月初按排期未来 90 天新增供给排序，做多最低三分之一、做空最高三分之一，持有 30 天，扣 0.4% 成本。纸面记录，不下单；启动前开始的月份标为"回填"，不计入前向统计。</div>
       ${months.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>调仓日</th><th>状态</th><th>多空差</th><th>多头</th><th>空头</th><th>做多（低供给）</th><th>做空（高供给）</th><th></th></tr></thead><tbody>
         ${months.map((m) => `<tr><td>${esc(m.rebalance_day)}</td><td>${m.status === 'closed' ? '已结算' : '持有中'}</td><td style="color:${Number(m.spread_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.spread_pct)}</td><td>${pct(m.long_return_pct)}</td><td>${pct(m.short_return_pct)}</td><td title="${names(m.long)}">${Object.keys(m.long || {}).length} 个</td><td title="${names(m.short)}">${Object.keys(m.short || {}).length} 个</td><td>${m.backfill ? '回填' : ''}</td></tr>`).join('')}
