@@ -81,9 +81,26 @@ def _load_cached(path: Path, ttl_days: float) -> Optional[Any]:
         return None
 
 
+WATCHLIST_LATEST = PROJECT_ROOT / "data" / "research" / "pump_watchlist" / "latest.json"
+
+
+def _watchlist_bases() -> List[str]:
+    try:
+        payload = json.loads(WATCHLIST_LATEST.read_text(encoding="utf-8"))
+        return [str(r.get("base") or "").upper() for r in payload.get("full_ranking") or [] if r.get("base")]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def universe_bases() -> List[str]:
+    """July research manifest UNION the current weekly-model universe.
+
+    The manifest alone drifted away from the coins the weekly model scores
+    (only 31-49 of 86 overlapped by September), which starves any later test
+    of whether holder concentration adds information to that model.
+    """
     manifest = json.loads((AMBUSH_DIR / "manifest.json").read_text(encoding="utf-8"))
-    return sorted((manifest.get("symbols") or {}).keys())
+    return sorted(set((manifest.get("symbols") or {}).keys()) | set(_watchlist_bases()))
 
 
 def cg_mapping() -> Dict[str, str]:
@@ -98,15 +115,27 @@ def cg_mapping() -> Dict[str, str]:
 def load_platforms(mapping: Dict[str, str]) -> Dict[str, Dict[str, str]]:
     cache_path = OUT_DIR / "platforms_cache.json"
     cached = _load_cached(cache_path, PLATFORMS_CACHE_TTL_DAYS)
-    if cached:
-        return cached
+    if cached and set(_watchlist_bases()) <= set(cached) | set(cached.get("_unresolved", [])):
+        return {k: v for k, v in cached.items() if k != "_unresolved"}
     listing = _get_json(f"{CG_API}/coins/list", {"include_platform": "true"})
     by_id = {c["id"]: (c.get("platforms") or {}) for c in listing}
     out = {
         base: {k: v for k, v in (by_id.get(cg) or {}).items() if v}
         for base, cg in mapping.items()
     }
-    cache_path.write_text(json.dumps(out, indent=1), encoding="utf-8")
+    # Watchlist coins outside the curated mapping: resolve by symbol, keeping the
+    # first coin that has a contract on a supported chain (same rule as the
+    # weekly watchlist's own top-N enrichment; symbol collisions are possible).
+    known_chains = {cg for cg, _ in CHAIN_MAP}
+    wanted = {b for b in _watchlist_bases() if b not in out}
+    for coin in listing:
+        sym = str(coin.get("symbol") or "").upper()
+        if sym in wanted and sym not in out:
+            plats = {k: v for k, v in (coin.get("platforms") or {}).items() if v}
+            if set(plats) & known_chains:
+                out[sym] = plats
+    unresolved = sorted(wanted - set(out))  # remembered so the cache is not rebuilt every run for them
+    cache_path.write_text(json.dumps({**out, "_unresolved": unresolved}, indent=1), encoding="utf-8")
     return out
 
 
