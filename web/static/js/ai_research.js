@@ -6499,6 +6499,36 @@ ${confirmHint}`,
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每小时检查一次新上线永续。</div>'}`;
   }
 
+  function renderUnlockShortTracker(payload) {
+    const anchor = document.getElementById('ai-listing-short-tracker') || document.getElementById('ai-research-loop-v2');
+    if (!anchor) return;
+    let panel = document.getElementById('ai-unlock-short-tracker');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'ai-unlock-short-tracker';
+      panel.className = 'card';
+      panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
+      anchor.insertAdjacentElement('afterend', panel);
+    }
+    const s = payload?.summary || {};
+    const trades = Array.isArray(payload?.trades) ? payload.trades : [];
+    const pct = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
+    const statusNames = { scheduled: '待入场', open: '持有中', closed: '到期平仓', stopped: '止损', schedule_changed: '排期变更', entry_failed: '入场失败' };
+    panel.innerHTML = `
+      <h3 style="margin:0;">大额解锁前做空 · 纸面跟踪</h3>
+      <div style="margin-top:6px;color:var(--text-sub);">前向：待入场 ${Number(s.forward_scheduled || 0)} · 持有 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)}（排期变更 ${Number(s.forward_schedule_changed || 0)}）· 对冲后均值 ${pct(s.forward_mean_hedged_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '样本不足 20 笔，暂不评估'}</div>
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。解锁前 30 天收盘做空永续、前 1 天平仓，+40% 止损，篮子对冲。纸面记录，不下单；启动时已过入场日的标为"迟到"，不计入前向统计。</div>
+      ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>代币</th><th>解锁日</th><th>规模</th><th>类型</th><th>入场日</th><th>状态</th><th>对冲后</th><th>仅空头</th><th></th></tr></thead><tbody>
+        ${trades.map((t) => `<tr><td>${esc(t.token)}</td><td>${esc(t.unlock_date)}</td><td>${Number(t.size_pct).toFixed(1)}%</td><td>${t.insider ? '团队/投资人' : '生态/其他'}</td><td>${esc(t.entry_day)}</td><td>${esc(statusNames[t.status] || t.status)}</td><td style="color:${Number(t.hedged_return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.hedged_return_pct)}</td><td>${pct(t.short_return_pct ?? t.mark_return_pct)}</td><td>${t.late ? '迟到' : ''}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每 6 小时检查未来 60 天的大额解锁。</div>'}`;
+  }
+
+  async function refreshUnlockShortTracker() {
+    try {
+      renderUnlockShortTracker(await aiApi('/unlock-short', { timeoutMs: 12000 }));
+    } catch (err) { /* optional panel */ }
+  }
+
   async function refreshListingShortTracker() {
     try {
       renderListingShortTracker(await aiApi('/listing-short', { timeoutMs: 12000 }));
@@ -6531,7 +6561,7 @@ ${confirmHint}`,
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
-    refreshResearchLoopV2().then(() => refreshListingShortTracker()).catch(() => {});
+    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);
