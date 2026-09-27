@@ -12,6 +12,7 @@ Run scripts/delist_risk_fetch.py first.
 import json, sys, numpy as np, pandas as pd
 sys.path.insert(0,".")
 from core.research.exchange_notices import load_history, parse_notice
+from core.research.delist_risk import FEATURE_SIGNS, MODEL_PATH, features_from_daily
 C=pd.read_parquet("data/research/delist_risk/close.parquet"); V=pd.read_parquet("data/research/delist_risk/quote_volume.parquet")
 for f in (C,V): f.index=pd.to_datetime(f.index,utc=True)
 C=C.asfreq("1D"); V=V.reindex(C.index)
@@ -30,21 +31,18 @@ for D in dates:
     hist=C.loc[:D-pd.Timedelta("1D")]
     alive=[s for s in C.columns if pd.notna(C.at[D,s]) and hist[s].notna().sum()>=120] if D in C.index else []
     for s in alive:
-        c=hist[s].dropna(); v=V.loc[:D-pd.Timedelta("1D"),s].dropna()
-        vol30=v.tail(30).mean(); vol180=v.tail(180).mean()
-        ret90=(c.iloc[-1]/c.iloc[-91]-1)-(btc.asof(c.index[-1])/btc.asof(c.index[-91])-1) if len(c)>91 else np.nan
-        dd=c.iloc[-1]/c.tail(365).max()-1
+        feats=features_from_daily(hist[s], V.loc[:D-pd.Timedelta("1D"),s], btc)  # shared with live scoring
+        if feats is None: continue
         lab=any(D < t <= D+pd.Timedelta("60D") for t in dl.get(s,[]))
         # forward 30d return (short closes at last traded price if the coin stops trading)
         fwd=C.loc[D:D+pd.Timedelta("30D"),s].dropna()
         f30=fwd.iloc[-1]/fwd.iloc[0]-1 if len(fwd)>1 else np.nan
-        rows.append({"date":D,"sym":s,"logvol30":np.log10(max(vol30,1)),"voltrend":vol30/max(vol180,1),"ret90":ret90,"dd365":dd,"age":len(c),"label":lab,"fwd30":f30})
+        rows.append({"date":D,"sym":s,**feats,"label":lab,"fwd30":f30})
 R=pd.DataFrame(rows); R.to_parquet("data/research/delist_risk/panel.parquet")
 print("panel:",len(R),"coin-months |",R.date.nunique(),"months | positives:",int(R.label.sum()),"| base rate",round(R.label.mean(),4))
 # rank features within month; risk-direction signs: low volume, falling volume, weak return, deep drawdown, (age?)
-feats={"logvol30":-1,"voltrend":-1,"ret90":-1,"dd365":-1,"age":+1}
-for f,sgn in feats.items(): R[f+"_r"]=R.groupby("date")[f].rank(pct=True)*sgn
-X=[f+"_r" for f in feats]; R=R.dropna(subset=X+["fwd30"])
+for f,sgn in FEATURE_SIGNS.items(): R[f+"_r"]=R.groupby("date")[f].rank(pct=True)*sgn
+X=[f+"_r" for f in FEATURE_SIGNS]; R=R.dropna(subset=X+["fwd30"])
 dev=R[R.date<"2025-01-01"]; test=R[R.date>="2025-01-01"]
 # BLAS-free logistic
 Xd=dev[X].to_numpy(float); y=dev.label.to_numpy(float); w=np.zeros(len(X)); b=np.log(y.mean()/(1-y.mean()))
@@ -64,3 +62,15 @@ for name,part in (("dev 2023-24",dev),("TEST 2025-26",test)):
     m=part.groupby("date").apply(lambda g: -(g[g.q>=0.95].fwd30.mean()-g.fwd30.mean())-0.004)
     rng=np.random.default_rng(0); bs=[m.sample(len(m),replace=True,random_state=int(x)).mean() for x in rng.integers(0,1e9,2000)]
     print(f"  hedged short of top-5% risk basket, 30d: mean {m.mean()*100:+.2f}%/month  median {m.median()*100:+.2f}%  positive months {(m>0).mean():.0%}  90%CI [{np.percentile(bs,5)*100:+.2f}, {np.percentile(bs,95)*100:+.2f}]  months={len(m)}")
+
+# export the dev-fitted model (validated on 2025-26 above) for live scoring
+s_test=(test[X].to_numpy(float)*w).sum(1)+b
+t=test.assign(score=s_test); t["q"]=t.groupby("date")["score"].rank(pct=True)
+MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+MODEL_PATH.write_text(json.dumps({
+    "features": X, "weights": [float(x) for x in w], "bias": float(b), "fitted_on": "2023-03..2024-12 monthly panel",
+    "test_auc": round(float(auc(s_test, t.label.to_numpy())), 3),
+    "test_top5_lift": round(float(t[t.q>=0.95].label.mean()/max(t.label.mean(),1e-9)), 2),
+    "note": "defensive flag only; shorting the flagged bucket lost money (2023-24 -4.0%/month)",
+}, indent=1), encoding="utf-8")
+print("model exported ->", MODEL_PATH)

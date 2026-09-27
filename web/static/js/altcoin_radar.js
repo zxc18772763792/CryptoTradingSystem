@@ -2404,7 +2404,7 @@
         return [
           '<tr>',
           `<td>${toNumber(row.rank, 0)}</td>`,
-          `<td><strong>${escapeHtml(String(row.base || ''))}</strong>${row.exchange_notice ? ` <span class="altcoin-radar-tag" style="color:${row.exchange_notice === 'monitoring_tag' ? 'var(--warning)' : 'var(--negative)'};" title="Binance 公告">${row.exchange_notice === 'monitoring_tag' ? '监控标签' : '下架公告'}</span>` : ''}</td>`,
+          `<td><strong>${escapeHtml(String(row.base || ''))}</strong>${row.exchange_notice ? ` <span class="altcoin-radar-tag" style="color:${row.exchange_notice === 'monitoring_tag' ? 'var(--warning)' : 'var(--negative)'};" title="Binance 公告">${row.exchange_notice === 'monitoring_tag' ? '监控标签' : '下架公告'}</span>` : ''}${row.delist_risk_flagged ? ` <span class="altcoin-radar-tag" style="color:var(--warning);" title="下架风险分位 ${(Number(row.delist_risk_percentile) * 100).toFixed(0)}%：成交量低、走弱、深度回撤的币被下架概率约为平均的 5 倍；仅提示，约 9/10 被标记的币 60 天内不会被下架">高下架风险</span>` : ''}</td>`,
           `<td>${toNumber(row.score, 0).toFixed(3)}</td>`,
           `<td>${escapeHtml(drivers || '--')}</td>`,
           `<td>${fmtPumpMcap(row.mcap_usd)}</td>`,

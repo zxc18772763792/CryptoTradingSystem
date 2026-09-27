@@ -71,6 +71,18 @@ async def get_pump_precursor_watchlist():
                 live_notices[str(row.get("base"))] = {k: notice.get(k) for k in ("kind", "effective_date", "title")}
     except Exception:  # noqa: BLE001 - annotation only
         pass
+    try:
+        # Delisting-risk percentile across the whole Binance spot universe (a warning,
+        # not an exclusion: 9 of 10 flagged coins are not delisted within 60 days).
+        from core.research.delist_risk import load_scores  # noqa: PLC0415
+
+        risk = load_scores()
+        for row in payload.get("top") or []:
+            entry = risk.get(str(row.get("base") or "").upper())
+            row["delist_risk_percentile"] = entry["percentile"] if entry else None
+            row["delist_risk_flagged"] = bool(entry and entry["flagged"])
+    except Exception:  # noqa: BLE001 - annotation only
+        pass
     return {
         "available": True,
         "live_exchange_notices": live_notices,
