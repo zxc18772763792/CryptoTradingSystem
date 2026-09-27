@@ -1,4 +1,9 @@
-"""Round 6 stage 2: LLM reads the project's own docs and returns a vesting spec (plus a no-docs memory baseline)."""
+"""Round 6: LLM reads the project's own docs and returns a vesting spec (plus a no-docs memory baseline).
+
+Usage: vesting_llm_extract.py [input docs file] [output file] [modes]
+defaults: docs.json extractions.json docs,memory (step 1); step 2 runs
+discovered.json discovered_extractions.json docs.
+"""
 import asyncio, json, re, sys
 from pathlib import Path
 import httpx
@@ -55,19 +60,21 @@ async def one(row, mode, sem, c):
         return {"error": err}
 
 async def main():
-    rows = json.loads((OUT / "docs.json").read_text(encoding="utf-8"))
-    path = OUT / "extractions.json"
+    src, dst, modes = (sys.argv[1:] + ["docs.json", "extractions.json", "docs,memory"][len(sys.argv) - 1:])[:3]
+    modes = modes.split(",")
+    rows = json.loads((OUT / src).read_text(encoding="utf-8"))
+    path = OUT / dst
     done = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     async with httpx.AsyncClient(timeout=30) as c:
         for r in rows:
             r["binance_first_day"] = await first_trade_day(c, r["ticker"])
         sem = asyncio.Semaphore(4)
-        jobs = [(r, m) for r in rows for m in ("docs", "memory") if not done.get(r["ticker"], {}).get(m) or "error" in done[r["ticker"]][m]]
+        jobs = [(r, m) for r in rows for m in modes if not done.get(r["ticker"], {}).get(m) or "error" in done[r["ticker"]][m]]
         results = await asyncio.gather(*(one(r, m, sem, c) for r, m in jobs))
     for (r, m), res in zip(jobs, results):
-        done.setdefault(r["ticker"], {"slug": r["slug"], "binance_first_day": r["binance_first_day"]})[m] = res
+        done.setdefault(r["ticker"], {"slug": r["slug"], "binance_first_day": r["binance_first_day"], "covered": r.get("covered")})[m] = res
     path.write_text(json.dumps(done, ensure_ascii=False, indent=1), encoding="utf-8")
-    errs = sum("error" in v.get(m, {}) for v in done.values() for m in ("docs", "memory"))
+    errs = sum("error" in v.get(m, {}) for v in done.values() for m in modes)
     print("tokens", len(done), "errors", errs)
 
 asyncio.run(main())
