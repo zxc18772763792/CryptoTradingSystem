@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from core.research import exchange_notices
+from core.research import exchange_notices, retirement
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "listing_short" / "tracker.json"
@@ -213,6 +213,7 @@ async def tick(client, *, llm_extract=None, history: Optional[Dict[str, List[Dic
             # Only facts published before the D2 entry are fair inputs for the filter question.
             tok["available_before_entry"] = int(tok["announcement"]["release_ms"]) <= int(trade["entry_at"])
     state["updated_at"] = now.isoformat()
+    retirement.register(state, "listing_short", now.isoformat())
     save_state(state, state_path)
     return summary(state)
 
@@ -233,5 +234,6 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "forward_win_rate": round(sum(r > 0 for r in returns) / len(returns), 3) if returns else None,
         "backtest_reference": "229 perps 2024-26: +15.8%/trade mean, 90% CI [+10.3, +21.8], win 58%",
         "evaluation_ready": len(done) >= 30,
+        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES["listing_short"]),
     }
     return out

@@ -90,6 +90,9 @@ def test_month_opens_after_first_close_then_settles_with_the_spread(world, tmp_p
     assert month["status"] == "closed"
     assert month["spread_pct"] == pytest.approx((0.10 - (-0.10) - sf.MONTH_COST) * 100)
     assert summary["forward_completed"] == 1 and summary["forward_mean_spread_pct"] == pytest.approx(19.6)
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["retirement_rule"]["min_n"] == 12  # rule registered on the first tick, before any result
+    assert summary["retirement"]["verdict"] == "collecting" and summary["retirement"]["n"] == 1
 
 
 def test_month_started_before_tracker_is_backfill(world, tmp_path):
