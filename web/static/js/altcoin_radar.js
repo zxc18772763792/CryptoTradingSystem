@@ -2404,7 +2404,7 @@
         return [
           '<tr>',
           `<td>${toNumber(row.rank, 0)}</td>`,
-          `<td><strong>${escapeHtml(String(row.base || ''))}</strong></td>`,
+          `<td><strong>${escapeHtml(String(row.base || ''))}</strong>${row.exchange_notice ? ` <span class="altcoin-radar-tag" style="color:${row.exchange_notice === 'monitoring_tag' ? 'var(--warning)' : 'var(--negative)'};" title="Binance 公告">${row.exchange_notice === 'monitoring_tag' ? '监控标签' : '下架公告'}</span>` : ''}</td>`,
           `<td>${toNumber(row.score, 0).toFixed(3)}</td>`,
           `<td>${escapeHtml(drivers || '--')}</td>`,
           `<td>${fmtPumpMcap(row.mcap_usd)}</td>`,
@@ -2420,7 +2420,9 @@
       })
       .join('');
     const generated = data.generated_at ? fmtDateTime(data.generated_at) : '--';
-    const ageText = payload.age_days != null ? `${Number(payload.age_days).toFixed(1)} 天前` : '';
+    const excluded = Object.keys(data.excluded_by_exchange_notice || {});
+    const noticeText = excluded.length ? ` · 因下架公告剔除：${excluded.map((b) => escapeHtml(b)).join('、')}` : '';
+    const ageText = (payload.age_days != null ? `${Number(payload.age_days).toFixed(1)} 天前` : '') + noticeText;
     if (payload.refresh && payload.refresh.running) {
       setPumpWatchlistNote('后台生成中（约 15 分钟）...', 'info');
     } else if (payload.stale) {

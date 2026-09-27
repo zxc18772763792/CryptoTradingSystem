@@ -453,6 +453,19 @@ def _read_jsonl_tail(path: Path, limit: int, *, block_size: int = 1 << 20) -> Li
     return rows
 
 
+_BLOCKING_NOTICE_KINDS = {"delist", "futures_delist"}
+
+
+def _exchange_notice(symbol: Any) -> Optional[Dict[str, Any]]:
+    """Active Binance delisting-type notice for this symbol's coin, if any (never raises)."""
+    try:
+        from core.research.exchange_notices import base_of, load_flags  # noqa: PLC0415
+
+        return load_flags().get(base_of(str(symbol or ""))) if symbol else None
+    except Exception:
+        return None
+
+
 def _circuit_breaker_decision(strategy_name: str, *, is_reduce_only: bool) -> Optional[Dict[str, Any]]:
     """Mirror the execution engine's breaker gate before submitting.
 
@@ -3547,6 +3560,16 @@ class AutonomousTradingAgent:
             streak = max(0, int(summary.get("recent_close_loss_streak_count") or 0))
             notes.append(f"loss streak {streak}" if streak > 0 else "loss streak")
 
+        notice = _exchange_notice(symbol)
+        if notice and not bool(adjusted.get("has_position")):
+            # Delisting notices: 91% of coins kept falling and shorts get squeezed
+            # (docs/LLM_TRADING_RESEARCH_ROUND3_2026-09-26.md) -> no fresh entries.
+            # A monitoring tag is untested, so it only annotates.
+            if notice["kind"] in _BLOCKING_NOTICE_KINDS:
+                score -= 0.5
+                tradable_now = False
+            notes.append(f"exchange notice: {notice['kind']}")
+
         if notes:
             summary = str(adjusted.get("summary") or "").strip()
             extra = ", ".join(notes)
@@ -5404,6 +5427,9 @@ class AutonomousTradingAgent:
             add_item("live_mode_blocked", "实盘执行被禁止", "交易引擎在 live，但 agent 未允许 live", "danger", 9)
         elif execution_reason == "submit_rejected":
             add_item("submit_rejected", "执行引擎拒绝了信号", "submit_signal returned false", "danger", 12)
+        elif execution_reason == "exchange_delisting_notice":
+            notice = dict(execution.get("exchange_notice") or {})
+            add_item("exchange_delisting_notice", "交易所下架公告：禁止新开仓", str(notice.get("title") or notice.get("kind") or ""), "danger", 7)
         elif action == "hold" and decision_reason.startswith("circuit_breaker_close_only"):
             add_item(
                 "circuit_breaker_blocked",
@@ -5472,6 +5498,7 @@ class AutonomousTradingAgent:
             "live_mode_blocked",
             "submit_rejected",
             "circuit_breaker_blocked",
+            "exchange_delisting_notice",
         }
         for item in items:
             code = str(item.get("code") or "").strip() or "diagnostic"
@@ -6179,8 +6206,15 @@ class AutonomousTradingAgent:
                         or bool(signal_meta.get("close_only") or signal_meta.get("reduce_only"))
                     ),
                 )
+                reduce_only = signal.signal_type in (SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT) or bool(
+                    signal_meta.get("close_only") or signal_meta.get("reduce_only")
+                )
+                notice = None if reduce_only else _exchange_notice(signal.symbol)
                 if trading_mode == "live" and not bool(effective_cfg.get("allow_live")):
                     execution["reason"] = "live_mode_blocked"
+                elif notice and notice["kind"] in _BLOCKING_NOTICE_KINDS:
+                    execution["reason"] = "exchange_delisting_notice"
+                    execution["exchange_notice"] = notice
                 elif breaker_block is not None:
                     execution["reason"] = "circuit_breaker_blocked"
                     execution["circuit_breaker"] = breaker_block

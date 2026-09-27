@@ -221,6 +221,18 @@ async def fetch_oi_daily(client: CoinglassClient, base: str) -> Optional[pd.Seri
     return None
 
 
+def _exchange_notice_flags() -> Dict[str, Dict[str, Any]]:
+    """Active delisting-type notices; falls back to the cached history if the
+    web scheduler has not refreshed the flag file recently. Never fails the run."""
+    try:
+        from core.research.exchange_notices import active_flags, load_flags, load_history  # noqa: PLC0415
+
+        return load_flags() or active_flags(load_history())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"exchange notice flags unavailable: {exc}")
+        return {}
+
+
 def _write_weekly_archive(parts: List[pd.DataFrame]) -> None:
     """Keep this week's daily inputs: forward evidence for research loop v2.
 
@@ -322,6 +334,16 @@ async def main() -> None:
     # watchlist universe and leaves the columns blank). Brand-new coins without a
     # DEX contract / GeckoTerminal holder data / unlock schedule stay blank —
     # that is a real coverage limit, not a bug.
+    # Delisting guard: coins under a Binance delisting notice kept falling 91%
+    # of the time (docs/LLM_TRADING_RESEARCH_ROUND3_2026-09-26.md); keep them
+    # out of the top list but record why. Monitoring tags only annotate.
+    notices = _exchange_notice_flags()
+    excluded_by_notice = {
+        b: notices[b] for b in scored.index if b in notices and notices[b]["kind"] in {"delist", "futures_delist"}
+    }
+    if excluded_by_notice:
+        scored = scored.drop(index=list(excluded_by_notice))
+        logger.info(f"excluded by exchange delisting notice: {', '.join(excluded_by_notice)}")
     top_bases = [b for b, _ in scored.head(args.top).iterrows()]
     holder_rows, unlock_rows = _fetch_top_onchain(top_bases, mcap_by_base, price_by_base)
 
@@ -343,6 +365,7 @@ async def main() -> None:
                 "funding_7d": round(float(row["funding_7d"]), 6),
                 "dd_from_ath": round(float(row["dd_from_ath"]), 4),
                 "pumped_before_120d": bool(row["pumped_before_120d"] > 0),
+                "exchange_notice": (notices.get(base) or {}).get("kind"),
                 "top10_holder_pct": holder.get("top10_pct"),
                 "unlock_next_30d_pct": unlock.get("unlock_next_30d_pct_mcap"),
                 "days_to_next_unlock": unlock.get("days_to_next_unlock"),
@@ -362,6 +385,9 @@ async def main() -> None:
         "scored": len(scored),
         "skipped": skipped,
         "top": entries,
+        "excluded_by_exchange_notice": {
+            b: {k: v.get(k) for k in ("kind", "effective_date", "title")} for b, v in excluded_by_notice.items()
+        },
         "full_ranking": [
             {"base": b, "score": round(float(r["score"]), 4)} for b, r in scored.iterrows()
         ],

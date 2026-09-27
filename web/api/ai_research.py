@@ -6339,6 +6339,17 @@ async def run_ai_research_loop_v2_once(request: Request):
     return loop.request_run()
 
 
+@router.get("/listing-short")
+async def get_listing_short_tracker():
+    """Paper tracker for the new-perp D2->D14 short (research only)."""
+    from core.research import listing_short_tracker
+    from core.research.exchange_research_runner import status as runner_status
+
+    state = await asyncio.to_thread(listing_short_tracker.load_state)
+    trades = sorted(state.get("trades", {}).values(), key=lambda t: -int(t.get("onboard_ms") or 0))
+    return {"summary": listing_short_tracker.summary(state), "trades": trades[:60], "runner": runner_status()}
+
+
 async def _build_operating_mode_payload() -> Dict[str, Any]:
     from core.runtime.operating_mode import validate_operating_mode
     from core.runtime.state import runtime_state

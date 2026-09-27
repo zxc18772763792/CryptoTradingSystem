@@ -6474,6 +6474,37 @@ ${confirmHint}`,
       </tbody></table></div>` : '<div class="u-note">台账为空。启用后每轮由模型提出 1–5 个公式。</div>'}`;
   }
 
+  function renderListingShortTracker(payload) {
+    const anchor = document.getElementById('ai-research-loop-v2') || document.getElementById('ai-iteration-cockpit');
+    if (!anchor) return;
+    let panel = document.getElementById('ai-listing-short-tracker');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'ai-listing-short-tracker';
+      panel.className = 'card';
+      panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
+      anchor.insertAdjacentElement('afterend', panel);
+    }
+    const s = payload?.summary || {};
+    const trades = Array.isArray(payload?.trades) ? payload.trades : [];
+    const pct = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
+    const statusNames = { waiting_d2: '等 D2 收盘', open: '持有中', closed: 'D14 平仓', stopped: '止损' };
+    const floatOf = (t) => t?.tokenomics?.llm?.circulating_supply_pct_at_listing ?? t?.tokenomics?.regex?.circulating_supply_pct_at_listing;
+    panel.innerHTML = `
+      <h3 style="margin:0;">新上市永续 D2→D14 做空 · 纸面跟踪</h3>
+      <div style="margin-top:6px;color:var(--text-sub);">前向 ${Number(s.forward_trades || 0)} 笔（完成 ${Number(s.forward_completed || 0)} / 持有 ${Number(s.forward_open || 0)}）· 前向均值 ${pct(s.forward_mean_return_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '样本不足 30 笔，暂不评估'}</div>
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。纸面记录，不下单；启动前已上线的币标为"回填"，不计入前向统计。流通占比由研究模型从上币公告提取（正则兜底）。</div>
+      ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>合约</th><th>上线</th><th>状态</th><th>收益（空头）</th><th>最大不利</th><th>上市流通占比</th><th></th></tr></thead><tbody>
+        ${trades.map((t) => `<tr><td>${esc(t.symbol)}</td><td>${esc(t.onboard_ms ? fmtTs(new Date(Number(t.onboard_ms))) : '--')}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td><td style="color:${Number(t.return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.return_pct)}</td><td>${pct(t.max_adverse_pct)}</td><td>${floatOf(t) == null ? '--' : `${Number(floatOf(t)).toFixed(0)}%${t?.tokenomics?.available_before_entry === false ? '（公告晚于入场）' : ''}`}</td><td>${t.backfilled ? '回填' : ''}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每小时检查一次新上线永续。</div>'}`;
+  }
+
+  async function refreshListingShortTracker() {
+    try {
+      renderListingShortTracker(await aiApi('/listing-short', { timeoutMs: 12000 }));
+    } catch (err) { /* optional panel: stay silent */ }
+  }
+
   async function refreshResearchLoopV2() {
     if (!document.getElementById('ai-iteration-cockpit')) return;
     try {
@@ -6500,7 +6531,7 @@ ${confirmHint}`,
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
-    refreshResearchLoopV2().catch(() => {});
+    refreshResearchLoopV2().then(() => refreshListingShortTracker()).catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);
