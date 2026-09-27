@@ -57,14 +57,38 @@ async def get_pump_precursor_watchlist():
         age_days = (_utcnow() - generated).total_seconds() / 86400.0
     except Exception:
         age_days = None
+    # The list is weekly; delisting notices are live. Overlay today's flags so a
+    # notice published mid-week shows up without waiting for the next Monday run.
+    live_notices: Dict[str, Any] = {}
+    try:
+        from core.research.exchange_notices import load_flags  # noqa: PLC0415
+
+        flags = load_flags()
+        for row in payload.get("top") or []:
+            notice = flags.get(str(row.get("base") or "").upper())
+            row["exchange_notice"] = notice["kind"] if notice else row.get("exchange_notice")
+            if notice:
+                live_notices[str(row.get("base"))] = {k: notice.get(k) for k in ("kind", "effective_date", "title")}
+    except Exception:  # noqa: BLE001 - annotation only
+        pass
     return {
         "available": True,
+        "live_exchange_notices": live_notices,
         "stale": bool(age_days is not None and age_days > _PUMP_WATCHLIST_STALE_DAYS),
         "age_days": None if age_days is None else round(age_days, 2),
         "refresh": dict(_pump_refresh_state),
         "data": payload,
         "ts": _utcnow().isoformat(),
     }
+
+
+@router.get("/radar/exchange-notices")
+async def get_exchange_notices():
+    """Coins under an active Binance delisting / futures-delisting / monitoring notice."""
+    from core.research.exchange_notices import load_flags  # noqa: PLC0415
+    from core.research.exchange_research_runner import status as runner_status  # noqa: PLC0415
+
+    return {"flags": load_flags(), "runner": runner_status(), "ts": _utcnow().isoformat()}
 
 
 async def _run_pump_watchlist_refresh() -> None:

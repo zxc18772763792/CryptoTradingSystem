@@ -4588,3 +4588,35 @@ def test_autonomous_agent_journal_rotates_to_archive(monkeypatch, tmp_path: Path
     archived = list((tmp_path / "journal_archive").glob("autonomous_agent_journal.*.jsonl"))
     assert len(archived) == 1
     assert [row["i"] for row in agent.read_journal(limit=50)] == [2]
+
+
+def test_autonomous_agent_refuses_fresh_entry_on_delisting_notice(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+    from core.research import exchange_notices
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.72}
+
+    monkeypatch.setattr(exchange_notices, "load_flags", lambda *a, **k: {"BTC": {"kind": "delist", "title": "Binance Will Delist BTC on 2099-01-01"}})
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    submit_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", submit_mock)
+    monkeypatch.setattr(agent, "_call_provider", AsyncMock(return_value={
+        "action": "buy", "confidence": 0.83, "strength": 0.76, "leverage": 1,
+        "stop_loss_pct": 0.02, "take_profit_pct": 0.05, "reason": "trend_following",
+    }))
+
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", symbol_mode="fixed", symbol="BTC/USDT", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert result["decision"]["action"] == "buy"
+    assert result["execution"]["submitted"] is False
+    assert result["execution"]["reason"] == "exchange_delisting_notice"
+    assert submit_mock.await_count == 0
+    assert agent.get_status()["last_diagnostics"]["primary"]["code"] == "exchange_delisting_notice"

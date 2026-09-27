@@ -106,6 +106,12 @@ class ResearchScheduler:
         from core.ai.research_loop_v2 import get_cross_sectional_loop
         await get_cross_sectional_loop(app).tick()
 
+        try:
+            from core.research.exchange_research_runner import tick as exchange_research_tick
+            await exchange_research_tick()
+        except Exception as exc:  # noqa: BLE001 - never let this starve the research queue below
+            logger.debug(f"exchange research tick failed: {exc}")
+
         # Old queued jobs must not be starved by newer drafts in the UI's top 50.
         all_proposals = app.state.ai_proposal_registry.list(limit=None)
         queued = [p for p in all_proposals if p.status == "research_queued"]
