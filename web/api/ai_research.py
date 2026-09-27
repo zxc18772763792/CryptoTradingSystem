@@ -6360,6 +6360,16 @@ async def get_unlock_short_tracker():
     return {"summary": unlock_short_tracker.summary(state), "trades": trades[:80]}
 
 
+@router.get("/supply-factor")
+async def get_supply_factor_tracker():
+    """Forward paper tracker: monthly long/short on scheduled supply growth (research only)."""
+    from core.research import supply_factor_tracker
+
+    state = await asyncio.to_thread(supply_factor_tracker.load_state)
+    months = sorted(state.get("months", {}).values(), key=lambda m: m.get("rebalance_day") or "", reverse=True)
+    return {"summary": supply_factor_tracker.summary(state), "months": months[:24]}
+
+
 async def _build_operating_mode_payload() -> Dict[str, Any]:
     from core.runtime.operating_mode import validate_operating_mode
     from core.runtime.state import runtime_state
