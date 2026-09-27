@@ -233,6 +233,63 @@ def _exchange_notice_flags() -> Dict[str, Dict[str, Any]]:
         return {}
 
 
+MCAP_CACHE = OUT_DIR / "mcap_cache.json"
+MCAP_CACHE_MAX_DAYS = 21
+
+
+def _save_mcap_cache(mcap: Dict[str, float], price: Dict[str, float]) -> None:
+    try:
+        MCAP_CACHE.write_text(json.dumps({"saved_at": datetime.now(timezone.utc).isoformat(), "mcap": mcap, "price": price}), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"mcap cache write failed: {exc}")
+
+
+def _cached_mcaps() -> tuple[Dict[str, float], Dict[str, float]]:
+    """Last good market caps, rescaled by each coin's price move since (supply assumed unchanged)."""
+    try:
+        cache = json.loads(MCAP_CACHE.read_text(encoding="utf-8"))
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(cache["saved_at"])
+        if age.days > MCAP_CACHE_MAX_DAYS:
+            return {}, {}
+        tickers = {t["symbol"]: float(t.get("lastPrice") or 0) for t in _get_json(f"{FAPI}/fapi/v1/ticker/24hr")}
+        mcap, price = {}, {}
+        for base, old_mcap in cache["mcap"].items():
+            old_price = float(cache["price"].get(base) or 0)
+            now_price = tickers.get(f"{base}USDT", 0.0)
+            if old_price > 0 and now_price > 0:
+                mcap[base], price[base] = float(old_mcap) * now_price / old_price, now_price
+        return mcap, price
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"mcap cache unavailable: {exc}")
+        return {}, {}
+
+
+def _archived_oi() -> Dict[str, pd.Series]:
+    """Daily OI per coin from the weekly archives (earlier successful runs)."""
+    try:
+        from core.research.xs_panel import stitch_weekly_archive  # noqa: PLC0415
+
+        daily = stitch_weekly_archive()
+        return {b: g.set_index("date")["oi"].dropna() for b, g in daily.groupby("base")} if len(daily) else {}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"archived OI unavailable: {exc}")
+        return {}
+
+
+def _binance_oi_fallback(symbol: str, archived: Optional[pd.Series]) -> Optional[pd.Series]:
+    """Binance keeps ~30 days of daily OI; older days come from our own archive."""
+    try:
+        rows = _get_json(f"{FAPI}/futures/data/openInterestHist", {"symbol": symbol, "period": "1d", "limit": 30})
+        time.sleep(BINANCE_PACE_SEC)
+        idx = pd.to_datetime([int(r["timestamp"]) for r in rows], unit="ms", utc=True).tz_localize(None).normalize()
+        recent = pd.Series([float(r["sumOpenInterestValue"]) for r in rows], index=idx)
+    except Exception:  # noqa: BLE001
+        return None
+    series = recent if archived is None else recent.combine_first(archived)
+    series = series[~series.index.duplicated(keep="first")].sort_index()
+    return series if len(series) >= 32 else None
+
+
 def _write_weekly_archive(parts: List[pd.DataFrame]) -> None:
     """Keep this week's daily inputs: forward evidence for research loop v2.
 
@@ -264,7 +321,12 @@ async def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     model = load_model_weights()
 
-    snapshots = await load_coinglass_market_snapshots("binance", manual=True)
+    degraded: List[str] = []
+    try:
+        snapshots = await load_coinglass_market_snapshots("binance", manual=True)
+    except Exception as exc:  # noqa: BLE001 - a Coinglass 403 killed the 08-24 and 08-31 runs outright
+        logger.warning(f"coinglass market snapshots failed ({exc}); using cached market caps")
+        snapshots = {}
     mcap_by_base: Dict[str, float] = {}
     price_by_base: Dict[str, float] = {}
     for sym, row in snapshots.items():
@@ -282,7 +344,15 @@ async def main() -> None:
         except Exception:
             pass
 
+    if mcap_by_base:
+        _save_mcap_cache(mcap_by_base, price_by_base)
+    else:
+        mcap_by_base, price_by_base = _cached_mcaps()
+        if not mcap_by_base:
+            raise SystemExit("no market caps: Coinglass unavailable and no cache younger than 21 days")
+        degraded.append("market_caps_from_cache")
     universe = load_universe(args.max_symbols, mcap_by_base)
+    oi_history = _archived_oi()
     logger.info(f"watchlist universe: {len(universe)} symbols")
 
     feature_rows: Dict[str, Dict[str, float]] = {}
@@ -309,6 +379,10 @@ async def main() -> None:
             oi = await fetch_oi_daily(client, base)
             await asyncio.sleep(COINGLASS_PACE_SEC)
             if oi is None or len(oi) < 32:
+                oi = _binance_oi_fallback(symbol, oi_history.get(base))
+                if oi is not None and "oi_from_binance" not in degraded:
+                    degraded.append("oi_from_binance")
+            if oi is None or len(oi) < 32:
                 skipped[base] = "no_oi"
                 continue
             daily = klines.tail(HISTORY_DAYS).copy()
@@ -327,6 +401,10 @@ async def main() -> None:
     _write_weekly_archive(archive_parts)
     scored = score_universe(feature_rows, model)
     logger.info(f"scored {len(scored)} symbols, skipped {len(skipped)}")
+    if len(scored) == 0 or len(scored) < 0.3 * len(universe):
+        # A cross-sectional rank over a handful of survivors is meaningless, and
+        # overwriting latest.json would replace last week's good list with it.
+        raise SystemExit(f"only {len(scored)}/{len(universe)} coins scored (skips: {skipped}); keeping the previous watchlist")
 
     # On-chain display columns (context only, not scored): fetch holder
     # concentration + unlock proximity for THIS run's own top-N coins directly,
@@ -382,6 +460,7 @@ async def main() -> None:
             "label": model.get("label"),
         },
         "universe_size": len(universe),
+        "degraded": degraded,
         "scored": len(scored),
         "skipped": skipped,
         "top": entries,
