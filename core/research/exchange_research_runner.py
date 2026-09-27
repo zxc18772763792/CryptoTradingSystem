@@ -14,15 +14,16 @@ from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 
-from core.research import exchange_notices, listing_short_tracker, unlock_short_tracker
+from core.research import delist_risk, exchange_notices, listing_short_tracker, unlock_short_tracker
 
 NOTICE_INTERVAL_SEC = 1800
 TRACKER_INTERVAL_SEC = 3600
 UNLOCK_INTERVAL_SEC = 6 * 3600
+DELIST_RISK_INTERVAL_SEC = 24 * 3600
 ALERT_STATE_PATH = exchange_notices.ANNOUNCEMENT_DIR / "guard_alerts.json"
 WATCHLIST_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "pump_watchlist" / "latest.json"
 
-_last_run: Dict[str, float] = {"notices": 0.0, "tracker": 0.0, "unlock": 0.0}
+_last_run: Dict[str, float] = {"notices": 0.0, "tracker": 0.0, "unlock": 0.0, "delist_risk": 0.0}
 _status: Dict[str, Any] = {}
 
 
@@ -135,4 +136,14 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             except Exception as exc:
                 _status["unlock_tracker_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
                 logger.warning(f"unlock short tracker failed: {exc}")
+        if (force or now - _last_run["delist_risk"] >= DELIST_RISK_INTERVAL_SEC) and delist_risk.MODEL_PATH.exists():
+            _last_run["delist_risk"] = now
+            try:
+                model = delist_risk.load_model()
+                scored = await delist_risk.compute_live_scores(client, model)
+                delist_risk.write_scores(scored, model)
+                _status["delist_risk"] = {"scored": int(len(scored)), "flagged": int(scored["flagged"].sum()), "checked_at": now}
+            except Exception as exc:
+                _status["delist_risk_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+                logger.warning(f"delist risk scoring failed: {exc}")
     return status()
