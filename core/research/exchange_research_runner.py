@@ -1,4 +1,4 @@
-"""Scheduler hook: delisting guard refresh + new-listing paper tracker.
+"""Scheduler hook: delisting guard refresh + new-listing and unlock paper trackers.
 
 Called from the research scheduler tick (every ~5 min) and rate-limited here:
 announcements every 30 min (flags + one-time alerts for held / watchlisted
@@ -14,14 +14,15 @@ from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 
-from core.research import exchange_notices, listing_short_tracker
+from core.research import exchange_notices, listing_short_tracker, unlock_short_tracker
 
 NOTICE_INTERVAL_SEC = 1800
 TRACKER_INTERVAL_SEC = 3600
+UNLOCK_INTERVAL_SEC = 6 * 3600
 ALERT_STATE_PATH = exchange_notices.ANNOUNCEMENT_DIR / "guard_alerts.json"
 WATCHLIST_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "pump_watchlist" / "latest.json"
 
-_last_run: Dict[str, float] = {"notices": 0.0, "tracker": 0.0}
+_last_run: Dict[str, float] = {"notices": 0.0, "tracker": 0.0, "unlock": 0.0}
 _status: Dict[str, Any] = {}
 
 
@@ -127,4 +128,11 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             except Exception as exc:
                 _status["tracker_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
                 logger.warning(f"listing short tracker failed: {exc}")
+        if force or now - _last_run["unlock"] >= UNLOCK_INTERVAL_SEC:
+            _last_run["unlock"] = now
+            try:
+                _status["unlock_tracker"] = await unlock_short_tracker.tick(client)
+            except Exception as exc:
+                _status["unlock_tracker_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+                logger.warning(f"unlock short tracker failed: {exc}")
     return status()

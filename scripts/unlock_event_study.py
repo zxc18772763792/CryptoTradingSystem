@@ -40,11 +40,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.research.unlock_events import cliff_events, unlocked_series  # noqa: E402  (shared with the paper tracker)
+
 OUT = PROJECT_ROOT / "data" / "research" / "unlock_study"
 LLAMA = "https://defillama-datasets.llama.fi"
 SPOT = "https://api.binance.com/api/v3"
 START = pd.Timestamp("2022-10-01", tz="UTC")
-INSIDER_CATEGORIES = {"insiders", "privateSale"}
 WINDOWS = {"pre30": (-31, -1), "pre7": (-8, -1), "post1": (-1, 1), "post7": (-1, 7), "post30": (-1, 30)}
 
 
@@ -69,43 +70,6 @@ def _cached_json(s, url: str, path: Path, max_age_days: float = 14) -> Any:
     path.write_text(r.text, encoding="utf-8")
     time.sleep(0.3)
     return r.json()
-
-
-def unlocked_series(schedule: Dict[str, Any]) -> pd.Series:
-    """Cumulative unlocked tokens per day, summed across allocation categories."""
-    parts = []
-    for cat in (schedule.get("documentedData") or {}).get("data") or []:
-        pts = cat.get("data") or []
-        if pts:
-            parts.append(pd.Series({pd.Timestamp(p["timestamp"], unit="s", tz="UTC").normalize(): float(p.get("unlocked") or 0) for p in pts}))
-    if not parts:
-        return pd.Series(dtype=float)
-    return pd.concat(parts, axis=1).sort_index().ffill().fillna(0).sum(axis=1)
-
-
-def cliff_events(entry: Dict[str, Any], unlocked: pd.Series, min_pct: float) -> List[Dict[str, Any]]:
-    out = []
-    for ev in entry.get("unlockEvents") or []:
-        allocs = ev.get("cliffAllocations") or []
-        if not allocs:
-            continue
-        t = pd.Timestamp(ev["timestamp"], unit="s", tz="UTC").normalize()
-        amount = sum(float(a.get("amount") or 0) for a in allocs)
-        before = unlocked[unlocked.index < t]
-        base = float(before.iloc[-1]) if len(before) else 0.0
-        if amount <= 0 or base <= 0:
-            continue
-        insider = sum(float(a.get("amount") or 0) for a in allocs if a.get("category") in INSIDER_CATEGORIES)
-        out.append({"date": t, "size_pct": amount / base * 100, "insider": insider / amount >= 0.5})
-    events = sorted([e for e in out if e["size_pct"] >= min_pct], key=lambda e: e["date"])
-    kept: List[Dict[str, Any]] = []
-    for e in events:  # largest event per 30-day cluster
-        if kept and (e["date"] - kept[-1]["date"]).days < 30:
-            if e["size_pct"] > kept[-1]["size_pct"]:
-                kept[-1] = e
-            continue
-        kept.append(e)
-    return kept
 
 
 def daily_closes(s, symbol: str) -> Optional[pd.Series]:

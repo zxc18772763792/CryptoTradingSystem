@@ -6350,6 +6350,16 @@ async def get_listing_short_tracker():
     return {"summary": listing_short_tracker.summary(state), "trades": trades[:60], "runner": runner_status()}
 
 
+@router.get("/unlock-short")
+async def get_unlock_short_tracker():
+    """Forward paper tracker: short perps before large cliff unlocks (research only)."""
+    from core.research import unlock_short_tracker
+
+    state = await asyncio.to_thread(unlock_short_tracker.load_state)
+    trades = sorted(state.get("trades", {}).values(), key=lambda t: t.get("unlock_date") or "", reverse=True)
+    return {"summary": unlock_short_tracker.summary(state), "trades": trades[:80]}
+
+
 async def _build_operating_mode_payload() -> Dict[str, Any]:
     from core.runtime.operating_mode import validate_operating_mode
     from core.runtime.state import runtime_state
