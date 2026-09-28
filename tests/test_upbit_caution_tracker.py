@@ -36,6 +36,7 @@ class World:
             {"id": 6970, "title": "이이(EEE) 거래 유의 종목 지정 안내", "first_listed_at": "2026-10-05T11:00:00+09:00"},
         ]
         self.path = lambda k: (1.0, 1.0)  # day k -> (high, close)
+        self.no_spot_history = set()
 
     async def get(self, url, params=None, headers=None):
         params = params or {}
@@ -51,6 +52,8 @@ class World:
             return _Resp({"data": {"notices": self.notices if params.get("page") == 1 else []}})
         if url.startswith(uc.UPBIT + "/"):
             return _Resp({"data": {"body": "<p>유통량 계획 변경 공시 미흡</p>"}})
+        if url.startswith(uc.SPOT) and params.get("symbol") in self.no_spot_history:
+            return _Resp([])
         if url.endswith("/klines"):
             start, now_ms = int(params["startTime"]), self.now.timestamp() * 1000
             bars = []
@@ -130,3 +133,40 @@ def test_stop_and_invalid_reason(world, tmp_path):
     aaa = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]
     assert aaa["status"] == "stopped" and aaa["exit_price"] == pytest.approx(1.4 * 1.02)
     assert aaa["reason"]["reason"] == "other"
+
+
+def test_krw_listing_parsing():
+    assert uc.krw_listing_tickers("라이터(LIT) KRW 마켓 디지털 자산 추가") == ["LIT"]
+    assert uc.krw_listing_tickers("클러스터프로토콜(CP) 신규 거래지원 안내 (KRW, BTC, USDT 마켓)") == ["CP"]
+    assert uc.krw_listing_tickers("원화 마켓 신규 상장 (ABC)") == ["ABC"]
+    assert uc.krw_listing_tickers("비트(BIT) BTC 마켓 디지털 자산 추가") == []  # no KRW market
+    assert uc.krw_listing_tickers("에이(AAA) 거래 유의 종목 지정 안내") == []
+    assert uc.krw_listing_tickers("에이(AAA) 거래지원 종료 안내 (KRW 마켓)") == []
+
+
+def test_krw_listing_dedupes_follow_ups_and_needs_spot_history(world, tmp_path):
+    world.notices = [
+        {"id": 8002, "title": "에이에이(AAA) KRW 마켓 디지털 자산 추가 (거래지원 개시 시점 변경 안내)", "first_listed_at": "2026-10-06T10:00:00+09:00"},
+        {"id": 8001, "title": "에이에이(AAA) KRW 마켓 디지털 자산 추가", "first_listed_at": "2026-10-05T15:00:00+09:00"},
+        {"id": 8000, "title": "씨씨(CCC) 신규 거래지원 안내 (KRW, BTC 마켓)", "first_listed_at": "2026-10-05T12:00:00+09:00"},
+    ]
+    world.no_spot_history = {"CCCUSDT"}
+    path = tmp_path / "listing.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    summary = asyncio.run(uc.tick(world, strategy="krw_listing", state_path=path))
+    trades = json.loads(path.read_text(encoding="utf-8"))["trades"]
+    assert set(trades) == {"AAA|8001", "CCC|8000"}  # the start-time follow-up is not a second event
+    assert trades["CCC|8000"]["status"] == "no_perp"  # never traded on Binance spot before: outside the study
+    assert summary["strategy"] == "krw_listing" and "70 perps" in summary["backtest_reference"]
+    assert json.loads(path.read_text(encoding="utf-8"))["retirement_rule"]["min_n"] == 30
+
+
+def test_caution_extensions_are_not_deduped(world, tmp_path):
+    world.notices = [
+        {"id": 7101, "title": "에이에이(AAA) 거래 유의 종목 지정 기간 연장 안내", "first_listed_at": "2026-10-05T15:00:00+09:00"},
+        {"id": 7100, "title": "에이에이(AAA) 거래 유의 종목 지정 안내", "first_listed_at": "2026-09-20T15:00:00+09:00"},
+    ]
+    path = tmp_path / "caution.json"
+    uc.save_state({"started_at": "2026-09-01T00:00:00+00:00", "trades": {}}, path)
+    asyncio.run(uc.tick(world, state_path=path))
+    assert set(json.loads(path.read_text(encoding="utf-8"))["trades"]) == {"AAA|7100", "AAA|7101"}

@@ -6565,13 +6565,31 @@ ${confirmHint}`,
     } catch (err) { /* optional panel */ }
   }
 
-  function renderUpbitCautionTracker(payload) {
-    const anchor = document.getElementById('ai-supply-factor-tracker') || document.getElementById('ai-unlock-short-tracker');
+  const UPBIT_TRACKERS = {
+    caution: {
+      id: 'ai-upbit-caution-tracker',
+      anchors: ['ai-supply-factor-tracker', 'ai-unlock-short-tracker'],
+      title: 'Upbit 交易警示后 7 天做空 · 纸面跟踪',
+      note: 'Upbit 发布"거래 유의 종목 지정"（交易警示，同时暂停充值）后，以公告当日 UTC 收盘价纸面做空币安永续，7 天后收盘平仓，+40% 止损，计手续费与资金费。纸面记录，不下单；启动前的公告标为"回填"。警示原因由研究模型读韩文正文归类，只用于事后分组，不影响交易。',
+      showReason: true,
+    },
+    krw_listing: {
+      id: 'ai-upbit-krw-listing-tracker',
+      anchors: ['ai-upbit-caution-tracker', 'ai-supply-factor-tracker'],
+      title: 'Upbit 韩元上币冲高后 7 天做空 · 纸面跟踪',
+      note: 'Upbit 新增 KRW 交易对当天通常先冲高约 30%。以公告当日 UTC 收盘价纸面做空币安永续，7 天后收盘平仓，+40% 止损，计手续费与资金费（冲高后空头资金费偏高，回测均值 −2.4%）。尾部风险大：回测最差两笔约 −49%。同一币 30 天内的后续公告（如开盘时间变更）不重复开仓。纸面记录，不下单。',
+      showReason: false,
+    },
+  };
+
+  function renderUpbitCautionTracker(payload, strategy = 'caution') {
+    const cfg = UPBIT_TRACKERS[strategy];
+    const anchor = cfg.anchors.map((id) => document.getElementById(id)).find(Boolean);
     if (!anchor) return;
-    let panel = document.getElementById('ai-upbit-caution-tracker');
+    let panel = document.getElementById(cfg.id);
     if (!panel) {
       panel = document.createElement('section');
-      panel.id = 'ai-upbit-caution-tracker';
+      panel.id = cfg.id;
       panel.className = 'card';
       panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
       anchor.insertAdjacentElement('afterend', panel);
@@ -6582,18 +6600,21 @@ ${confirmHint}`,
     const statusNames = { waiting_entry: '等当日收盘', open: '持有中', closed: '7 天平仓', stopped: '止损', no_perp: '无永续' };
     const reasonNames = { disclosure_or_supply: '披露/流通量', security_incident: '安全事件', project_or_team_issue: '项目/团队', network_or_technical: '网络/技术', legal_or_regulatory: '法律/监管', other: '其他' };
     panel.innerHTML = `
-      <h3 style="margin:0;">Upbit 交易警示后 7 天做空 · 纸面跟踪</h3>
+      <h3 style="margin:0;">${esc(cfg.title)}</h3>
       <div style="margin-top:6px;color:var(--text-sub);">前向：待入场 ${Number(s.forward_waiting || 0)} · 持有 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)} · 均值 ${pct(s.forward_mean_return_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · 回填 ${Number(s.backfilled || 0)} · 无永续 ${Number(s.no_perp || 0)}</div>
       ${trackerVerdictLine(s)}
-      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。Upbit 发布"거래 유의 종목 지정"（交易警示，同时暂停充值）后，以公告当日 UTC 收盘价纸面做空币安永续，7 天后收盘平仓，+40% 止损，计手续费与资金费。纸面记录，不下单；启动前的公告标为"回填"。警示原因由研究模型读韩文正文归类，只用于事后分组，不影响交易。</div>
-      ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>代币</th><th>公告时间</th><th>状态</th><th>收益（空头）</th><th>资金费</th><th>原因</th><th></th></tr></thead><tbody>
-        ${trades.map((t) => `<tr><td>${esc(t.symbol || t.ticker)}</td><td>${esc(t.notice_at ? fmtTs(new Date(t.notice_at)) : '--')}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td><td style="color:${Number(t.return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.return_pct)}</td><td>${t.funding == null ? '--' : pct(Number(t.funding) * 100)}</td><td title="${esc(t.reason?.summary_en || '')}">${esc(reasonNames[t.reason?.reason] || '--')}</td><td>${t.backfilled ? '回填' : ''}</td></tr>`).join('')}
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${esc(cfg.note)}</div>
+      ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>代币</th><th>公告时间</th><th>状态</th><th>收益（空头）</th><th>资金费</th>${cfg.showReason ? '<th>原因</th>' : ''}<th></th></tr></thead><tbody>
+        ${trades.map((t) => `<tr><td>${esc(t.symbol || t.ticker)}</td><td>${esc(t.notice_at ? fmtTs(new Date(t.notice_at)) : '--')}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td><td style="color:${Number(t.return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.return_pct)}</td><td>${t.funding == null ? '--' : pct(Number(t.funding) * 100)}</td>${cfg.showReason ? `<td title="${esc(t.reason?.summary_en || '')}">${esc(reasonNames[t.reason?.reason] || '--')}</td>` : ''}<td>${t.backfilled ? '回填' : ''}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每 30 分钟检查一次 Upbit 公告。</div>'}`;
   }
 
   async function refreshUpbitCautionTracker() {
     try {
-      renderUpbitCautionTracker(await aiApi('/upbit-caution', { timeoutMs: 12000 }));
+      renderUpbitCautionTracker(await aiApi('/upbit-caution', { timeoutMs: 12000 }), 'caution');
+    } catch (err) { /* optional panel */ }
+    try {
+      renderUpbitCautionTracker(await aiApi('/upbit-krw-listing', { timeoutMs: 12000 }), 'krw_listing');
     } catch (err) { /* optional panel */ }
   }
 

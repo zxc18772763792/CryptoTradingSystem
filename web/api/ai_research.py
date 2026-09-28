@@ -6380,6 +6380,17 @@ async def get_upbit_caution_tracker():
     return {"summary": upbit_caution_tracker.summary(state), "trades": trades[:80]}
 
 
+@router.get("/upbit-krw-listing")
+async def get_upbit_krw_listing_tracker():
+    """Forward paper tracker: 7-day perp short after an Upbit KRW-market listing (research only)."""
+    from core.research import upbit_caution_tracker
+
+    path = upbit_caution_tracker.KRW_LISTING_STATE_PATH
+    state = await asyncio.to_thread(upbit_caution_tracker.load_state, path)
+    trades = sorted(state.get("trades", {}).values(), key=lambda t: t.get("notice_at") or "", reverse=True)
+    return {"summary": upbit_caution_tracker.summary(state, "krw_listing"), "trades": trades[:80]}
+
+
 async def _build_operating_mode_payload() -> Dict[str, Any]:
     from core.runtime.operating_mode import validate_operating_mode
     from core.runtime.state import runtime_state
