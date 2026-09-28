@@ -4,7 +4,8 @@ Events from scripts/upbit_event_study.py (data/research/upbit/events.csv).
 For caution designations, "investment caution urged" notices and KRW
 listings: short the USDT-margined perp (XXXUSDT or 1000XXXUSDT, listed on
 Binance futures before the notice) at the close of the notice's UTC day,
-cover at the close 7 days later. Costs: 0.1% round trip in fees, funding
+cover at the close 7 days later. Costs: 0.1% round trip in fees, funding (all
+settlements: some perps settle hourly, so the request limit must cover 168+)
 actually paid or received over the hold (fapi fundingRate), a +40% intraday
 stop filled 2% worse. Reported raw and against the equal-weight move of all
 perps over the same window (a rough market hedge).
@@ -53,11 +54,11 @@ def main():
             if not sym:
                 rows.append({"kind": e.kind, "token": e.token, "date": d0, "status": "no_perp"})
                 continue
-            key = f"{sym}|{d0.date()}"
+            key = f"v2|{sym}|{d0.date()}"  # v2: funding limit 1000 (v1 used 100, truncating 1h-funding perps)
             if key not in store:
                 start = int(d0.timestamp() * 1000)
                 kl = get(c, f"{FAPI}/klines", {"symbol": sym, "interval": "1d", "startTime": start, "limit": HOLD + 1}) or []
-                fr = get(c, f"{FAPI}/fundingRate", {"symbol": sym, "startTime": start + 86_400_000, "endTime": start + (HOLD + 1) * 86_400_000, "limit": 100}) or []
+                fr = get(c, f"{FAPI}/fundingRate", {"symbol": sym, "startTime": start + 86_400_000, "endTime": start + (HOLD + 1) * 86_400_000, "limit": 1000}) or []
                 store[key] = {"klines": kl, "funding": fr}
                 time.sleep(0.2)
             kl, fr = store[key]["klines"], store[key]["funding"]

@@ -107,10 +107,11 @@ class ResearchScheduler:
         await get_cross_sectional_loop(app).tick()
 
         try:
-            from core.research.exchange_research_runner import tick as exchange_research_tick
-            await exchange_research_tick()
+            # Background and non-overlapping: a slow exchange pass must not hold up the queue below.
+            from core.research.exchange_research_runner import start_background_tick
+            start_background_tick()
         except Exception as exc:  # noqa: BLE001 - never let this starve the research queue below
-            logger.debug(f"exchange research tick failed: {exc}")
+            logger.debug(f"exchange research tick failed to start: {exc}")
 
         # Old queued jobs must not be starved by newer drafts in the UI's top 50.
         all_proposals = app.state.ai_proposal_registry.list(limit=None)

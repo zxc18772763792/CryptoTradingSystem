@@ -19,6 +19,7 @@ Honesty rules:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -65,20 +66,70 @@ def save_state(state: Dict[str, Any], path: Path = STATE_PATH) -> None:
     tmp.replace(path)
 
 
+def _is_fresh(path: Path, ttl_sec: float) -> bool:
+    return path.exists() and time.time() - path.stat().st_mtime < ttl_sec
+
+
+def _write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 async def _cached_json(client, url: str, path: Path, ttl_sec: float) -> Any:
-    if path.exists() and time.time() - path.stat().st_mtime < ttl_sec:
-        return json.loads(path.read_text(encoding="utf-8"))
+    # File IO and JSON parsing run in a worker thread: the schedule files are up to
+    # 12 MB each and this runs inside the web server's event loop.
+    if await asyncio.to_thread(_is_fresh, path, ttl_sec):
+        return await asyncio.to_thread(lambda: json.loads(path.read_text(encoding="utf-8")))
     resp = await client.get(url)
     resp.raise_for_status()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(resp.text, encoding="utf-8")
+    await asyncio.to_thread(_write_text, path, resp.text)
+    return await asyncio.to_thread(json.loads, resp.text)
+
+
+def _parsed_unlocked(json_path: Path) -> pd.Series:
+    """Daily unlocked series from a raw schedule file, via a compact sidecar cache.
+
+    Parsing all ~180 raw files (318 MB) takes ~30 s; the sidecar (.unlocked.json,
+    a few KB) is rebuilt only when the raw file is newer. Runs in a worker thread.
+    """
+    side = json_path.with_suffix(".unlocked.json")
+    if side.exists() and side.stat().st_mtime >= json_path.stat().st_mtime:
+        data = json.loads(side.read_text(encoding="utf-8"))
+        series = pd.Series(data["v"], index=pd.to_datetime(data["t"], unit="s", utc=True), dtype=float)
+    else:
+        series = unlocked_series(json.loads(json_path.read_text(encoding="utf-8")))
+        payload = {"t": [int(ts.timestamp()) for ts in series.index], "v": [float(v) for v in series.to_numpy()]}
+        _write_text(side, json.dumps(payload))
+    return series
+
+
+async def schedule_unlocked(client, slug: str) -> pd.Series:
+    """Cumulative unlocked supply for a DefiLlama emissions slug (downloaded when stale)."""
+    path = CACHE_DIR / "emissions" / f"{slug}.json"
+    if not await asyncio.to_thread(_is_fresh, path, SCHEDULE_TTL_SEC):
+        resp = await client.get(f"{LLAMA_DATASETS}/emissions/{slug}")
+        resp.raise_for_status()
+        await asyncio.to_thread(_write_text, path, resp.text)
+    return await asyncio.to_thread(_parsed_unlocked, path)
+
+
+def _checked_json(resp) -> Any:
+    """Body of a Binance response; raises on transient failures so the pass retries later.
+
+    400 means the symbol no longer exists (delisted): that is a real "no data".
+    Anything else non-200 (429, 5xx, proxy errors) must not be booked as "no data",
+    or a trade closing in that pass would keep a wrong result forever.
+    """
+    if resp.status_code == 400:
+        return []
+    resp.raise_for_status()
     return resp.json()
 
 
 async def _daily_bars(client, symbol: str, start: pd.Timestamp) -> pd.DataFrame:
     resp = await client.get(f"{FAPI}/klines", params={"symbol": symbol, "interval": "1d",
                                                        "startTime": int(start.timestamp() * 1000), "limit": 120})
-    rows = resp.json() if resp.status_code == 200 else []
+    rows = _checked_json(resp)
     frame = pd.DataFrame([[r[0], float(r[2]), float(r[4])] for r in rows or []], columns=["t", "high", "close"])
     frame.index = pd.to_datetime(frame.pop("t"), unit="ms", utc=True)
     return frame
@@ -87,8 +138,8 @@ async def _daily_bars(client, symbol: str, start: pd.Timestamp) -> pd.DataFrame:
 async def _funding(client, symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> float:
     resp = await client.get(f"{FAPI}/fundingRate", params={"symbol": symbol, "startTime": int(start.timestamp() * 1000),
                                                             "endTime": int(end.timestamp() * 1000), "limit": 1000})
-    rows = resp.json() if resp.status_code == 200 and isinstance(resp.json(), list) else []
-    return float(sum(float(r.get("fundingRate") or 0) for r in rows))
+    rows = _checked_json(resp)
+    return float(sum(float(r.get("fundingRate") or 0) for r in rows if isinstance(r, dict)))
 
 
 def closed_close(bars: pd.DataFrame, day: pd.Timestamp, now: pd.Timestamp) -> Optional[float]:
@@ -120,9 +171,7 @@ async def build_universe(client) -> Dict[str, Dict[str, Any]]:
 
 
 async def _cliffs(client, token: Dict[str, Any], min_pct: float) -> List[Dict[str, Any]]:
-    schedule = await _cached_json(client, f"{LLAMA_DATASETS}/emissions/{token['slug']}",
-                                  CACHE_DIR / "emissions" / f"{token['slug']}.json", SCHEDULE_TTL_SEC)
-    return cliff_events(token["entry"], unlocked_series(schedule), min_pct)
+    return cliff_events(token["entry"], await schedule_unlocked(client, token["slug"]), min_pct)
 
 
 async def _leg(client, symbol: str, entry_day: pd.Timestamp, exit_day: pd.Timestamp, side: int) -> Optional[float]:

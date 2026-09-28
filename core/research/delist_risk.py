@@ -14,6 +14,7 @@ One implementation serves both the study and live scoring.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from datetime import datetime, timezone
@@ -30,6 +31,8 @@ SCORES_PATH = RISK_DIR / "latest_scores.json"
 # +1: higher value = more risk after ranking; -1: lower value = more risk.
 FEATURE_SIGNS = {"logvol30": -1, "voltrend": -1, "ret90": -1, "dd365": -1, "age": +1}
 FLAG_PERCENTILE = 0.95
+FETCH_CONCURRENCY = 8
+MIN_SCORED_FRACTION = 0.8
 MIN_HISTORY_DAYS = 120
 STABLE_OR_LEVERAGED = (
     r"(UP|DOWN|BULL|BEAR)$|^(USDC|BUSD|TUSD|FDUSD|USDP|DAI|PAX|EUR|GBP|AUD|UST|USTC|USDS|USDSB|SUSD|"
@@ -131,10 +134,21 @@ async def compute_live_scores(client, model: Dict[str, Any]) -> pd.DataFrame:
     if btc is None:
         raise RuntimeError("BTC daily klines unavailable")
     features: Dict[str, Dict[str, float]] = {}
-    for base in bases:
-        frame = await daily(base)
+    gate = asyncio.Semaphore(FETCH_CONCURRENCY)
+
+    async def one(base: str) -> None:
+        async with gate:
+            try:
+                frame = await daily(base)
+            except Exception:  # noqa: BLE001 - one bad pair must not sink the whole universe
+                return
         if frame is not None:
             feats = features_from_daily(frame["close"], frame["qvol"], btc["close"])
             if feats is not None:
                 features[base] = feats
+
+    await asyncio.gather(*(one(base) for base in bases))
+    if len(features) < MIN_SCORED_FRACTION * len(bases):
+        # ranks are relative to the whole universe: a half-fetched universe gives wrong percentiles
+        raise RuntimeError(f"only {len(features)}/{len(bases)} pairs fetched; keeping the previous scores")
     return score_universe(features, model)
