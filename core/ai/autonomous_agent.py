@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import contextlib
 import json
 import math
@@ -15,6 +16,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 import pandas as pd
 from loguru import logger
+
+# Serializes learning-memory rebuilds (they run in worker threads and write one file).
+_LEARNING_REFRESH_LOCK = threading.Lock()
 
 from config.settings import settings
 from core.ai.model_endpoints import research_agent_endpoint_targets
@@ -5031,7 +5035,8 @@ class AutonomousTradingAgent:
         cache_result: bool = True,
         cache_preview_result: bool = False,
     ) -> Dict[str, Any]:
-        cfg = self._cfg_with_learning_overlays(self.get_runtime_config(), force_learning_refresh=force)
+        # Off-loop: a learning refresh re-reads the trade journals (loop_stall_watchdog, 2026-09-28).
+        cfg = await asyncio.to_thread(self._cfg_with_learning_overlays, self.get_runtime_config(), force_learning_refresh=force)
         symbol_mode = _normalize_symbol_mode(cfg.get("symbol_mode"))
         configured_symbol = _normalize_symbol_text(cfg.get("symbol") or "BTC/USDT") or "BTC/USDT"
         selection_top_n = _coerce_int(limit or cfg.get("selection_top_n") or 10, 10, low=3, high=20)
@@ -5738,6 +5743,16 @@ class AutonomousTradingAgent:
         ):
             return dict(self._learning_memory or {})
 
+        with _LEARNING_REFRESH_LOCK:  # refreshes may now run in worker threads concurrently
+            if (
+                not force
+                and self._last_learning_refresh_at is not None
+                and time.time() - float(self._last_learning_refresh_at) < refresh_ttl_sec
+            ):
+                return dict(self._learning_memory or {})
+            return self._rebuild_learning_memory(runtime_cfg, now_ts)
+
+    def _rebuild_learning_memory(self, runtime_cfg: Dict[str, Any], now_ts: float) -> Dict[str, Any]:
         strategy_name = str(runtime_cfg.get("strategy_name") or "AI_AutonomousAgent")
         journal_rows = self.read_journal(limit=800)
         live_review = execution_engine.get_live_trade_review(
@@ -5907,7 +5922,8 @@ class AutonomousTradingAgent:
         force: bool = False,
         request_id: str,
     ) -> Dict[str, Any]:
-        cfg = self._cfg_with_learning_overlays(
+        cfg = await asyncio.to_thread(
+            self._cfg_with_learning_overlays,
             self.get_runtime_config(),
             force_learning_refresh=bool(force),
         )
@@ -6294,7 +6310,7 @@ class AutonomousTradingAgent:
         self._last_symbol_scan = selection
         self._tick_count += 1
         if bool(execution.get("submitted")) or raw_decision_source in {"provider", "fallback"}:
-            self._refresh_learning_memory(cfg=effective_cfg, force=True)
+            await asyncio.to_thread(self._refresh_learning_memory, cfg=effective_cfg, force=True)
 
         return {
             "timestamp": now_iso,

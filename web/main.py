@@ -2210,6 +2210,13 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
 async def lifespan(app: FastAPI):
     logger.info("Starting Crypto Trading System...")
 
+    # First thing: any later synchronous call that freezes the loop (startup
+    # included) gets logged with the code that held it.
+    from core.monitoring import loop_stall_watchdog
+
+    with contextlib.suppress(Exception):
+        loop_stall_watchdog.start()
+
     # Warm the process-wide TLS context off-loop so no later httpx client
     # construction ever does a blocking CA-bundle read on the event loop
     # (the 2026-07-02 service freeze; see core/utils/shared_ssl.py).

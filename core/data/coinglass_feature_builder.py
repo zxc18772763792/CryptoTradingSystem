@@ -1422,7 +1422,9 @@ async def update_coinglass_cache(
                             break
                         continue
                     normalized_rows = list(normalized_result.get("rows") or [])
-                    persist_normalized_rows(
+                    # parquet write off the event loop (1.5s stalls per write; loop_stall_watchdog 2026-09-28)
+                    await asyncio.to_thread(
+                        persist_normalized_rows,
                         dataset=dataset,
                         manifest=manifest,
                         route=result["route"],
