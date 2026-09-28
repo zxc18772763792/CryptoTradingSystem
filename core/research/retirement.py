@@ -28,6 +28,8 @@ RULES: Dict[str, Dict[str, Any]] = {
     "listing_short": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 15.8},
     "unlock_short": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 9.5},
     "supply_factor": {"min_n": 12, "unit": "month", "backtest_mean_pct": 2.6},
+    # added 2026-09-28 with its tracker, before its first forward trade
+    "upbit_caution": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 7.6},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",
