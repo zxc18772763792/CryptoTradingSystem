@@ -46,6 +46,19 @@ LOOKAHEAD_DAYS = 60
 PRICE_MATCH_TOLERANCE = 0.15
 INDEX_TTL_SEC, SCHEDULE_TTL_SEC = 86400, 3 * 86400
 BACKTEST_REFERENCE = "cliffs>=10%, t-30..t-1, +40% stop, basket-hedged: +9.5%/trade, 90% CI [+5.7, +13.4], win 73%"
+# Variants. "t30" is the original pre-registered tracker. "t7" (added 2026-09-28) is a
+# shadow: the unlock drift sits largely in the last week, and with cliffs >= 5% there are
+# ~2.6x more events (scripts/unlock_short_backtest.py --min-size 5 --entry -7 --exit -1
+# --stop 0.4: +3.6%/trade hedged, 90% CI [+2.0, +5.0], win 71%, n=273, +3.7% 2022-24 and
+# +3.5% 2025-26). Chosen among 8 entry/size combinations, so it must prove itself forward.
+VARIANTS: Dict[str, Dict[str, Any]] = {
+    "t30": {"min_size_pct": 10.0, "entry_days_before": 30, "exit_days_before": 1, "state_path": STATE_PATH,
+            "rule": "unlock_short", "reference": BACKTEST_REFERENCE},
+    "t7": {"min_size_pct": 5.0, "entry_days_before": 7, "exit_days_before": 1,
+           "state_path": PROJECT_ROOT / "data" / "research" / "unlock_short_t7" / "tracker.json",
+           "rule": "unlock_short_t7",
+           "reference": "cliffs>=5%, t-7..t-1, +40% stop, basket-hedged: +3.6%/trade, 90% CI [+2.0, +5.0], win 71%, n=273"},
+}
 DAY = pd.Timedelta(days=1)
 
 
@@ -182,7 +195,9 @@ async def _leg(client, symbol: str, entry_day: pd.Timestamp, exit_day: pd.Timest
     return side * (bars.at[exit_day, "close"] / bars.at[entry_day, "close"] - 1) - side * fund - LEG_COST
 
 
-async def tick(client, state_path: Path = STATE_PATH) -> Dict[str, Any]:
+async def tick(client, state_path: Optional[Path] = None, variant: str = "t30") -> Dict[str, Any]:
+    spec = VARIANTS[variant]
+    state_path = state_path or spec["state_path"]
     state = load_state(state_path)
     now = _now()
     today = now.normalize()
@@ -197,16 +212,17 @@ async def tick(client, state_path: Path = STATE_PATH) -> Dict[str, Any]:
     # 1) discover upcoming large unlocks
     for ticker, events in cliffs.items():
         for ev in events:
-            if ev["size_pct"] < MIN_SIZE_PCT or not (today < ev["date"] <= today + pd.Timedelta(days=LOOKAHEAD_DAYS)):
+            if ev["size_pct"] < spec["min_size_pct"] or not (today < ev["date"] <= today + pd.Timedelta(days=LOOKAHEAD_DAYS)):
                 continue
             key = f"{ticker}|{ev['date'].date()}"
             if key in state["trades"]:
                 continue
-            entry_day = ev["date"] - pd.Timedelta(days=ENTRY_DAYS_BEFORE)
+            entry_day = ev["date"] - pd.Timedelta(days=spec["entry_days_before"])
             state["trades"][key] = {
                 "token": ticker, "symbol": universe[ticker]["symbol"], "unlock_date": str(ev["date"].date()),
                 "size_pct": round(ev["size_pct"], 2), "insider": ev["insider"],
-                "entry_day": str(max(entry_day, today).date()), "exit_day": str((ev["date"] - pd.Timedelta(days=EXIT_DAYS_BEFORE)).date()),
+                "entry_day": str(max(entry_day, today).date()), "exit_day": str((ev["date"] - pd.Timedelta(days=spec["exit_days_before"])).date()),
+                "min_size_pct": spec["min_size_pct"],
                 "late": bool(entry_day < today), "discovered_at": now.isoformat(), "status": "scheduled",
             }
 
@@ -219,9 +235,9 @@ async def tick(client, state_path: Path = STATE_PATH) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"unlock tracker: update failed for {key}: {exc}")
     state["updated_at"] = now.isoformat()
-    retirement.register(state, "unlock_short", now.isoformat())
+    retirement.register(state, spec["rule"], now.isoformat())
     save_state(state, state_path)
-    return summary(state)
+    return summary(state, variant)
 
 
 async def _update_trade(client, trade, universe, cliffs, now) -> None:
@@ -243,7 +259,8 @@ async def _update_trade(client, trade, universe, cliffs, now) -> None:
 
     # still scheduled in the latest DefiLlama data?
     events = cliffs.get(trade["token"])
-    if events is not None and not any(abs((e["date"] - unlock).days) <= 3 and e["size_pct"] >= MIN_SIZE_PCT for e in events):
+    min_size = float(trade.get("min_size_pct") or MIN_SIZE_PCT)
+    if events is not None and not any(abs((e["date"] - unlock).days) <= 3 and e["size_pct"] >= min_size for e in events):
         return await _close(client, trade, now.normalize() - DAY, "schedule_changed", bars)
 
     entry = float(trade["entry_price"])
@@ -274,7 +291,8 @@ async def _close(client, trade, day, status, bars, stop_price: Optional[float] =
     )
 
 
-def summary(state: Dict[str, Any]) -> Dict[str, Any]:
+def summary(state: Dict[str, Any], variant: str = "t30") -> Dict[str, Any]:
+    spec = VARIANTS[variant]
     trades = list(state.get("trades", {}).values())
     forward = [t for t in trades if not t.get("late")]
     done = [t for t in forward if t.get("status") in {"closed", "stopped", "schedule_changed"}]
@@ -290,7 +308,8 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "forward_schedule_changed": sum(t.get("status") == "schedule_changed" for t in done),
         "forward_mean_hedged_pct": round(float(np.mean(hedged)), 2) if hedged else None,
         "forward_win_rate": round(float(np.mean([h > 0 for h in hedged])), 3) if hedged else None,
-        "backtest_reference": BACKTEST_REFERENCE,
-        "evaluation_ready": len(hedged) >= 20,
-        "retirement": retirement.verdict(hedged, state.get("retirement_rule") or retirement.RULES["unlock_short"]),
+        "variant": variant,
+        "backtest_reference": spec["reference"],
+        "evaluation_ready": len(hedged) >= retirement.RULES[spec["rule"]]["min_n"],
+        "retirement": retirement.verdict(hedged, state.get("retirement_rule") or retirement.RULES[spec["rule"]]),
     }

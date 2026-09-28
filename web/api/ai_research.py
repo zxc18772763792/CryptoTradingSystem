@@ -6360,6 +6360,16 @@ async def get_unlock_short_tracker():
     return {"summary": unlock_short_tracker.summary(state), "trades": trades[:80]}
 
 
+@router.get("/unlock-short-t7")
+async def get_unlock_short_t7_tracker():
+    """Shadow paper tracker: short perps in the last week before cliffs >= 5% (research only)."""
+    from core.research import unlock_short_tracker
+
+    state = await asyncio.to_thread(unlock_short_tracker.load_state, unlock_short_tracker.VARIANTS["t7"]["state_path"])
+    trades = sorted(state.get("trades", {}).values(), key=lambda t: t.get("unlock_date") or "", reverse=True)
+    return {"summary": unlock_short_tracker.summary(state, "t7"), "trades": trades[:80]}
+
+
 @router.get("/supply-factor")
 async def get_supply_factor_tracker():
     """Forward paper tracker: monthly long/short on scheduled supply growth (research only)."""

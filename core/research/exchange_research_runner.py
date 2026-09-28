@@ -34,7 +34,8 @@ ALERT_STATE_PATH = exchange_notices.ANNOUNCEMENT_DIR / "guard_alerts.json"
 WATCHLIST_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "pump_watchlist" / "latest.json"
 VERDICT_STATE_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "tracker_verdicts.json"
 TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解锁前做空", "supply_factor": "供给通胀因子",
-                 "upbit_caution": "Upbit 警示后做空", "upbit_krw_listing": "Upbit 韩元上币后做空"}
+                 "upbit_caution": "Upbit 警示后做空", "upbit_krw_listing": "Upbit 韩元上币后做空",
+                 "unlock_short_t7": "解锁前最后一周做空"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
 UPBIT_INTERVAL_SEC = 1800
@@ -196,6 +197,10 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _status["unlock_tracker"] = await unlock_short_tracker.tick(client)
             await _verdict_alert("unlock_short", _status["unlock_tracker"])
 
+        async def unlock_t7():
+            _status["unlock_tracker_t7"] = await unlock_short_tracker.tick(client, variant="t7")
+            await _verdict_alert("unlock_short_t7", _status["unlock_tracker_t7"])
+
         async def supply():
             _status["supply_factor"] = await supply_factor_tracker.tick(client)
             await _verdict_alert("supply_factor", _status["supply_factor"])
@@ -217,6 +222,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("notices", NOTICE_INTERVAL_SEC, now, force, notices)
         await _run_job("tracker", TRACKER_INTERVAL_SEC, now, force, listing)
         await _run_job("unlock", UNLOCK_INTERVAL_SEC, now, force, unlock)
+        await _run_job("unlock_t7", UNLOCK_INTERVAL_SEC, now, force, unlock_t7)
         await _run_job("supply", UNLOCK_INTERVAL_SEC, now, force, supply)
         await _run_job("upbit", UPBIT_INTERVAL_SEC, now, force, upbit_caution)
         await _run_job("upbit_krw_listing", UPBIT_INTERVAL_SEC, now, force, upbit_krw_listing)

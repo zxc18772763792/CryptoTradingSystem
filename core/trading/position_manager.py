@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from loguru import logger
@@ -198,6 +198,7 @@ class PositionManager:
     """持仓管理器。"""
 
     def __init__(self):
+        self._scope_state_cache: Dict[str, Tuple[Tuple[int, int], Optional[Dict[str, Any]]]] = {}
         self._positions: Dict[str, Position] = {}
         self._position_history: List[Position] = []
         self._position_history_limit = max(
@@ -414,12 +415,26 @@ class PositionManager:
         return positions
 
     def _load_scope_state(self, scope: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Persisted state of a scope, re-read only when the file changed.
+
+        The balance/trading APIs read the *other* scope's positions on every
+        request, synchronously on the event loop. Normally a few ms; while the
+        disk was saturated (2026-09-28) one read froze the web loop 23.8 s. The
+        (mtime, size) check is a single stat; callers only read the payload.
+        """
         path = self._scope_state_path(scope)
         try:
             if not path.exists():
                 return None
+            stat = path.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+            cached = self._scope_state_cache.get(str(path))
+            if cached is not None and cached[0] == signature:
+                return cached[1]
             payload = json.loads(_read_text_with_retry(path, encoding="utf-8"))
-            return payload if isinstance(payload, dict) else None
+            payload = payload if isinstance(payload, dict) else None
+            self._scope_state_cache[str(path)] = (signature, payload)
+            return payload
         except Exception as e:
             logger.warning(f"Failed to load persisted positions for scope={scope or self._scope}: {e}")
             return None

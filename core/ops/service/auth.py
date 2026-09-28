@@ -76,6 +76,13 @@ async def require_ops_auth(request: Request) -> OpsAuthContext:
     return ctx
 
 
+# Role reported when a request reached code without passing an auth dependency.
+# It has no permissions (rbac: unknown roles get an empty set). It used to be
+# "SYSTEM" (every permission), which was safe only while every caller sat behind
+# an auth dependency - one missing dependency would have granted full access.
+UNAUTHENTICATED_ROLE = "UNAUTHENTICATED"
+
+
 def get_request_auth(request: Request) -> OpsAuthContext:
     ctx = getattr(request.state, "ops_auth", None)
     if isinstance(ctx, OpsAuthContext):
@@ -89,7 +96,7 @@ def get_request_auth(request: Request) -> OpsAuthContext:
         client_ip = ""
     return OpsAuthContext(
         actor=actor,
-        role="SYSTEM",
+        role=UNAUTHENTICATED_ROLE,
         token_present=False,
         api_key_present=False,
         client_ip=client_ip,

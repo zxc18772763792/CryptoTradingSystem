@@ -31,6 +31,8 @@ RULES: Dict[str, Dict[str, Any]] = {
     # added 2026-09-28 with its tracker, before its first forward trade
     "upbit_caution": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 7.6},
     "upbit_krw_listing": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 6.7},
+    # added 2026-09-28 with the unlock last-week shadow tracker
+    "unlock_short_t7": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 3.6},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",
