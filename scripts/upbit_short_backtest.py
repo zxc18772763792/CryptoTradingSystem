@@ -9,6 +9,9 @@ settlements: some perps settle hourly, so the request limit must cover 168+)
 actually paid or received over the hold (fapi fundingRate), a +40% intraday
 stop filled 2% worse. Reported raw and against the equal-weight move of all
 perps over the same window (a rough market hedge).
+
+Historical output is exploratory: exchangeInfo is today's contract universe,
+not a point-in-time listing archive. Missing funding is excluded, not zero.
 """
 import json
 import sys
@@ -25,6 +28,32 @@ sys.path.insert(0, ".")
 OUT = Path("data/research/upbit")
 FAPI = "https://fapi.binance.com/fapi/v1"
 HOLD, FEE, STOP, SLIP = 7, 0.001, 0.40, 0.02
+DAY_MS = 86_400_000
+
+
+def score_short_trade(kl, fr, day0_ms):
+    """Score one complete daily-bar window, charging funding only while open."""
+    if len(kl) < HOLD + 1 or any(int(kl[i][0]) != day0_ms + i * DAY_MS for i in range(HOLD + 1)):
+        raise ValueError("incomplete_daily_bars")
+    if not fr:
+        raise ValueError("missing_funding")
+    entry_ms, planned_exit_ms = day0_ms + DAY_MS, day0_ms + (HOLD + 1) * DAY_MS
+    funding_times = sorted(int(f["fundingTime"]) for f in fr
+                           if entry_ms <= int(f["fundingTime"]) <= planned_exit_ms)
+    if (not funding_times or len(set(funding_times)) != len(funding_times)
+            or funding_times[0] - entry_ms > DAY_MS
+            or planned_exit_ms - funding_times[-1] > DAY_MS
+            or any(b - a > DAY_MS for a, b in zip(funding_times, funding_times[1:]))):
+        raise ValueError("incomplete_funding")
+    entry = float(kl[0][4])
+    exit_px, exit_ms, stopped = float(kl[HOLD][4]), planned_exit_ms, False
+    for bar in kl[1:HOLD + 1]:
+        if float(bar[2]) >= entry * (1 + STOP):
+            exit_px, exit_ms, stopped = entry * (1 + STOP) * (1 + SLIP), int(bar[0]) + DAY_MS, True
+            break
+    funding = sum(float(f["fundingRate"]) for f in fr
+                  if entry_ms <= int(f["fundingTime"]) <= exit_ms)
+    return (entry - exit_px) / entry - FEE + funding, funding, stopped
 
 
 def get(c, url, params):
@@ -55,24 +84,18 @@ def main():
                 rows.append({"kind": e.kind, "token": e.token, "date": d0, "status": "no_perp"})
                 continue
             key = f"v2|{sym}|{d0.date()}"  # v2: funding limit 1000 (v1 used 100, truncating 1h-funding perps)
-            if key not in store:
+            if key not in store or not store[key].get("funding"):
                 start = int(d0.timestamp() * 1000)
                 kl = get(c, f"{FAPI}/klines", {"symbol": sym, "interval": "1d", "startTime": start, "limit": HOLD + 1}) or []
-                fr = get(c, f"{FAPI}/fundingRate", {"symbol": sym, "startTime": start + 86_400_000, "endTime": start + (HOLD + 1) * 86_400_000, "limit": 1000}) or []
+                fr = get(c, f"{FAPI}/fundingRate", {"symbol": sym, "startTime": start + DAY_MS, "endTime": start + (HOLD + 1) * DAY_MS, "limit": 1000}) or []
                 store[key] = {"klines": kl, "funding": fr}
                 time.sleep(0.2)
             kl, fr = store[key]["klines"], store[key]["funding"]
-            if len(kl) < HOLD + 1:
-                rows.append({"kind": e.kind, "token": e.token, "date": d0, "status": "short_history"})
+            try:
+                ret, funding, stopped = score_short_trade(kl, fr, int(d0.timestamp() * 1000))
+            except ValueError as exc:
+                rows.append({"kind": e.kind, "token": e.token, "date": d0, "status": str(exc)})
                 continue
-            entry = float(kl[0][4])
-            exit_px, stopped = float(kl[HOLD][4]), False
-            for bar in kl[1:HOLD + 1]:
-                if float(bar[2]) >= entry * (1 + STOP):
-                    exit_px, stopped = entry * (1 + STOP) * (1 + SLIP), True
-                    break
-            funding = sum(float(f["fundingRate"]) for f in fr)  # short receives positive funding
-            ret = (entry - exit_px) / entry - FEE + funding
             rows.append({"kind": e.kind, "token": e.token, "date": d0, "status": "ok", "symbol": sym,
                          "short_ret": ret, "funding": funding, "stopped": stopped})
     cache.write_text(json.dumps(store), encoding="utf-8")

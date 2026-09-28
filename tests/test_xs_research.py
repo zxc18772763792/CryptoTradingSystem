@@ -93,6 +93,23 @@ def test_forward_labels_use_next_30_days_and_stay_nan_until_mature():
     assert labelled["fwd30_maxret"].iloc[-30:].isna().all()
 
 
+def test_forward_labels_reject_a_missing_day_inside_the_horizon():
+    dates = pd.date_range("2026-01-01", periods=50, freq="D").delete(10)
+    daily = pd.DataFrame({"base": "A", "date": dates, "close": [1.0] * 49})
+    labelled = xs_panel.add_forward_labels(daily)
+    assert pd.isna(labelled.loc[0, "fwd30_maxret"])
+    assert labelled.loc[10, "fwd30_maxret"] == pytest.approx(0.0)
+
+
+def test_forward_labels_reject_duplicate_that_masks_a_missing_day():
+    dates = list(pd.date_range("2026-01-01", periods=50, freq="D"))
+    dates[10] = dates[9]  # One duplicate and one missing date keep the endpoint span at 30 days.
+    daily = pd.DataFrame({"base": "A", "date": dates, "close": [1.0] * len(dates)})
+    labelled = xs_panel.add_forward_labels(daily)
+    assert pd.isna(labelled.loc[0, "fwd30_maxret"])
+    assert labelled.loc[11, "fwd30_maxret"] == pytest.approx(0.0)
+
+
 def test_stitch_weekly_archive_latest_wins_and_mcap_only_on_snapshot_day(tmp_path):
     def snap(end, close, mcap):
         dates = pd.date_range(end=end, periods=3, freq="D")

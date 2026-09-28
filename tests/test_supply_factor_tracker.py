@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import httpx
 import pandas as pd
 import pytest
 
@@ -43,6 +44,7 @@ class World:
 
     def __init__(self):
         self.tokens = [f"T{i}" for i in range(12)]
+        self.reverse_schedule = False
 
     def price(self, token, day):
         i = int(token[1:])
@@ -55,6 +57,8 @@ class World:
             return _Resp({"data": [{"protocolSlug": t.lower(), "tokenPrice": [{"symbol": t, "price": 1.0}]} for t in self.tokens]})
         if "/emissions/" in url:
             i = int(url.rsplit("/", 1)[-1][1:])
+            if self.reverse_schedule:
+                i = 11 - i
             return _Resp(_schedule(1000.0 * i))
         if url.endswith("/ticker/price"):
             return _Resp([{"symbol": f"{t}USDT", "price": "1.0"} for t in self.tokens])
@@ -79,10 +83,12 @@ def test_month_opens_after_first_close_then_settles_with_the_spread(world, tmp_p
 
     asyncio.run(sf.tick(world, state_path, now=pd.Timestamp("2026-10-01 12:00", tz="UTC")))
     assert json.loads(state_path.read_text(encoding="utf-8"))["months"] == {}  # Oct 1 close not final yet
+    world.reverse_schedule = True  # a later schedule revision must not change the frozen rank
 
     asyncio.run(sf.tick(world, state_path, now=pd.Timestamp("2026-10-02 01:00", tz="UTC")))
     month = json.loads(state_path.read_text(encoding="utf-8"))["months"]["2026-10-01"]
     assert month["backfill"] is False and month["status"] == "open"
+    assert month["schedule_observed_at"] == "2026-10-01T12:00:00+00:00"
     assert set(month["long"]) == {"T0", "T1", "T2", "T3"} and set(month["short"]) == {"T8", "T9", "T10", "T11"}
 
     summary = asyncio.run(sf.tick(world, state_path, now=pd.Timestamp("2026-11-01 01:00", tz="UTC")))
@@ -93,6 +99,48 @@ def test_month_opens_after_first_close_then_settles_with_the_spread(world, tmp_p
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["retirement_rule"]["min_n"] == 12  # rule registered on the first tick, before any result
     assert summary["retirement"]["verdict"] == "collecting" and summary["retirement"]["n"] == 1
+
+
+def test_month_without_preclose_schedule_is_excluded_from_forward(world, tmp_path):
+    state_path = tmp_path / "state.json"
+    sf.save_state({"started_at": "2026-09-27T00:00:00+00:00", "months": {}}, state_path)
+    summary = asyncio.run(sf.tick(world, state_path, now=pd.Timestamp("2026-10-02 01:00", tz="UTC")))
+    month = json.loads(state_path.read_text(encoding="utf-8"))["months"]["2026-10-01"]
+    assert month["backfill"] is True
+    assert month["backfill_reason"] == "schedule_not_captured_before_entry_close"
+    assert summary["forward_open"] == 0 and summary["months_missed_snapshot"] == 1
+
+
+def test_snapshot_fetch_crossing_utc_close_is_not_forward(world, tmp_path, monkeypatch):
+    state_path = tmp_path / "state.json"
+    sf.save_state({"started_at": "2026-09-27T00:00:00+00:00", "months": {}}, state_path)
+    times = iter([pd.Timestamp("2026-10-01 23:59:00", tz="UTC"),
+                  pd.Timestamp("2026-10-02 00:01:00", tz="UTC")])
+    monkeypatch.setattr(sf, "_utc_now", lambda: next(times))
+    asyncio.run(sf.tick(world, state_path))
+    snapshot = json.loads(state_path.read_text(encoding="utf-8"))["pending_months"]["2026-10-01"]
+    assert snapshot["observed_at"] == "2026-10-02T00:01:00+00:00"
+    result = asyncio.run(sf.tick(world, state_path, now=pd.Timestamp("2026-10-02 01:00", tz="UTC")))
+    month = json.loads(state_path.read_text(encoding="utf-8"))["months"]["2026-10-01"]
+    assert month["backfill"] is True and result["forward_open"] == 0
+
+
+def test_transient_schedule_error_does_not_create_partial_snapshot(world, tmp_path, monkeypatch):
+    original = ut.schedule_unlocked
+
+    async def failing_schedule(client, slug):
+        if slug == "t0":
+            response = httpx.Response(429, request=httpx.Request("GET", "https://example.org/emissions/t0"))
+            response.raise_for_status()
+        return await original(client, slug)
+
+    monkeypatch.setattr(ut, "schedule_unlocked", failing_schedule)
+    state_path = tmp_path / "state.json"
+    sf.save_state({"started_at": "2026-09-27T00:00:00+00:00", "months": {}}, state_path)
+    asyncio.run(sf.tick(world, state_path, now=pd.Timestamp("2026-10-01 12:00", tz="UTC")))
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    assert state["pending_months"] == {}
+    assert state["pending_weeks"] == {}
 
 
 def test_month_started_before_tracker_is_backfill(world, tmp_path):
