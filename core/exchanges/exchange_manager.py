@@ -47,6 +47,10 @@ class ExchangeManager:
         self._exchanges: Dict[str, BaseExchange] = {}
         self._account_exchanges: Dict[str, Dict[str, BaseExchange]] = {}
         self._connected: bool = False
+        # Exchanges initialize() was asked for and had a config, per account scope
+        # (None = shared). A connector that failed at startup is absent from the
+        # store; health_check() reports it unhealthy so the watchdog retries it.
+        self._intended: Dict[Optional[str], set] = {}
 
     @staticmethod
     def _account_manager():
@@ -170,6 +174,7 @@ class ExchangeManager:
             config = self._resolve_exchange_config(name, account_id=account_id)
             if not config:
                 continue
+            self._intended.setdefault(self._normalize_account_id(account_id), set()).add(name)
             exchange_specs.append((name, config))
 
         connect_timeout_sec = self._startup_connect_timeout_sec()
@@ -369,6 +374,11 @@ class ExchangeManager:
             except Exception as e:
                 logger.error(f"Health check failed for {name}: {e}")
                 results[name] = False
+        # Intended but never connected (e.g. a startup connect that timed out):
+        # without this the watchdog never saw it and it stayed missing until the
+        # next restart (binance, 2026-09-28: 18.3 s against an 18 s limit).
+        for name in sorted(self._intended.get(self._normalize_account_id(account_id), set())):
+            results.setdefault(name, False)
 
         return results
 

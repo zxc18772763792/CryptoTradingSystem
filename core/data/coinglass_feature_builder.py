@@ -1372,7 +1372,9 @@ async def update_coinglass_cache(
                         interval=requested_interval or None,
                         manual=manual,
                     )
-                    persist_raw_snapshot(
+                    # raw snapshot write off the loop too (4.8 s stall; loop_stall_watchdog 2026-09-28)
+                    await asyncio.to_thread(
+                        persist_raw_snapshot,
                         dataset=dataset,
                         route=result["route"],
                         request_meta={
