@@ -35,8 +35,11 @@ KINDS = [  # first match wins; order matters (release before designation)
     ("caution", re.compile(r"유의\s*종목\s*지정")),
     ("delist", re.compile(r"거래\s*지원\s*종료")),
     ("warning_urged", re.compile(r"유의\s*촉구")),
-    ("listing_krw", re.compile(r"(신규\s*)?거래\s*지원\s*안내.*KRW|KRW.*(신규\s*)?거래\s*지원")),
-    ("listing_other", re.compile(r"신규\s*거래\s*지원|거래\s*지원\s*안내")),
+    # Listings. Round 7 v1 only knew the "거래지원 안내" wording and missed most of them;
+    # 2026-09-28 added the "마켓 ... 추가 / 신규 상장 / 원화 마켓 오픈" wordings.
+    ("listing_krw", re.compile(r"(신규\s*)?거래\s*지원\s*안내.*KRW|KRW.*(신규\s*)?거래\s*지원|(KRW|원화)[^(]*마켓[^(]*(추가|상장|오픈)|(원화|KRW)\s*마켓\s*(신규\s*)?상장")),
+    ("listing_other", re.compile(r"신규\s*거래\s*지원|거래\s*지원\s*안내|(BTC|ETH|USDT)[^(]*마켓[^(]*(추가|오픈|거래\s*지원\s*예정)|\s상장(\s*안내)?$")),
+    ("supply_change", re.compile(r"유통량")),
 ]
 NOT_TICKER = {"KRW", "BTC", "USDT", "ETH"}
 
