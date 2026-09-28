@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from config.settings import settings
+from core.news.collectors.quality import junk_reason
 from core.news.text_normalizer import clean_news_text
 from core.news.storage.models import (
     EventSchema,
@@ -1158,7 +1159,12 @@ async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[
     seen_local: set[str] = set()
     seen_local_title_buckets: set[str] = set()
     local_dup = 0
+    junk_dropped = 0
     for item in news_items:
+        # Not every caller goes through MultiSourceNewsCollector, so re-check here.
+        if junk_reason(item) is not None:
+            junk_dropped += 1
+            continue
         row = _normalize_news_item(item)
         row["payload"] = _apply_ingest_meta(row.get("payload") if isinstance(row.get("payload"), dict) else {}, ingest_meta)
         if not row["url"]:
@@ -1175,7 +1181,12 @@ async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[
         normalized.append(row)
 
     if not normalized:
-        return {"inserted": [], "pulled_count": pulled_count, "deduped_count": pulled_count}
+        return {
+            "inserted": [],
+            "pulled_count": pulled_count,
+            "deduped_count": pulled_count - junk_dropped,
+            "junk_dropped_count": junk_dropped,
+        }
 
     urls = [item["url"] for item in normalized]
     hashes = [item["content_hash"] for item in normalized]
@@ -1232,7 +1243,7 @@ async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[
                     )
                 ).scalars().all()
                 inserted = [_row_to_news_dict(row) for row in rows]
-                deduped_count = max(deduped_count, pulled_count - len(inserted))
+                deduped_count = max(deduped_count, pulled_count - junk_dropped - len(inserted))
             else:
                 inserted = []
         else:
@@ -1251,6 +1262,7 @@ async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[
         "inserted": inserted,
         "pulled_count": pulled_count,
         "deduped_count": deduped_count,
+        "junk_dropped_count": junk_dropped,
     }
 
 
@@ -1277,7 +1289,9 @@ async def enqueue_llm_tasks(news_items: List[Dict[str, Any]], min_importance: in
             seen_raw_ids.add(raw_id)
             payload = item.get("payload") or {}
             importance = int(payload.get("importance_score") or 0)
-            if importance < int(min_importance or 0):
+            # Stored rows always carry a title; id-only stubs are judged on importance alone.
+            is_junk = "title" in item and junk_reason(item) is not None
+            if importance < int(min_importance or 0) or is_junk:
                 skipped += 1
                 continue
             existing_task = existing.get(raw_id)

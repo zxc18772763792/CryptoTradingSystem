@@ -35,6 +35,7 @@ from core.news.collectors.jin10 import Jin10Collector
 from core.news.collectors.newsapi import NewsAPICollector
 from core.news.collectors.okx_announcements import OKXAnnouncementsCollector
 from core.news.collectors.opennews import OpenNewsCollector
+from core.news.collectors.quality import junk_reason
 from core.news.collectors.rss import RSSNewsCollector
 from core.news.storage import db as news_db
 
@@ -511,7 +512,18 @@ class MultiSourceNewsCollector:
         all_items.sort(key=lambda x: _parse_ts_to_unix(x.get("published_at")), reverse=True)
         deduped: List[Dict[str, Any]] = []
         seen: set[str] = set()
+        junk_total = 0
         for item in all_items:
+            reason = junk_reason(item)
+            if reason is not None:
+                junk_total += 1
+                provider = str(item.get("provider") or (item.get("payload") or {}).get("provider") or "unknown")
+                stats = source_stats.setdefault(
+                    provider, {"enabled": True, "pulled_count": 0, "kept_count": 0, "errors": []}
+                )
+                junk = stats.setdefault("junk_dropped", {})
+                junk[reason] = int(junk.get(reason) or 0) + 1
+                continue
             key = _dedupe_key(item)
             if key in seen:
                 continue
@@ -530,6 +542,7 @@ class MultiSourceNewsCollector:
             "source_stats": source_stats,
             "pulled_total": total_pulled,
             "kept_total": len(deduped),
+            "junk_dropped_total": junk_total,
             "errors": errors,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
