@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
+import httpx
 from loguru import logger
 
 # alternative.me publishes one reading per day, but several callers (research
@@ -124,27 +125,30 @@ class FearGreedCollector:
         cached = _cached_current()
         if cached is not None:
             return cached
-        session = await self._get_session()
+        from core.utils import dual_transport  # noqa: PLC0415
+
         try:
-            async with session.get(self.API_URL, params={"limit": 1}) as resp:
-                if resp.status != 200:
-                    logger.warning(f"Fear & Greed API returned {resp.status}")
-                    return None
-                data = await resp.json()
-                rows = data.get("data") or []
-                if not rows:
-                    return None
-                item = rows[0]
-                index = FearGreedIndex(
-                    value=int(item["value"]),
-                    classification=str(item.get("value_classification") or ""),
-                    timestamp=datetime.fromtimestamp(int(item["timestamp"])),
-                    time_until_update=int(item.get("time_until_update", 0)) or None,
-                )
-                _store_current(index)
-                return index
-        except (aiohttp.ClientError, asyncio.TimeoutError, TimeoutError) as e:
-            logger.error(f"Fear & Greed fetch error: {e}")
+            # Direct first, proxy as fallback (the proxy often refuses the first connect).
+            resp = await dual_transport.get(
+                self.API_URL, params={"limit": 1}, timeout_sec=float(self._timeout.total or 10)
+            )
+            rows = resp.json().get("data") or []
+            if not rows:
+                return None
+            item = rows[0]
+            index = FearGreedIndex(
+                value=int(item["value"]),
+                classification=str(item.get("value_classification") or ""),
+                timestamp=datetime.fromtimestamp(int(item["timestamp"])),
+                time_until_update=int(item.get("time_until_update", 0)) or None,
+            )
+            _store_current(index)
+            return index
+        except httpx.HTTPStatusError as exc:
+            logger.warning(f"Fear & Greed API returned {exc.response.status_code}")
+            return None
+        except (httpx.HTTPError, aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, OSError) as e:
+            logger.warning(f"Fear & Greed fetch error: {type(e).__name__}: {e}")
             return None
         except (KeyError, ValueError, TypeError) as e:
             logger.error(f"Fear & Greed parse error: {e}")

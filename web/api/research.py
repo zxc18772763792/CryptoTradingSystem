@@ -114,6 +114,12 @@ _MODULE_TIMEOUT_SEC = {
 _MARKET_STATE_HISTORY_PREFERRED_MAX_AGE_SEC = 5 * 60
 _MARKET_STATE_NEWS_TIMEOUT_SEC = 12.0
 _MARKET_STATE_PUBLIC_MARKET_TIMEOUT_SEC = 9.0
+# Live microstructure / community fetches. They are the only source while the
+# analytics-history collectors are off; a cold pass measured 3.7-4.1 s and 6-7 s
+# (2026-09-28), so the old 4 s always fell back. The module budget is 40 s and
+# results are served stale-while-revalidate, so only the first cold call waits.
+_MARKET_STATE_LIVE_FETCH_TIMEOUT_SEC = 9.0
+_ONCHAIN_WARMUP_WAIT_SEC = 14.0  # cold on-chain overview takes ~10 s; the module budget is 30 s
 _COINGLASS_PREFERRED_MAX_AGE_SEC = 5 * 60
 _MACRO_MARKET_STALE_MAX_AGE_SEC = 3 * 24 * 60 * 60
 _MACRO_MONTHLY_STALE_MAX_AGE_SEC = 62 * 24 * 60 * 60
@@ -2604,7 +2610,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
                 symbol=profile.primary_symbol,
                 depth_limit=20,
             ),
-            4.0,
+            _MARKET_STATE_LIVE_FETCH_TIMEOUT_SEC,
         )
     if not prefer_history_community:
         live_community_task = _wait_or_none_keep_running(
@@ -2612,7 +2618,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
                 symbol=profile.primary_symbol,
                 exchange=profile.exchange,
             ),
-            4.0,
+            _MARKET_STATE_LIVE_FETCH_TIMEOUT_SEC,
         )
     live_micro = (
         dict((await live_micro_task) or {}) if live_micro_task is not None else {}
@@ -3065,18 +3071,27 @@ async def _build_cross_asset_module(profile: ResearchProfile) -> Dict[str, Any]:
     )
 
 
+async def _onchain_overview_for_workbench(profile: ResearchProfile) -> Dict[str, Any]:
+    """On-chain overview, waiting briefly through a cold cache's warm-up.
+
+    get_onchain_overview never blocks: on a cold cache it returns a "warming"
+    placeholder (served_mode=bootstrap) and fills the cache in the background
+    (~10 s). The workbench used to cache that placeholder as its module result
+    for up to 10 minutes, so the first view after a restart or an idle spell
+    always showed no funding / no Fear & Greed (2026-09-28).
+    """
+    kwargs = dict(exchange=profile.exchange, symbol=profile.primary_symbol, whale_threshold_btc=10.0, chain="auto")
+    result = dict(await get_onchain_overview(refresh=True, **kwargs) or {})
+    deadline = time.monotonic() + _ONCHAIN_WARMUP_WAIT_SEC
+    while str(result.get("served_mode") or "") == "bootstrap" and time.monotonic() < deadline:
+        await asyncio.sleep(1.0)
+        result = dict(await get_onchain_overview(refresh=False, **kwargs) or {})
+    return result
+
+
 async def _build_onchain_module(profile: ResearchProfile) -> Dict[str, Any]:
     chain_context = resolve_onchain_chain_context(profile.primary_symbol, "auto")
-    onchain_task = _wait_or_none(
-        get_onchain_overview(
-            exchange=profile.exchange,
-            symbol=profile.primary_symbol,
-            whale_threshold_btc=10.0,
-            chain="auto",
-            refresh=True,
-        ),
-        8.0,
-    )
+    onchain_task = _wait_or_none(_onchain_overview_for_workbench(profile), _ONCHAIN_WARMUP_WAIT_SEC + 4.0)
     community_snapshot_task = _wait_or_none(
         _load_latest_community_snapshot(profile.exchange, profile.primary_symbol), 4.0
     )

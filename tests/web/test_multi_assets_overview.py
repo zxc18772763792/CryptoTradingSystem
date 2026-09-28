@@ -9,7 +9,7 @@ from web.api import data as data_api
 
 
 def test_get_multi_assets_overview_loads_symbol_frames_concurrently(monkeypatch):
-    async def fake_load_symbol_df(*, exchange: str, symbol: str, timeframe: str):
+    async def fake_load_symbol_df(*, exchange: str, symbol: str, timeframe: str, start_time=None):
         await asyncio.sleep(0.05)
         return pd.DataFrame(
             {
