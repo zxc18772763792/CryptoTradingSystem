@@ -120,7 +120,12 @@ _MARKET_STATE_PUBLIC_MARKET_TIMEOUT_SEC = 9.0
 # results are served stale-while-revalidate, so only the first cold call waits.
 _MARKET_STATE_LIVE_FETCH_TIMEOUT_SEC = 9.0
 _ONCHAIN_WARMUP_WAIT_SEC = 14.0  # cold on-chain overview takes ~10 s; the module budget is 30 s
-_COINGLASS_PREFERRED_MAX_AGE_SEC = 5 * 60
+# The CoinGlass plan allows 10 req/min; the worker rotates ~39 dataset requests
+# (13 datasets x 3 symbols) at ~8 per 3.3-min round, so any one dataset refreshes
+# about every 16 min. A 5-min "fresh" bar marked the workbench degraded most of
+# the time (2026-09-28); 20 min = one rotation plus margin.
+_COINGLASS_PREFERRED_MAX_AGE_SEC = 20 * 60
+_WHALE_HISTORY_FRESH_MAX_AGE_SEC = 30 * 60  # whale collector runs every ~10 min
 _MACRO_MARKET_STALE_MAX_AGE_SEC = 3 * 24 * 60 * 60
 _MACRO_MONTHLY_STALE_MAX_AGE_SEC = 62 * 24 * 60 * 60
 _PUBLIC_MARKET_DATA_CACHE_TTL_SEC = 5 * 60
@@ -2503,7 +2508,7 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
         _build_news_summary(profile.primary_symbol, hours=24),
         _MARKET_STATE_NEWS_TIMEOUT_SEC,
     )
-    calendar_task = _wait_or_none_keep_running(get_trading_calendar(days=7), 4.0)
+    calendar_task = _wait_or_none_keep_running(get_trading_calendar(days=7), _MARKET_STATE_LIVE_FETCH_TIMEOUT_SEC)
     macro_task = _wait_or_none_keep_running(_load_macro_snapshot_payload(), 2.0)
     history_micro_task = _wait_or_none_keep_running(
         _load_latest_microstructure_snapshot(profile.exchange, profile.primary_symbol),
@@ -2662,8 +2667,11 @@ async def _build_market_state_module(profile: ResearchProfile) -> Dict[str, Any]
                 "threshold_btc": history_whale.get("threshold_btc"),
                 "btc_price": history_whale.get("btc_price"),
                 "transactions": list(history_whale.get("transactions") or [])[:10],
+                "source": "analytics_history_snapshot",
             }
-            used_history_whale = True
+            # Whale transfers only ever come from the history collector; only a
+            # stale snapshot is a fallback worth warning about.
+            used_history_whale = not _snapshot_is_recent(history_whale, _WHALE_HISTORY_FRESH_MAX_AGE_SEC)
 
     calendar_rows = _map_calendar_rows(calendar_data.get("events") or [])
     calendar_source_summary = _build_calendar_source_summary(
@@ -3232,10 +3240,13 @@ async def _build_discipline_module(_: ResearchProfile) -> Dict[str, Any]:
     suggestions = list(stoploss.get("position_suggestions") or [])
     impulsive_ratio = float(behavior.get("impulsive_ratio") or 0.0)
     overtrade = bool(behavior.get("overtrading_warning"))
-    degraded = int(behavior.get("entries") or 0) == 0
+    no_entries = int(behavior.get("entries") or 0) == 0
+    degraded = not behavior  # the report itself failed; no trades yet is not a fault
 
     warnings: List[str] = []
-    if degraded:
+    if not behavior:
+        warnings.append("行为报告暂不可用，纪律模块仅展示通用建议。")
+    elif no_entries:
         warnings.append("近期无行为记录，纪律模块仅展示通用建议。")
     if overtrade:
         warnings.append("检测到过度交易风险。")

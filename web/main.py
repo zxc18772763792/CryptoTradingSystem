@@ -295,6 +295,29 @@ _ANALYTICS_HISTORY_WORKER_SPECS = (
     ("community", _ANALYTICS_HISTORY_COMMUNITY_INTERVAL_SEC, 24),
     ("whales", _ANALYTICS_HISTORY_WHALE_INTERVAL_SEC, 36),
 )
+# Collectors to run when ANALYTICS_HISTORY_ENABLED is off. Whale transfers are
+# mempool/CoinGlass "recent" lists that cannot be fetched after the fact, so they
+# must be recorded as they happen; one run is ~5 s and 2 CoinGlass calls every
+# 10 min (2026-09-28). Microstructure/community stay off: the workbench fetches
+# those live. ANALYTICS_HISTORY_ENABLED=true still runs all three.
+_ANALYTICS_HISTORY_SELECTED = (
+    {name for name, _, _ in _ANALYTICS_HISTORY_WORKER_SPECS}
+    if _ANALYTICS_HISTORY_ENABLED
+    else {
+        item.strip().lower()
+        for item in str(
+            os.getenv(
+                "ANALYTICS_HISTORY_COLLECTORS",
+                str(getattr(settings, "ANALYTICS_HISTORY_COLLECTORS", "whales") or ""),
+            )
+        ).split(",")
+        if item.strip()
+    }
+)
+# Idle gate: postpone a history run while the web loop has just stalled.
+_ANALYTICS_HISTORY_BUSY_WINDOW_SEC = 120.0
+_ANALYTICS_HISTORY_BUSY_RETRY_SEC = 60
+_ANALYTICS_HISTORY_MAX_POSTPONES = 3
 _STATUS_CACHE_TTL_SEC = 1.5
 _status_cache_payload: Dict[str, Any] | None = None
 _status_cache_at: float = 0.0
@@ -1254,6 +1277,23 @@ async def _news_llm_worker(app: FastAPI, stop_event: asyncio.Event) -> None:
             pass
 
 
+def _web_loop_recently_stalled() -> bool:
+    """True when the loop-stall watchdog logged a stall in the last busy window."""
+    try:
+        from core.monitoring import loop_stall_watchdog  # noqa: PLC0415
+
+        stalls = loop_stall_watchdog.recent_stalls()
+    except Exception:
+        return False
+    if not stalls:
+        return False
+    try:
+        last = datetime.strptime(str(stalls[-1].get("at")), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return False
+    return (datetime.now() - last).total_seconds() < _ANALYTICS_HISTORY_BUSY_WINDOW_SEC
+
+
 async def _analytics_history_worker(
     app: FastAPI,
     stop_event: asyncio.Event,
@@ -1269,6 +1309,14 @@ async def _analytics_history_worker(
 
     await asyncio.sleep(max(3, int(startup_delay_sec)))
     while not stop_event.is_set():
+        postpones = 0
+        while postpones < _ANALYTICS_HISTORY_MAX_POSTPONES and _web_loop_recently_stalled():
+            postpones += 1  # busy: wait for a quiet moment, but never skip a run entirely
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=_ANALYTICS_HISTORY_BUSY_RETRY_SEC)
+                return
+            except asyncio.TimeoutError:
+                pass
         try:
             result = await trading_api.run_analytics_history_collection(
                 exchange=exchange,
@@ -2194,8 +2242,10 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "factory": lambda stop_event: _news_llm_worker(app, stop_event),
             "restart_on_failure": True,
         }
-    if _ANALYTICS_HISTORY_ENABLED:
+    if _ANALYTICS_HISTORY_SELECTED:
         for collector, interval_sec, startup_delay_sec in _ANALYTICS_HISTORY_WORKER_SPECS:
+            if collector not in _ANALYTICS_HISTORY_SELECTED:
+                continue
             factories[f"analytics_history_{collector}"] = {
                 "factory": lambda stop_event, collector=collector, interval_sec=interval_sec, startup_delay_sec=startup_delay_sec: _analytics_history_worker(
                     app,
@@ -2222,6 +2272,15 @@ async def lifespan(app: FastAPI):
 
     with contextlib.suppress(Exception):
         loop_stall_watchdog.start()
+
+    # Proxy from .env when the inherited environment has none (the supervisor's
+    # environment decided this before; see core/utils/proxy_env.py).
+    from core.utils.proxy_env import ensure_proxy_env
+
+    with contextlib.suppress(Exception):
+        exported = ensure_proxy_env(settings)
+        if exported:
+            logger.info(f"proxy environment taken from settings: {', '.join(exported)}")
 
     # Warm the process-wide TLS context off-loop so no later httpx client
     # construction ever does a blocking CA-bundle read on the event loop
