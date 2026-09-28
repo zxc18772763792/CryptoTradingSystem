@@ -7142,8 +7142,15 @@ async def get_multi_assets_overview(
     rows = []
     ret_map: Dict[str, pd.Series] = {}
 
+    # Only the tail is used: read just the lookback window (x2 for gaps) instead of
+    # each symbol's whole history. 30 symbols x ~90 days of 5m bars took ~13 s and
+    # always overran the research workbench's 12 s budget (2026-09-28).
+    bars = max(80, int(lookback))
+    window_start = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        seconds=_timeframe_seconds(timeframe) * bars * 2 + 86400
+    )
     load_tasks = [
-        _load_symbol_df(exchange=exchange, symbol=sym, timeframe=timeframe)
+        _load_symbol_df(exchange=exchange, symbol=sym, timeframe=timeframe, start_time=window_start)
         for sym in symbol_list
     ]
     results = await asyncio.gather(*load_tasks, return_exceptions=True)
@@ -7154,7 +7161,7 @@ async def get_multi_assets_overview(
         df = result
         if df.empty:
             continue
-        sdf = df.tail(max(80, int(lookback)))
+        sdf = df.tail(bars)
         close = sdf["close"].astype(float)
         ret = close.pct_change().dropna()
         if ret.empty:

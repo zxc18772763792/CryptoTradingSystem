@@ -6812,16 +6812,15 @@ async def _fetch_slowmist_security_alerts(
     )
 
     try:
-        async with httpx.AsyncClient(
-            timeout=_ANALYTICS_SECURITY_ALERT_TIMEOUT_SEC,
+        # Direct first: through the proxy this host takes ~12 s against a 6 s budget.
+        from core.utils import dual_transport  # noqa: PLC0415
+
+        resp = await dual_transport.get(
+            _SLOWMIST_HACKED_URL,
             headers={"User-Agent": "Mozilla/5.0"},
-            follow_redirects=True,
-            trust_env=True,
-            verify=get_shared_ssl_context(),
-        ) as client:
-            resp = await client.get(_SLOWMIST_HACKED_URL)
-            resp.raise_for_status()
-            html = resp.text
+            timeout_sec=_ANALYTICS_SECURITY_ALERT_TIMEOUT_SEC,
+        )
+        html = resp.text
     except Exception as exc:
         if stale_cached is not None:
             return _with_security_alert_runtime_fields(
