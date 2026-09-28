@@ -33,7 +33,7 @@ ALERT_STATE_PATH = exchange_notices.ANNOUNCEMENT_DIR / "guard_alerts.json"
 WATCHLIST_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "pump_watchlist" / "latest.json"
 VERDICT_STATE_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "tracker_verdicts.json"
 TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解锁前做空", "supply_factor": "供给通胀因子",
-                 "upbit_caution": "Upbit 警示后做空"}
+                 "upbit_caution": "Upbit 警示后做空", "upbit_krw_listing": "Upbit 韩元上币后做空"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
 UPBIT_INTERVAL_SEC = 1800
@@ -202,6 +202,8 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             try:
                 _status["upbit_caution"] = await upbit_caution_tracker.tick(client, llm_extract=_llm_upbit_reason)
                 await _verdict_alert("upbit_caution", _status["upbit_caution"])
+                _status["upbit_krw_listing"] = await upbit_caution_tracker.tick(client, strategy="krw_listing")
+                await _verdict_alert("upbit_krw_listing", _status["upbit_krw_listing"])
             except Exception as exc:
                 _status["upbit_caution_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
                 logger.warning(f"upbit caution tracker failed: {exc}")

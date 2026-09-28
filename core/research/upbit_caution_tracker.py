@@ -1,4 +1,14 @@
-"""Paper tracker: short the Binance perp for 7 days after an Upbit caution designation.
+"""Paper trackers: short the Binance perp for 7 days after two kinds of Upbit notice.
+
+Strategy "caution" (below) and, since 2026-09-28, strategy "krw_listing": a
+coin newly added to Upbit's KRW market pops ~30% on the day, then lagged
+controls matched on the 30-day move including that pop by 9.5% over 7 days
+(58/69); the same 7-day perp short earned +6.7% per trade after fees and
+2.4% funding (53/70 wins, every year 2023-26, two tail losses near -49%).
+Each strategy keeps its own state file, statistics and retirement rule.
+Both mirror the backtest's universe: the coin must have traded on Binance
+spot 30 days before the notice. Listing follow-ups (e.g. a changed start
+time) never open a second listing trade: one listing per coin per 30 days.
 
 Why (docs/LLM_TRADING_RESEARCH_ROUND7_2026-09-28.md, scripts/upbit_short_backtest.py):
 after Upbit designates a coin 거래 유의 종목 ("caution"; deposits to Upbit are
@@ -32,6 +42,8 @@ from core.research import retirement
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_caution" / "tracker.json"
+KRW_LISTING_STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_krw_listing" / "tracker.json"
+SPOT = "https://api.binance.com/api/v3"
 UPBIT = "https://api-manager.upbit.com/api/v1/announcements"
 FAPI = "https://fapi.binance.com/fapi/v1"
 HOLD_DAYS, STOP_PCT, STOP_SLIPPAGE, ROUND_TRIP_COST = 7, 0.40, 0.02, 0.001
@@ -41,6 +53,10 @@ CAUTION = re.compile(r"유의\s*종목\s*지정")
 RELEASED = re.compile(r"지정\s*해제")
 NOT_TICKER = {"KRW", "BTC", "USDT", "ETH"}
 BACKTEST_REFERENCE = "31 perps 2022-26: +7.6%/trade after fees+funding, 90% CI [+4.3, +11.9], win 77%, no stops"
+KRW_LISTING_REFERENCE = "70 perps 2023-26: +6.7%/trade after fees+funding, 90% CI [+3.8, +9.3], win 76%, 2 stops near -49%"
+KRW_LISTING = re.compile(r"(신규\s*)?거래\s*지원\s*안내.*KRW|KRW.*(신규\s*)?거래\s*지원|(KRW|원화)[^(]*마켓[^(]*(추가|상장|오픈)|(원화|KRW)\s*마켓\s*(신규\s*)?상장")
+NOT_LISTING = re.compile(r"유의|거래\s*지원\s*종료|유통량")
+DEDUPE_DAYS = 30
 REASONS = ("disclosure_or_supply", "security_incident", "project_or_team_issue", "network_or_technical",
            "legal_or_regulatory", "other")
 REASON_SYSTEM_PROMPT = f"""You read a Korean crypto-exchange notice that designates a coin as a caution item.
@@ -75,6 +91,23 @@ def caution_tickers(title: str) -> List[str]:
         return []
     found = {m for grp in re.findall(r"\(([^)]*)\)", title) for m in re.findall(r"[A-Z0-9]{2,10}", grp)}
     return sorted(found - NOT_TICKER)
+
+
+def krw_listing_tickers(title: str) -> List[str]:
+    """Tickers of a notice adding coins to Upbit's KRW market (same wording rules as the study)."""
+    if not KRW_LISTING.search(title) or NOT_LISTING.search(title):
+        return []
+    found = {m for grp in re.findall(r"\(([^)]*)\)", title) for m in re.findall(r"[A-Z0-9]{2,10}", grp)}
+    return sorted(found - NOT_TICKER)
+
+
+STRATEGIES: Dict[str, Dict[str, Any]] = {
+    # caution: extensions count as new events (as in the backtest); listings: one event per coin per DEDUPE_DAYS
+    "caution": {"match": caution_tickers, "state_path": STATE_PATH, "rule": "upbit_caution", "reference": BACKTEST_REFERENCE,
+                "dedupe": False},
+    "krw_listing": {"match": krw_listing_tickers, "state_path": KRW_LISTING_STATE_PATH, "rule": "upbit_krw_listing",
+                    "reference": KRW_LISTING_REFERENCE, "dedupe": True},
+}
 
 
 def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], day0_ms: int, now_ms: float) -> Dict[str, Any]:
@@ -129,7 +162,17 @@ async def _notice_body(client, notice_id: int) -> str:
     return re.sub(r"<[^>]+>", " ", body)
 
 
-async def tick(client, *, llm_extract=None, state_path: Path = STATE_PATH) -> Dict[str, Any]:
+async def _spot_history_30d(client, ticker: str, day0_ms: int) -> bool:
+    """True when the coin had a Binance USDT spot daily bar 30 days before the notice (the study's universe)."""
+    start = day0_ms - BACKFILL_DAYS * DAY_MS
+    resp = await client.get(f"{SPOT}/klines", params={"symbol": f"{ticker}USDT", "interval": "1d", "startTime": start, "limit": 1})
+    rows = resp.json() if resp.status_code == 200 else []
+    return isinstance(rows, list) and bool(rows) and int(rows[0][0]) == start
+
+
+async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, strategy: str = "caution") -> Dict[str, Any]:
+    spec = STRATEGIES[strategy]
+    state_path = state_path or spec["state_path"]
     state = load_state(state_path)
     started = datetime.fromisoformat(state["started_at"])
     now = _now()
@@ -140,19 +183,26 @@ async def tick(client, *, llm_extract=None, state_path: Path = STATE_PATH) -> Di
     perps = {s["symbol"]: int(s.get("onboardDate") or 0) for s in info.json().get("symbols", [])
              if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"}
 
-    for notice in await _notices(client):
+    # oldest first: the original notice must claim an event before its follow-ups do
+    for notice in sorted(await _notices(client), key=lambda n: str(n.get("first_listed_at") or "")):
         at = datetime.fromisoformat(notice["first_listed_at"]).astimezone(timezone.utc)
         if (now - at).days > BACKFILL_DAYS:
             continue
-        for ticker in caution_tickers(str(notice.get("title") or "")):
+        for ticker in spec["match"](str(notice.get("title") or "")):
             key = f"{ticker}|{notice['id']}"
             if key in state["trades"]:
                 continue
-            symbol = next((s for s in (f"{ticker}USDT", f"1000{ticker}USDT") if 0 < perps.get(s, 0) < at.timestamp() * 1000), None)
             day0 = datetime(at.year, at.month, at.day, tzinfo=timezone.utc)
+            day0_ms = int(day0.timestamp() * 1000)
+            if spec["dedupe"] and any(t.get("ticker") == ticker and abs(int(t.get("day0_ms") or 0) - day0_ms) < DEDUPE_DAYS * DAY_MS
+                   for t in state["trades"].values()):
+                continue  # a follow-up notice (changed start time, update) for an event already recorded
+            symbol = next((s for s in (f"{ticker}USDT", f"1000{ticker}USDT") if 0 < perps.get(s, 0) < at.timestamp() * 1000), None)
+            if symbol and not await _spot_history_30d(client, ticker, day0_ms):
+                symbol = None  # outside the backtest universe: no Binance spot history before the notice
             state["trades"][key] = {
                 "ticker": ticker, "symbol": symbol, "notice_id": notice["id"], "title": notice.get("title"),
-                "notice_at": at.isoformat(), "day0_ms": int(day0.timestamp() * 1000),
+                "notice_at": at.isoformat(), "day0_ms": day0_ms,
                 "backfilled": at < started, "discovered_at": now.isoformat(),
                 "status": "waiting_entry" if symbol else "no_perp",
             }
@@ -182,12 +232,13 @@ async def tick(client, *, llm_extract=None, state_path: Path = STATE_PATH) -> Di
                 logger.debug(f"upbit caution tracker: reason for {key} failed: {exc}")
 
     state["updated_at"] = now.isoformat()
-    retirement.register(state, "upbit_caution", now.isoformat())
+    retirement.register(state, spec["rule"], now.isoformat())
     save_state(state, state_path)
-    return summary(state)
+    return summary(state, strategy)
 
 
-def summary(state: Dict[str, Any]) -> Dict[str, Any]:
+def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
+    spec = STRATEGIES[strategy]
     trades = list(state.get("trades", {}).values())
     forward = [t for t in trades if not t.get("backfilled") and t.get("symbol")]
     done = [t for t in forward if t.get("status") in {"closed", "stopped"}]
@@ -203,7 +254,8 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "forward_completed": len(done),
         "forward_mean_return_pct": round(float(np.mean(returns)), 2) if returns else None,
         "forward_win_rate": round(float(np.mean([r > 0 for r in returns])), 3) if returns else None,
-        "backtest_reference": BACKTEST_REFERENCE,
-        "evaluation_ready": len(returns) >= retirement.RULES["upbit_caution"]["min_n"],
-        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES["upbit_caution"]),
+        "strategy": strategy,
+        "backtest_reference": spec["reference"],
+        "evaluation_ready": len(returns) >= retirement.RULES[spec["rule"]]["min_n"],
+        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES[spec["rule"]]),
     }

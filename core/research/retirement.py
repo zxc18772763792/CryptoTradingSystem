@@ -30,6 +30,7 @@ RULES: Dict[str, Dict[str, Any]] = {
     "supply_factor": {"min_n": 12, "unit": "month", "backtest_mean_pct": 2.6},
     # added 2026-09-28 with its tracker, before its first forward trade
     "upbit_caution": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 7.6},
+    "upbit_krw_listing": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 6.7},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",
