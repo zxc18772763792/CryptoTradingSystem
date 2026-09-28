@@ -52,8 +52,8 @@ DAY_MS = 86_400_000
 CAUTION = re.compile(r"유의\s*종목\s*지정")
 RELEASED = re.compile(r"지정\s*해제")
 NOT_TICKER = {"KRW", "BTC", "USDT", "ETH"}
-BACKTEST_REFERENCE = "31 perps 2022-26: +7.6%/trade after fees+funding, 90% CI [+4.3, +11.9], win 77%, no stops"
-KRW_LISTING_REFERENCE = "70 perps 2023-26: +6.7%/trade after fees+funding, 90% CI [+3.8, +9.3], win 76%, 2 stops near -49%"
+BACKTEST_REFERENCE = "31 perps 2022-26: +7.5%/trade after fees+funding, 90% CI [+4.2, +11.8], win 74%, no stops"
+KRW_LISTING_REFERENCE = "70 perps 2023-26: +6.5%/trade after fees+funding, 90% CI [+3.5, +9.1], win 74%, 2 stops near -49%"
 KRW_LISTING = re.compile(r"(신규\s*)?거래\s*지원\s*안내.*KRW|KRW.*(신규\s*)?거래\s*지원|(KRW|원화)[^(]*마켓[^(]*(추가|상장|오픈)|(원화|KRW)\s*마켓\s*(신규\s*)?상장")
 NOT_LISTING = re.compile(r"유의|거래\s*지원\s*종료|유통량")
 DEDUPE_DAYS = 30
@@ -214,11 +214,18 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
             try:
                 resp = await client.get(f"{FAPI}/klines", params={"symbol": trade["symbol"], "interval": "1d",
                                                                   "startTime": trade["day0_ms"], "limit": HOLD_DAYS + 2})
-                if resp.status_code == 200:
-                    bars = [[int(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4])] for b in resp.json()]
-                    fr = await client.get(f"{FAPI}/fundingRate", params={"symbol": trade["symbol"], "startTime": trade["day0_ms"], "limit": 100})
-                    funding = fr.json() if fr.status_code == 200 and isinstance(fr.json(), list) else []
-                    trade.update(evaluate_trade(bars, funding, trade["day0_ms"], now_ms), updated_at=now.isoformat())
+                if resp.status_code == 400:  # the contract no longer exists: never resolvable
+                    trade.update(status="delisted", updated_at=now.isoformat())
+                    continue
+                if resp.status_code != 200:
+                    continue  # transient: retry next pass
+                bars = [[int(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4])] for b in resp.json()]
+                # limit 1000: some perps settle funding hourly (7 days = 168+ settlements)
+                fr = await client.get(f"{FAPI}/fundingRate", params={"symbol": trade["symbol"], "startTime": trade["day0_ms"], "limit": 1000})
+                funding = fr.json() if fr.status_code == 200 else None
+                if not isinstance(funding, list):
+                    continue  # never book a missing funding history as zero funding
+                trade.update(evaluate_trade(bars, funding, trade["day0_ms"], now_ms), updated_at=now.isoformat())
             except Exception as exc:  # noqa: BLE001 - retried next pass
                 logger.debug(f"upbit caution tracker: {key} update failed: {exc}")
         if "reason" not in trade and llm_extract is not None:
@@ -249,6 +256,7 @@ def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
         "trades_total": len(trades),
         "backfilled": sum(bool(t.get("backfilled")) for t in trades),
         "no_perp": sum(t.get("status") == "no_perp" for t in trades),
+        "delisted": sum(t.get("status") == "delisted" for t in trades),
         "forward_waiting": sum(t.get("status") == "waiting_entry" for t in forward),
         "forward_open": sum(t.get("status") == "open" for t in forward),
         "forward_completed": len(done),

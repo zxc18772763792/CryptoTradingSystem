@@ -6497,7 +6497,7 @@ ${confirmHint}`,
     const s = payload?.summary || {};
     const trades = Array.isArray(payload?.trades) ? payload.trades : [];
     const pct = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
-    const statusNames = { waiting_d2: '等 D2 收盘', open: '持有中', closed: 'D14 平仓', stopped: '止损' };
+    const statusNames = { waiting_d2: '等 D2 收盘', open: '持有中', closed: 'D14 平仓', stopped: '止损', delisted: '合约下架' };
     const floatOf = (t) => t?.tokenomics?.llm?.circulating_supply_pct_at_listing ?? t?.tokenomics?.regex?.circulating_supply_pct_at_listing;
     panel.innerHTML = `
       <h3 style="margin:0;">新上市永续 D2→D14 做空 · 纸面跟踪</h3>
@@ -6555,7 +6555,7 @@ ${confirmHint}`,
       ${trackerVerdictLine(s)}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。每月初按排期未来 90 天新增供给排序，做多最低三分之一、做空最高三分之一，持有 30 天，扣 0.4% 成本。纸面记录，不下单；启动前开始的月份标为"回填"，不计入前向统计。</div>
       ${months.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>调仓日</th><th>状态</th><th>多空差</th><th>多头</th><th>空头</th><th>做多（低供给）</th><th>做空（高供给）</th><th></th></tr></thead><tbody>
-        ${months.map((m) => `<tr><td>${esc(m.rebalance_day)}</td><td>${m.status === 'closed' ? '已结算' : '持有中'}</td><td style="color:${Number(m.spread_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.spread_pct)}</td><td>${pct(m.long_return_pct)}</td><td>${pct(m.short_return_pct)}</td><td title="${names(m.long)}">${Object.keys(m.long || {}).length} 个</td><td title="${names(m.short)}">${Object.keys(m.short || {}).length} 个</td><td>${m.backfill ? '回填' : ''}</td></tr>`).join('')}
+        ${months.map((m) => `<tr><td>${esc(m.rebalance_day)}</td><td>${m.status === 'closed' ? '已结算' : m.status === 'unresolved' ? '无法结算' : '持有中'}</td><td style="color:${Number(m.spread_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.spread_pct)}</td><td>${pct(m.long_return_pct)}</td><td>${pct(m.short_return_pct)}</td><td title="${names(m.long)}">${Object.keys(m.long || {}).length} 个</td><td title="${names(m.short)}">${Object.keys(m.short || {}).length} 个</td><td>${m.backfill ? '回填' : ''}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；每月 1 日收盘后建仓。</div>'}`;
   }
 
@@ -6597,7 +6597,7 @@ ${confirmHint}`,
     const s = payload?.summary || {};
     const trades = Array.isArray(payload?.trades) ? payload.trades : [];
     const pct = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
-    const statusNames = { waiting_entry: '等当日收盘', open: '持有中', closed: '7 天平仓', stopped: '止损', no_perp: '无永续' };
+    const statusNames = { waiting_entry: '等当日收盘', open: '持有中', closed: '7 天平仓', stopped: '止损', no_perp: '无永续', delisted: '合约下架' };
     const reasonNames = { disclosure_or_supply: '披露/流通量', security_incident: '安全事件', project_or_team_issue: '项目/团队', network_or_technical: '网络/技术', legal_or_regulatory: '法律/监管', other: '其他' };
     panel.innerHTML = `
       <h3 style="margin:0;">${esc(cfg.title)}</h3>

@@ -183,13 +183,16 @@ async def tick(client, *, llm_extract=None, history: Optional[Dict[str, List[Dic
         if trade["status"] not in {"closed", "stopped", "delisted"}:  # finished trades keep their result
             resp = await client.get(f"{FAPI}/fapi/v1/klines", params={"symbol": perp["symbol"], "interval": "1d",
                                                                    "startTime": perp["onboard_ms"] - 86_400_000, "limit": 20})
-            if resp.status_code == 200:
+            if resp.status_code == 400:  # the contract no longer exists: stop polling it
+                trade.update(status="delisted", updated_at=now.isoformat())
+            elif resp.status_code == 200:
                 bars = [[int(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4])] for b in resp.json()]
                 funding = []
                 if len(bars) > ENTRY_BAR:
                     fr = await client.get(f"{FAPI}/fapi/v1/fundingRate", params={"symbol": perp["symbol"], "startTime": bars[0][0], "limit": 1000})
-                    funding = fr.json() if fr.status_code == 200 and isinstance(fr.json(), list) else []
-                trade.update(evaluate_trade(bars, funding, now.timestamp() * 1000), updated_at=now.isoformat())
+                    funding = fr.json() if fr.status_code == 200 else None
+                if isinstance(funding, list):  # a failed funding request retries next pass, never books zero funding
+                    trade.update(evaluate_trade(bars, funding, now.timestamp() * 1000), updated_at=now.isoformat())
 
         if "tokenomics" not in trade and history is not None:
             article = find_listing_announcement(perp["base"], history, perp["onboard_ms"])

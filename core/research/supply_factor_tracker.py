@@ -34,6 +34,7 @@ STATE_PATH = PROJECT_ROOT / "data" / "research" / "supply_factor" / "tracker.jso
 SPOT = "https://api.binance.com/api/v3"
 HORIZON_DAYS, HOLD_DAYS, MONTH_COST = 90, 30, 0.004
 MIN_TOKENS = 12
+CLOSE_GRACE_DAYS = 5  # after this, close with the exit prices that exist (true delistings)
 BACKTEST_REFERENCE = "long low / short high supply-growth terciles, 30d: +2.6%/month, 76% of months positive, IC<0 in 33/42 months"
 DAY = pd.Timedelta(days=1)
 
@@ -53,7 +54,10 @@ def save_state(state: Dict[str, Any], path: Path = STATE_PATH) -> None:
 
 def supply_growth(schedule: Dict[str, Any], day: pd.Timestamp, horizon_days: int = HORIZON_DAYS) -> Optional[float]:
     """Scheduled growth of unlocked supply from `day` to `day + horizon` (None if not covered)."""
-    unlocked = unlocked_series(schedule)
+    return growth_from_unlocked(unlocked_series(schedule), day, horizon_days)
+
+
+def growth_from_unlocked(unlocked: pd.Series, day: pd.Timestamp, horizon_days: int = HORIZON_DAYS) -> Optional[float]:
     if unlocked.empty:
         return None
     unlocked = unlocked.asfreq("1D").ffill()
@@ -83,11 +87,15 @@ async def _spot_universe(client) -> Dict[str, Dict[str, Any]]:
 
 
 async def _close_on(client, symbol: str, day: pd.Timestamp, now: pd.Timestamp) -> Optional[float]:
-    """Close of the daily bar that opens on `day`, only once that day has ended."""
+    """Close of the daily bar that opens on `day`, only once that day has ended.
+
+    None = the pair has no such bar (delisted: HTTP 400, or no row). Transient
+    failures raise instead, so the caller retries rather than dropping the coin.
+    """
     if day + DAY > now:
         return None
     resp = await client.get(f"{SPOT}/klines", params={"symbol": symbol, "interval": "1d", "startTime": int(day.timestamp() * 1000), "limit": 1})
-    rows = resp.json() if resp.status_code == 200 else []
+    rows = ut._checked_json(resp)
     if not isinstance(rows, list) or not rows or pd.Timestamp(rows[0][0], unit="ms", tz="UTC") != day:
         return None
     return float(rows[0][4])
@@ -98,11 +106,10 @@ async def _open_month(client, day: pd.Timestamp, now: pd.Timestamp, backfill: bo
     growth: Dict[str, float] = {}
     for ticker, token in universe.items():
         try:
-            schedule = await ut._cached_json(client, f"{LLAMA_DATASETS}/emissions/{token['slug']}",
-                                             ut.CACHE_DIR / "emissions" / f"{token['slug']}.json", ut.SCHEDULE_TTL_SEC)
+            unlocked = await ut.schedule_unlocked(client, token["slug"])
         except Exception:  # noqa: BLE001 - some index entries have no schedule file
             continue
-        g = supply_growth(schedule, day)
+        g = growth_from_unlocked(unlocked, day)
         if g is not None:
             growth[ticker] = g
     if len(growth) < MIN_TOKENS:
@@ -125,16 +132,24 @@ async def _open_month(client, day: pd.Timestamp, now: pd.Timestamp, backfill: bo
 
 async def _close_month(client, month: Dict[str, Any], now: pd.Timestamp) -> None:
     exit_day = pd.Timestamp(month["exit_day"], tz="UTC")
+    give_up = now >= exit_day + pd.Timedelta(days=CLOSE_GRACE_DAYS)
     rets: Dict[str, List[float]] = {"long": [], "short": []}
     for leg in ("long", "short"):
         for ticker, row in month[leg].items():
             if not row.get("entry"):
                 continue
-            px = await _close_on(client, month["symbols"][ticker], exit_day, now)
-            row["exit"] = px
-            if px:  # a pair delisted mid-month has no exit close and is dropped, as in the backtest
-                rets[leg].append(px / row["entry"] - 1)
+            if not row.get("exit"):
+                try:
+                    row["exit"] = await _close_on(client, month["symbols"][ticker], exit_day, now)
+                except Exception:  # noqa: BLE001 - transient: keep the month open and retry next pass
+                    if not give_up:
+                        return
+                    row["exit"] = None
+            if row["exit"]:  # a pair delisted mid-month has no exit close and is dropped, as in the backtest
+                rets[leg].append(row["exit"] / row["entry"] - 1)
     if not rets["long"] or not rets["short"]:
+        if give_up:  # a whole leg without exit prices: record it and stop polling
+            month["status"] = "unresolved"
         return
     spread = float(np.mean(rets["long"]) - np.mean(rets["short"]) - MONTH_COST)
     month.update(status="closed", long_return_pct=round(float(np.mean(rets["long"])) * 100, 3),

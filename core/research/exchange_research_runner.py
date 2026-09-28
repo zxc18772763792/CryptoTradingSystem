@@ -9,6 +9,7 @@ nothing here places or closes orders.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -37,8 +38,10 @@ TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解�
 ALERT_VERDICTS = {"retire", "confirmed"}
 
 UPBIT_INTERVAL_SEC = 1800
-_last_run: Dict[str, float] = {"notices": 0.0, "tracker": 0.0, "unlock": 0.0, "delist_risk": 0.0, "supply": 0.0, "upbit": 0.0}
+_last_run: Dict[str, float] = {}
 _status: Dict[str, Any] = {}
+_durations: Dict[str, float] = {}
+_running: "Optional[asyncio.Task[Any]]" = None
 
 
 def status() -> Dict[str, Any]:
@@ -161,60 +164,83 @@ async def _llm_upbit_reason(text: str) -> Optional[Dict[str, Any]]:
     )
 
 
+async def _run_job(name: str, interval_sec: float, now: float, force: bool, job) -> None:
+    """Run one job if due: isolated errors, duration recorded, stale error cleared on success."""
+    if not force and now - _last_run.get(name, 0.0) < interval_sec:
+        return
+    _last_run[name] = now
+    started = time.perf_counter()
+    try:
+        await job()
+        _status.pop(f"{name}_error", None)
+    except Exception as exc:
+        _status[f"{name}_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+        logger.warning(f"exchange research job {name} failed: {exc}")
+    finally:
+        _durations[name] = round(time.perf_counter() - started, 2)
+        _status["durations_sec"] = dict(_durations)
+
+
 async def tick(force: bool = False) -> Dict[str, Any]:
     now = time.time()
     async with _client() as client:
-        if force or now - _last_run["notices"] >= NOTICE_INTERVAL_SEC:
-            _last_run["notices"] = now
-            try:
-                await _refresh_notices(client)
-            except Exception as exc:
-                _status["notices_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
-                logger.warning(f"delisting guard refresh failed: {exc}")
-        if force or now - _last_run["tracker"] >= TRACKER_INTERVAL_SEC:
-            _last_run["tracker"] = now
-            try:
-                _status["tracker"] = await listing_short_tracker.tick(
-                    client, llm_extract=_llm_extract, history=exchange_notices.load_history()
-                )
-                await _verdict_alert("listing_short", _status["tracker"])
-            except Exception as exc:
-                _status["tracker_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
-                logger.warning(f"listing short tracker failed: {exc}")
-        if force or now - _last_run["unlock"] >= UNLOCK_INTERVAL_SEC:
-            _last_run["unlock"] = now
-            try:
-                _status["unlock_tracker"] = await unlock_short_tracker.tick(client)
-                await _verdict_alert("unlock_short", _status["unlock_tracker"])
-            except Exception as exc:
-                _status["unlock_tracker_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
-                logger.warning(f"unlock short tracker failed: {exc}")
-        if force or now - _last_run["supply"] >= UNLOCK_INTERVAL_SEC:
-            _last_run["supply"] = now
-            try:
-                _status["supply_factor"] = await supply_factor_tracker.tick(client)
-                await _verdict_alert("supply_factor", _status["supply_factor"])
-            except Exception as exc:
-                _status["supply_factor_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
-                logger.warning(f"supply factor tracker failed: {exc}")
-        if force or now - _last_run["upbit"] >= UPBIT_INTERVAL_SEC:
-            _last_run["upbit"] = now
-            try:
-                _status["upbit_caution"] = await upbit_caution_tracker.tick(client, llm_extract=_llm_upbit_reason)
-                await _verdict_alert("upbit_caution", _status["upbit_caution"])
-                _status["upbit_krw_listing"] = await upbit_caution_tracker.tick(client, strategy="krw_listing")
-                await _verdict_alert("upbit_krw_listing", _status["upbit_krw_listing"])
-            except Exception as exc:
-                _status["upbit_caution_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
-                logger.warning(f"upbit caution tracker failed: {exc}")
-        if (force or now - _last_run["delist_risk"] >= DELIST_RISK_INTERVAL_SEC) and delist_risk.MODEL_PATH.exists():
-            _last_run["delist_risk"] = now
-            try:
-                model = delist_risk.load_model()
-                scored = await delist_risk.compute_live_scores(client, model)
-                delist_risk.write_scores(scored, model)
-                _status["delist_risk"] = {"scored": int(len(scored)), "flagged": int(scored["flagged"].sum()), "checked_at": now}
-            except Exception as exc:
-                _status["delist_risk_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
-                logger.warning(f"delist risk scoring failed: {exc}")
+        async def notices():
+            await _refresh_notices(client)
+
+        async def listing():
+            history = await asyncio.to_thread(exchange_notices.load_history)
+            _status["tracker"] = await listing_short_tracker.tick(client, llm_extract=_llm_extract, history=history)
+            await _verdict_alert("listing_short", _status["tracker"])
+
+        async def unlock():
+            _status["unlock_tracker"] = await unlock_short_tracker.tick(client)
+            await _verdict_alert("unlock_short", _status["unlock_tracker"])
+
+        async def supply():
+            _status["supply_factor"] = await supply_factor_tracker.tick(client)
+            await _verdict_alert("supply_factor", _status["supply_factor"])
+
+        async def upbit_caution():
+            _status["upbit_caution"] = await upbit_caution_tracker.tick(client, llm_extract=_llm_upbit_reason)
+            await _verdict_alert("upbit_caution", _status["upbit_caution"])
+
+        async def upbit_krw_listing():
+            _status["upbit_krw_listing"] = await upbit_caution_tracker.tick(client, strategy="krw_listing")
+            await _verdict_alert("upbit_krw_listing", _status["upbit_krw_listing"])
+
+        async def delist():
+            model = delist_risk.load_model()
+            scored = await delist_risk.compute_live_scores(client, model)
+            await asyncio.to_thread(delist_risk.write_scores, scored, model)
+            _status["delist_risk"] = {"scored": int(len(scored)), "flagged": int(scored["flagged"].sum()), "checked_at": now}
+
+        await _run_job("notices", NOTICE_INTERVAL_SEC, now, force, notices)
+        await _run_job("tracker", TRACKER_INTERVAL_SEC, now, force, listing)
+        await _run_job("unlock", UNLOCK_INTERVAL_SEC, now, force, unlock)
+        await _run_job("supply", UNLOCK_INTERVAL_SEC, now, force, supply)
+        await _run_job("upbit", UPBIT_INTERVAL_SEC, now, force, upbit_caution)
+        await _run_job("upbit_krw_listing", UPBIT_INTERVAL_SEC, now, force, upbit_krw_listing)
+        if delist_risk.MODEL_PATH.exists():
+            await _run_job("delist_risk", DELIST_RISK_INTERVAL_SEC, now, force, delist)
     return status()
+
+
+def start_background_tick() -> bool:
+    """Run tick() as a background task unless one is still running.
+
+    The research scheduler calls this every ~5 minutes. A full pass (hundreds of
+    exchange requests after a restart) can take minutes; awaiting it inline held
+    up the research-job queue behind it, and overlapping passes would race on
+    the same state files. Returns False when a pass is already in flight.
+    """
+    global _running
+    if _running is not None and not _running.done():
+        return False
+    _running = asyncio.get_running_loop().create_task(tick())
+    _running.add_done_callback(_log_background_failure)
+    return True
+
+
+def _log_background_failure(task: "asyncio.Task[Any]") -> None:
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning(f"exchange research pass failed: {task.exception()}")
