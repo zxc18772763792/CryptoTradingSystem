@@ -505,6 +505,20 @@ def _build_scope_failover_entry(
     }
 
 
+def _failover_entry_changed(entry: Mapping[str, Any], previous: Mapping[str, Any]) -> bool:
+    """True when anything but the ``updated_at`` stamp differs.
+
+    Every model call used to rewrite the shared failover file (the stamp always
+    differs), under a cross-process file lock on the event loop; with a busy disk
+    one save froze the web loop ~4 s (2026-09-28). The primary-retry timer reads
+    ``primary_retry_started_at``, which is part of the comparison, so skipping a
+    stamp-only write does not delay a retry.
+    """
+    ignore = {"updated_at"}
+    keys = (set(entry) | set(previous)) - ignore
+    return any(entry.get(key) != previous.get(key) for key in keys)
+
+
 def _failover_entry_matches_targets(raw_entry: Mapping[str, Any], base_urls: Sequence[str]) -> bool:
     raw_base_urls = raw_entry.get("base_urls")
     if not isinstance(raw_base_urls, list):
@@ -570,7 +584,7 @@ def _load_scope_failover_entry(
                     chat_preferred_base_urls=raw_chat_preferred,
                 )
                 _preserve_primary_retry_clock(entry, raw_entry)
-                if raw_entry != entry:
+                if _failover_entry_changed(entry, raw_entry):
                     scopes[normalized_scope] = entry
                     _save_openai_failover_state(
                         path,
@@ -703,11 +717,12 @@ def _remember_scope_failover_state(
                         )
 
                 _preserve_primary_retry_clock(entry, raw_entry, primary_failed=normalized_failure == primary_base_url)
-                scopes[normalized_scope] = entry
-                _save_openai_failover_state(
-                    path,
-                    {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
-                )
+                if _failover_entry_changed(entry, raw_entry):
+                    scopes[normalized_scope] = entry
+                    _save_openai_failover_state(
+                        path,
+                        {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+                    )
                 return
 
         raw_entry = _OPENAI_SCOPED_FAILOVER_STATE.get(normalized_scope)
@@ -839,11 +854,12 @@ def _remember_scope_chat_preference(
                     chat_preferred_base_urls=chat_preferred,
                 )
                 _preserve_primary_retry_clock(entry, raw_entry)
-                scopes[normalized_scope] = entry
-                _save_openai_failover_state(
-                    path,
-                    {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
-                )
+                if _failover_entry_changed(entry, raw_entry):
+                    scopes[normalized_scope] = entry
+                    _save_openai_failover_state(
+                        path,
+                        {"version": _OPENAI_FAILOVER_STATE_VERSION, "scopes": scopes},
+                    )
                 return
 
         raw_entry = _OPENAI_SCOPED_FAILOVER_STATE.get(normalized_scope)

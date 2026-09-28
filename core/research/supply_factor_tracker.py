@@ -8,6 +8,12 @@ long the lowest third, short the highest third, hold 30 days, 0.4% cost:
 the same within age and market-cap groups. This tracker repeats exactly that
 rule on months that have not happened yet.
 
+Weekly measurement (added 2026-09-28, no trades): every Monday close the tracker
+records each token's scheduled 90-day growth and price, and a week later the rank
+correlation between growth and the week's return. The monthly trade needs 12
+months for a verdict; the direction test gets ~4x the samples (backtest: IC < 0
+in 141/194 weeks, p=1e-10), while weekly *trading* does not pay after costs.
+
 Rules: the portfolio for month D uses the schedule as DefiLlama shows it on
 the rebalance day, entry = close of day D, exit = close of day D+30, returns
 from Binance spot daily closes. Months that started before the tracker are
@@ -26,6 +32,7 @@ import pandas as pd
 from loguru import logger
 
 from core.research import retirement
+from core.research.xs_evaluation import spearman
 from core.research import unlock_short_tracker as ut
 from core.research.unlock_events import LLAMA_DATASETS, entry_price, entry_ticker, unlocked_series
 
@@ -101,7 +108,7 @@ async def _close_on(client, symbol: str, day: pd.Timestamp, now: pd.Timestamp) -
     return float(rows[0][4])
 
 
-async def _open_month(client, day: pd.Timestamp, now: pd.Timestamp, backfill: bool) -> Optional[Dict[str, Any]]:
+async def _universe_growth(client, day: pd.Timestamp):
     universe = await _spot_universe(client)
     growth: Dict[str, float] = {}
     for ticker, token in universe.items():
@@ -112,6 +119,11 @@ async def _open_month(client, day: pd.Timestamp, now: pd.Timestamp, backfill: bo
         g = growth_from_unlocked(unlocked, day)
         if g is not None:
             growth[ticker] = g
+    return universe, growth
+
+
+async def _open_month(client, day: pd.Timestamp, now: pd.Timestamp, backfill: bool) -> Optional[Dict[str, Any]]:
+    universe, growth = await _universe_growth(client, day)
     if len(growth) < MIN_TOKENS:
         logger.warning(f"supply factor: only {len(growth)} tokens with schedules for {day.date()}")
         return None
@@ -178,10 +190,68 @@ async def tick(client, state_path: Path = STATE_PATH, now: Optional[pd.Timestamp
                 await _close_month(client, month, now)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"supply factor: close {month['rebalance_day']} failed: {exc}")
+    try:
+        await _tick_weekly_ic(client, state, now, started)
+    except Exception as exc:  # noqa: BLE001 - measurement only; retried next pass
+        logger.warning(f"supply factor: weekly IC failed: {exc}")
     state["updated_at"] = now.isoformat()
     retirement.register(state, "supply_factor", now.isoformat())
     save_state(state, state_path)
     return summary(state)
+
+
+async def _tick_weekly_ic(client, state: Dict[str, Any], now: pd.Timestamp, started: pd.Timestamp) -> None:
+    weeks = state.setdefault("weekly_ic", {})
+    monday = now.normalize() - pd.Timedelta(days=now.weekday())
+    key = str(monday.date())
+    if key not in weeks and monday + DAY <= now:
+        universe, growth = await _universe_growth(client, monday)
+        if len(growth) >= MIN_TOKENS:
+            entries: Dict[str, float] = {}
+            for ticker in growth:
+                px = await _close_on(client, universe[ticker]["symbol"], monday, now)  # transient errors raise: retry
+                if px:
+                    entries[ticker] = px
+            weeks[key] = {"week": key, "status": "open", "backfill": monday < started.normalize(),
+                          "growth": {t: round(growth[t], 5) for t in entries}, "entry": entries,
+                          "symbols": {t: universe[t]["symbol"] for t in entries}}
+    for week in weeks.values():
+        end = pd.Timestamp(week["week"], tz="UTC") + pd.Timedelta(days=7)
+        if week["status"] != "open" or end + DAY > now:
+            continue
+        exits: Dict[str, float] = {}
+        for ticker, symbol in week["symbols"].items():
+            px = await _close_on(client, symbol, end, now)
+            if px:
+                exits[ticker] = px
+        rets = {t: exits[t] / week["entry"][t] - 1 for t in exits}
+        if len(rets) < MIN_TOKENS:
+            week["status"] = "unresolved"
+            continue
+        g = pd.Series({t: week["growth"][t] for t in rets})
+        r = pd.Series(rets)
+        q = g.rank(pct=True)
+        week.update(status="closed", n=len(rets), ic=round(spearman(g, r), 4),
+                    spread_pct=round(float((r[q <= 1 / 3].mean() - r[q > 2 / 3].mean()) * 100), 3))
+        week.pop("entry", None)  # keep the state small once the week is scored
+        week.pop("symbols", None)
+
+
+def weekly_ic_summary(state: Dict[str, Any]) -> Dict[str, Any]:
+    from math import comb
+
+    closed = [w for w in (state.get("weekly_ic") or {}).values() if w.get("status") == "closed" and not w.get("backfill")]
+    n = len(closed)
+    negative = sum(float(w["ic"]) < 0 for w in closed)
+    return {
+        "weeks_completed": n,
+        "weeks_ic_negative": negative,
+        "mean_ic": round(float(np.mean([w["ic"] for w in closed])), 4) if closed else None,
+        "mean_gross_spread_pct": round(float(np.mean([w["spread_pct"] for w in closed])), 3) if closed else None,
+        # one-sided sign test that low-growth tokens beat high-growth ones (IC < 0)
+        "sign_test_p": round(sum(comb(n, i) for i in range(negative, n + 1)) / 2 ** n, 4) if n else None,
+        "backtest_reference": "weekly rank IC < 0 in 141/194 weeks 2023-26 (p=1e-10); weekly trading does not pay after 0.4% costs",
+    }
 
 
 def summary(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -199,5 +269,6 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "forward_positive_months": round(float(np.mean([s > 0 for s in spreads])), 3) if spreads else None,
         "backtest_reference": BACKTEST_REFERENCE,
         "evaluation_ready": len(done) >= 12,
+        "weekly_ic": weekly_ic_summary(state),
         "retirement": retirement.verdict(spreads, state.get("retirement_rule") or retirement.RULES["supply_factor"]),
     }

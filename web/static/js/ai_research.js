@@ -6509,13 +6509,31 @@ ${confirmHint}`,
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每小时检查一次新上线永续。</div>'}`;
   }
 
-  function renderUnlockShortTracker(payload) {
-    const anchor = document.getElementById('ai-listing-short-tracker') || document.getElementById('ai-research-loop-v2');
+  const UNLOCK_TRACKERS = {
+    t30: {
+      id: 'ai-unlock-short-tracker',
+      anchors: ['ai-listing-short-tracker', 'ai-research-loop-v2'],
+      title: '大额解锁前做空 · 纸面跟踪',
+      rule: '解锁前 30 天收盘做空永续、前 1 天平仓，+40% 止损，篮子对冲。',
+      minN: 20,
+    },
+    t7: {
+      id: 'ai-unlock-short-t7-tracker',
+      anchors: ['ai-unlock-short-tracker', 'ai-listing-short-tracker'],
+      title: '解锁前最后一周做空 · 影子跟踪',
+      rule: '影子版本（2026-09-28 起）：解锁 ≥5%，解锁前 7 天收盘做空、前 1 天平仓，+40% 止损，篮子对冲。持有 6 天，事件约为原版 2.6 倍，用来更快验证同一批解锁；它是从 8 个参数组合中选出的，需要前向数据证明。',
+      minN: 30,
+    },
+  };
+
+  function renderUnlockShortTracker(payload, variant = 't30') {
+    const cfg = UNLOCK_TRACKERS[variant];
+    const anchor = cfg.anchors.map((id) => document.getElementById(id)).find(Boolean);
     if (!anchor) return;
-    let panel = document.getElementById('ai-unlock-short-tracker');
+    let panel = document.getElementById(cfg.id);
     if (!panel) {
       panel = document.createElement('section');
-      panel.id = 'ai-unlock-short-tracker';
+      panel.id = cfg.id;
       panel.className = 'card';
       panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
       anchor.insertAdjacentElement('afterend', panel);
@@ -6525,10 +6543,10 @@ ${confirmHint}`,
     const pct = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
     const statusNames = { scheduled: '待入场', open: '持有中', closed: '到期平仓', stopped: '止损', schedule_changed: '排期变更', entry_failed: '入场失败' };
     panel.innerHTML = `
-      <h3 style="margin:0;">大额解锁前做空 · 纸面跟踪</h3>
-      <div style="margin-top:6px;color:var(--text-sub);">前向：待入场 ${Number(s.forward_scheduled || 0)} · 持有 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)}（排期变更 ${Number(s.forward_schedule_changed || 0)}）· 对冲后均值 ${pct(s.forward_mean_hedged_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '样本不足 20 笔，暂不评估'}</div>
+      <h3 style="margin:0;">${esc(cfg.title)}</h3>
+      <div style="margin-top:6px;color:var(--text-sub);">前向：待入场 ${Number(s.forward_scheduled || 0)} · 持有 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)}（排期变更 ${Number(s.forward_schedule_changed || 0)}）· 对冲后均值 ${pct(s.forward_mean_hedged_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : `样本不足 ${cfg.minN} 笔，暂不评估`}</div>
       ${trackerVerdictLine(s)}
-      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。解锁前 30 天收盘做空永续、前 1 天平仓，+40% 止损，篮子对冲。纸面记录，不下单；启动时已过入场日的标为"迟到"，不计入前向统计。</div>
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${esc(cfg.rule)}纸面记录，不下单；启动时已过入场日的标为"迟到"，不计入前向统计。</div>
       ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>代币</th><th>解锁日</th><th>规模</th><th>类型</th><th>入场日</th><th>状态</th><th>对冲后</th><th>仅空头</th><th></th></tr></thead><tbody>
         ${trades.map((t) => `<tr><td>${esc(t.token)}</td><td>${esc(t.unlock_date)}</td><td>${Number(t.size_pct).toFixed(1)}%</td><td>${t.insider ? '团队/投资人' : '生态/其他'}</td><td>${esc(t.entry_day)}</td><td>${esc(statusNames[t.status] || t.status)}</td><td style="color:${Number(t.hedged_return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.hedged_return_pct)}</td><td>${pct(t.short_return_pct ?? t.mark_return_pct)}</td><td>${t.late ? '迟到' : ''}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每 6 小时检查未来 60 天的大额解锁。</div>'}`;
@@ -6553,6 +6571,11 @@ ${confirmHint}`,
       <h3 style="margin:0;">供给通胀因子 · 月度多空纸面跟踪</h3>
       <div style="margin-top:6px;color:var(--text-sub);">前向：持有中 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)} 个月 · 平均多空差 ${pct(s.forward_mean_spread_pct)}/月 · 正收益月份 ${s.forward_positive_months == null ? '--' : `${(Number(s.forward_positive_months) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '不足 12 个月，暂不评估'}</div>
       ${trackerVerdictLine(s)}
+      ${(() => {
+        const w = s.weekly_ic || {};
+        const n = Number(w.weeks_completed || 0);
+        return `<div style="margin-top:4px;">每周方向测量（不交易）：已完成 ${n} 周${n ? ` · 秩相关为负 ${Number(w.weeks_ic_negative || 0)}/${n} 周 · 平均 IC ${w.mean_ic == null ? '--' : Number(w.mean_ic).toFixed(3)} · 符号检验 p=${w.sign_test_p == null ? '--' : Number(w.sign_test_p).toFixed(3)}` : ' · 每周一收盘后记录，一周后评分'}<span class="u-note">（回测：194 周中 141 周为负；约 3 个月可判断方向是否仍成立）</span></div>`;
+      })()}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。每月初按排期未来 90 天新增供给排序，做多最低三分之一、做空最高三分之一，持有 30 天，扣 0.4% 成本。纸面记录，不下单；启动前开始的月份标为"回填"，不计入前向统计。</div>
       ${months.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>调仓日</th><th>状态</th><th>多空差</th><th>多头</th><th>空头</th><th>做多（低供给）</th><th>做空（高供给）</th><th></th></tr></thead><tbody>
         ${months.map((m) => `<tr><td>${esc(m.rebalance_day)}</td><td>${m.status === 'closed' ? '已结算' : m.status === 'unresolved' ? '无法结算' : '持有中'}</td><td style="color:${Number(m.spread_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.spread_pct)}</td><td>${pct(m.long_return_pct)}</td><td>${pct(m.short_return_pct)}</td><td title="${names(m.long)}">${Object.keys(m.long || {}).length} 个</td><td title="${names(m.short)}">${Object.keys(m.short || {}).length} 个</td><td>${m.backfill ? '回填' : ''}</td></tr>`).join('')}
@@ -6621,6 +6644,9 @@ ${confirmHint}`,
   async function refreshUnlockShortTracker() {
     try {
       renderUnlockShortTracker(await aiApi('/unlock-short', { timeoutMs: 12000 }));
+    } catch (err) { /* optional panel */ }
+    try {
+      renderUnlockShortTracker(await aiApi('/unlock-short-t7', { timeoutMs: 12000 }), 't7');
     } catch (err) { /* optional panel */ }
   }
 
