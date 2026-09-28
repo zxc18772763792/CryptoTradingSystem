@@ -4,7 +4,11 @@
   default_half_life_min: 240
   gdelt_timeout_sec: 30
   gdelt_max_records: 160
-  gdelt_query: "(bitcoin OR ethereum OR solana OR xrp OR stablecoin OR binance OR crypto OR ETF OR SEC OR hack OR liquidation OR fed OR fomc OR treasury OR staking OR onchain)"
+  # 2026-09-28: the old query (ETF/SEC/hack/liquidation/fed/treasury, all languages) was 98% off-topic
+  # (36 of 1,628 items in 7 days mentioned crypto). Unambiguous crypto terms, English + Chinese sources: ~46%.
+  # Macro is covered by jin10 and the coinglass calendar feeds.
+  gdelt_query: '(bitcoin OR ethereum OR cryptocurrency OR stablecoin OR binance OR coinbase OR solana OR blockchain OR "crypto exchange" OR "crypto market") (sourcelang:english OR sourcelang:chinese)'
+
   news_sources:
     [
       chaincatcher_flash,

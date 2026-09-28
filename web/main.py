@@ -135,6 +135,14 @@ _PUBLIC_MACRO_WORKERS_ENABLED = _env_bool(
     "PUBLIC_MACRO_WORKERS_ENABLED",
     bool(getattr(settings, "PUBLIC_MACRO_WORKERS_ENABLED", False)),
 )
+# The daily macro cache (yfinance/Yahoo, FRED, stats.gov.cn) feeds the research
+# workbench and planner. It used to share the switch above with Google Trends and
+# was therefore off, leaving the snapshot frozen (20 days stale on 2026-09-28).
+# It is non-blocking (~15 s, loop lag < 20 ms), so it has its own switch, on by default.
+_MACRO_CACHE_WORKER_ENABLED = _PUBLIC_MACRO_WORKERS_ENABLED or _env_bool(
+    "MACRO_CACHE_WORKER_ENABLED",
+    bool(getattr(settings, "MACRO_CACHE_WORKER_ENABLED", True)),
+)
 _PREMIUM_EXTERNAL_WORKERS_ENABLED = _env_bool(
     "PREMIUM_EXTERNAL_WORKERS_ENABLED",
     bool(getattr(settings, "PREMIUM_EXTERNAL_WORKERS_ENABLED", False)),
@@ -2141,18 +2149,15 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "restart_on_failure": True,
         }
     if _PUBLIC_MACRO_WORKERS_ENABLED:
-        factories.update(
-            {
-                "google_trends": {
-                    "factory": lambda stop_event: _google_trends_worker(stop_event),
-                    "restart_on_failure": False,
-                },
-                "macro_cache": {
-                    "factory": lambda stop_event: _macro_cache_worker(stop_event),
-                    "restart_on_failure": False,
-                },
-            }
-        )
+        factories["google_trends"] = {
+            "factory": lambda stop_event: _google_trends_worker(stop_event),
+            "restart_on_failure": False,
+        }
+    if _MACRO_CACHE_WORKER_ENABLED:
+        factories["macro_cache"] = {
+            "factory": lambda stop_event: _macro_cache_worker(stop_event),
+            "restart_on_failure": False,
+        }
     if _PREMIUM_EXTERNAL_WORKERS_ENABLED:
         factories.update(
             {

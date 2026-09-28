@@ -73,6 +73,7 @@ def test_news_llm_task_can_be_forced_external_only(monkeypatch):
 
 def test_optional_external_data_workers_are_disabled_by_default(monkeypatch):
     monkeypatch.setattr(web_main, "_PUBLIC_MACRO_WORKERS_ENABLED", False)
+    monkeypatch.setattr(web_main, "_MACRO_CACHE_WORKER_ENABLED", False)
     monkeypatch.setattr(web_main, "_PREMIUM_EXTERNAL_WORKERS_ENABLED", False)
     monkeypatch.setattr(web_main, "_COINGLASS_WORKER_ENABLED", True)
 
@@ -87,6 +88,18 @@ def test_optional_external_data_workers_are_disabled_by_default(monkeypatch):
     assert "kaiko" not in factories
 
 
+def test_macro_cache_worker_has_its_own_switch(monkeypatch):
+    # The workbench's macro snapshot needs the daily refresh even when the other
+    # public-data workers (Google Trends) stay off.
+    monkeypatch.setattr(web_main, "_PUBLIC_MACRO_WORKERS_ENABLED", False)
+    monkeypatch.setattr(web_main, "_MACRO_CACHE_WORKER_ENABLED", True)
+
+    factories = web_main._build_runtime_task_factories(FastAPI())
+
+    assert "macro_cache" in factories
+    assert "google_trends" not in factories
+
+
 def test_coinglass_worker_factory_can_be_disabled(monkeypatch):
     monkeypatch.setattr(web_main, "_COINGLASS_WORKER_ENABLED", False)
 
@@ -98,6 +111,7 @@ def test_coinglass_worker_factory_can_be_disabled(monkeypatch):
 def test_optional_external_data_workers_can_be_enabled(monkeypatch):
     monkeypatch.setattr(web_main, "_COINGLASS_WORKER_ENABLED", True)
     monkeypatch.setattr(web_main, "_PUBLIC_MACRO_WORKERS_ENABLED", True)
+    monkeypatch.setattr(web_main, "_MACRO_CACHE_WORKER_ENABLED", True)
     monkeypatch.setattr(web_main, "_PREMIUM_EXTERNAL_WORKERS_ENABLED", True)
 
     factories = web_main._build_runtime_task_factories(FastAPI())
