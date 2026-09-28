@@ -76,7 +76,8 @@ def test_evaluate_trade_closes_at_d14_with_funding():
     result = lt.evaluate_trade(bars(closes), funding, now_ms=20 * DAY)
     entry = 1.0 * (1 - lt.ENTRY_SLIPPAGE)
     assert result["status"] == "closed"
-    assert result["return_pct"] == pytest.approx((entry / 0.5 - 1 + 0.001 - lt.ROUND_TRIP_COST) * 100, abs=1e-3)
+    # linear short: a fall from entry to 0.5 earns (entry - 0.5) / entry, not entry / 0.5 - 1
+    assert result["return_pct"] == pytest.approx(((entry - 0.5) / entry + 0.001 - lt.ROUND_TRIP_COST) * 100, abs=1e-3)
 
 
 def test_evaluate_trade_stops_on_a_daily_high_and_marks_open_trades():

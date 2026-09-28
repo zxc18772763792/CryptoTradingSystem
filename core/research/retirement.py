@@ -25,7 +25,8 @@ from typing import Any, Dict, Optional, Sequence
 Z90 = 1.645
 DECAY_FRACTION = 0.25
 RULES: Dict[str, Dict[str, Any]] = {
-    "listing_short": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 15.8},
+    # 15.8 came from an entry/exit - 1 P&L bug; corrected 2026-09-28 before any forward trade
+    "listing_short": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 1.5},
     "unlock_short": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 9.5},
     "supply_factor": {"min_n": 12, "unit": "month", "backtest_mean_pct": 2.6},
     # added 2026-09-28 with its tracker, before its first forward trade

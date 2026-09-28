@@ -189,7 +189,9 @@ def study_listing(c, hist, stop: float) -> None:
                 break
         entry_ms, exit_ms = k.index[2].timestamp() * 1000, exit_t.timestamp() * 1000
         fund = sum(float(x["fundingRate"]) for x in funding if entry_ms <= int(x["fundingTime"]) <= exit_ms)
-        results.append({"tk": tk, "year": k.index[2].year, "ret": entry / exit_px - 1 + fund - 0.003})
+        # Linear USDT-perp short: (entry - exit) / entry. Until 2026-09-28 this used
+        # entry / exit - 1, which inflates gains and damps squeezes (+15.8% -> +1.5%/trade).
+        results.append({"tk": tk, "year": k.index[2].year, "ret": (entry - exit_px) / entry + fund - 0.003})
     R = pd.DataFrame(results)
     print(f"\n[new perps: short D2 close -> D14 close, stop +{stop:.0%}, funding + 0.3% costs]")
     if len(R):
