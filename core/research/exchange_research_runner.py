@@ -2,7 +2,7 @@
 
 Called from the research scheduler tick (every ~5 min) and rate-limited here:
 announcements every 30 min (flags + one-time alerts for held / watchlisted
-coins), the listing tracker every 60 min. Each paper tracker's pre-registered
+coins), the listing tracker every 60 min, the Upbit caution tracker every 30 min. Each paper tracker's pre-registered
 retirement verdict (core/research/retirement.py) alerts once when it turns
 "retire" or "confirmed". Research and risk annotation only:
 nothing here places or closes orders.
@@ -16,7 +16,14 @@ from typing import Any, Dict, Optional, Set
 
 from loguru import logger
 
-from core.research import delist_risk, exchange_notices, listing_short_tracker, supply_factor_tracker, unlock_short_tracker
+from core.research import (
+    delist_risk,
+    exchange_notices,
+    listing_short_tracker,
+    supply_factor_tracker,
+    unlock_short_tracker,
+    upbit_caution_tracker,
+)
 
 NOTICE_INTERVAL_SEC = 1800
 TRACKER_INTERVAL_SEC = 3600
@@ -25,10 +32,12 @@ DELIST_RISK_INTERVAL_SEC = 24 * 3600
 ALERT_STATE_PATH = exchange_notices.ANNOUNCEMENT_DIR / "guard_alerts.json"
 WATCHLIST_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "pump_watchlist" / "latest.json"
 VERDICT_STATE_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "tracker_verdicts.json"
-TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解锁前做空", "supply_factor": "供给通胀因子"}
+TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解锁前做空", "supply_factor": "供给通胀因子",
+                 "upbit_caution": "Upbit 警示后做空"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
-_last_run: Dict[str, float] = {"notices": 0.0, "tracker": 0.0, "unlock": 0.0, "delist_risk": 0.0, "supply": 0.0}
+UPBIT_INTERVAL_SEC = 1800
+_last_run: Dict[str, float] = {"notices": 0.0, "tracker": 0.0, "unlock": 0.0, "delist_risk": 0.0, "supply": 0.0, "upbit": 0.0}
 _status: Dict[str, Any] = {}
 
 
@@ -142,6 +151,16 @@ async def _llm_extract(text: str) -> Optional[Dict[str, Any]]:
     )
 
 
+async def _llm_upbit_reason(text: str) -> Optional[Dict[str, Any]]:
+    from core.ai.research_context_generator import generate_json  # noqa: PLC0415
+
+    return await generate_json(
+        json.dumps({"notice_text": text}, ensure_ascii=False),
+        system_prompt=upbit_caution_tracker.REASON_SYSTEM_PROMPT,
+        timeout=90,
+    )
+
+
 async def tick(force: bool = False) -> Dict[str, Any]:
     now = time.time()
     async with _client() as client:
@@ -178,6 +197,14 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             except Exception as exc:
                 _status["supply_factor_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
                 logger.warning(f"supply factor tracker failed: {exc}")
+        if force or now - _last_run["upbit"] >= UPBIT_INTERVAL_SEC:
+            _last_run["upbit"] = now
+            try:
+                _status["upbit_caution"] = await upbit_caution_tracker.tick(client, llm_extract=_llm_upbit_reason)
+                await _verdict_alert("upbit_caution", _status["upbit_caution"])
+            except Exception as exc:
+                _status["upbit_caution_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
+                logger.warning(f"upbit caution tracker failed: {exc}")
         if (force or now - _last_run["delist_risk"] >= DELIST_RISK_INTERVAL_SEC) and delist_risk.MODEL_PATH.exists():
             _last_run["delist_risk"] = now
             try:
