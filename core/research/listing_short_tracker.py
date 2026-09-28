@@ -2,7 +2,9 @@
 
 Why (docs/LLM_TRADING_RESEARCH_ROUND3_2026-09-26.md): over 229 Binance perps
 launched 2024-2026, shorting at the D2 daily close and covering at the D14
-close (+40% stop, funding and 0.3% costs counted) averaged +15.8% per trade,
+close (+40% stop, funding and 0.3% costs counted) averaged +15.8% per trade
+(CORRECTED 2026-09-28: that figure used entry/exit - 1; with the linear short P&L
+(entry - exit)/entry it is +1.5%/trade, 90% CI [-2.0, +4.9] - not significant),
 90% CI [+10, +22], strong in 2025-26, weak in 2024. The open question is
 whether an LLM reading the listing announcement (circulating supply at
 listing, airdrop share...) can pick the better shorts; 15 matched events were
@@ -92,7 +94,8 @@ def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], now_m
     fund = sum(float(f["fundingRate"]) for f in funding if entry_ms <= int(f["fundingTime"]) <= until)
     out.update(
         exit_price=exit_px, exit_at=exit_ms, funding=round(fund, 6),
-        return_pct=round((entry / mark - 1 + fund - ROUND_TRIP_COST) * 100, 3),  # short P&L, realized or marked
+        # linear USDT-perp short P&L, realized or marked (was entry / mark - 1 until 2026-09-28)
+        return_pct=round(((entry - mark) / entry + fund - ROUND_TRIP_COST) * 100, 3),
         max_adverse_pct=round((max([b[2] for b in bars[ENTRY_BAR + 1 : EXIT_BAR + 1] if b[0] + day <= until] or [entry]) / entry - 1) * 100, 2),
     )
     return out
@@ -235,7 +238,7 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "forward_open": sum(t.get("status") == "open" for t in live),
         "forward_mean_return_pct": round(sum(returns) / len(returns), 2) if returns else None,
         "forward_win_rate": round(sum(r > 0 for r in returns) / len(returns), 3) if returns else None,
-        "backtest_reference": "229 perps 2024-26: +15.8%/trade mean, 90% CI [+10.3, +21.8], win 58%",
+        "backtest_reference": "229 perps 2024-26 (linear short P&L): +1.5%/trade, 90% CI [-2.0, +4.9], median +5.3%, win 59%, worst -57% - not significant",
         "evaluation_ready": len(done) >= 30,
         "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES["listing_short"]),
     }
