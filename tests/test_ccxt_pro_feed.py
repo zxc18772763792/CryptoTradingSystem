@@ -420,6 +420,10 @@ async def test_disk_snapshot_bootstraps_when_load_markets_fails(tmp_path):
     stop1.set()
     await asyncio.wait_for(task1, timeout=5.0)
 
+    for _ in range(100):  # the snapshot is written off-loop (worker thread)
+        if (tmp_path / "binance_swap.json").exists():
+            break
+        await asyncio.sleep(0.02)
     assert (tmp_path / "binance_swap.json").exists(), "feed should persist a markets snapshot"
 
     # 2) Fresh feed whose client's load_markets() fails -> on-disk fallback.

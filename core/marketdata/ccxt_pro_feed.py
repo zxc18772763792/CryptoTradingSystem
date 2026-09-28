@@ -463,9 +463,18 @@ class CcxtProMarketFeed:
         if isinstance(currencies, dict):
             self._currency_cache[name] = currencies
         self._market_cache_loaded_at[name] = self._now_iso()
-        self._persist_markets_to_disk(
-            name, markets, currencies if isinstance(currencies, dict) else None
-        )
+        args = (name, dict(markets), dict(currencies) if isinstance(currencies, dict) else None)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            self._persist_markets_to_disk(*args)
+        else:
+            # json.dump of thousands of markets froze the web loop 3.5s at every
+            # startup (loop_stall_watchdog, 2026-09-28): write it off-loop. Shallow
+            # copies so ccxt can keep mutating its own dicts; best effort by design.
+            loop.run_in_executor(None, self._persist_markets_to_disk, *args)
 
     # ── on-disk markets snapshot (cross-restart bootstrap fallback) ─────────
     def _market_cache_dir(self) -> Path:
