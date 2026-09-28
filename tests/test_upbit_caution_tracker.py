@@ -33,6 +33,7 @@ class World:
             {"id": 7000, "title": "비비(BBB) 거래 유의 종목 지정 해제 안내", "first_listed_at": "2026-10-05T14:00:00+09:00"},
             {"id": 6990, "title": "씨씨(CCC) 거래 유의 종목 지정 안내", "first_listed_at": "2026-09-30T10:00:00+09:00"},
             {"id": 6980, "title": "디디(DDD) 거래 유의 종목 지정 안내", "first_listed_at": "2026-10-05T12:00:00+09:00"},
+            {"id": 6970, "title": "이이(EEE) 거래 유의 종목 지정 안내", "first_listed_at": "2026-10-05T11:00:00+09:00"},
         ]
         self.path = lambda k: (1.0, 1.0)  # day k -> (high, close)
 
@@ -41,9 +42,10 @@ class World:
         if url.endswith("/exchangeInfo"):
             listed = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
             return _Resp({"symbols": [
-                {"symbol": "AAAUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed},
-                {"symbol": "1000CCCUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed},
-                {"symbol": "DDDUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": DAY0 + DAY},  # listed after
+                {"symbol": "AAAUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed, "status": "TRADING"},
+                {"symbol": "1000CCCUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed, "status": "TRADING"},
+                {"symbol": "DDDUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": DAY0 + DAY, "status": "TRADING"},  # listed after
+                {"symbol": "EEEUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed, "status": "SETTLING"},
             ]})
         if url == uc.UPBIT:
             return _Resp({"data": {"notices": self.notices if params.get("page") == 1 else []}})
@@ -93,12 +95,13 @@ def test_lifecycle_backfill_and_no_perp(world, tmp_path):
     world.path = lambda k: (1.0, 1.0 if k == 0 else 0.9)  # falls 10% after entry
     summary = run(world, path)
     trades = json.loads(path.read_text(encoding="utf-8"))["trades"]
-    assert set(trades) == {"AAA|7001", "CCC|6990", "DDD|6980"}  # the release notice is ignored
+    assert set(trades) == {"AAA|7001", "CCC|6990", "DDD|6980", "EEE|6970"}  # the release notice is ignored
     assert trades["AAA|7001"]["status"] == "waiting_entry"  # day-0 close not final yet
     assert trades["CCC|6990"]["backfilled"] is True and trades["CCC|6990"]["symbol"] == "1000CCCUSDT"
     assert trades["DDD|6980"]["status"] == "no_perp"  # perp listed after the notice
+    assert trades["EEE|6970"]["status"] == "no_perp"  # settled contract: flat klines would fake a 0% trade
     assert trades["AAA|7001"]["reason"]["reason"] == "disclosure_or_supply"
-    assert summary["forward_waiting"] == 1 and summary["no_perp"] == 1
+    assert summary["forward_waiting"] == 1 and summary["no_perp"] == 2
 
     world.now = datetime(2026, 10, 6, 1, tzinfo=timezone.utc)
     run(world, path)

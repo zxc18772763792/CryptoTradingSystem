@@ -136,8 +136,9 @@ async def tick(client, *, llm_extract=None, state_path: Path = STATE_PATH) -> Di
     now_ms = now.timestamp() * 1000
     info = await client.get(f"{FAPI}/exchangeInfo")
     info.raise_for_status()
+    # Only live contracts: a settled perp still appears in exchangeInfo with frozen, flat klines.
     perps = {s["symbol"]: int(s.get("onboardDate") or 0) for s in info.json().get("symbols", [])
-             if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT"}
+             if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"}
 
     for notice in await _notices(client):
         at = datetime.fromisoformat(notice["first_listed_at"]).astimezone(timezone.utc)
@@ -157,6 +158,8 @@ async def tick(client, *, llm_extract=None, state_path: Path = STATE_PATH) -> Di
             }
 
     for key, trade in state["trades"].items():
+        if trade["status"] == "waiting_entry" and trade.get("symbol") and trade["symbol"] not in perps:
+            trade["status"] = "no_perp"  # contract stopped trading before the entry close
         if trade["status"] in {"waiting_entry", "open"} and trade.get("symbol"):
             try:
                 resp = await client.get(f"{FAPI}/klines", params={"symbol": trade["symbol"], "interval": "1d",
