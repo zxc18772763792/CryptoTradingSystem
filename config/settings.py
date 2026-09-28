@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     BINANCE_ALPHA_HISTORY_MAX_MB: int = 256
     PUBLIC_MACRO_WORKERS_ENABLED: bool = False
     MACRO_CACHE_WORKER_ENABLED: bool = True
+    ANALYTICS_HISTORY_COLLECTORS: str = "whales"
     PREMIUM_EXTERNAL_WORKERS_ENABLED: bool = False
 
     # LLM API

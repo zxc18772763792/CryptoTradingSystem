@@ -728,6 +728,11 @@ async def worker_loop(cfg: Dict[str, Any], *, once: bool = False, pull_enabled: 
 
 
 async def main_async(args: argparse.Namespace) -> None:
+    # Same proxy environment as the web service, however the worker was launched.
+    from config.settings import settings as _settings  # noqa: PLC0415
+    from core.utils.proxy_env import ensure_proxy_env  # noqa: PLC0415
+
+    ensure_proxy_env(_settings)
     cfg = load_service_config()
     await news_db.init_news_db()
     try:
