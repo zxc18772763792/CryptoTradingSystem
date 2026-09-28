@@ -6599,7 +6599,13 @@ async def _fetch_binance_announcements(limit: int = 6) -> List[Dict[str, Any]]:
             )
             if resp.status_code != 200:
                 return announcements
-            rows = ((resp.json() or {}).get("data") or {}).get("articles") or []
+            data = (resp.json() or {}).get("data") or {}
+            # With catalogId the articles are nested under data.catalogs[].
+            rows = data.get("articles") or [
+                article
+                for catalog in data.get("catalogs") or []
+                for article in (catalog or {}).get("articles") or []
+            ]
             for row in rows[:limit]:
                 announcements.append(
                     {
