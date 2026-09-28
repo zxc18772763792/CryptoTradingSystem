@@ -217,7 +217,8 @@ def _news_source_flags() -> Dict[str, bool]:
         "binance_announcements": _enabled("NEWS_ENABLE_BINANCE_ANNOUNCEMENTS", True),
         "okx_announcements": _enabled("NEWS_ENABLE_OKX_ANNOUNCEMENTS", True),
         "bybit_announcements": _enabled("NEWS_ENABLE_BYBIT_ANNOUNCEMENTS", True),
-        "cryptocompare_news": _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
+        # The collector skips this source without a key (core/news/collectors/manager.py); say so here too.
+        "cryptocompare_news": bool(os.environ.get("CRYPTOCOMPARE_API_KEY")) and _enabled("NEWS_ENABLE_CRYPTOCOMPARE_NEWS", True),
         "coinglass_newsflash": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_NEWSFLASH", True),
         "coinglass_articles": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ARTICLES", True),
         "coinglass_economic_data": coinglass_news_enabled and _enabled("NEWS_ENABLE_COINGLASS_ECONOMIC_DATA", True),
