@@ -1859,7 +1859,8 @@ async def _exchange_watchdog_worker(stop_event: asyncio.Event) -> None:
                     continue
                 logger.warning(f"exchange_watchdog: {name} unhealthy, attempting reconnect")
                 _last_reconnect_at[name] = now
-                ok = await exchange_manager.reconnect_exchange(name)
+                # 45 s: a cold connect through the proxy takes ~18 s (time sync + markets)
+                ok = await exchange_manager.reconnect_exchange(name, timeout_sec=45.0)
                 if ok:
                     # Fresh client gets a clean slate; if it is still
                     # unhealthy the failure count must rebuild to the
