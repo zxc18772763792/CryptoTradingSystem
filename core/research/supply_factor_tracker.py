@@ -8,17 +8,17 @@ long the lowest third, short the highest third, hold 30 days, 0.4% cost:
 the same within age and market-cap groups. This tracker repeats exactly that
 rule on months that have not happened yet.
 
-Weekly measurement (added 2026-09-28, no trades): every Monday close the tracker
-records each token's scheduled 90-day growth and price, and a week later the rank
-correlation between growth and the week's return. The monthly trade needs 12
-months for a verdict; the direction test gets ~4x the samples (backtest: IC < 0
-in 141/194 weeks, p=1e-10), while weekly *trading* does not pay after costs.
+Weekly measurement (added 2026-09-28, no trades): snapshot each token's scheduled
+90-day growth before Monday's close, record the close after the bar is complete,
+and a week later measure rank correlation with returns. The monthly trade needs
+12 months for a verdict; the weekly direction test offers faster feedback, but
+adjacent weeks are correlated and weekly *trading* does not pay after costs.
 
-Rules: the portfolio for month D uses the schedule as DefiLlama shows it on
-the rebalance day, entry = close of day D, exit = close of day D+30, returns
-from Binance spot daily closes. Months that started before the tracker are
-recorded as ``backfill`` (schedules are today's, so they are not independent)
-and excluded from forward statistics.
+Rules: the portfolio for month D uses a schedule captured before D's daily bar
+closes, entry = close of day D, exit = close of day D+30, returns from Binance
+spot daily closes. A schedule first seen after entry close is marked backfill
+and excluded from forward statistics. Weekly observations without a pre-close
+snapshot are marked missed rather than counted as forward evidence.
 """
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+import httpx
 from loguru import logger
 
 from core.research import retirement
@@ -44,6 +45,10 @@ MIN_TOKENS = 12
 CLOSE_GRACE_DAYS = 5  # after this, close with the exit prices that exist (true delistings)
 BACKTEST_REFERENCE = "long low / short high supply-growth terciles, 30d: +2.6%/month, 76% of months positive, IC<0 in 33/42 months"
 DAY = pd.Timedelta(days=1)
+
+
+def _utc_now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz="UTC")
 
 
 def load_state(path: Path = STATE_PATH) -> Dict[str, Any]:
@@ -114,16 +119,46 @@ async def _universe_growth(client, day: pd.Timestamp):
     for ticker, token in universe.items():
         try:
             unlocked = await ut.schedule_unlocked(client, token["slug"])
-        except Exception:  # noqa: BLE001 - some index entries have no schedule file
-            continue
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:  # some index entries have no schedule file
+                continue
+            raise  # rate limits and server errors must not silently shrink the sample
         g = growth_from_unlocked(unlocked, day)
         if g is not None:
             growth[ticker] = g
     return universe, growth
 
 
-async def _open_month(client, day: pd.Timestamp, now: pd.Timestamp, backfill: bool) -> Optional[Dict[str, Any]]:
+def _snapshot_valid(snapshot: Optional[Dict[str, Any]], day: pd.Timestamp) -> bool:
+    if not snapshot:
+        return False
+    try:
+        observed = pd.Timestamp(snapshot["observed_at"]).tz_convert("UTC")
+    except (KeyError, TypeError, ValueError):
+        return False
+    return day <= observed < day + DAY
+
+
+async def _capture_snapshot(client, day: pd.Timestamp, now: pd.Timestamp,
+                            *, use_wall_clock: bool = False) -> Optional[Dict[str, Any]]:
     universe, growth = await _universe_growth(client, day)
+    if len(growth) < MIN_TOKENS:
+        logger.warning(f"supply factor: only {len(growth)} tokens with schedules for {day.date()}")
+        return None
+    # Production ticks use the completion time: fetching a large universe can
+    # cross the UTC close even when the tick started before it.
+    observed_at = _utc_now() if use_wall_clock else now
+    return {"observed_at": observed_at.isoformat(), "growth": growth,
+            "symbols": {t: universe[t]["symbol"] for t in growth}}
+
+
+async def _open_month(client, day: pd.Timestamp, now: pd.Timestamp, backfill: bool,
+                      snapshot: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    if snapshot is None:
+        universe, growth = await _universe_growth(client, day)
+    else:
+        growth = snapshot["growth"]
+        universe = {t: {"symbol": symbol} for t, symbol in snapshot["symbols"].items()}
     if len(growth) < MIN_TOKENS:
         logger.warning(f"supply factor: only {len(growth)} tokens with schedules for {day.date()}")
         return None
@@ -136,6 +171,7 @@ async def _open_month(client, day: pd.Timestamp, now: pd.Timestamp, backfill: bo
     return {
         "rebalance_day": str(day.date()), "exit_day": str((day + pd.Timedelta(days=HOLD_DAYS)).date()),
         "backfill": backfill, "status": "open", "universe": len(growth),
+        "schedule_observed_at": snapshot["observed_at"] if snapshot else None,
         "long": {t: {"growth": round(growth[t], 4), "entry": entries.get(t)} for t in legs["long"]},
         "short": {t: {"growth": round(growth[t], 4), "entry": entries.get(t)} for t in legs["short"]},
         "symbols": {t: universe[t]["symbol"] for t in legs["long"] + legs["short"]},
@@ -170,20 +206,38 @@ async def _close_month(client, month: Dict[str, Any], now: pd.Timestamp) -> None
 
 async def tick(client, state_path: Path = STATE_PATH, now: Optional[pd.Timestamp] = None) -> Dict[str, Any]:
     state = load_state(state_path)
-    now = now or pd.Timestamp.now(tz="UTC")
+    use_wall_clock = now is None
+    now = _utc_now() if use_wall_clock else now
     started = pd.Timestamp(state["started_at"]).tz_convert("UTC")
     month_start = now.normalize().replace(day=1)
+    pending_months = state.setdefault("pending_months", {})
     for day in [month_start]:
         key = str(day.date())
-        if key in state["months"] or day + DAY > now:
+        if key in state["months"]:
+            pending_months.pop(key, None)
             continue
+        if day <= now < day + DAY:
+            if day >= started.normalize() and key not in pending_months:
+                try:
+                    snapshot = await _capture_snapshot(client, day, now, use_wall_clock=use_wall_clock)
+                    if snapshot:
+                        pending_months[key] = snapshot
+                except Exception as exc:  # noqa: BLE001 - retry until the entry bar closes
+                    logger.warning(f"supply factor: snapshot {key} failed: {exc}")
+            continue
+        snapshot = pending_months.get(key)
+        forward = _snapshot_valid(snapshot, day) and day >= started.normalize()
         try:
-            month = await _open_month(client, day, now, backfill=day < started.normalize())
+            month = await _open_month(client, day, now, backfill=not forward,
+                                      snapshot=snapshot if forward else None)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"supply factor: rebalance {key} failed: {exc}")
             month = None
         if month:
+            if not forward and day >= started.normalize():
+                month["backfill_reason"] = "schedule_not_captured_before_entry_close"
             state["months"][key] = month
+            pending_months.pop(key, None)
     for month in state["months"].values():
         if month["status"] == "open" and pd.Timestamp(month["exit_day"], tz="UTC") + DAY <= now:
             try:
@@ -191,7 +245,7 @@ async def tick(client, state_path: Path = STATE_PATH, now: Optional[pd.Timestamp
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"supply factor: close {month['rebalance_day']} failed: {exc}")
     try:
-        await _tick_weekly_ic(client, state, now, started)
+        await _tick_weekly_ic(client, state, now, started, use_wall_clock=use_wall_clock)
     except Exception as exc:  # noqa: BLE001 - measurement only; retried next pass
         logger.warning(f"supply factor: weekly IC failed: {exc}")
     state["updated_at"] = now.isoformat()
@@ -200,21 +254,39 @@ async def tick(client, state_path: Path = STATE_PATH, now: Optional[pd.Timestamp
     return summary(state)
 
 
-async def _tick_weekly_ic(client, state: Dict[str, Any], now: pd.Timestamp, started: pd.Timestamp) -> None:
+async def _tick_weekly_ic(client, state: Dict[str, Any], now: pd.Timestamp, started: pd.Timestamp,
+                          *, use_wall_clock: bool = False) -> None:
     weeks = state.setdefault("weekly_ic", {})
+    pending = state.setdefault("pending_weeks", {})
     monday = now.normalize() - pd.Timedelta(days=now.weekday())
     key = str(monday.date())
-    if key not in weeks and monday + DAY <= now:
-        universe, growth = await _universe_growth(client, monday)
-        if len(growth) >= MIN_TOKENS:
+    if key not in weeks and monday <= now < monday + DAY and monday >= started.normalize() and key not in pending:
+        snapshot = await _capture_snapshot(client, monday, now, use_wall_clock=use_wall_clock)
+        if snapshot:
+            pending[key] = snapshot
+    for week_key in set(pending) | {key}:
+        week_start = pd.Timestamp(week_key, tz="UTC")
+        if week_key in weeks or week_start + DAY > now:
+            continue
+        snapshot = pending.get(week_key)
+        if _snapshot_valid(snapshot, week_start) and week_start >= started.normalize():
             entries: Dict[str, float] = {}
-            for ticker in growth:
-                px = await _close_on(client, universe[ticker]["symbol"], monday, now)  # transient errors raise: retry
+            for ticker, symbol in snapshot["symbols"].items():
+                px = await _close_on(client, symbol, week_start, now)  # transient errors raise: retry
                 if px:
                     entries[ticker] = px
-            weeks[key] = {"week": key, "status": "open", "backfill": monday < started.normalize(),
-                          "growth": {t: round(growth[t], 5) for t in entries}, "entry": entries,
-                          "symbols": {t: universe[t]["symbol"] for t in entries}}
+            if len(entries) >= MIN_TOKENS:
+                weeks[week_key] = {"week": week_key, "status": "open", "backfill": False,
+                                   "schedule_observed_at": snapshot["observed_at"],
+                                   "growth": {t: round(snapshot["growth"][t], 5) for t in entries},
+                                   "entry": entries, "symbols": {t: snapshot["symbols"][t] for t in entries}}
+            else:
+                weeks[week_key] = {"week": week_key, "status": "unresolved", "backfill": False,
+                                   "reason": "insufficient_entry_prices", "n": len(entries)}
+        else:
+            weeks[week_key] = {"week": week_key, "status": "missed", "backfill": True,
+                               "reason": "schedule_not_captured_before_entry_close"}
+        pending.pop(week_key, None)
     for week in weeks.values():
         end = pd.Timestamp(week["week"], tz="UTC") + pd.Timedelta(days=7)
         if week["status"] != "open" or end + DAY > now:
@@ -231,8 +303,12 @@ async def _tick_weekly_ic(client, state: Dict[str, Any], now: pd.Timestamp, star
         g = pd.Series({t: week["growth"][t] for t in rets})
         r = pd.Series(rets)
         q = g.rank(pct=True)
-        week.update(status="closed", n=len(rets), ic=round(spearman(g, r), 4),
-                    spread_pct=round(float((r[q <= 1 / 3].mean() - r[q > 2 / 3].mean()) * 100), 3))
+        ic = spearman(g, r)
+        spread = float((r[q <= 1 / 3].mean() - r[q > 2 / 3].mean()) * 100)
+        if not np.isfinite(ic) or not np.isfinite(spread):
+            week.update(status="unresolved", reason="nonfinite_factor_statistic", n=len(rets))
+            continue
+        week.update(status="closed", n=len(rets), ic=round(ic, 4), spread_pct=round(spread, 3))
         week.pop("entry", None)  # keep the state small once the week is scored
         week.pop("symbols", None)
 
@@ -245,12 +321,14 @@ def weekly_ic_summary(state: Dict[str, Any]) -> Dict[str, Any]:
     negative = sum(float(w["ic"]) < 0 for w in closed)
     return {
         "weeks_completed": n,
+        "weeks_missed": sum(w.get("status") == "missed" for w in (state.get("weekly_ic") or {}).values()),
         "weeks_ic_negative": negative,
         "mean_ic": round(float(np.mean([w["ic"] for w in closed])), 4) if closed else None,
         "mean_gross_spread_pct": round(float(np.mean([w["spread_pct"] for w in closed])), 3) if closed else None,
         # one-sided sign test that low-growth tokens beat high-growth ones (IC < 0)
         "sign_test_p": round(sum(comb(n, i) for i in range(negative, n + 1)) / 2 ** n, 4) if n else None,
-        "backtest_reference": "weekly rank IC < 0 in 141/194 weeks 2023-26 (p=1e-10); weekly trading does not pay after 0.4% costs",
+        "sign_test_note": "Descriptive only: adjacent weeks and 90-day supply windows are correlated.",
+        "backtest_reference": "weekly rank IC < 0 in 141/194 weeks 2023-26; weekly trading does not pay after 0.4% costs",
     }
 
 
@@ -263,6 +341,7 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "started_at": state.get("started_at"),
         "updated_at": state.get("updated_at"),
         "months_total": len(months),
+        "months_missed_snapshot": sum(m.get("backfill_reason") == "schedule_not_captured_before_entry_close" for m in months),
         "forward_open": sum(m.get("status") == "open" for m in forward),
         "forward_completed": len(done),
         "forward_mean_spread_pct": round(float(np.mean(spreads)), 2) if spreads else None,

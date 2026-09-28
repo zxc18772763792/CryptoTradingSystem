@@ -5525,7 +5525,7 @@ async def get_research_symbols(exchange: str = "binance", include_major: bool = 
         )
         if universe_task not in done:
             logger.warning(
-                "research_symbols: coinglass altcoin universe timed out after %.1fs",
+                "research_symbols: coinglass altcoin universe timed out after {:.1f}s",
                 _RESEARCH_SYMBOLS_TIMEOUT_SEC,
             )
             universe_task.cancel()
@@ -5544,7 +5544,7 @@ async def get_research_symbols(exchange: str = "binance", include_major: bool = 
             data = await universe_task
     except asyncio.TimeoutError:
         logger.warning(
-            "research_symbols: coinglass altcoin universe timed out after %.1fs",
+            "research_symbols: coinglass altcoin universe timed out after {:.1f}s",
             _RESEARCH_SYMBOLS_TIMEOUT_SEC,
         )
         if not universe_task.done():

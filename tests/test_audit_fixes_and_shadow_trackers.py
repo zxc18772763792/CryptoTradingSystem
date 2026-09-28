@@ -99,6 +99,7 @@ class _WeekWorld:
     def __init__(self):
         self.tokens = [f"T{i}" for i in range(12)]
         self.monday = pd.Timestamp("2026-10-05", tz="UTC")
+        self.constant_schedule = False
 
     def price(self, token, day):
         i = int(token[1:])
@@ -114,6 +115,8 @@ class _WeekWorld:
             return base._Resp({"data": [{"protocolSlug": t.lower(), "tokenPrice": [{"symbol": t, "price": 1.0}]} for t in self.tokens]})
         if "/emissions/" in url:
             i = int(url.rsplit("/", 1)[-1][1:])
+            if self.constant_schedule:
+                i = 0
             return base._Resp(base._schedule(1000.0 * i))
         if url.endswith("/ticker/price"):
             return base._Resp([{"symbol": f"{t}USDT", "price": "1.0"} for t in self.tokens])
@@ -130,10 +133,41 @@ def test_weekly_supply_ic_is_measured_without_trading(tmp_path, monkeypatch):
     world = _WeekWorld()
     path = tmp_path / "state.json"
     sf.save_state({"started_at": "2026-10-01T00:00:00+00:00", "months": {}}, path)
+    asyncio.run(sf.tick(world, path, now=pd.Timestamp("2026-10-05 12:00", tz="UTC")))
     asyncio.run(sf.tick(world, path, now=pd.Timestamp("2026-10-06 01:00", tz="UTC")))
     week = json.loads(path.read_text(encoding="utf-8"))["weekly_ic"]["2026-10-05"]
     assert week["status"] == "open" and week["backfill"] is False and len(week["entry"]) == 12
+    assert week["schedule_observed_at"] == "2026-10-05T12:00:00+00:00"
     summary = asyncio.run(sf.tick(world, path, now=pd.Timestamp("2026-10-13 01:00", tz="UTC")))
     week = json.loads(path.read_text(encoding="utf-8"))["weekly_ic"]["2026-10-05"]
     assert week["status"] == "closed" and week["ic"] == pytest.approx(-1.0) and "entry" not in week
     assert summary["weekly_ic"]["weeks_completed"] == 1 and summary["weekly_ic"]["weeks_ic_negative"] == 1
+
+
+def test_weekly_supply_ic_missed_snapshot_is_not_forward(tmp_path, monkeypatch):
+    monkeypatch.setattr(ut, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(ut, "SCHEDULE_TTL_SEC", 0)
+    monkeypatch.setattr(ut, "INDEX_TTL_SEC", 0)
+    world = _WeekWorld()
+    path = tmp_path / "state.json"
+    sf.save_state({"started_at": "2026-10-01T00:00:00+00:00", "months": {}}, path)
+    summary = asyncio.run(sf.tick(world, path, now=pd.Timestamp("2026-10-06 01:00", tz="UTC")))
+    week = json.loads(path.read_text(encoding="utf-8"))["weekly_ic"]["2026-10-05"]
+    assert week["status"] == "missed" and week["backfill"] is True
+    assert summary["weekly_ic"]["weeks_completed"] == 0
+    assert summary["weekly_ic"]["weeks_missed"] == 1
+
+
+def test_weekly_supply_ic_constant_growth_is_unresolved(tmp_path, monkeypatch):
+    monkeypatch.setattr(ut, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(ut, "SCHEDULE_TTL_SEC", 0)
+    monkeypatch.setattr(ut, "INDEX_TTL_SEC", 0)
+    world = _WeekWorld()
+    world.constant_schedule = True
+    path = tmp_path / "state.json"
+    sf.save_state({"started_at": "2026-10-01T00:00:00+00:00", "months": {}}, path)
+    for when in ("2026-10-05 12:00", "2026-10-06 01:00", "2026-10-13 01:00"):
+        summary = asyncio.run(sf.tick(world, path, now=pd.Timestamp(when, tz="UTC")))
+    week = json.loads(path.read_text(encoding="utf-8"))["weekly_ic"]["2026-10-05"]
+    assert week["status"] == "unresolved" and week["reason"] == "nonfinite_factor_statistic"
+    assert summary["weekly_ic"]["weeks_completed"] == 0

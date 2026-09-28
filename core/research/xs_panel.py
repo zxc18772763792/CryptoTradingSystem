@@ -44,11 +44,15 @@ def add_forward_labels(daily: pd.DataFrame, horizon: int = LABEL_HORIZON_DAYS) -
         fwd = np.full(n, np.nan)
         for i in range(n - horizon):
             fwd[i] = np.nanmax(close[i + 1 : i + 1 + horizon]) / close[i] - 1.0 if close[i] > 0 else np.nan
-        # Require a contiguous calendar: a gap inside the window would overstate the horizon.
+        # Check every adjacent day. A duplicate row can conceal a missing day
+        # while leaving the overall first-to-last span unchanged.
         dates = pd.to_datetime(grp["date"]).to_numpy()
-        span = np.full(n, np.nan)
-        span[: n - horizon] = (dates[horizon:] - dates[: n - horizon]) / np.timedelta64(1, "D")
-        fwd[~(span <= horizon + 1)] = np.nan
+        consecutive = np.zeros(n, dtype=bool)
+        if n > horizon:
+            bad_step = np.diff(dates) != np.timedelta64(1, "D")
+            bad_count = np.r_[0, np.cumsum(bad_step)]
+            consecutive[: n - horizon] = bad_count[horizon:] == bad_count[: n - horizon]
+        fwd[~consecutive] = np.nan
         grp["fwd30_maxret"] = fwd
         parts.append(grp)
     return pd.concat(parts, ignore_index=True) if parts else daily.assign(fwd30_maxret=np.nan)
