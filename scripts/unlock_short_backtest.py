@@ -123,7 +123,10 @@ def leg_return(d: Dict[str, pd.Series], entry: pd.Timestamp, exit_: pd.Timestamp
         if len(hit):
             end, stopped = hit.index[0], True
     p1 = p0 * (1 + stop) * 1.02 if stopped else close[end]
-    fund = d["funding"][(d["funding"].index > entry) & (d["funding"].index <= end + pd.Timedelta(days=1))].sum()
+    # Bars are indexed by their open; the position exists from the entry bar's close
+    # (entry + 1 day) to the exit bar's close. Before 2026-09-28 the window started at
+    # the entry bar's open, charging one day of funding the position never held.
+    fund = d["funding"][(d["funding"].index > entry + pd.Timedelta(days=1)) & (d["funding"].index <= end + pd.Timedelta(days=1))].sum()
     price_ret = side * (p1 / p0 - 1)
     worst = (d["high"][(d["high"].index > entry) & (d["high"].index <= end)].max() / p0 - 1) if side < 0 else np.nan
     return {"ret": price_ret - side * fund - LEG_COST, "funding": -side * fund, "stopped": stopped, "worst_up": worst, "end": end}
