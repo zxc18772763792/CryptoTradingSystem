@@ -290,22 +290,30 @@ def _binance_oi_fallback(symbol: str, archived: Optional[pd.Series]) -> Optional
     return series if len(series) >= 32 else None
 
 
-def _write_weekly_archive(parts: List[pd.DataFrame]) -> None:
+def _write_weekly_archive(parts: List[pd.DataFrame], captured_at: datetime) -> None:
     """Keep this week's daily inputs: forward evidence for research loop v2.
 
     Without it every week of fresh data is thrown away after scoring and no
     formula frozen by the loop can ever be judged on post-freeze data.
     mcap is today's value repeated over history; core.research.xs_panel only
-    trusts it on the snapshot's last day. Best-effort: never fails the run.
+    trusts it on the snapshot's last day. ``captured_at`` (run start, UTC) and
+    the per-coin sources let the v2 verdict prove what was visible on the
+    signal day. Best-effort: never fails the run.
     """
     if not parts:
         return
     try:
-        from core.research.xs_panel import PANEL_COLUMNS, WEEKLY_ARCHIVE_DIR  # noqa: PLC0415
+        from core.research.xs_panel import (  # noqa: PLC0415
+            ARCHIVE_META_COLUMNS, ARCHIVE_SCHEMA_VERSION, PANEL_COLUMNS, WEEKLY_ARCHIVE_DIR,
+        )
 
         WEEKLY_ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
-        frame = pd.concat(parts, ignore_index=True)[PANEL_COLUMNS]
-        target = WEEKLY_ARCHIVE_DIR / f"{datetime.now(timezone.utc):%Y-%m-%d}.parquet"
+        frame = pd.concat(parts, ignore_index=True).assign(
+            captured_at=captured_at.isoformat(), schema_version=ARCHIVE_SCHEMA_VERSION,
+        )[PANEL_COLUMNS + ARCHIVE_META_COLUMNS]
+        # Named by the capture day, not the write moment: a run that crosses
+        # midnight must not look like a later capture.
+        target = WEEKLY_ARCHIVE_DIR / f"{captured_at:%Y-%m-%d}.parquet"
         frame.to_parquet(target, index=False)
         logger.info(f"weekly archive -> {target} ({frame['base'].nunique()} coins, {len(frame)} rows)")
     except Exception as exc:  # noqa: BLE001
@@ -319,6 +327,7 @@ async def main() -> None:
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+    captured_at = datetime.now(timezone.utc)
     model = load_model_weights()
 
     degraded: List[str] = []
@@ -378,8 +387,9 @@ async def main() -> None:
                 continue
             oi = await fetch_oi_daily(client, base)
             await asyncio.sleep(COINGLASS_PACE_SEC)
+            oi_source = "coinglass"
             if oi is None or len(oi) < 32:
-                oi = _binance_oi_fallback(symbol, oi_history.get(base))
+                oi, oi_source = _binance_oi_fallback(symbol, oi_history.get(base)), "binance"
                 if oi is not None and "oi_from_binance" not in degraded:
                     degraded.append("oi_from_binance")
             if oi is None or len(oi) < 32:
@@ -389,7 +399,9 @@ async def main() -> None:
             daily["oi"] = oi.reindex(daily.index, method="ffill")
             daily["mcap"] = float(mcap)
             daily["funding"] = funding.reindex(daily.index).ffill(limit=3) if funding is not None else float("nan")
-            archive_parts.append(daily.assign(base=base).rename_axis("date").reset_index())
+            mcap_source = "cache" if "market_caps_from_cache" in degraded else "coinglass"
+            archive_parts.append(daily.assign(base=base, oi_source=oi_source, mcap_source=mcap_source)
+                                 .rename_axis("date").reset_index())
             features = latest_feature_row(daily)
             if features is None:
                 skipped[base] = "feature_nan"
@@ -398,7 +410,7 @@ async def main() -> None:
             if i % 10 == 0:
                 logger.info(f"features {i + 1}/{len(universe)} ({base})")
 
-    _write_weekly_archive(archive_parts)
+    _write_weekly_archive(archive_parts, captured_at)
     scored = score_universe(feature_rows, model)
     logger.info(f"scored {len(scored)} symbols, skipped {len(skipped)}")
     if len(scored) == 0 or len(scored) < 0.3 * len(universe):

@@ -34,7 +34,7 @@ from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
 from core.research import xs_panel
-from core.research.xs_evaluation import baseline_scores, bonferroni_z, evaluate_formula_on_panel
+from core.research.xs_evaluation import baseline_scores, bonferroni_z, evaluate_formula_forward, evaluate_formula_on_panel
 from core.research.xs_feature_dsl import FormulaError, describe_grammar, fingerprint, validate_formula
 
 VALIDATED_DRIVERS = (
@@ -214,27 +214,31 @@ class CrossSectionalResearchLoop:
             return
 
         def work():
-            daily = xs_panel.stitch_weekly_archive()
-            if daily.empty:
-                return None, None
+            # Point-in-time: each archive is scored on its own capture-day
+            # contents; later archives only supply outcome labels.
+            vintages, rejected = xs_panel.load_archive_vintages()
+            if not vintages:
+                return None, [], rejected
             from core.research.pump_precursor import load_model_weights
 
-            daily = xs_panel.add_forward_labels(daily)
-            return daily, baseline_scores(daily, load_model_weights())
+            model = load_model_weights()
+            for vintage in vintages:
+                vintage["baseline"] = baseline_scores(vintage["frame"], model, dates=[vintage["signal_date"]])
+            return xs_panel.vintage_labels(vintages), vintages, rejected
 
-        daily, baseline = await asyncio.to_thread(work)
+        labels, vintages, rejected = await asyncio.to_thread(work)
         now = _utc_now().isoformat()
         for item in pending:
             item["forward_checked_at"] = now
-            if daily is None:
-                item["forward_note"] = "尚无周度归档数据（generate_pump_watchlist 每周一写入）"
+            item["forward_archives_rejected"] = rejected[-10:]
+            if labels is None:
+                item["forward_note"] = "尚无可证明抓取时点的周度归档（generate_pump_watchlist 每周一写入）"
                 continue
-            metrics = await asyncio.to_thread(
-                evaluate_formula_on_panel, item, daily,
-                periods={"forward": (pd.Timestamp(item["frozen_at"]).tz_localize(None), None)},
-                n_perm=cfg.n_perm, baseline=baseline,
+            frozen_at = pd.Timestamp(item["frozen_at"])
+            frozen_at = frozen_at.tz_convert("UTC").tz_localize(None) if frozen_at.tzinfo else frozen_at
+            forward = await asyncio.to_thread(
+                evaluate_formula_forward, item, vintages, labels, after=frozen_at, n_perm=cfg.n_perm,
             )
-            forward = metrics["forward"]
             item["forward"] = forward
             if forward.get("status") != "ok" or (forward.get("dates") or 0) < cfg.forward_min_weeks:
                 item["forward_note"] = f"等待成熟标签：{forward.get('dates') or 0}/{cfg.forward_min_weeks} 周"

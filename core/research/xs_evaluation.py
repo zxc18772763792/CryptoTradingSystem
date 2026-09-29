@@ -22,13 +22,13 @@ All numerics are ufunc/reduction only: this env's BLAS can crash natively.
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 
 from core.research.xs_feature_dsl import evaluate_formula
-from core.research.xs_panel import weekly_rows
+from core.research.xs_panel import MCAP_MAX, MCAP_MIN, PUMP_THRESHOLD, weekly_rows
 
 TOP_QUANTILE = 0.8
 PHASES = 4
@@ -219,14 +219,56 @@ def evaluate_formula_on_panel(
     return out
 
 
-def baseline_scores(daily: pd.DataFrame, model: Mapping[str, Any]) -> pd.DataFrame:
-    """The validated weekly model's score on every Monday row (for redundancy checks)."""
+def point_in_time_rows(formula: Mapping[str, Any], vintages: List[Mapping[str, Any]], labels: pd.DataFrame) -> pd.DataFrame:
+    """Signal rows computed only from what each archive saw on its capture day.
+
+    ``labels`` (base, date, fwd30_maxret) may come from later archives:
+    outcomes are closes of finished bars, which later archives do not revise.
+    """
+    parts = []
+    for vintage in vintages:
+        frame = vintage["frame"]
+        rows = frame.assign(feature=feature_panel(formula, frame).to_numpy())
+        rows = rows[(rows["date"] == vintage["signal_date"]) & rows["mcap"].between(MCAP_MIN, MCAP_MAX)]
+        rows = rows[["base", "date", "feature"]]
+        baseline = vintage.get("baseline")
+        if baseline is not None and len(baseline):
+            rows = rows.merge(baseline[["base", "date", "baseline_score"]], on=["base", "date"], how="left")
+        parts.append(rows)
+    if not parts:
+        return pd.DataFrame(columns=["base", "date", "feature", "pump", "fwd30_maxret"])
+    rows = pd.concat(parts, ignore_index=True).merge(labels[["base", "date", "fwd30_maxret"]], on=["base", "date"], how="left")
+    rows = rows[rows["fwd30_maxret"].notna()]
+    return rows.assign(pump=(rows["fwd30_maxret"] >= PUMP_THRESHOLD).astype(int)).reset_index(drop=True)
+
+
+def evaluate_formula_forward(
+    formula: Mapping[str, Any],
+    vintages: List[Mapping[str, Any]],
+    labels: pd.DataFrame,
+    *,
+    after: pd.Timestamp,
+    n_perm: int = 300,
+) -> Dict[str, Any]:
+    """Post-freeze verdict metrics from archives captured strictly after ``after`` (naive UTC)."""
+    used = [v for v in vintages if v["captured_at"] > after]
+    rows = point_in_time_rows(formula, used, labels)
+    base_series = rows["baseline_score"] if "baseline_score" in rows else None
+    result = score_period(rows.drop(columns=["baseline_score"], errors="ignore"), formula["direction"],
+                          n_perm=n_perm, baseline_score=base_series)
+    result.update(method="point_in_time_vintages", vintages=len(used))
+    return result
+
+
+def baseline_scores(daily: pd.DataFrame, model: Mapping[str, Any], *, dates: Optional[Iterable] = None) -> pd.DataFrame:
+    """The validated weekly model's score on every Monday row, or on ``dates`` (for redundancy checks)."""
     from core.research.pump_precursor import FEATURES, build_daily_features
 
+    keep = None if dates is None else pd.DatetimeIndex(pd.to_datetime(list(dates)))
     parts = []
     for base, grp in daily.groupby("base", sort=False):
         frame = build_daily_features(grp.set_index("date").sort_index()[["close", "volume", "oi", "mcap", "funding"]])
-        frame = frame[frame.index.dayofweek == 0]
+        frame = frame[frame.index.dayofweek == 0] if keep is None else frame[frame.index.isin(keep)]
         frame = frame.assign(base=base).reset_index().rename(columns={"index": "date"})
         parts.append(frame[["base", "date"] + FEATURES])
     feats = pd.concat(parts, ignore_index=True)
