@@ -6,9 +6,12 @@ funding; one row per coin per day):
 * research panel  data/research/xs_panel/research_daily.parquet
   built once by scripts/build_xs_research_panel.py from the ambush dataset
   (2025-07 .. 2026-07). Development + holdout live here.
-* forward panel   stitched from data/research/xs_panel/weekly_archive/*.parquet,
-  which scripts/generate_pump_watchlist.py appends every Monday. Only data
-  after a formula was frozen counts as independent evidence.
+* forward archive data/research/xs_panel/weekly_archive/*.parquet, which
+  scripts/generate_pump_watchlist.py appends every Monday. Only archives
+  captured after a formula was frozen count as independent evidence, and each
+  archive is judged on its own capture-day contents (load_archive_vintages):
+  a later archive restates ~a year of history, so the stitched panel can
+  show values that were not visible on an earlier signal day.
 
 Labels follow the validated protocol (docs/AMBUSH_MODES_BACKTEST_REPORT_2026-07-18.md):
 Monday snapshots, market cap in [2e6, 1.5e9], pump100 = max close over the
@@ -17,7 +20,7 @@ next 30 days >= 2x today's close.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -32,6 +35,10 @@ PUMP_THRESHOLD = 1.0  # +100%
 MCAP_MIN, MCAP_MAX = 2e6, 1.5e9
 DEV_END = pd.Timestamp("2026-02-15")  # same split as the validated weekly model
 PANEL_COLUMNS = ["base", "date", "close", "volume", "oi", "mcap", "funding"]
+# Provenance written with each archive since schema 2. Schema-1 archives lack
+# it; their capture day is the file name (the writer's UTC date).
+ARCHIVE_SCHEMA_VERSION = 2
+ARCHIVE_META_COLUMNS = ["captured_at", "oi_source", "mcap_source", "schema_version"]
 
 
 def add_forward_labels(daily: pd.DataFrame, horizon: int = LABEL_HORIZON_DAYS) -> pd.DataFrame:
@@ -68,14 +75,17 @@ def load_research_panel(path: Path = RESEARCH_PANEL_PATH) -> pd.DataFrame:
     return frame
 
 
-def stitch_weekly_archive(archive_dir: Path = WEEKLY_ARCHIVE_DIR) -> pd.DataFrame:
+def stitch_weekly_archive(archive_dir: Optional[Path] = None) -> pd.DataFrame:
     """Merge weekly snapshots into one daily panel; later snapshots win.
 
     Each snapshot carries ~365 days of history per coin but only a CURRENT
     market cap, so mcap is taken on each snapshot's own last day and
     forward-filled between snapshots instead of trusting the flat history.
+
+    NOT point-in-time: fine for outcome labels (closes of finished bars) and
+    live OI history, never for features on a past signal day.
     """
-    files = sorted(archive_dir.glob("*.parquet"))
+    files = sorted((archive_dir or WEEKLY_ARCHIVE_DIR).glob("*.parquet"))
     if not files:
         return pd.DataFrame(columns=PANEL_COLUMNS)
     frames = []
@@ -96,6 +106,69 @@ def stitch_weekly_archive(archive_dir: Path = WEEKLY_ARCHIVE_DIR) -> pd.DataFram
     raw = raw.sort_values(["base", "date"])
     raw["mcap"] = raw.groupby("base")["mcap"].ffill()
     return raw[PANEL_COLUMNS].reset_index(drop=True)
+
+
+def load_archive_vintages(archive_dir: Optional[Path] = None) -> Tuple[List[Dict[str, object]], List[Dict[str, str]]]:
+    """Each weekly archive as it was captured: point-in-time data for its last day.
+
+    An archive is accepted only when its capture day is provable (the
+    ``captured_at`` column, or for schema-1 files the file name) and its last
+    closed bar is the day before capture. Coins whose own last bar lags that
+    day are dropped from the vintage. Everything else fails closed: rejected
+    archives are returned with a reason and never enter a verdict.
+    """
+    accepted: List[Dict[str, object]] = []
+    rejected: List[Dict[str, str]] = []
+    for path in sorted((archive_dir or WEEKLY_ARCHIVE_DIR).glob("*.parquet")):
+        try:
+            file_day = pd.to_datetime(path.stem, format="%Y-%m-%d")
+        except ValueError:
+            rejected.append({"file": path.name, "reason": "unparseable_name"})
+            continue
+        try:
+            snap = pd.read_parquet(path)
+        except Exception:  # noqa: BLE001 - a truncated write must not stop the verdict pass
+            rejected.append({"file": path.name, "reason": "unreadable"})
+            continue
+        if snap.empty:
+            rejected.append({"file": path.name, "reason": "empty"})
+            continue
+        snap["date"] = pd.to_datetime(snap["date"])
+        if "captured_at" in snap:
+            # Earliest fetch of the run: conservative against a freeze during the run.
+            captured = pd.to_datetime(snap["captured_at"], utc=True).min().tz_localize(None)
+            if pd.isna(captured) or captured.normalize() != file_day:
+                rejected.append({"file": path.name, "reason": "capture_time_mismatch"})
+                continue
+        else:
+            captured = file_day  # start of the write day: earliest possible capture
+        signal_date = snap["date"].max()
+        if captured.normalize() - signal_date != pd.Timedelta(days=1):
+            rejected.append({"file": path.name, "reason": "last_bar_not_previous_day"})
+            continue
+        last_bar = snap.groupby("base")["date"].max()
+        current = last_bar.index[last_bar == signal_date]
+        frame = snap[snap["base"].isin(current)][PANEL_COLUMNS].reset_index(drop=True)
+        accepted.append({
+            "file": path.name, "captured_at": captured, "signal_date": signal_date, "frame": frame,
+            "coins": int(len(current)), "lagging_coins_dropped": int(len(last_bar) - len(current)),
+        })
+    return accepted, rejected
+
+
+def vintage_labels(vintages: List[Dict[str, object]]) -> pd.DataFrame:
+    """Outcome labels (base, date, fwd30_maxret) from the accepted archives' closes.
+
+    Later archives win: closes of finished bars are outcomes, not features,
+    so a restatement cannot leak into a signal.
+    """
+    if not vintages:
+        return pd.DataFrame(columns=["base", "date", "fwd30_maxret"])
+    closes = pd.concat(
+        [v["frame"][["base", "date", "close"]].assign(_order=i) for i, v in enumerate(vintages)], ignore_index=True,
+    )
+    closes = closes.sort_values("_order").drop_duplicates(["base", "date"], keep="last").drop(columns="_order")
+    return add_forward_labels(closes)[["base", "date", "fwd30_maxret"]]
 
 
 def weekly_rows(daily: pd.DataFrame, feature: pd.Series) -> pd.DataFrame:

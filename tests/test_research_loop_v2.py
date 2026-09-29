@@ -89,7 +89,26 @@ def test_disabled_loop_does_nothing_unless_forced_and_model_errors_are_recorded(
 def test_forward_observation_waits_for_archive(tmp_path, monkeypatch):
     loop, _ = _loop(tmp_path, monkeypatch, [])
     loop.state["frozen"] = [{**GOOD, "fingerprint": "x", "frozen_at": "2026-09-26T00:00:00+00:00", "status": "forward_observing"}]
-    monkeypatch.setattr(xs_panel, "stitch_weekly_archive", lambda: pd.DataFrame(columns=xs_panel.PANEL_COLUMNS))
+    monkeypatch.setattr(xs_panel, "WEEKLY_ARCHIVE_DIR", tmp_path / "archive_empty")
     asyncio.run(loop._observe_forward(v2.CrossSectionalLoopConfig()))
     assert loop.state["frozen"][0]["status"] == "forward_observing"
     assert "归档" in loop.state["frozen"][0]["forward_note"]
+
+
+def test_forward_observation_ignores_archives_captured_before_freeze(tmp_path, monkeypatch):
+    loop, _ = _loop(tmp_path, monkeypatch, [])
+    loop.state["frozen"] = [{**GOOD, "fingerprint": "x", "frozen_at": "2026-08-24T08:00:00+00:00", "status": "forward_observing"}]
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    panel = synthetic_panel(signal=True)
+    for capture in ("2026-08-24", "2026-08-31"):  # the first was captured before the freeze
+        last = pd.Timestamp(capture) - pd.Timedelta(days=1)
+        part = panel[(panel["date"] > last - pd.Timedelta(days=60)) & (panel["date"] <= last)]
+        part.drop(columns=["fwd30_maxret"]).to_parquet(archive / f"{capture}.parquet")
+    (archive / "bad-name.parquet").write_bytes(b"")
+    monkeypatch.setattr(xs_panel, "WEEKLY_ARCHIVE_DIR", archive)
+    asyncio.run(loop._observe_forward(v2.CrossSectionalLoopConfig()))
+    item = loop.state["frozen"][0]
+    assert item["status"] == "forward_observing"
+    assert item["forward"]["method"] == "point_in_time_vintages" and item["forward"]["vintages"] == 1
+    assert item["forward_archives_rejected"] == [{"file": "bad-name.parquet", "reason": "unparseable_name"}]
