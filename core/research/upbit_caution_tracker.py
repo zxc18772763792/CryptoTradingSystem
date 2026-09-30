@@ -25,10 +25,19 @@ the tracker started are ``backfilled`` and excluded from forward statistics.
 
 The research model reads the Korean notice body and labels the stated reason
 (``reason``) for a later sub-group analysis; it never changes a trade.
+
+Point-in-time evidence (``evidence``, core/research/signal_evidence.py): the
+backtest could not show what was visible or tradable when each notice came
+out. Forward trades therefore record the notice exactly as first seen, the
+classifier version, the contract status, the order book at discovery and at
+the entry close, the 5-minute path over the hold and a market basket fixed at
+the signal. A notice first seen after its entry close is ``late``: that close
+was never tradable, so it stays out of forward statistics like a backfill.
 Research only: nothing here places orders.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -38,7 +47,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from loguru import logger
 
-from core.research import retirement
+from core.research import retirement, signal_evidence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_caution" / "tracker.json"
@@ -57,6 +66,11 @@ KRW_LISTING_REFERENCE = "70 perps 2023-26: +6.5%/trade after fees+funding, 90% C
 KRW_LISTING = re.compile(r"(신규\s*)?거래\s*지원\s*안내.*KRW|KRW.*(신규\s*)?거래\s*지원|(KRW|원화)[^(]*마켓[^(]*(추가|상장|오픈)|(원화|KRW)\s*마켓\s*(신규\s*)?상장")
 NOT_LISTING = re.compile(r"유의|거래\s*지원\s*종료|유통량")
 DEDUPE_DAYS = 30
+# Changes whenever a notice pattern changes, so evidence says which rules picked the trade.
+CLASSIFIER_VERSION = hashlib.sha1("|".join(
+    r.pattern for r in (CAUTION, RELEASED, KRW_LISTING, NOT_LISTING)).encode("utf-8")).hexdigest()[:10]
+NOTICE_FIELDS = ("id", "title", "first_listed_at", "listed_at", "category", "need_update_badge")
+ENTRY_BOOK_MAX_LAG_SEC = 6 * 3600  # later than this the book no longer describes the entry
 REASONS = ("disclosure_or_supply", "security_incident", "project_or_team_issue", "network_or_technical",
            "legal_or_regulatory", "other")
 REASON_SYSTEM_PROMPT = f"""You read a Korean crypto-exchange notice that designates a coin as a caution item.
@@ -180,8 +194,10 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
     info = await client.get(f"{FAPI}/exchangeInfo")
     info.raise_for_status()
     # Only live contracts: a settled perp still appears in exchangeInfo with frozen, flat klines.
-    perps = {s["symbol"]: int(s.get("onboardDate") or 0) for s in info.json().get("symbols", [])
-             if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING"}
+    contracts = {s["symbol"]: s for s in info.json().get("symbols", [])
+                 if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT"}
+    perps = {sym: int(s.get("onboardDate") or 0) for sym, s in contracts.items() if s.get("status") == "TRADING"}
+    basket: Optional[Dict[str, Any]] = None  # fetched at most once per pass, only for a new forward trade
 
     # oldest first: the original notice must claim an event before its follow-ups do
     for notice in sorted(await _notices(client), key=lambda n: str(n.get("first_listed_at") or "")):
@@ -200,11 +216,30 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
             symbol = next((s for s in (f"{ticker}USDT", f"1000{ticker}USDT") if 0 < perps.get(s, 0) < at.timestamp() * 1000), None)
             if symbol and not await _spot_history_30d(client, ticker, day0_ms):
                 symbol = None  # outside the backtest universe: no Binance spot history before the notice
+            backfilled = at < started
+            evidence: Dict[str, Any] = {
+                "version": signal_evidence.EVIDENCE_VERSION, "classifier_version": CLASSIFIER_VERSION,
+                "notice_first_seen": {k: notice.get(k) for k in NOTICE_FIELDS},
+                "discovery_lag_sec": round((now - at).total_seconds(), 1),
+                "contract_at_discovery": signal_evidence.contract_record(
+                    contracts, (f"{ticker}USDT", f"1000{ticker}USDT"), now),
+            }
+            if symbol and not backfilled:
+                evidence["book_at_discovery"] = await signal_evidence.book_snapshot(client, symbol, now)
+                if basket is None:
+                    try:
+                        basket = await signal_evidence.market_basket(client, perps, symbol, now)
+                    except Exception as exc:  # noqa: BLE001 - evidence is best-effort
+                        basket = {"captured_at": now.isoformat(), "error": type(exc).__name__}
+                evidence["market_basket"] = {**basket, "symbols": [x for x in basket.get("symbols", []) if x != symbol]}
             state["trades"][key] = {
                 "ticker": ticker, "symbol": symbol, "notice_id": notice["id"], "title": notice.get("title"),
                 "notice_at": at.isoformat(), "day0_ms": day0_ms,
-                "backfilled": at < started, "discovered_at": now.isoformat(),
+                "backfilled": backfilled, "discovered_at": now.isoformat(),
+                # first seen after the entry close: the backtest's entry was never available
+                "late": not backfilled and now_ms > day0_ms + DAY_MS,
                 "status": "waiting_entry" if symbol else "no_perp",
+                "evidence": evidence,
             }
 
     for key, trade in state["trades"].items():
@@ -228,6 +263,8 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
                 trade.update(evaluate_trade(bars, funding, trade["day0_ms"], now_ms), updated_at=now.isoformat())
             except Exception as exc:  # noqa: BLE001 - retried next pass
                 logger.debug(f"upbit caution tracker: {key} update failed: {exc}")
+        if trade.get("symbol") and not trade.get("backfilled") and "evidence" in trade:
+            await _record_trade_evidence(client, trade, perps, now)
         if "reason" not in trade and llm_extract is not None:
             try:
                 body = await _notice_body(client, trade["notice_id"])
@@ -244,12 +281,45 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
     return summary(state, strategy)
 
 
+async def _record_trade_evidence(client, trade: Dict[str, Any], perps: Dict[str, int], now: datetime) -> None:
+    """Entry-time book and contract status, then the 5-minute path and market control once closed."""
+    evidence = trade["evidence"]
+    entry_close_ms = trade["day0_ms"] + DAY_MS
+    now_ms = now.timestamp() * 1000
+    if trade["status"] in {"open", "closed", "stopped"} and "book_at_entry" not in evidence:
+        lag = round((now_ms - entry_close_ms) / 1000, 1)
+        evidence["contract_trading_at_entry_check"] = trade["symbol"] in perps
+        if lag <= ENTRY_BOOK_MAX_LAG_SEC:
+            book = await signal_evidence.book_snapshot(client, trade["symbol"], now)
+            evidence["book_at_entry"] = {**book, "lag_after_entry_close_sec": lag}
+        else:
+            evidence["book_at_entry"] = {"missed": True, "lag_after_entry_close_sec": lag}
+    if trade["status"] not in {"closed", "stopped"} or not trade.get("exit_at"):
+        return
+    entry_ms, exit_ms = int(trade["entry_at"]), int(trade["exit_at"])
+    try:
+        if "path" not in evidence:
+            bars = await signal_evidence.fetch_path(client, trade["symbol"], entry_ms, exit_ms)
+            evidence["path"] = signal_evidence.path_metrics(bars, float(trade["entry_price"]), entry_ms, exit_ms, STOP_PCT)
+        symbols = (evidence.get("market_basket") or {}).get("symbols") or []
+        if "market_control" not in evidence and symbols:
+            control = await signal_evidence.basket_return(client, symbols, entry_ms, exit_ms)
+            if control is not None:
+                # short the coin, long the basket: the part of the return that is not the market
+                evidence["market_control"] = {**control, "hedged_return_pct": round(
+                    float(trade["return_pct"]) + control["return_pct"], 3)}
+    except Exception as exc:  # noqa: BLE001 - retried next pass
+        logger.debug(f"upbit caution tracker: evidence for {trade.get('ticker')} failed: {exc}")
+
+
 def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
     spec = STRATEGIES[strategy]
     trades = list(state.get("trades", {}).values())
-    forward = [t for t in trades if not t.get("backfilled") and t.get("symbol")]
+    forward = [t for t in trades if not t.get("backfilled") and not t.get("late") and t.get("symbol")]
     done = [t for t in forward if t.get("status") in {"closed", "stopped"}]
     returns = [float(t["return_pct"]) for t in done if t.get("return_pct") is not None]
+    hedged = [float(t["evidence"]["market_control"]["hedged_return_pct"]) for t in done
+              if (t.get("evidence") or {}).get("market_control")]
     return {
         "started_at": state.get("started_at"),
         "updated_at": state.get("updated_at"),
@@ -262,6 +332,14 @@ def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
         "forward_completed": len(done),
         "forward_mean_return_pct": round(float(np.mean(returns)), 2) if returns else None,
         "forward_win_rate": round(float(np.mean([r > 0 for r in returns])), 3) if returns else None,
+        "forward_late": sum(bool(t.get("late") and t.get("symbol")) for t in trades),
+        "forward_hedged_mean_return_pct": round(float(np.mean(hedged)), 2) if hedged else None,
+        "evidence_coverage": {
+            "completed": len(done),
+            "book_at_entry": sum("mid" in ((t.get("evidence") or {}).get("book_at_entry") or {}) for t in done),
+            "path": sum(bool(((t.get("evidence") or {}).get("path") or {}).get("bars")) for t in done),
+            "market_control": len(hedged),
+        },
         "strategy": strategy,
         "backtest_reference": spec["reference"],
         "evaluation_ready": len(returns) >= retirement.RULES[spec["rule"]]["min_n"],

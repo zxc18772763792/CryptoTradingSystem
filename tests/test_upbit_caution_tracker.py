@@ -36,10 +36,14 @@ class World:
             {"id": 6970, "title": "이이(EEE) 거래 유의 종목 지정 안내", "first_listed_at": "2026-10-05T11:00:00+09:00"},
         ]
         self.path = lambda k: (1.0, 1.0)  # day k -> (high, close)
+        self.path5m = lambda t: (1.0, 1.0)  # 5m bar open ms -> (open, high)
+        self.basket_close = lambda k: 1.0  # day k close of every basket perp
         self.no_spot_history = set()
+        self.calls = []
 
     async def get(self, url, params=None, headers=None):
         params = params or {}
+        self.calls.append((url.rsplit("/", 1)[-1], params.get("symbol"), params.get("interval")))
         if url.endswith("/exchangeInfo"):
             listed = int(datetime(2025, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
             return _Resp({"symbols": [
@@ -47,7 +51,26 @@ class World:
                 {"symbol": "1000CCCUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed, "status": "TRADING"},
                 {"symbol": "DDDUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": DAY0 + DAY, "status": "TRADING"},  # listed after
                 {"symbol": "EEEUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed, "status": "SETTLING"},
+                {"symbol": "BTCUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed, "status": "TRADING"},
+                {"symbol": "ETHUSDT", "contractType": "PERPETUAL", "quoteAsset": "USDT", "onboardDate": listed, "status": "TRADING"},
             ]})
+        if url.endswith("/depth"):
+            return _Resp({"T": 1, "bids": [["0.999", "1000"], ["0.985", "5000"], ["0.9", "1"]],
+                          "asks": [["1.001", "2000"], ["1.015", "1000"], ["1.1", "1"]]})
+        if url.endswith("/ticker/24hr"):
+            return _Resp([{"symbol": "BTCUSDT", "quoteVolume": "9e9"}, {"symbol": "AAAUSDT", "quoteVolume": "5e9"},
+                          {"symbol": "EEEUSDT", "quoteVolume": "4e9"}, {"symbol": "ETHUSDT", "quoteVolume": "3e9"}])
+        if url.endswith("/klines") and params.get("interval") == "5m":
+            start, end = int(params["startTime"]), int(params["endTime"])
+            bars = []
+            for t in range(start, min(end + 1, start + params["limit"] * 300_000), 300_000):
+                open_, high = self.path5m(t)
+                bars.append([t, str(open_), str(high), "0.8", "1"])
+            return _Resp(bars)
+        if url.endswith("/klines") and params.get("symbol") in {"BTCUSDT", "ETHUSDT"}:
+            start = int(params["startTime"])
+            return _Resp([[start + k * DAY, "1", "1", "1", str(self.basket_close((start + k * DAY - DAY0) // DAY))]
+                          for k in range(params["limit"])])
         if url == uc.UPBIT:
             return _Resp({"data": {"notices": self.notices if params.get("page") == 1 else []}})
         if url.startswith(uc.UPBIT + "/"):
@@ -170,3 +193,66 @@ def test_caution_extensions_are_not_deduped(world, tmp_path):
     uc.save_state({"started_at": "2026-09-01T00:00:00+00:00", "trades": {}}, path)
     asyncio.run(uc.tick(world, state_path=path))
     assert set(json.loads(path.read_text(encoding="utf-8"))["trades"]) == {"AAA|7100", "AAA|7101"}
+
+
+def test_forward_trade_records_point_in_time_evidence(world, tmp_path):
+    path = tmp_path / "state.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    world.path = lambda k: (1.5 if k == 3 else 1.0, 1.0)  # stop on day 3
+    stop_bar = DAY0 + 3 * DAY + 12 * 300_000
+    world.path5m = lambda t: (1.5, 1.6) if t == stop_bar else (1.0, 1.0)  # opens beyond the stop: a gap
+    world.basket_close = lambda k: 1.1 if k >= 1 else 1.0  # market +10% over the hold
+    run(world, path)
+    ev = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]["evidence"]
+    assert ev["classifier_version"] == uc.CLASSIFIER_VERSION
+    assert ev["notice_first_seen"]["title"] == "에이에이(AAA) 거래 유의 종목 지정 안내"
+    assert ev["discovery_lag_sec"] == 7200.0
+    assert ev["contract_at_discovery"]["AAAUSDT"]["status"] == "TRADING"
+    assert ev["contract_at_discovery"]["1000AAAUSDT"] == "absent"
+    book = ev["book_at_discovery"]
+    assert book["spread_bps"] == pytest.approx(20.0) and book["bid_usdt_2pct"] == pytest.approx(999 + 4925)
+    assert ev["market_basket"]["symbols"] == ["BTCUSDT", "ETHUSDT"]  # live perps only, the coin itself excluded
+    backfill_ev = json.loads(path.read_text(encoding="utf-8"))["trades"]["CCC|6990"]["evidence"]
+    assert "book_at_discovery" not in backfill_ev  # no requests spent on backfills
+    eee = json.loads(path.read_text(encoding="utf-8"))["trades"]["EEE|6970"]["evidence"]
+    assert eee["contract_at_discovery"]["EEEUSDT"]["status"] == "SETTLING"  # why it had no tradable perp
+
+    world.now = datetime(2026, 10, 6, 1, tzinfo=timezone.utc)  # one hour after the entry close
+    run(world, path)
+    ev = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]["evidence"]
+    assert ev["book_at_entry"]["lag_after_entry_close_sec"] == 3600.0 and "mid" in ev["book_at_entry"]
+    assert ev["contract_trading_at_entry_check"] is True
+
+    world.now = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)
+    summary = run(world, path)
+    trade = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]
+    assert trade["status"] == "stopped"
+    p5 = trade["evidence"]["path"]
+    assert p5["stop_hit_at"] == stop_bar and p5["stop_gap_pct"] == pytest.approx((1.5 / 1.4 - 1) * 100, abs=1e-3)
+    assert p5["mae_pct"] == pytest.approx(60.0) and p5["coverage"] == 1.0
+    control = trade["evidence"]["market_control"]
+    assert control["return_pct"] == pytest.approx(10.0) and control["legs"] == 2
+    assert control["hedged_return_pct"] == pytest.approx(trade["return_pct"] + 10.0)
+    assert summary["evidence_coverage"] == {"completed": 1, "book_at_entry": 1, "path": 1, "market_control": 1}
+    assert summary["forward_hedged_mean_return_pct"] == pytest.approx(round(trade["return_pct"] + 10.0, 2))
+
+
+def test_entry_book_marked_missed_when_the_tracker_was_down(world, tmp_path):
+    path = tmp_path / "state.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    run(world, path)
+    world.now = datetime(2026, 10, 6, 9, tzinfo=timezone.utc)  # 9h after the entry close
+    run(world, path)
+    book = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]["evidence"]["book_at_entry"]
+    assert book == {"missed": True, "lag_after_entry_close_sec": 32400.0}
+
+
+def test_notice_first_seen_after_entry_close_is_late_and_excluded(world, tmp_path):
+    path = tmp_path / "state.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    world.now = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)  # first pass after the whole hold
+    summary = run(world, path)
+    aaa = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]
+    assert aaa["late"] is True and aaa["backfilled"] is False and aaa["status"] == "closed"
+    assert summary["forward_late"] == 1 and summary["forward_completed"] == 0
+    assert summary["retirement"]["verdict"] == "collecting"
