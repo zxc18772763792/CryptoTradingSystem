@@ -32,7 +32,7 @@ from core.factors_ts.cache import factor_cache_scope
 from core.backtest.cost_models import fee_rate as resolve_fee_rate
 from core.backtest.cost_models import slippage_rate as resolve_slippage_rate
 from core.backtest.exit_engine import EXIT_TEMPLATE_PRESETS, resolve_exit_engine_config, run_exit_engine
-from core.ai.ml_signal import build_feature_frame
+from core.ai.ml_signal import build_feature_frame, model_usability
 from core.data import data_storage
 from core.research.strategy_research import (
     _attach_research_enrichment as attach_research_enrichment,
@@ -2727,6 +2727,9 @@ def _build_positions_v2(strategy: str, df: pd.DataFrame, params: Optional[Dict[s
         if not model_path:
             raise HTTPException(status_code=400, detail="MLXGBoostStrategy 模型文件不存在")
 
+        usable, why = model_usability(model_path)
+        if not usable:
+            raise HTTPException(status_code=400, detail=f"ML 模型不可用：{why}")
         model = xgb.Booster()
         model.load_model(model_path)
         feat_df = _build_ml_backtest_feature_frame(df, model, params)
@@ -3394,6 +3397,9 @@ def _build_positions_legacy(strategy: str, df: pd.DataFrame, params: Optional[Di
         model_path = _resolve_ml_model_path(params)
         if not model_path:
             raise HTTPException(status_code=400, detail="MLXGBoostStrategy 模型文件不存在")
+        usable, why = model_usability(model_path)
+        if not usable:
+            raise HTTPException(status_code=400, detail=f"ML 模型不可用：{why}")
         model = xgb.Booster()
         model.load_model(model_path)
         feat_df = _build_ml_backtest_feature_frame(df, model, params)

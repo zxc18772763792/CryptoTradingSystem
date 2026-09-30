@@ -16,26 +16,33 @@ import numpy as np
 import pandas as pd
 
 
-FEATURE_SET_VERSION = "ml_signal_v1"
+# v2 (2026-09-30): every feature is scale-free (ratios, returns, bounded
+# oscillators). v1 fed raw price/volume LEVELS (close, EMAs, Bollinger bands,
+# ATR, MACD in price units) to a tree model trained on BTC alone; applied to
+# altcoins every row fell into BTC's "low price" leaves and the model said
+# LONG on 100% of alt bars (flipping to ~95% SHORT when the same alt was merely
+# rescaled to BTC's price). Level features cannot transfer across coins.
+FEATURE_SET_VERSION = "ml_signal_v2"
 FEATURE_COLUMNS: List[str] = [
     "rsi",
-    "macd",
-    "macd_signal",
-    "macd_hist",
-    "ema_fast",
-    "ema_slow",
-    "bb_upper",
-    "bb_lower",
-    "bb_mid",
-    "atr",
+    "macd_pct",
+    "macd_signal_pct",
+    "macd_hist_pct",
+    "ema_fast_gap",
+    "ema_slow_gap",
+    "bb_position",
+    "bb_width",
+    "atr_pct",
     "volume_ratio",
     "momentum",
-    "close",
-    "high",
-    "low",
-    "open",
-    "volume",
+    "ret_1",
+    "ret_4",
+    "body_pct",
+    "range_pct",
 ]
+# Test-set share of one-sided predictions above which a model is rejected: a
+# classifier that (almost) always says LONG carries no timing information.
+MAX_ONE_SIDE_SHARE = 0.90
 MODEL_FILE_NAME = "model.json"
 MANIFEST_FILE_NAME = "manifest.json"
 METRICS_FILE_NAME = "metrics.json"
@@ -218,11 +225,7 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     volume = _ensure_series(df, "volume")
 
     out = pd.DataFrame(index=df.index)
-    out["open"] = open_
-    out["high"] = high
-    out["low"] = low
-    out["close"] = close
-    out["volume"] = volume
+    safe_close = close.where(close > 0)
 
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -236,28 +239,32 @@ def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
     ema26 = close.ewm(span=26, adjust=False, min_periods=13).mean()
     macd_line = ema12 - ema26
     macd_signal = macd_line.ewm(span=9, adjust=False, min_periods=5).mean()
-    out["macd"] = macd_line
-    out["macd_signal"] = macd_signal
-    out["macd_hist"] = macd_line - macd_signal
+    out["macd_pct"] = macd_line / safe_close
+    out["macd_signal_pct"] = macd_signal / safe_close
+    out["macd_hist_pct"] = (macd_line - macd_signal) / safe_close
 
-    out["ema_fast"] = close.ewm(span=8, adjust=False, min_periods=4).mean()
-    out["ema_slow"] = close.ewm(span=21, adjust=False, min_periods=10).mean()
+    out["ema_fast_gap"] = close.ewm(span=8, adjust=False, min_periods=4).mean() / safe_close - 1.0
+    out["ema_slow_gap"] = close.ewm(span=21, adjust=False, min_periods=10).mean() / safe_close - 1.0
 
     bb_mid = close.rolling(20, min_periods=10).mean()
     bb_std = close.rolling(20, min_periods=10).std()
-    out["bb_mid"] = bb_mid
-    out["bb_upper"] = bb_mid + 2.0 * bb_std
-    out["bb_lower"] = bb_mid - 2.0 * bb_std
+    band = 4.0 * bb_std
+    out["bb_position"] = (close - (bb_mid - 2.0 * bb_std)) / band.where(band > 0)
+    out["bb_width"] = band / bb_mid.where(bb_mid > 0)
 
     hl = high - low
     hpc = (high - close.shift(1)).abs()
     lpc = (low - close.shift(1)).abs()
     tr = pd.concat([hl, hpc, lpc], axis=1).max(axis=1)
-    out["atr"] = tr.ewm(com=13, adjust=False, min_periods=14).mean()
+    out["atr_pct"] = tr.ewm(com=13, adjust=False, min_periods=14).mean() / safe_close
 
     vol_ma = volume.rolling(20, min_periods=10).mean()
     out["volume_ratio"] = volume / (vol_ma + 1e-9)
-    out["momentum"] = close.pct_change(14)
+    out["momentum"] = close.pct_change(14, fill_method=None)
+    out["ret_1"] = close.pct_change(1, fill_method=None)
+    out["ret_4"] = close.pct_change(4, fill_method=None)
+    out["body_pct"] = (close - open_) / open_.where(open_ > 0)
+    out["range_pct"] = (high - low) / safe_close
 
     return out.reindex(columns=FEATURE_COLUMNS).replace([np.inf, -np.inf], np.nan)
 
@@ -328,6 +335,66 @@ def build_dataset(
         feature_columns=list(selected_columns),
         forward_bars=int(forward_bars),
         feature_set_version=str(feature_set_version),
+    )
+
+
+def build_pooled_dataset(
+    frames: Mapping[str, pd.DataFrame],
+    *,
+    forward_bars: int,
+    min_rows_per_symbol: int = 200,
+) -> Tuple[MLDataSet, pd.Series]:
+    """Features/labels for several symbols stacked in time order.
+
+    Returns the dataset (RangeIndex rows) and the matching bar timestamps and
+    symbols (``_ts``/``_symbol`` columns of ``dataset.frame``). Labels never
+    cross symbols: each coin's label uses only its own future close.
+    """
+    parts: List[pd.DataFrame] = []
+    for symbol, df in frames.items():
+        try:
+            one = build_dataset(df, forward_bars=forward_bars, min_rows=min_rows_per_symbol)
+        except PipelineError:
+            continue
+        part = one.frame.copy()
+        part["_ts"] = pd.to_datetime(part.index, utc=True)
+        part["_symbol"] = str(symbol)
+        parts.append(part.reset_index(drop=True))
+    if not parts:
+        raise PipelineError("dataset", "no symbol had enough rows for pooled training")
+    frame = pd.concat(parts, ignore_index=True).sort_values(["_ts", "_symbol"], kind="mergesort").reset_index(drop=True)
+    dataset = MLDataSet(
+        frame=frame,
+        features=frame[FEATURE_COLUMNS].astype(float),
+        labels=frame["_label"].astype(int),
+        feature_columns=list(FEATURE_COLUMNS),
+        forward_bars=int(forward_bars),
+        feature_set_version=FEATURE_SET_VERSION,
+    )
+    return dataset, frame["_symbol"]
+
+
+def split_pooled_by_time(dataset: MLDataSet, *, test_size: float, bar_seconds: int) -> MLDataSplit:
+    """Chronological split on bar time for a pooled dataset, with a purge gap.
+
+    Rows whose label window (forward_bars) would reach into the test period are
+    dropped from training, so no training label overlaps a test bar.
+    """
+    if not 0.0 < float(test_size) < 1.0:
+        raise PipelineError("split", "test_size must be between 0 and 1", details={"test_size": float(test_size)})
+    ts = pd.to_datetime(dataset.frame["_ts"], utc=True)
+    cut = ts.quantile(1.0 - float(test_size))
+    purge = pd.Timedelta(seconds=int(bar_seconds) * int(dataset.forward_bars))
+    train_mask = (ts < cut - purge).to_numpy()
+    test_mask = (ts >= cut).to_numpy()
+    if not train_mask.any() or not test_mask.any():
+        raise PipelineError("split", "pooled time split produced an empty partition")
+    return MLDataSplit(
+        X_train=dataset.features[train_mask].copy(),
+        X_test=dataset.features[test_mask].copy(),
+        y_train=dataset.labels[train_mask].copy(),
+        y_test=dataset.labels[test_mask].copy(),
+        test_size=float(test_size),
     )
 
 
@@ -534,8 +601,10 @@ def apply_quality_gate(
     min_recall: float = 0.40,
     min_train_samples: int = 80,
     min_test_samples: int = 20,
+    max_one_side_share: float = MAX_ONE_SIDE_SHARE,
 ) -> GateResult:
     thresholds = {
+        "max_one_side_share": float(max_one_side_share),
         "min_auc": float(min_auc),
         "min_f1": float(min_f1),
         "min_precision": float(min_precision),
@@ -570,6 +639,20 @@ def apply_quality_gate(
         reasons.append(f"train sample count too low ({train_samples} < {min_train_samples})")
     if test_samples < min_test_samples:
         reasons.append(f"test sample count too low ({test_samples} < {min_test_samples})")
+
+    long_prob = [float(v) for v in (metrics.get("test_long_prob") or [])]
+    threshold = float(metrics.get("prediction_threshold") or 0.55)
+    if long_prob:
+        long_share = sum(v >= threshold for v in long_prob) / len(long_prob)
+        short_share = sum((1.0 - v) >= threshold for v in long_prob) / len(long_prob)
+        if max(long_share, short_share) > max_one_side_share:
+            reasons.append(
+                f"one-sided predictions (long {long_share:.1%} / short {short_share:.1%} > {max_one_side_share:.0%})"
+            )
+    for symbol, share in dict(metrics.get("per_symbol_one_side_share") or {}).items():
+        if float(share) > max_one_side_share:
+            reasons.append(f"one-sided predictions on {symbol} ({float(share):.1%} > {max_one_side_share:.0%})")
+            break
 
     passed = not reasons
     return GateResult(passed=passed, reasons=reasons, thresholds=thresholds)
@@ -622,8 +705,14 @@ def build_manifest(
     created_at: datetime,
     source_commit: str,
     environment: Mapping[str, Any],
+    training_symbols: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
+    symbols = [str(x) for x in (training_symbols or [symbol])]
     return {
+        # "pooled": trained across coins on scale-free features, usable on any
+        # coin; "single": only on the coin it was trained on.
+        "symbol_scope": "pooled" if len(symbols) > 1 else "single",
+        "training_symbols": symbols,
         "model_id": str(model_id),
         "feature_set_version": str(feature_set_version),
         "training_window": dict(training_window),
@@ -713,7 +802,8 @@ def run_signal_training_pipeline(
     )
     metrics = evaluate_model(model, split, threshold=prediction_threshold)
 
-    allowed_gate_keys = {"min_auc", "min_f1", "min_precision", "min_recall", "min_train_samples", "min_test_samples"}
+    allowed_gate_keys = {"min_auc", "min_f1", "min_precision", "min_recall", "min_train_samples", "min_test_samples",
+                         "max_one_side_share"}
     gate_kwargs = {key: value for key, value in dict(gate_thresholds or {}).items() if key in allowed_gate_keys}
     gate = apply_quality_gate(metrics, **gate_kwargs)
 
@@ -777,6 +867,118 @@ def run_signal_training_pipeline(
         artifact_dir=artifact_dir,
         manifest=manifest,
         metrics=metrics,
+        gate=gate,
+        diagnostics=diagnostics,
+        dataset=dataset,
+        split=split,
+        feature_importances=feature_importances,
+    )
+
+
+_PER_ROW_METRIC_KEYS = ("test_predictions", "test_long_prob", "test_short_prob", "test_true")
+
+
+def run_pooled_training_pipeline(
+    *,
+    frames: Mapping[str, pd.DataFrame],
+    output_root: Path,
+    timeframe: str,
+    bar_seconds: int,
+    exchange: str,
+    forward_bars: int,
+    test_size: float,
+    n_estimators: int,
+    max_depth: int,
+    learning_rate: float,
+    scale_pos_weight: float,
+    prediction_threshold: float = 0.55,
+    gate_thresholds: Optional[Mapping[str, float]] = None,
+    fail_on_gate: bool = True,
+) -> MLTrainingRun:
+    """Train one model across many coins on scale-free features.
+
+    The split is on bar time (not row order) with a purge of ``forward_bars``
+    so no training label overlaps the test period. Besides the classification
+    gate, a model whose predictions are one-sided overall or on any single
+    coin is rejected. Per-row test predictions are summarised, not stored.
+    """
+    diagnostics = assert_environment_ready(require_xgboost=True, require_sklearn=False)
+    dataset, symbols = build_pooled_dataset(frames, forward_bars=forward_bars)
+    split = split_pooled_by_time(dataset, test_size=test_size, bar_seconds=bar_seconds)
+    model, feature_importances = train_xgboost_classifier(
+        split,
+        n_estimators=n_estimators,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        scale_pos_weight=scale_pos_weight,
+    )
+    metrics = evaluate_model(model, split, threshold=prediction_threshold)
+
+    test_symbols = symbols.loc[split.X_test.index].to_numpy()
+    long_prob = np.asarray(metrics["test_long_prob"], dtype=float)
+    per_symbol: Dict[str, float] = {}
+    for symbol in sorted(set(test_symbols)):
+        mask = test_symbols == symbol
+        if mask.sum() < 50:
+            continue
+        lp = long_prob[mask]
+        per_symbol[str(symbol)] = round(float(max(np.mean(lp >= prediction_threshold),
+                                                  np.mean((1.0 - lp) >= prediction_threshold))), 4)
+    metrics["per_symbol_one_side_share"] = per_symbol
+    metrics["test_long_share"] = round(float(np.mean(long_prob >= prediction_threshold)), 4)
+    metrics["test_short_share"] = round(float(np.mean((1.0 - long_prob) >= prediction_threshold)), 4)
+
+    allowed_gate_keys = {"min_auc", "min_f1", "min_precision", "min_recall", "min_train_samples", "min_test_samples",
+                         "max_one_side_share"}
+    gate_kwargs = {key: value for key, value in dict(gate_thresholds or {}).items() if key in allowed_gate_keys}
+    gate = apply_quality_gate(metrics, **gate_kwargs)
+    stored = {k: v for k, v in metrics.items() if k not in _PER_ROW_METRIC_KEYS}
+
+    created_at = _utc_now()
+    source_commit = get_source_commit()
+    model_id = create_model_id(symbol="pooled", timeframe=timeframe, source_commit=source_commit, created_at=created_at)
+    ts = pd.to_datetime(dataset.frame["_ts"], utc=True)
+    training_window = {
+        "exchange": str(exchange),
+        "symbol": "pooled",
+        "timeframe": str(timeframe),
+        "symbols": sorted(set(symbols)),
+        "rows": int(dataset.sample_count),
+        "forward_bars": int(forward_bars),
+        "start_at": ts.min().isoformat(),
+        "end_at": ts.max().isoformat(),
+        "test_starts_at": pd.to_datetime(dataset.frame.loc[split.X_test.index, "_ts"], utc=True).min().isoformat(),
+    }
+    manifest = build_manifest(
+        model_id=model_id,
+        feature_set_version=dataset.feature_set_version,
+        training_window=training_window,
+        symbol="pooled",
+        timeframe=timeframe,
+        metrics={**stored, "quality_gate": gate.to_dict(), "feature_columns": list(dataset.feature_columns)},
+        created_at=created_at,
+        source_commit=source_commit,
+        environment=diagnostics.to_dict(),
+        training_symbols=sorted(set(symbols)),
+    )
+    artifact_dir = save_model_artifacts(
+        output_root=Path(output_root),
+        model=model,
+        manifest=manifest,
+        metrics={**stored, "quality_gate": gate.to_dict(), "feature_columns": list(dataset.feature_columns)},
+        feature_importances=feature_importances,
+    )
+    if not gate.passed and fail_on_gate:
+        raise PipelineError(
+            "gate",
+            "ML quality gate failed",
+            details={"reasons": gate.reasons, "auc": stored.get("auc"), "artifact_dir": str(artifact_dir)},
+        )
+    return MLTrainingRun(
+        model=model,
+        artifact_dir=artifact_dir,
+        manifest=manifest,
+        metrics=stored,
         gate=gate,
         diagnostics=diagnostics,
         dataset=dataset,

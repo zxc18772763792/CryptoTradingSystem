@@ -210,6 +210,7 @@ def test_mlxgboost_backtest_support_accepts_manifest_valid_model_path(monkeypatc
             {
                 "feature_set_version": FEATURE_SET_VERSION,
                 "feature_columns": FEATURE_COLS,
+                "quality_gate": {"passed": True, "reasons": []},
             }
         ),
         encoding="utf-8",
@@ -221,6 +222,25 @@ def test_mlxgboost_backtest_support_accepts_manifest_valid_model_path(monkeypatc
 
     assert supported is True
     assert reason is None
+
+
+def test_mlxgboost_backtest_support_rejects_a_gate_failed_model(monkeypatch, tmp_path):
+    from core.ai.ml_signal import FEATURE_COLS
+    from core.ml.pipeline import FEATURE_SET_VERSION
+
+    model_path = tmp_path / "model.json"
+    model_path.write_text("{}", encoding="utf-8")
+    model_path.with_suffix(".manifest.json").write_text(
+        json.dumps({"feature_set_version": FEATURE_SET_VERSION, "feature_columns": FEATURE_COLS,
+                    "metrics": {"quality_gate": {"passed": False, "reasons": ["auc"]}}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(strategy_registry.importlib_util, "find_spec", lambda name: object())
+    monkeypatch.setattr(strategy_registry, "_mlxgboost_model_candidates", lambda: [model_path])
+
+    supported, reason = strategy_registry._mlxgboost_backtest_support_status()
+
+    assert supported is False and "quality gate" in reason
 
 
 def test_shared_cost_model_helpers_support_flat_and_dynamic_modes():

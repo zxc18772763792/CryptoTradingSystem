@@ -1,4 +1,15 @@
-"""Train and package an ML signal model."""
+"""Train and package an ML signal model.
+
+Single coin (legacy):  python scripts/train_ml_signal.py --symbol BTC/USDT --timeframe 1h
+Pooled (what the agent's aggregator needs, it scores ~30 coins):
+    python scripts/train_ml_signal.py --symbols auto --timeframe 15m --days 180
+
+A pooled model is trained on scale-free features across every local coin with
+enough history, split on bar time with a label-length purge. Only a model that
+passes the quality gate (including "not one-sided on any coin") is copied to
+models/ml_signal_xgb.json; otherwise the previous canonical file stays and the
+loader keeps refusing it if it is stale.
+"""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +29,17 @@ if str(_ROOT) not in sys.path:
 import pandas as pd
 from loguru import logger
 
-from core.ml.pipeline import PipelineError, diagnose_environment, run_signal_training_pipeline
+from core.ml.pipeline import (
+    PipelineError,
+    diagnose_environment,
+    run_pooled_training_pipeline,
+    run_signal_training_pipeline,
+)
+
+STABLE_BASES = {"USDC", "FDUSD", "TUSD", "DAI", "USD1", "BFUSD", "USDP", "EUR", "USDE", "PYUSD", "RLUSD", "XUSD", "U"}
+
+
+_STORAGE_READY = False
 
 
 async def load_ohlcv(
@@ -32,7 +53,10 @@ async def load_ohlcv(
 
     from core.data import data_storage
 
-    await data_storage.initialize()
+    global _STORAGE_READY
+    if not _STORAGE_READY:  # initialize() probes Redis (~5s when it is down): once per run, not per coin
+        await data_storage.initialize()
+        _STORAGE_READY = True
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=days)
     df = await data_storage.load_klines_from_parquet(
@@ -51,6 +75,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--exchange", default="binance", help="Exchange name (default: binance)")
     parser.add_argument("--symbol", default="BTC/USDT", help="Symbol (default: BTC/USDT)")
+    parser.add_argument(
+        "--symbols",
+        default="",
+        help="Pooled training: comma list, or 'auto' = every local */USDT coin with enough history (stablecoins excluded)",
+    )
+    parser.add_argument("--min-days", type=int, default=120, dest="min_days",
+                        help="Pooled training: minimum days of bars per coin (default: 120)")
     parser.add_argument("--timeframe", default="1h", help="Timeframe (default: 1h)")
     parser.add_argument("--days", type=int, default=365, help="Lookback days (default: 365)")
     parser.add_argument(
@@ -86,7 +117,86 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _local_symbols(exchange: str) -> list:
+    from core.data import data_storage
+
+    root = Path(data_storage.storage_path) / exchange
+    out = []
+    for child in sorted(root.glob("*_USDT")):
+        base = child.name[: -len("_USDT")]
+        if base and base not in STABLE_BASES:
+            out.append(f"{base}/USDT")
+    return out
+
+
+async def pooled_main(args: argparse.Namespace) -> None:
+    from core.ai.ml_signal import timeframe_seconds
+
+    bar_seconds = timeframe_seconds(args.timeframe)
+    if not bar_seconds:
+        raise PipelineError("args", f"unsupported timeframe {args.timeframe!r}")
+    symbols = _local_symbols(args.exchange) if args.symbols.strip().lower() == "auto" else [
+        x.strip() for x in args.symbols.split(",") if x.strip()]
+    need = int(args.min_days * 86400 / bar_seconds)
+    frames = {}
+    for symbol in symbols:
+        df = await load_ohlcv(args.exchange, symbol, args.timeframe, args.days)
+        if df is None or len(df) < need:
+            continue
+        frames[symbol] = df
+    logger.info(f"pooled training: {len(frames)}/{len(symbols)} coins with >= {args.min_days}d of {args.timeframe} bars")
+    if len(frames) < 5:
+        raise PipelineError("data", "fewer than 5 coins with enough history for pooled training")
+    run = run_pooled_training_pipeline(
+        frames=frames,
+        output_root=Path(args.output),
+        timeframe=args.timeframe,
+        bar_seconds=bar_seconds,
+        exchange=args.exchange,
+        forward_bars=args.forward_bars,
+        test_size=args.test_size,
+        n_estimators=args.n_estimators,
+        max_depth=args.max_depth,
+        learning_rate=args.learning_rate,
+        scale_pos_weight=args.scale_pos_weight,
+        prediction_threshold=args.prediction_threshold,
+    )
+    _report_and_publish(run)
+
+
+def _report_and_publish(run) -> None:
+    report = dict(run.metrics.get("classification_report") or {})
+    positive = dict(report.get("1") or {})
+    logger.info(
+        f"Train samples={run.metrics.get('train_samples')} "
+        f"Test samples={run.metrics.get('test_samples')} "
+        f"AUC={run.metrics.get('auc')} long share={run.metrics.get('test_long_share')} "
+        f"short share={run.metrics.get('test_short_share')}"
+    )
+    logger.info(
+        f"Precision={positive.get('precision', 0.0):.4f} "
+        f"Recall={positive.get('recall', 0.0):.4f} "
+        f"F1={positive.get('f1-score', 0.0):.4f}"
+    )
+    top_features = sorted(run.feature_importances.items(), key=lambda item: item[1], reverse=True)[:5]
+    logger.info("Top-5 features: " + "  ".join(f"{key}={value:.4f}" for key, value in top_features))
+    logger.info(f"Model artifacts saved to {run.artifact_dir}")
+    logger.info(f"Manifest model_id={run.manifest['model_id']}")
+    try:
+        artifact_model_path = Path(run.artifact_dir) / "model.json"
+        legacy_model_path = _ROOT / "models" / "ml_signal_xgb.json"
+        legacy_model_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(artifact_model_path, legacy_model_path)
+        shutil.copy2(Path(run.artifact_dir) / "manifest.json", legacy_model_path.with_suffix(".manifest.json"))
+        logger.info(f"Legacy model path updated: {legacy_model_path}")
+    except Exception as exc:
+        logger.warning(f"Failed to update legacy model path: {exc}")
+
+
 async def main_async(args: argparse.Namespace) -> None:
+    if args.symbols.strip():
+        await pooled_main(args)
+        return
     diagnostics = diagnose_environment()
     logger.info(
         "ML environment: "
@@ -133,32 +243,7 @@ async def main_async(args: argparse.Namespace) -> None:
         prediction_threshold=args.prediction_threshold,
     )
 
-    report = dict(run.metrics.get("classification_report") or {})
-    positive = dict(report.get("1") or {})
-    logger.info(
-        f"Train samples={run.metrics.get('train_samples')} "
-        f"Test samples={run.metrics.get('test_samples')} "
-        f"AUC={run.metrics.get('auc')}"
-    )
-    logger.info(
-        f"Precision={positive.get('precision', 0.0):.4f} "
-        f"Recall={positive.get('recall', 0.0):.4f} "
-        f"F1={positive.get('f1-score', 0.0):.4f}"
-    )
-
-    top_features = sorted(run.feature_importances.items(), key=lambda item: item[1], reverse=True)[:5]
-    logger.info("Top-5 features: " + "  ".join(f"{key}={value:.4f}" for key, value in top_features))
-    logger.info(f"Model artifacts saved to {run.artifact_dir}")
-    logger.info(f"Manifest model_id={run.manifest['model_id']}")
-    try:
-        artifact_model_path = Path(run.artifact_dir) / "model.json"
-        legacy_model_path = _ROOT / "models" / "ml_signal_xgb.json"
-        legacy_model_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(artifact_model_path, legacy_model_path)
-        shutil.copy2(Path(run.artifact_dir) / "manifest.json", legacy_model_path.with_suffix(".manifest.json"))
-        logger.info(f"Legacy model path updated: {legacy_model_path}")
-    except Exception as exc:
-        logger.warning(f"Failed to update legacy model path: {exc}")
+    _report_and_publish(run)
 
 
 def main() -> None:

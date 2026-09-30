@@ -178,7 +178,9 @@ def test_signal_aggregator_ml_signal_uses_internal_feature_builder():
     assert confidence == pytest.approx(0.73, rel=1e-9)
     assert captured["symbol"] == "BTC/USDT"
     assert captured["rows"] == len(df)
-    assert captured["columns"][:5] == ["rsi", "macd", "macd_signal", "macd_hist", "ema_fast"]
+    from core.ai.ml_signal import FEATURE_COLS
+
+    assert captured["columns"] == FEATURE_COLS
 
 
 def test_signal_aggregator_handles_missing_market_data(monkeypatch):
