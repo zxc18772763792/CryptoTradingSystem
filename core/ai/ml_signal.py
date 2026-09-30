@@ -4,6 +4,13 @@ The model is a binary classifier that predicts whether price will be
 higher or lower N bars ahead. It wraps XGBoost and fails closed to FLAT
 when required inference features are missing or invalid.
 
+It also fails closed when the model is not fit for the request: a model
+whose manifest does not record a PASSED training quality gate is never
+loaded, bars of a different timeframe than the training bars get FLAT, and a
+single-coin model gets FLAT on other coins. (2026-09-30: a BTC-only 1h model
+that had failed its own gate was used on ~30 altcoins at 15m and said LONG on
+100% of their bars; see core/ml/pipeline.py for the v2 feature set.)
+
 If xgboost is not installed or the model file does not exist, every
 call to ``predict()`` returns a ``FLAT`` signal with confidence 0.
 
@@ -18,7 +25,7 @@ import os
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -34,6 +41,27 @@ from core.ml.pipeline import MANIFEST_FILE_NAME
 # The training script must produce exactly these columns (in any order;
 # the model reindexes to this list).
 FEATURE_COLS: List[str] = list(PIPELINE_FEATURE_COLUMNS)
+
+_TIMEFRAME_SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+
+
+def timeframe_seconds(timeframe: str) -> Optional[int]:
+    text = str(timeframe or "").strip().lower()
+    if len(text) < 2 or text[-1] not in _TIMEFRAME_SECONDS:
+        return None
+    try:
+        return int(text[:-1] or 1) * _TIMEFRAME_SECONDS[text[-1]]
+    except ValueError:
+        return None
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return str(symbol or "").split(":")[0].replace("_", "/").upper()
+
+
+def manifest_gate_passed(manifest: Dict[str, Any]) -> bool:
+    gate = manifest.get("quality_gate") or (manifest.get("metrics") or {}).get("quality_gate") or {}
+    return bool(isinstance(gate, dict) and gate.get("passed") is True)
 
 
 def build_feature_frame(df: pd.DataFrame) -> pd.DataFrame:
@@ -83,6 +111,8 @@ class MLSignalModel:
         self._model_backend = ""
         self._feature_names: List[str] = list(FEATURE_COLS)
         self._manifest: Dict[str, Any] = {}
+        self.load_error: str = ""
+        self.last_rejection: str = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -153,12 +183,30 @@ class MLSignalModel:
                 f"features={len(self._feature_names)}, backend={backend}"
             )
         except Exception as exc:
+            self.load_error = str(exc)
             logger.warning(f"MLSignalModel: failed to load model: {exc}")
 
     def is_loaded(self) -> bool:
         return self._model is not None
 
-    def predict(self, features: pd.DataFrame, symbol: str = "") -> MLSignalResult:
+    def scope_rejection(self, features: pd.DataFrame, symbol: str = "", timeframe: Optional[str] = None) -> str:
+        """Why this model must not score these bars ("" when it may)."""
+        trained_tf = str(self._manifest.get("timeframe") or "")
+        trained_sec = timeframe_seconds(trained_tf)
+        bar_sec: Optional[float] = timeframe_seconds(timeframe) if timeframe else None
+        if bar_sec is None and isinstance(features.index, pd.DatetimeIndex) and len(features.index) >= 3:
+            steps = features.index[-50:].to_series().diff().dropna().dt.total_seconds()
+            bar_sec = float(steps.median()) if len(steps) else None
+        if trained_sec and bar_sec and abs(bar_sec - trained_sec) > 0.01 * trained_sec:
+            return f"timeframe_mismatch(trained {trained_tf}, bars {int(bar_sec)}s)"
+        if str(self._manifest.get("symbol_scope") or "single") != "pooled" and symbol:
+            trained = {_normalize_symbol(x) for x in (self._manifest.get("training_symbols")
+                                                     or [self._manifest.get("symbol") or ""]) if x}
+            if trained and _normalize_symbol(symbol) not in trained:
+                return f"symbol_outside_single_coin_model({sorted(trained)[0]})"
+        return ""
+
+    def predict(self, features: pd.DataFrame, symbol: str = "", timeframe: Optional[str] = None) -> MLSignalResult:
         """Return directional signal for the last row of *features*."""
         flat = MLSignalResult(
             symbol=symbol,
@@ -169,6 +217,9 @@ class MLSignalModel:
             model_version=self.MODEL_VERSION,
         )
         if self._model is None or features is None or features.empty:
+            return flat
+        self.last_rejection = self.scope_rejection(features, symbol, timeframe)
+        if self.last_rejection:
             return flat
 
         try:
@@ -290,6 +341,8 @@ class MLSignalModel:
             raise ValueError("ML manifest feature_columns must be a list of strings")
         if list(feature_columns) != FEATURE_COLS:
             raise ValueError("ML manifest feature_columns do not match inference feature columns")
+        if not manifest_gate_passed(manifest):
+            raise ValueError("ML manifest does not record a passed training quality gate; refusing to load")
 
     def _align_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Select last row and require the expected feature columns."""
@@ -302,3 +355,17 @@ class MLSignalModel:
             nan_cols = aligned.columns[aligned.isna().any()].tolist()
             raise ValueError(f"invalid NaN ML feature columns: {nan_cols[:8]}")
         return aligned
+
+
+def model_usability(model_path: str) -> Tuple[bool, str]:
+    """Manifest-only check for code that loads the booster directly (backtests, research).
+
+    Same rules as MLSignalModel.load: current feature set, matching columns,
+    passed quality gate. Returns (usable, reason).
+    """
+    probe = MLSignalModel(str(model_path))
+    try:
+        probe._validate_manifest(probe._load_manifest())
+    except ValueError as exc:
+        return False, str(exc)
+    return True, ""

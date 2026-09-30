@@ -171,6 +171,11 @@ class SignalAggregator:
             ml_available = bool(self._ml_model.is_loaded() and has_market_data)
             if not ml_available:
                 ml_reason = "insufficient_market_data" if self._ml_model.is_loaded() and not has_market_data else "ml_model_unavailable"
+                if not self._ml_model.is_loaded() and getattr(self._ml_model, "load_error", ""):
+                    ml_reason = f"ml_model_unavailable: {self._ml_model.load_error}"[:200]
+            elif getattr(self._ml_model, "last_rejection", ""):
+                # The model refused these bars (other timeframe / coin): no vote, not a FLAT vote.
+                ml_available, ml_reason = False, str(self._ml_model.last_rejection)
         else:
             ml_direction, ml_conf = "FLAT", 0.0
             ml_available = False

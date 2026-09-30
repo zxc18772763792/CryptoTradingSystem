@@ -192,7 +192,8 @@ def test_ml_signal_load_accepts_valid_manifest(monkeypatch, tmp_path: Path):
     model_path = tmp_path / "model.json"
     model_path.write_text("{}", encoding="utf-8")
     model_path.with_suffix(".manifest.json").write_text(
-        json.dumps({"feature_set_version": FEATURE_SET_VERSION, "feature_columns": FEATURE_COLS}),
+        json.dumps({"feature_set_version": FEATURE_SET_VERSION, "feature_columns": FEATURE_COLS,
+                    "quality_gate": {"passed": True, "reasons": []}}),
         encoding="utf-8",
     )
 

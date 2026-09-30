@@ -11,7 +11,10 @@ at random times nearby, by more than trading costs?
 First run (2026-09-10..25, deepseek flash, 15m): 1172 BUY calls -> 136
 independent after de-dup; edge vs random timing 1h -0.08%, 4h -0.14%,
 24h -1.60%, every CI spanning zero or below. The model agreed with the rule
-aggregator on 100% of calls, i.e. it added no information.
+aggregator on 100% of calls - by construction (2026-09-30 correction): when
+flat the agent only asks the model once the aggregator has a direction, and
+that aggregator was dominated by a broken constant-LONG ML component. Whether
+the model's go/hold filter adds value is measured by scripts/agent_filter_value.py.
 
 Method (keep it honest):
 * entry = close of the last FULLY CLOSED 5m bar before the call (no lookahead);

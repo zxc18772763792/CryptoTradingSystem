@@ -2066,6 +2066,11 @@ def _build_positions(
         # walk-forward folds; reloading the JSON+deserialising tree on every
         # call costs significant I/O. mtime invalidates the cache when the
         # model file is retrained.
+        from core.ai.ml_signal import model_usability
+
+        usable, why = model_usability(model_path)
+        if not usable:
+            raise ValueError(f"MLXGBoostStrategy: model not usable ({why})")
         booster = _load_xgb_booster_cached(model_path)
         threshold_ml = float(params.get("threshold", 0.55))
         dtest = xgb.DMatrix(feat_df.values, feature_names=list(feat_df.columns))
