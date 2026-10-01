@@ -6370,6 +6370,23 @@ async def get_unlock_short_t7_tracker():
     return {"summary": unlock_short_tracker.summary(state, "t7"), "trades": trades[:80]}
 
 
+@router.get("/xs-reversal")
+async def get_xs_reversal_tracker():
+    """Forward paper tracker: daily cross-sectional reversal on 1h bars (research only)."""
+    from core.research import xs_reversal_tracker
+
+    state = await asyncio.to_thread(xs_reversal_tracker.load_state)
+    days = []
+    for day, record in sorted(state.get("days", {}).items(), reverse=True)[:60]:
+        days.append({
+            "day": day, "status": record.get("status"), "late": bool(record.get("late")),
+            "coins": record.get("coins"), "per_side": len(record.get("longs") or {}),
+            "long_leg_pct": record.get("long_leg_pct"), "short_leg_pct": record.get("short_leg_pct"),
+            "net_per_position_pct": record.get("net_per_position_pct"), "missing_positions": record.get("missing_positions"),
+        })
+    return {"summary": xs_reversal_tracker.summary(state), "days": days}
+
+
 @router.get("/supply-factor")
 async def get_supply_factor_tracker():
     """Forward paper tracker: monthly long/short on scheduled supply growth (research only)."""

@@ -6642,6 +6642,38 @@ ${confirmHint}`,
     } catch (err) { /* optional panel */ }
   }
 
+  function renderXsReversalTracker(payload) {
+    const anchor = ['ai-upbit-krw-listing-tracker', 'ai-upbit-caution-tracker', 'ai-supply-factor-tracker']
+      .map((id) => document.getElementById(id)).find(Boolean);
+    if (!anchor) return;
+    let panel = document.getElementById('ai-xs-reversal-tracker');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'ai-xs-reversal-tracker';
+      panel.className = 'card';
+      panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
+      anchor.insertAdjacentElement('afterend', panel);
+    }
+    const s = payload?.summary || {};
+    const days = Array.isArray(payload?.days) ? payload.days : [];
+    const pct = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(d)}%`);
+    const statusNames = { open: '持有中', closed: '已结算', missed: '错过', too_few_coins: '币数不足', no_data: '无数据', unresolved: '未能结算' };
+    panel.innerHTML = `
+      <h3 style="margin:0;">日线横截面反转（纸面）</h3>
+      <div style="margin-top:6px;color:var(--text-sub);">每天 00:00 UTC 按 1h 均线偏离排序：做多跌得最深的 10%、做空涨得最多的 10%，持有 24 小时。前向完成 ${Number(s.forward_completed || 0)} 天 · 每仓净值均值 ${pct(s.forward_mean_net_pct, 3)} · 正收益天数 ${s.forward_positive_days == null ? '--' : `${(Number(s.forward_positive_days) * 100).toFixed(0)}%`} · 晚到 ${Number(s.late || 0)} · 错过 ${Number(s.missed || 0)} · 币池 ${Number(s.universe_size || 0)}</div>
+      ${trackerVerdictLine(s)}
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。日波动约 1.6%，均值仅 +0.06%：前向几年内都难以确认，规则只在满 180 天后均值不为正时判退役。</div>
+      ${days.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>日期</th><th>状态</th><th>币数/每边</th><th>多头腿</th><th>空头腿</th><th>每仓净值</th><th></th></tr></thead><tbody>
+        ${days.slice(0, 20).map((d) => `<tr><td>${esc(d.day)}</td><td>${esc(statusNames[d.status] || d.status || '--')}</td><td>${d.coins ?? '--'} / ${d.per_side || '--'}</td><td>${pct(d.long_leg_pct)}</td><td>${pct(d.short_leg_pct)}</td><td style="color:${Number(d.net_per_position_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(d.net_per_position_pct, 3)}</td><td>${d.late ? '晚到' : ''}${d.missing_positions ? ` 缺 ${Number(d.missing_positions)}` : ''}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器在每天 00:00 UTC 后的第一个检查建仓。</div>'}`;
+  }
+
+  async function refreshXsReversalTracker() {
+    try {
+      renderXsReversalTracker(await aiApi('/xs-reversal', { timeoutMs: 12000 }));
+    } catch (err) { /* optional panel */ }
+  }
+
   async function refreshUnlockShortTracker() {
     try {
       renderUnlockShortTracker(await aiApi('/unlock-short', { timeoutMs: 12000 }));
@@ -6683,7 +6715,7 @@ ${confirmHint}`,
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
-    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).catch(() => {});
+    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).then(() => refreshXsReversalTracker()).catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);

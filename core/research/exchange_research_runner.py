@@ -24,6 +24,7 @@ from core.research import (
     supply_factor_tracker,
     unlock_short_tracker,
     upbit_caution_tracker,
+    xs_reversal_tracker,
 )
 
 NOTICE_INTERVAL_SEC = 1800
@@ -35,10 +36,13 @@ WATCHLIST_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "pump_wat
 VERDICT_STATE_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "tracker_verdicts.json"
 TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解锁前做空", "supply_factor": "供给通胀因子",
                  "upbit_caution": "Upbit 警示后做空", "upbit_krw_listing": "Upbit 韩元上币后做空",
-                 "unlock_short_t7": "解锁前最后一周做空"}
+                 "unlock_short_t7": "解锁前最后一周做空", "xs_reversal": "日线横截面反转"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
 UPBIT_INTERVAL_SEC = 1800
+# Every pass: the reversal tracker must form its portfolio within 30 min of 00:00
+# UTC, and a pass with nothing due makes no request.
+XS_REVERSAL_INTERVAL_SEC = 240
 _last_run: Dict[str, float] = {}
 _status: Dict[str, Any] = {}
 _durations: Dict[str, float] = {}
@@ -213,12 +217,18 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _status["upbit_krw_listing"] = await upbit_caution_tracker.tick(client, strategy="krw_listing")
             await _verdict_alert("upbit_krw_listing", _status["upbit_krw_listing"])
 
+        async def xs_reversal():
+            _status["xs_reversal"] = await xs_reversal_tracker.tick(client)
+            await _verdict_alert("xs_reversal", _status["xs_reversal"])
+
         async def delist():
             model = delist_risk.load_model()
             scored = await delist_risk.compute_live_scores(client, model)
             await asyncio.to_thread(delist_risk.write_scores, scored, model)
             _status["delist_risk"] = {"scored": int(len(scored)), "flagged": int(scored["flagged"].sum()), "checked_at": now}
 
+        # first: a slow notices/tracker job must not push the 00:00 formation past its window
+        await _run_job("xs_reversal", XS_REVERSAL_INTERVAL_SEC, now, force, xs_reversal)
         await _run_job("notices", NOTICE_INTERVAL_SEC, now, force, notices)
         await _run_job("tracker", TRACKER_INTERVAL_SEC, now, force, listing)
         await _run_job("unlock", UNLOCK_INTERVAL_SEC, now, force, unlock)

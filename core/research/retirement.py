@@ -34,6 +34,9 @@ RULES: Dict[str, Dict[str, Any]] = {
     "upbit_krw_listing": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 6.7},
     # added 2026-09-28 with the unlock last-week shadow tracker
     "unlock_short_t7": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 3.6},
+    # added 2026-10-01 with the daily reversal tracker, before its first forward day;
+    # unit = net % per position per day; mean from scripts/xs_reversal_backtest.py
+    "xs_reversal": {"min_n": 180, "unit": "day", "backtest_mean_pct": 0.057},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",
