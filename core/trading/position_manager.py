@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -27,6 +28,92 @@ def _replace_with_retry(tmp_path: Path, target_path: Path) -> None:
                 raise
             time.sleep(delay)
             delay *= 2
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    _replace_with_retry(tmp, path)
+
+
+class _StateFileWriter:
+    """Writes position-state snapshots off the event loop, newest wins.
+
+    Price ticks persist the whole scope state every 2 s. Written inline, each
+    write blocked the web event loop for 2-4 s whenever the disk was busy
+    (107 of ~140 loop stalls over 36 h, 2026-10-01/02, bursts at 23:00, 00:00
+    and after the laptop woke). Throttled writes now go to one daemon thread
+    that keeps only the latest snapshot per file; forced writes (open, close,
+    flush) stay synchronous. A per-file sequence number makes sure an older
+    snapshot can never overwrite a newer one, whichever thread writes last.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._wake = threading.Condition(self._lock)
+        self._pending: Dict[str, Tuple[int, str]] = {}
+        self._written: Dict[str, int] = {}
+        self._file_locks: Dict[str, threading.Lock] = {}
+        self._seq = 0
+        self._busy = 0
+        self._thread: Optional[threading.Thread] = None
+
+    def _next(self, path: Path) -> Tuple[str, int, threading.Lock]:
+        key = str(path)
+        self._seq += 1
+        return key, self._seq, self._file_locks.setdefault(key, threading.Lock())
+
+    def _write(self, path: Path, seq: int, text: str, file_lock: threading.Lock) -> None:
+        with file_lock:
+            if seq <= self._written.get(str(path), 0):
+                return  # a newer snapshot already reached the disk
+            _write_atomic(path, text)
+            self._written[str(path)] = seq
+
+    def submit(self, path: Path, text: str) -> None:
+        with self._lock:
+            key, seq, _ = self._next(path)
+            self._pending[key] = (seq, text)
+            if self._thread is None or not self._thread.is_alive():
+                self._thread = threading.Thread(target=self._run, name="position-state-writer", daemon=True)
+                self._thread.start()
+            self._wake.notify()
+
+    def write_now(self, path: Path, text: str) -> None:
+        with self._lock:
+            key, seq, file_lock = self._next(path)
+            self._pending.pop(key, None)  # superseded by this newer snapshot
+        self._write(path, seq, text, file_lock)
+
+    def wait_idle(self, timeout: float = 10.0) -> bool:
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            while self._pending or self._busy:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    return False
+                self._wake.wait(left)
+        return True
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                while not self._pending:
+                    self._wake.wait()
+                key, (seq, text) = self._pending.popitem()
+                file_lock = self._file_locks[key]
+                self._busy += 1
+            try:
+                self._write(Path(key), seq, text, file_lock)
+            except Exception as exc:  # noqa: BLE001 - the next snapshot retries
+                logger.warning(f"Failed to persist positions to {key}: {exc}")
+            finally:
+                with self._lock:
+                    self._busy -= 1
+                    self._wake.notify_all()
+
+
+_STATE_WRITER = _StateFileWriter()
 
 
 def _read_text_with_retry(path: Path, *, encoding: str = "utf-8") -> str:
@@ -448,12 +535,13 @@ class PositionManager:
         try:
             path = self._scope_state_path(self._scope)
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid4().hex}.tmp")
-            tmp.write_text(
-                json.dumps(self._snapshot_scope_state(), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            _replace_with_retry(tmp, path)
+            # Serialize here (~15 ms): the snapshot holds live position objects,
+            # so it must not be read from another thread. Only disk I/O moves.
+            text = json.dumps(self._snapshot_scope_state(), ensure_ascii=False, indent=2)
+            if force:
+                _STATE_WRITER.write_now(path, text)
+            else:
+                _STATE_WRITER.submit(path, text)
             self._last_persist_at = now
             self._dirty = False
         except Exception as e:
