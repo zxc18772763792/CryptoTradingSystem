@@ -1,0 +1,48 @@
+{
+  "checked_files": 1252,
+  "full_suite": [
+    {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "2",
+      "tests": "2675",
+      "time": "390.521",
+      "timestamp": "2026-10-01T21:17:56.854234+08:00",
+      "hostname": "LAPTOP-VQIN9BKS"
+    }
+  ],
+  "skipped": [
+    {
+      "test": "tests.test_binance_runup_validation::test_ake_btw_and_17_plus_2_baseline_event_regression",
+      "reason": "Frozen baseline is not available",
+      "detail": "C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_m09enusr\\source\\tests\\test_binance_runup_validation.py:381: Frozen baseline is not available"
+    },
+    {
+      "test": "tests.test_strategy_bug_fixes.TestMeanReversionHalfLifeTPGuard::test_buy_take_profit_above_current_price",
+      "reason": "BUY crossing did not trigger on this random seed",
+      "detail": "C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_m09enusr\\source\\tests\\test_strategy_bug_fixes.py:408: BUY crossing did not trigger on this random seed"
+    }
+  ],
+  "differences_from_full_snapshot": [
+    {
+      "path": "tests/test_audit_remediation_trading.py",
+      "matches_supplemental_snapshot": true
+    }
+  ],
+  "production_matches_full_snapshot": true,
+  "supplemental_suite": [
+    {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "13",
+      "time": "5.057",
+      "timestamp": "2026-10-01T21:20:51.749964+08:00",
+      "hostname": "LAPTOP-VQIN9BKS"
+    }
+  ],
+  "git_head": "ddd197f94a12eb624bc026fc53838fe543d1f27d",
+  "radar_status": ""
+}

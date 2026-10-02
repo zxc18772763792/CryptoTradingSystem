@@ -1,0 +1,20 @@
+{
+  "command": [
+    "pytest",
+    "-q",
+    "-m",
+    "not live",
+    "tests/test_infra_fixes.py::test_legacy_mojibake_fixer_defaults_to_dry_run",
+    "tests/test_model_env_unicode.py",
+    "tests/test_exit_logic_overhaul_verification.py",
+    "tests/test_sensitive_api_auth.py::test_account_summary_requires_read_trading_state_permission",
+    "--basetemp=C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_full_audit_20261001_01a0f2da\\pytest_focused_tmp",
+    "--junitxml=C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_full_audit_20261001_01a0f2da\\pytest_focused_results.xml"
+  ],
+  "exit_code": 1,
+  "elapsed_seconds": 17.52,
+  "snapshot_commit": "2fecd05dea8c5ee438b4071e50548b828b7411af",
+  "real_env_files_in_snapshot": false,
+  "external_connections_blocked": true,
+  "original_working_tree_blocked": true
+}

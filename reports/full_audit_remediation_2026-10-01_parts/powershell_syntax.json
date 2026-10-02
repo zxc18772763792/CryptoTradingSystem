@@ -1,0 +1,26 @@
+[
+  {
+    "file": "_once.ps1",
+    "errors": []
+  },
+  {
+    "file": "scripts/web.ps1",
+    "errors": []
+  },
+  {
+    "file": "scripts/supervise_web.ps1",
+    "errors": []
+  },
+  {
+    "file": "scripts/ensure_web_supervisor_task.ps1",
+    "errors": []
+  },
+  {
+    "file": "scripts/managed_process.ps1",
+    "errors": []
+  },
+  {
+    "file": "tests/helpers/check_managed_process_scope.ps1",
+    "errors": []
+  }
+]

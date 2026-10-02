@@ -1,0 +1,15 @@
+{
+  "requested_port": 8000,
+  "selected_web_ports": [
+    8000,
+    8001
+  ],
+  "selected_worker_projects": [
+    "main",
+    "radar"
+  ],
+  "duplicate_cleanup_stopped_fake_process_ids": [
+    12002
+  ],
+  "all_os_process_operations_mocked": true
+}

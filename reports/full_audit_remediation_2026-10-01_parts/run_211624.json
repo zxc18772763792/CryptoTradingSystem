@@ -1,0 +1,23 @@
+{
+  "command": [
+    "pytest",
+    "-q",
+    "-m",
+    "not live",
+    "tests/test_audit_remediation_data.py",
+    "tests/test_audit_remediation_web.py",
+    "tests/test_audit_remediation_trading.py",
+    "tests/test_audit_remediation_ops.py",
+    "tests/test_release_safety_assets.py",
+    "tests/governance/test_governance_gates.py",
+    "--basetemp=C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_geroaffu\\pytest_tmp",
+    "--junitxml=C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_geroaffu\\pytest_results.xml"
+  ],
+  "exit_code": 0,
+  "seconds": 20.08,
+  "snapshot": "C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_geroaffu\\source",
+  "log": "F:\\9_Crypto\\crypto_trading_system\\reports\\full_audit_remediation_2026-10-01_parts\\pytest_211624.log",
+  "xml": "C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_geroaffu\\pytest_results.xml",
+  "credentials_removed": true,
+  "network_restricted": true
+}

@@ -1,0 +1,134 @@
+{
+  "revision": "2fecd05dea8c5ee438b4071e50548b828b7411af",
+  "method": "AST-extracted functions; project modules never imported; all IO and venues mocked; no persistence",
+  "checks": {
+    "manual_reverse_risk_bypass": true,
+    "reconcile_duplicates_aggregate": true,
+    "close_pnl_cumulative": true,
+    "order_id_account_collision": true,
+    "contract_size_mismatch": true,
+    "sandbox_rest_mainnet": true,
+    "algo_zero_fill_counted": true,
+    "partial_zero_fill_marker": true
+  },
+  "observations": [
+    {
+      "probe": "REVERSE_BYPASS",
+      "observed": [
+        "[[\"governance_allow_close\", true], [\"submitted_amount\", 100.0, false, 100.0]]"
+      ]
+    },
+    {
+      "probe": "SAME_ORDER_AS_ENTRY_ALLOWED",
+      "observed": [
+        false
+      ]
+    },
+    {
+      "probe": "RECONCILE_DUPLICATION",
+      "observed": [
+        3.0,
+        3.0,
+        "local_total",
+        6.0,
+        "venue_total",
+        3
+      ]
+    },
+    {
+      "probe": "CUMULATIVE_CLOSE",
+      "observed": [
+        10.0,
+        30.0,
+        "sum_if_logged_verbatim",
+        40.0,
+        "correct_total",
+        30
+      ]
+    },
+    {
+      "probe": "ENTRY_COST_OMITTED",
+      "observed": [
+        {
+          "gross_pnl": 10.0,
+          "fee": 1.0,
+          "slippage_cost": 1.0,
+          "funding_pnl": 0.0,
+          "net_pnl": 8.0,
+          "unrealized_gross": 0.0
+        },
+        "correct_net",
+        3
+      ]
+    },
+    {
+      "probe": "ENGINE_CLOSE_LOGGED_PNL",
+      "observed": [
+        30.0,
+        "correct_this_fill",
+        20
+      ]
+    },
+    {
+      "probe": "ORDER_ID_COLLISION",
+      "observed": [
+        1,
+        "stored_account",
+        "B",
+        "cancelled",
+        [
+          [
+            "B",
+            "42",
+            "BTC/USDT"
+          ]
+        ]
+      ]
+    },
+    {
+      "probe": "CONTRACT_UNITS",
+      "observed": [
+        "sent_contracts",
+        1,
+        "correct_contracts",
+        10,
+        "reported_base_qty",
+        10.0,
+        "correct_base_qty",
+        1
+      ]
+    },
+    {
+      "probe": "SANDBOX_REST_MAINNET",
+      "observed": [
+        [
+          "https://fapi.binance.com/fapi/v1/order"
+        ],
+        {
+          "api_key": "AUDIT_FAKE_KEY",
+          "api_secret": "AUDIT_FAKE_SECRET",
+          "proxy": ""
+        }
+      ]
+    },
+    {
+      "probe": "ALGO_UNFILLED_MERGE",
+      "observed": [
+        2.0,
+        "closed",
+        "actual_filled",
+        0
+      ]
+    },
+    {
+      "probe": "PARTIAL_ZERO_FILL_MARKED_DONE",
+      "observed": [
+        true,
+        true,
+        null,
+        2
+      ]
+    }
+  ]
+}
+

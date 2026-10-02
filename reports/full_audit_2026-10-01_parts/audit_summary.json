@@ -1,0 +1,17 @@
+{
+  "head": "2fecd05dea8c5ee438b4071e50548b828b7411af",
+  "confirmed_findings": 41,
+  "severity": {
+    "P0": 0,
+    "P1": 15,
+    "P2": 25,
+    "P3": 1
+  },
+  "tracked_files": 1239,
+  "ignored_first_party_source_helpers": 12,
+  "json_syntax_files": 130,
+  "json_errors": [],
+  "generated_at": "2026-10-01T03:12:50.566573+08:00",
+  "business_code_modified": false,
+  "live_operations_performed": false
+}
