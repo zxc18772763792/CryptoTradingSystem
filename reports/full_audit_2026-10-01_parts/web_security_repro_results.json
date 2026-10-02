@@ -1,0 +1,73 @@
+{
+  "role_matrix": {
+    "OPERATOR": {
+      "manage_strategies": true,
+      "approve_live": false,
+      "approve_risk_change": false,
+      "manage_news": true
+    },
+    "RESEARCH_LEAD": {
+      "manage_strategies": true,
+      "approve_live": false,
+      "approve_risk_change": false,
+      "manage_news": false
+    },
+    "AUDITOR": {
+      "manage_strategies": false,
+      "approve_live": false,
+      "approve_risk_change": false,
+      "manage_news": false
+    }
+  },
+  "auditor_circuit_breaker_reset": {
+    "status": 200,
+    "reset_calls": 1,
+    "response": {
+      "scope": "portfolio",
+      "target": "portfolio",
+      "changed": true,
+      "state": {
+        "portfolio": {
+          "tripped": false
+        }
+      }
+    }
+  },
+  "reset_audit_signature_failure": "AuditLogger.log() got an unexpected keyword argument 'target'",
+  "operator_strategy_live_mode": {
+    "status": 200,
+    "operator_approve_live": false,
+    "manager_calls": "[call('audit-strategy', 'live')]"
+  },
+  "allowlist_removed_without_risk_approval": {
+    "status": "applied",
+    "increase_risk": false,
+    "risk_delta_score": 0.0,
+    "activation_calls": 1
+  },
+  "allowlist_replaced_risk_score": 0.0,
+  "unrelated_reducing_change_resets_runtime_halt": {
+    "reset_halt_calls": 1,
+    "original_reason": "daily_loss_limit",
+    "config_kill_switch": false
+  },
+  "auditor_ops_news_ingestion": {
+    "manage_news": false,
+    "ingest_calls": 1
+  },
+  "websocket_hello_disconnect_subscription_leak": {
+    "subscribe_calls": 1,
+    "unsubscribe_calls": 0
+  },
+  "profile_overwrites_repo_file": {
+    "path_is_inside_audit_sandbox": true,
+    "extension": ".py",
+    "overwritten": true
+  },
+  "counterfactual_append_lost_at_replace": {
+    "remaining_trace_ids": [
+      "old"
+    ],
+    "new_record_lost": true
+  }
+}

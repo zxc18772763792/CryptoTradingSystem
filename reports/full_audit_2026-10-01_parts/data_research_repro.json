@@ -1,0 +1,104 @@
+{
+  "news_cursor_before_save_and_truncation": {
+    "source_rows": 16,
+    "first_saved_candidates": 10,
+    "second_saved_candidates": 0,
+    "permanently_omitted": 6,
+    "cursor_write_before_caller_can_save": [
+      "cursor_committed",
+      "cursor_committed"
+    ]
+  },
+  "cusum_short_warmup": {
+    "n_bars": 12,
+    "min_bars": 20,
+    "triggered": true
+  },
+  "single_symbol_label_leakage": {
+    "first_test": "2025-01-07T16:00:00+00:00",
+    "training_labels_using_test_closes": [
+      [
+        "2025-01-07T12:00:00+00:00",
+        "2025-01-07T16:00:00+00:00"
+      ],
+      [
+        "2025-01-07T13:00:00+00:00",
+        "2025-01-07T17:00:00+00:00"
+      ],
+      [
+        "2025-01-07T14:00:00+00:00",
+        "2025-01-07T18:00:00+00:00"
+      ],
+      [
+        "2025-01-07T15:00:00+00:00",
+        "2025-01-07T19:00:00+00:00"
+      ]
+    ]
+  },
+  "position_limit_missing_buy_reservations": {
+    "accepted_open_buy_notional": 100,
+    "configured_position_limit": 60
+  },
+  "non_atomic_fill_retry": {
+    "order_filled_size": 100.0,
+    "position_size": 200.0,
+    "fill_count": 2,
+    "cash": 900.0
+  },
+  "stale_quote_filled": {
+    "quote_timestamp": "2020-01-01T00:00:00Z",
+    "order_status": "FILLED"
+  },
+  "gamma_fallback": {
+    "yes_price": 0.8,
+    "no_price": 0.8,
+    "market_updatedAt": "2020-01-01",
+    "quote_ts": "2026-09-30T18:44:48.725716+00:00"
+  },
+  "entry_fee_trade_metrics": {
+    "portfolio_pnl": -0.05015000000003056,
+    "reported_net_pnl": 0.04985000000000568,
+    "winning_trades": 1,
+    "fee_cost": 0.20015
+  },
+  "performance_analyzer_hourly_annualization": {
+    "reported_10pct_over_365_hourly_bars": 0.10000000000000009,
+    "correct_365days_hourly": 8.84973267580763,
+    "reported_calmar_at_10pct_return_5pct_drawdown": 0.02,
+    "correct_calmar": 2.0
+  },
+  "hub_invalid_freshness": {
+    "old_exchange_ts": "2020-01-01T00:00:00+00:00",
+    "read_ok": true,
+    "age_ms": 8,
+    "inf_read_ok": true,
+    "inf_price": "inf"
+  },
+  "dsl_future_and_missing_source": {
+    "full_prefix": [
+      99.0,
+      99.0
+    ],
+    "prefix_only": [
+      0.0,
+      0.0
+    ],
+    "missing_flow_reads_close": [
+      100,
+      100,
+      100
+    ]
+  },
+  "factor_cache_collision": {
+    "fingerprints_equal": true,
+    "cached": 0.02,
+    "actual": 0.22
+  },
+  "live_router_invalid_action": {
+    "fail_open": false,
+    "mode": "enforce",
+    "provider_action": "BLOCKED",
+    "allowed": true,
+    "action": "allow"
+  }
+}

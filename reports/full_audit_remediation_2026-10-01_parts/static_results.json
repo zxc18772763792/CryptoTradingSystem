@@ -1,0 +1,28 @@
+{
+  "python_checked": 885,
+  "python_errors": [],
+  "javascript": {
+    "exit_code": 0,
+    "stderr": ""
+  },
+  "compose": {
+    "news_healthcheck": {
+      "test": [
+        "CMD",
+        "python",
+        "scripts/check_news_worker_health.py",
+        "--max-age",
+        "900"
+      ],
+      "interval": "30s",
+      "timeout": "5s",
+      "retries": 3,
+      "start_period": "900s"
+    },
+    "parsed": true
+  },
+  "xss": {
+    "unescaped_html": false,
+    "exit_code": 0
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "command": [
+    "pytest",
+    "-q",
+    "-m",
+    "not live",
+    "tests/test_audit_remediation_trading.py",
+    "tests/test_audit_remediation_data.py",
+    "tests/test_audit_remediation_web.py",
+    "tests/test_audit_remediation_ops.py",
+    "tests/polymarket/test_ops_polymarket.py",
+    "tests/test_sensitive_api_auth.py",
+    "--basetemp=C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_3q_k3qca\\pytest_tmp",
+    "--junitxml=C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_3q_k3qca\\pytest_results.xml"
+  ],
+  "exit_code": 0,
+  "seconds": 26.7,
+  "snapshot": "C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_3q_k3qca\\source",
+  "log": "F:\\9_Crypto\\crypto_trading_system\\reports\\full_audit_remediation_2026-10-01_parts\\pytest_210559.log",
+  "xml": "C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_3q_k3qca\\pytest_results.xml",
+  "credentials_removed": true,
+  "network_restricted": true
+}

@@ -1,0 +1,30 @@
+{
+  "command": [
+    "pytest",
+    "-q",
+    "-m",
+    "not live",
+    "tests/test_audit_remediation_trading.py",
+    "tests/test_audit_remediation_data.py",
+    "tests/polymarket/test_audit_paper_atomicity.py",
+    "tests/polymarket/test_paper_trading.py",
+    "tests/polymarket/test_ops_polymarket.py",
+    "tests/polymarket/test_paper_strategy.py",
+    "tests/governance/test_governance_gates.py",
+    "tests/test_exchange_order_fill_price.py",
+    "tests/test_exchange_connector_precision.py",
+    "tests/test_pump_precursor.py",
+    "tests/test_research_loop_v2.py",
+    "tests/test_pump_watchlist_resilience.py",
+    "tests/test_exit_logic_overhaul_verification.py",
+    "--basetemp=C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_81e754hx\\pytest_tmp",
+    "--junitxml=C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_81e754hx\\pytest_results.xml"
+  ],
+  "exit_code": 1,
+  "seconds": 29.62,
+  "snapshot": "C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_81e754hx\\source",
+  "log": "F:\\9_Crypto\\crypto_trading_system\\reports\\full_audit_remediation_2026-10-01_parts\\pytest_210033.log",
+  "xml": "C:\\Users\\zxc\\AppData\\Local\\Temp\\crypto_remediation_20261001_81e754hx\\pytest_results.xml",
+  "credentials_removed": true,
+  "network_restricted": true
+}

@@ -1,0 +1,5 @@
+{
+  "payload": "<img src=x onerror=\"globalThis.auditOnlyMarker=1\">",
+  "stored_name_reaches_innerHTML_unescaped": true,
+  "html": "<div class=\"list-item\"><span><img src=x onerror=\"globalThis.auditOnlyMarker=1\"> (AuditType) | 收益率 -- | 回撤 -- | 方差 -- | 运行 0s | 共享:main </span><span class=\"status-badge connected\">运行中</span></div>"
+}

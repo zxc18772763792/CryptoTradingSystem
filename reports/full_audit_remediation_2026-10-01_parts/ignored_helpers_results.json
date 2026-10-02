@@ -1,0 +1,13 @@
+{
+  "IS2": "200 healthy; 401/429/500 unhealthy; no HTTP requests",
+  "IS1": {
+    "exit_codes": [
+      5,
+      1,
+      7,
+      0
+    ],
+    "subprocesses": "mocked",
+    "writes": "temporary directory only"
+  }
+}

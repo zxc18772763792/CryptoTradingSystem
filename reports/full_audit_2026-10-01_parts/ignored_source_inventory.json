@@ -1,0 +1,74 @@
+[
+  {
+    "path": "data/_level1_relaxed_run.py",
+    "sha256": "31e5c25e79de21a9d503a199500a92b9e98b5e051be9b73be91ba2b52ac3d9fd",
+    "lines": 46,
+    "status": "静态副作用审阅；未执行；AST通过"
+  },
+  {
+    "path": "data/_level1_watcher.py",
+    "sha256": "1d792525b76cab9e60a631c7b04024b3d5f38ede64703f138137595cc2cfe2f2",
+    "lines": 54,
+    "status": "静态副作用审阅；未执行；AST通过"
+  },
+  {
+    "path": "data/_restart_live8000.ps1",
+    "sha256": "df36549d2fabd0d65b6a7ef96232c390e0e2475469830df9702cbb5c6e6a43d8",
+    "lines": 61,
+    "status": "静态副作用审阅；未执行"
+  },
+  {
+    "path": "data/_switch_strategy_primary.ps1",
+    "sha256": "5f092418309b807d0497b7b077e61e40895d33733acfa7390d99fba93df74dd4",
+    "lines": 62,
+    "status": "静态副作用审阅；未执行"
+  },
+  {
+    "path": "data/_ws_proxy_monitor.py",
+    "sha256": "6abc0f7f1bc8e348a9d8405c7c8a6d187c7d36bf6d6ffefa172f4873646ae58f",
+    "lines": 78,
+    "status": "静态副作用审阅；未执行；AST通过"
+  },
+  {
+    "path": "logs/automation_daily_scan/pytest_20260731_090633.ps1",
+    "sha256": "d5e1428e3daed1eb336f5957c726fba31d693655a9f1ee141b790d6073cfcbb4",
+    "lines": 3,
+    "status": "静态副作用审阅；未执行"
+  },
+  {
+    "path": "logs/automation_daily_scan/pytest_rerun_20260731_091921.ps1",
+    "sha256": "fad22988196faf27db54643acdc20ac51dc6ab640ca9e1119f39f9cfac649417",
+    "lines": 3,
+    "status": "静态副作用审阅；未执行"
+  },
+  {
+    "path": "tmp/codex_automation/run_full_pytest_20260709_090721.ps1",
+    "sha256": "df092ec9340fddcbe59337cf898d63ff7f69cbc1b89f03e997e1afc7f2485ab5",
+    "lines": 10,
+    "status": "静态副作用审阅；未执行"
+  },
+  {
+    "path": "tmp/codex_maintenance_20260806/run_tests.ps1",
+    "sha256": "176959da58433ffc365298a76816f6a038c4d93ec98706a347f7348bb955cb1f",
+    "lines": 6,
+    "status": "静态副作用审阅；未执行"
+  },
+  {
+    "path": "tmp/redesign_agent.py",
+    "sha256": "645dc63733ea6e5cafa2c614aa9ee2ca959f61e35a6123c68fc35ab04009aa2c",
+    "lines": 194,
+    "status": "静态副作用审阅；未执行；AST通过"
+  },
+  {
+    "path": "tmp/verify_agent_sources.cjs",
+    "sha256": "bc871d23b9fcd4eb609f4d0c6cb0a4f1164f7ecfc040ee76424bb70fc4d6aca8",
+    "lines": 31,
+    "status": "静态副作用审阅；未执行"
+  },
+  {
+    "path": "tmp/verify_dashboard_coverage.cjs",
+    "sha256": "3b7f2d3422f53a71bf38394347cff4ca03a1e3140067e18abb88db81a7a41860",
+    "lines": 21,
+    "status": "静态副作用审阅；未执行"
+  }
+]
