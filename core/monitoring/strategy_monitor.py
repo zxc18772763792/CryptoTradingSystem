@@ -119,7 +119,7 @@ def detect_strategy_decay(
     cusum_low: List[float] = []
     s_low = 0.0
     trigger_idx: Optional[int] = None
-    reliable_from = min_bars if n >= min_bars else 0
+    reliable_from = max(0, min_bars - 1)
 
     for i, r in enumerate(returns):
         # Increment: excess return below (target - allowance)

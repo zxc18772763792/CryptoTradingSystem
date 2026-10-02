@@ -8,6 +8,8 @@ required.
 """
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
@@ -49,7 +51,7 @@ def _coerce_float(value: Any) -> Optional[float]:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out
+    return out if math.isfinite(out) else None
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -57,7 +59,7 @@ def _coerce_int(value: Any) -> Optional[int]:
         return None
     try:
         return int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -68,11 +70,14 @@ def _coerce_datetime(value: Any) -> Optional[datetime]:
         dt = value
     elif isinstance(value, (int, float)):
         raw = float(value)
-        if raw <= 0:
+        if not math.isfinite(raw) or raw <= 0:
             return None
         if raw > 10_000_000_000:
             raw = raw / 1000.0
-        dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+        try:
+            dt = datetime.fromtimestamp(raw, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
     else:
         text = str(value or "").strip()
         if not text:
@@ -109,7 +114,9 @@ class MarketTick:
 
     def age_ms(self, *, now: Optional[datetime] = None) -> int:
         ref = now or _utc_now()
-        return max(0, int((ref - self.timestamp_received).total_seconds() * 1000))
+        # Transport liveness cannot make a replayed venue event fresh.
+        event_time = min(self.timestamp_received, self.timestamp_exchange) if self.timestamp_exchange else self.timestamp_received
+        return max(0, int((ref - event_time).total_seconds() * 1000))
 
     def mid(self) -> Optional[float]:
         if self.bid is None or self.ask is None:

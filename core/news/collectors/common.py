@@ -225,7 +225,7 @@ class BaseNewsCollector:
         for item in items:
             try:
                 ts = parse_datetime_utc(item.get("published_at")).timestamp()
-                if ts > cursor_ts:
+                if ts >= cursor_ts - 300.0:  # overlap for equal timestamps/late delivery; DB deduplicates
                     out.append(item)
             except Exception:
                 out.append(item)

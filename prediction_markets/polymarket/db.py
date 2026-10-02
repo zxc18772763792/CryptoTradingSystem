@@ -763,7 +763,47 @@ async def reset_paper_account(account_id: str = "default", initial_cash: float =
         return _paper_account_to_dict(row)
 
 
-async def create_paper_order(order: Dict[str, Any]) -> Dict[str, Any]:
+async def _lock_paper_account(session: AsyncSession, account_id: str) -> None:
+    # A write as the first statement serializes account mutations on SQLite too.
+    result = await session.execute(update(PMPaperAccount).where(
+        PMPaperAccount.account_id == account_id
+    ).values(updated_at=utc_now()))
+    if result.rowcount != 1:
+        raise ValueError("unknown paper account")
+
+
+async def _validate_paper_reservation(session: AsyncSession, row: PMPaperOrder, limits: Dict[str, Any]) -> None:
+    account = await session.get(PMPaperAccount, row.account_id)
+    orders = (await session.execute(select(PMPaperOrder).where(
+        PMPaperOrder.account_id == row.account_id,
+        PMPaperOrder.status.in_(["OPEN", "PARTIAL"]),
+    ))).scalars().all()
+    position = (await session.execute(select(PMPaperPosition).where(
+        PMPaperPosition.account_id == row.account_id, PMPaperPosition.token_id == row.token_id,
+    ))).scalars().first()
+    notional = row.price * row.size
+    fee_rate = max(0.0, float(limits.get("fee_rate", 0.0)))
+    if not float(limits["min_price"]) <= row.price <= float(limits["max_price"]):
+        raise ValueError("price outside paper limits")
+    if notional > float(limits["max_order_notional"]):
+        raise ValueError("order notional exceeds max_order_notional")
+    remaining = lambda o: max(0.0, float(o.size) - float(o.filled_size))
+    position_size = float(position.size) if position else 0.0
+    if row.side == "BUY":
+        reserved = sum(o.price * remaining(o) * (1 + fee_rate) for o in orders if o.side == "BUY")
+        if float(account.cash) - reserved + 1e-12 < notional * (1 + fee_rate):
+            raise ValueError("insufficient paper cash")
+        pending = sum(o.price * remaining(o) for o in orders if o.side == "BUY" and o.token_id == row.token_id)
+        exposure = position_size * (float(position.avg_price) if position else 0.0) + pending + notional
+        if exposure > float(limits["max_position_notional"]) + 1e-12:
+            raise ValueError("position notional exceeds max_position_notional")
+    else:
+        reserved = sum(remaining(o) for o in orders if o.side == "SELL" and o.token_id == row.token_id)
+        if row.size > position_size - reserved + 1e-12:
+            raise ValueError("insufficient paper position")
+
+
+async def create_paper_order(order: Dict[str, Any], *, risk_limits: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     now = parse_ts_any(order.get("created_at") or utc_now())
     row = PMPaperOrder(
         order_id=str(order.get("order_id") or ""),
@@ -785,6 +825,9 @@ async def create_paper_order(order: Dict[str, Any]) -> Dict[str, Any]:
         payload_json=order.get("payload") or order.get("payload_json") or {},
     )
     async with pm_session_scope() as session:
+        await _lock_paper_account(session, row.account_id)
+        if risk_limits is not None:
+            await _validate_paper_reservation(session, row, risk_limits)
         session.add(row)
         await session.flush()
         return _paper_order_to_dict(row)
@@ -814,7 +857,9 @@ async def list_paper_orders(account_id: str = "default", status: Optional[str] =
     account = str(account_id or "default").strip() or "default"
     async with pm_session_scope() as session:
         stmt = select(PMPaperOrder).where(PMPaperOrder.account_id == account)
-        if status:
+        if str(status).upper() == "ACTIVE":
+            stmt = stmt.where(PMPaperOrder.status.in_(["OPEN", "PARTIAL"]))
+        elif status:
             stmt = stmt.where(PMPaperOrder.status == str(status).upper())
         rows = (
             await session.execute(stmt.order_by(PMPaperOrder.created_at.desc()).limit(max(1, min(int(limit or 200), 1000))))
@@ -833,8 +878,19 @@ async def get_paper_order(order_id: str) -> Optional[Dict[str, Any]]:
     return _paper_order_to_dict(row) if row else None
 
 
-async def cancel_paper_order(order_id: str) -> Optional[Dict[str, Any]]:
-    return await update_paper_order(str(order_id or ""), {"status": "CANCELED"})
+async def cancel_paper_order(order_id: str, *, account_id: str) -> Optional[Dict[str, Any]]:
+    async with pm_session_scope() as session:
+        await _lock_paper_account(session, account_id)
+        row = (await session.execute(select(PMPaperOrder).where(
+            PMPaperOrder.order_id == order_id, PMPaperOrder.account_id == account_id,
+        ))).scalars().first()
+        if row is None:
+            return None
+        if row.status in {"OPEN", "PARTIAL"}:
+            row.status = "CANCELED"
+            row.updated_at = utc_now()
+            await session.flush()
+        return _paper_order_to_dict(row)
 
 
 async def record_paper_fill(fill: Dict[str, Any]) -> Dict[str, Any]:
@@ -885,7 +941,7 @@ async def list_paper_positions(account_id: str = "default", include_flat: bool =
     return [_paper_position_to_dict(row) for row in rows]
 
 
-async def apply_paper_fill_to_account(fill: Dict[str, Any]) -> Dict[str, Any]:
+async def _apply_paper_fill(session: AsyncSession, fill: Dict[str, Any]) -> Dict[str, Any]:
     account = str(fill.get("account_id") or "default")
     token_id = str(fill.get("token_id") or "")
     market_id = str(fill.get("market_id") or "")
@@ -895,56 +951,99 @@ async def apply_paper_fill_to_account(fill: Dict[str, Any]) -> Dict[str, Any]:
     size = float(fill.get("size") or 0.0)
     fee = float(fill.get("fee_paid") or 0.0)
     now = parse_ts_any(fill.get("ts") or utc_now())
-    async with pm_session_scope() as session:
-        account_row = await session.get(PMPaperAccount, account)
-        if account_row is None:
-            account_row = PMPaperAccount(account_id=account, initial_cash=1000.0, cash=1000.0, updated_at=now)
-            session.add(account_row)
-            await session.flush()
-        pos = (
-            await session.execute(
-                select(PMPaperPosition).where(
-                    and_(PMPaperPosition.account_id == account, PMPaperPosition.token_id == token_id)
-                )
-            )
-        ).scalars().first()
-        if pos is None:
-            pos = PMPaperPosition(
-                account_id=account,
-                market_id=market_id,
-                token_id=token_id,
-                outcome=outcome,
-                size=0.0,
-                avg_price=0.0,
-                realized_pnl=0.0,
-                fees_paid=0.0,
-                updated_at=now,
-            )
-            session.add(pos)
-            await session.flush()
-        old_size = float(pos.size or 0.0)
-        old_avg = float(pos.avg_price or 0.0)
-        realized = 0.0
-        if side == "BUY":
-            cost = price * size + fee
-            new_size = old_size + size
-            pos.avg_price = ((old_size * old_avg) + (size * price)) / new_size if new_size > 0 else 0.0
-            pos.size = new_size
-            account_row.cash = float(account_row.cash or 0.0) - cost
-        else:
-            sell_size = min(size, max(0.0, old_size))
-            proceeds = price * size - fee
-            realized = (price - old_avg) * sell_size
-            pos.size = max(0.0, old_size - sell_size)
-            if pos.size <= 1e-12:
-                pos.size = 0.0
-                pos.avg_price = 0.0
-            account_row.cash = float(account_row.cash or 0.0) + proceeds
-        pos.realized_pnl = float(pos.realized_pnl or 0.0) + realized
-        pos.fees_paid = float(pos.fees_paid or 0.0) + fee
-        pos.updated_at = now
-        account_row.realized_pnl = float(account_row.realized_pnl or 0.0) + realized
-        account_row.fees_paid = float(account_row.fees_paid or 0.0) + fee
-        account_row.updated_at = now
+    account_row = await session.get(PMPaperAccount, account)
+    if account_row is None:
+        account_row = PMPaperAccount(account_id=account, initial_cash=1000.0, cash=1000.0, updated_at=now)
+        session.add(account_row)
         await session.flush()
-        return {"account": _paper_account_to_dict(account_row), "position": _paper_position_to_dict(pos)}
+    pos = (
+        await session.execute(
+            select(PMPaperPosition).where(
+                and_(PMPaperPosition.account_id == account, PMPaperPosition.token_id == token_id)
+            )
+        )
+    ).scalars().first()
+    if pos is None:
+        pos = PMPaperPosition(
+            account_id=account,
+            market_id=market_id,
+            token_id=token_id,
+            outcome=outcome,
+            size=0.0,
+            avg_price=0.0,
+            realized_pnl=0.0,
+            fees_paid=0.0,
+            updated_at=now,
+        )
+        session.add(pos)
+        await session.flush()
+    old_size = float(pos.size or 0.0)
+    old_avg = float(pos.avg_price or 0.0)
+    realized = 0.0
+    if side == "BUY":
+        cost = price * size + fee
+        if float(account_row.cash) + 1e-12 < cost:
+            raise ValueError("insufficient paper cash at fill")
+        new_size = old_size + size
+        pos.avg_price = ((old_size * old_avg) + (size * price)) / new_size if new_size > 0 else 0.0
+        pos.size = new_size
+        account_row.cash = float(account_row.cash or 0.0) - cost
+    else:
+        if size > old_size + 1e-12:
+            raise ValueError("insufficient paper position at fill")
+        sell_size = size
+        proceeds = price * size - fee
+        realized = (price - old_avg) * sell_size
+        pos.size = max(0.0, old_size - sell_size)
+        if pos.size <= 1e-12:
+            pos.size = 0.0
+            pos.avg_price = 0.0
+        account_row.cash = float(account_row.cash or 0.0) + proceeds
+    pos.realized_pnl = float(pos.realized_pnl or 0.0) + realized
+    pos.fees_paid = float(pos.fees_paid or 0.0) + fee
+    pos.updated_at = now
+    account_row.realized_pnl = float(account_row.realized_pnl or 0.0) + realized
+    account_row.fees_paid = float(account_row.fees_paid or 0.0) + fee
+    account_row.updated_at = now
+    await session.flush()
+    return {"account": _paper_account_to_dict(account_row), "position": _paper_position_to_dict(pos)}
+
+
+async def apply_paper_fill_to_account(fill: Dict[str, Any]) -> Dict[str, Any]:
+    async with pm_session_scope() as session:
+        await _lock_paper_account(session, str(fill.get("account_id") or "default"))
+        return await _apply_paper_fill(session, fill)
+
+
+async def fill_paper_order_atomically(order_id: str, *, account_id: str, price: float,
+                                    fee_rate: float, quote: Dict[str, Any], ts: datetime) -> Optional[Dict[str, Any]]:
+    """Commit the fill, account ledger and terminal order state as one transaction."""
+    async with pm_session_scope() as session:
+        await _lock_paper_account(session, account_id)
+        row = (await session.execute(select(PMPaperOrder).where(
+            PMPaperOrder.order_id == order_id, PMPaperOrder.account_id == account_id,
+        ))).scalars().first()
+        if row is None:
+            raise ValueError("unknown paper order for account")
+        if row.status not in {"OPEN", "PARTIAL"}:
+            return _paper_order_to_dict(row)
+        if (row.side == "BUY" and price > row.price) or (row.side == "SELL" and price < row.price):
+            return _paper_order_to_dict(row)
+        remaining = max(0.0, float(row.size) - float(row.filled_size))
+        if remaining <= 0:
+            return _paper_order_to_dict(row)
+        fee = price * remaining * max(0.0, fee_rate)
+        fill = dict(fill_id=f"pm-fill-{row.order_id}-{row.filled_size:.12g}",
+                    order_id=row.order_id, account_id=account_id, ts=ts,
+                    market_id=row.market_id, token_id=row.token_id, outcome=row.outcome,
+                    side=row.side, price=price, size=remaining, fee_paid=fee,
+                    quote_id=quote.get("id"))
+        session.add(PMPaperFill(**fill, payload_json={"quote": quote}))
+        await _apply_paper_fill(session, fill)
+        row.avg_fill_price = ((float(row.avg_fill_price or 0.0) * row.filled_size) + price * remaining) / row.size
+        row.filled_size = row.size
+        row.fee_paid = float(row.fee_paid or 0.0) + fee
+        row.status = "FILLED"
+        row.updated_at = ts
+        await session.flush()
+        return _paper_order_to_dict(row)

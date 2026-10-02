@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from prediction_markets.polymarket import db as pm_db
@@ -23,7 +23,7 @@ async def _setup_db(tmp_path: Path):
 def _quote(token_id: str, minute: int, bid: float, ask: float):
     midpoint = (bid + ask) / 2.0
     return {
-        "ts": datetime(2026, 3, 3, 0, minute, tzinfo=timezone.utc),
+        "ts": (datetime.now(timezone.utc) - timedelta(seconds=max(0, 30 - minute))),
         "market_id": f"m-{token_id}",
         "token_id": token_id,
         "outcome": "YES",
@@ -34,7 +34,7 @@ def _quote(token_id: str, minute: int, bid: float, ask: float):
         "spread": ask - bid,
         "depth1": 100.0,
         "depth5": 500.0,
-        "fetched_at": datetime(2026, 3, 3, 0, minute, tzinfo=timezone.utc),
+        "fetched_at": (datetime.now(timezone.utc) - timedelta(seconds=max(0, 30 - minute))),
     }
 
 

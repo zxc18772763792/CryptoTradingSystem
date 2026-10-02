@@ -1150,7 +1150,7 @@ async def auto_requeue_failed_llm_tasks(limit: int = 4, since: Optional[datetime
     }
 
 
-async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[Dict[str, Any]] = None, *, source_cursors: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     pulled_count = len(news_items)
     if pulled_count == 0:
         return {"inserted": [], "pulled_count": 0, "deduped_count": 0}
@@ -1249,14 +1249,32 @@ async def save_news_raw(news_items: List[Dict[str, Any]], ingest_meta: Optional[
         else:
             for item in rows_to_insert:
                 obj = NewsRaw(**item)
-                session.add(obj)
                 try:
-                    await session.flush()
+                    async with session.begin_nested():
+                        session.add(obj)
+                        await session.flush()
                     objects.append(obj)
                 except IntegrityError:
-                    await session.rollback()
                     deduped_count += 1
             inserted = [_row_to_news_dict(obj) for obj in objects]
+
+        for source, cursor in (source_cursors or {}).items():
+            if cursor is None:
+                continue
+            state = (await session.execute(select(NewsSourceState).where(
+                NewsSourceState.source == source).with_for_update())).scalar_one_or_none()
+            if state is None:
+                state = NewsSourceState(source=source, cursor_type="ts")
+                session.add(state)
+            # Never regress a cursor if overlapping pulls finish out of order.
+            state.cursor_value = str(max(float(state.cursor_value or 0), float(cursor)))
+            state.cursor_type = "ts"
+            state.updated_at = state.last_success_at = datetime.now(timezone.utc)
+            state.last_error = None
+            state.error_count = 0
+            state.paused_until = None
+            state.success_count = int(state.success_count or 0) + 1
+        await session.flush()
 
     return {
         "inserted": inserted,

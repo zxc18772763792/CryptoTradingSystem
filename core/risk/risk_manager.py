@@ -113,6 +113,7 @@ class RiskManager:
         self._alerts: List[Dict[str, Any]] = []
         self._trading_halted = False
         self._halt_reason = ""
+        self._governance_kill_switch = False
         self._daily_stop_guard_until: Optional[datetime] = None
         self._daily_stop_breach_count = 0
         self._daily_stop_required_breaches_paper = 2
@@ -896,6 +897,11 @@ class RiskManager:
         """Return True if an order can pass risk checks."""
         self._check_new_day()
 
+        if getattr(self, "_governance_kill_switch", False):
+            self._add_alert(title="交易被阻止", message="governance kill_switch enabled",
+                            severity="critical", data={"symbol": symbol, "side": side})
+            return False
+
         if self._trading_halted and not (
             allow_close and self._is_daily_loss_halt_reason(self._halt_reason)
         ):
@@ -1254,7 +1260,7 @@ class RiskManager:
             open_positions=open_positions,
             max_drawdown=self.calculate_max_drawdown(self._equity_curve),
             risk_level=level,
-            trading_halted=self._trading_halted,
+            trading_halted=self._trading_halted or self._governance_kill_switch,
         )
 
     def _risk_metrics_from_state(self, scope: str, state: Dict[str, Any]) -> RiskMetrics:
@@ -1289,7 +1295,7 @@ class RiskManager:
                 list(state.get("equity_curve") or [])
             ),
             risk_level=level,
-            trading_halted=bool(state.get("trading_halted", False)),
+            trading_halted=bool(state.get("trading_halted", False)) or self._governance_kill_switch,
         )
 
     def _build_autonomy_discipline_contract(
@@ -1421,7 +1427,8 @@ class RiskManager:
             "scope": target_scope,
             "risk_level": metrics.risk_level.value,
             "trading_halted": metrics.trading_halted,
-            "halt_reason": halt_reason,
+            "halt_reason": halt_reason or ("governance kill_switch enabled" if self._governance_kill_switch else ""),
+            "governance_kill_switch": self._governance_kill_switch,
             "discipline": discipline,
             "drawdown": {
                 "max_drawdown": round(float(metrics.max_drawdown), 6),

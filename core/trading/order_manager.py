@@ -5,6 +5,8 @@ import asyncio
 import re
 import time
 import uuid
+import json
+import hashlib
 from datetime import datetime, timezone
 import math
 from typing import Any, Awaitable, Callable, Dict, List, Optional
@@ -81,6 +83,35 @@ class OrderManager:
         text = str(value or default).strip().lower()
         return "live" if text == "live" else "paper"
 
+    def _cache_live_order(self, order: Order, metadata: Dict[str, Any]) -> Order:
+        account_id = str(metadata.get("account_id") or "main")
+        identity = json.dumps([account_id, str(order.exchange).lower(), order.symbol, str(order.id)], separators=(",", ":"))
+        key = "live_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        order.account_id = account_id
+        order.cache_key = key
+        self._orders[key] = order
+        self._order_meta[key] = {**self._order_meta.get(key, {}), **metadata,
+                                 "account_id": account_id, "mode": "live", "exchange_order_id": str(order.id)}
+        return order
+
+    def _order_key(self, order_id: str, *, account_id: Optional[str] = None,
+                   exchange: Optional[str] = None, symbol: Optional[str] = None) -> Optional[str]:
+        matches = []
+        candidates = [(order_id, self._orders[order_id])] if order_id in self._orders else self._orders.items()
+        for key, order in candidates:
+            if order_id not in {key, str(order.id)}:
+                continue
+            meta = self._order_meta.get(key, {})
+            if account_id is not None and str(meta.get("account_id") or "main") != str(account_id):
+                continue
+            if exchange and str(order.exchange).lower() != str(exchange).lower():
+                continue
+            if symbol and str(order.symbol).split(":")[0] != str(symbol).split(":")[0]:
+                continue
+            matches.append(key)
+        # Never select a different account based on insertion order.
+        return matches[0] if len(matches) == 1 else None
+
     def _resolve_request_mode(self, request: OrderRequest) -> str:
         fallback_mode = "paper" if self._paper_trading else "live"
         try:
@@ -113,6 +144,7 @@ class OrderManager:
         that have not yet been cached locally.
         """
         if order_id:
+            order_id = self._order_key(order_id) or order_id
             stored_mode = str((self._order_meta.get(order_id) or {}).get("mode") or "").strip().lower()
             if stored_mode in {"paper", "live"}:
                 return stored_mode
@@ -127,6 +159,7 @@ class OrderManager:
         trading_mode: Optional[str],
     ) -> bool:
         requested = str(trading_mode or "").strip().lower()
+        order_id = self._order_key(order_id) or order_id
         stored = str((self._order_meta.get(order_id) or {}).get("mode") or "").strip().lower()
         return requested in {"paper", "live"} and stored in {"paper", "live"} and requested != stored
 
@@ -678,9 +711,21 @@ class OrderManager:
                 params.setdefault("reduceOnly", True)
 
             market_type = str(params.get("market_type") or "").strip().lower()
+            binance_sandbox_futures = (
+                str(request.exchange or "").lower() == "binance"
+                and market_type in {"future", "futures", "swap", "perp", "perpetual", "contract"}
+                and bool(getattr(getattr(exchange, "config", None), "sandbox", False))
+            )
+            if binance_sandbox_futures and not bool(request.reduce_only):
+                # The production fast REST leverage endpoint is unavailable in sandbox.
+                client = await exchange._ensure_client()
+                await client.set_leverage(requested_leverage, request.symbol)
+                params.pop("leverage", None)
             is_binance_futures = (
                 str(request.exchange or "").lower() == "binance"
                 and market_type in {"future", "futures", "swap", "perp", "perpetual", "contract"}
+                and not bool(getattr(getattr(exchange, "config", None), "sandbox", False))
+                and str(request.symbol).split(":")[0].upper().endswith(("/USDT", "/USDC"))
             )
             if is_binance_futures and not bool(request.reduce_only):
                 synced = await self._sync_binance_futures_leverage(
@@ -767,10 +812,9 @@ class OrderManager:
                         ) if self._safe_nonnegative_float((raw_order or {}).get("updateTime"), 0.0) > 0 else datetime.now(timezone.utc),
                         exchange=request.exchange,
                     )
-                    self._orders[order.id] = order
                     meta_payload = self._request_meta(request)
                     meta_payload["client_order_id"] = client_order_id
-                    self._order_meta[order.id] = meta_payload
+                    self._cache_live_order(order, meta_payload)
                     logger.info(
                         f"Fast Binance futures order created: {order.id} "
                         f"{request.side.value} {request.amount} {request.symbol} "
@@ -799,10 +843,9 @@ class OrderManager:
                 params=params,
             )
 
-            self._orders[order.id] = order
             meta_payload = self._request_meta(request)
             meta_payload["client_order_id"] = client_order_id
-            self._order_meta[order.id] = meta_payload
+            self._cache_live_order(order, meta_payload)
             logger.info(
                 f"Order created: {order.id} "
                 f"{request.side.value} {request.amount} {request.symbol} "
@@ -882,34 +925,27 @@ class OrderManager:
         return order
 
     async def cancel_order(
-        self,
-        order_id: str,
-        symbol: str,
-        exchange: str = "binance",
-        trading_mode: Optional[str] = None,
+        self, order_id: str, symbol: str, exchange: str = "binance",
+        trading_mode: Optional[str] = None, account_id: Optional[str] = None,
     ) -> bool:
-        if self._operation_mode_conflicts(order_id, trading_mode):
-            logger.error(
-                "Refused cancel_order with conflicting mode: "
-                f"order_id={order_id} requested={trading_mode} "
-                f"stored={(self._order_meta.get(order_id) or {}).get('mode')}"
-            )
+        key = self._order_key(order_id, account_id=account_id, exchange=exchange, symbol=symbol)
+        if key is None or self._operation_mode_conflicts(key, trading_mode):
+            logger.error("Refused unknown, ambiguous or mode-conflicting order cancellation")
             return False
-        if self._resolve_operation_mode(order_id=order_id, trading_mode=trading_mode) == "paper":
-            return await self._cancel_paper_order(order_id)
-
-        connector = self._resolve_cached_exchange(exchange, account_id=self._order_meta.get(order_id, {}).get("account_id"))
+        if self._resolve_operation_mode(order_id=key, trading_mode=trading_mode) == "paper":
+            return await self._cancel_paper_order(key)
+        order = self._orders[key]
+        connector = self._resolve_cached_exchange(exchange, account_id=self._order_meta[key].get("account_id"))
         if not connector:
             return False
-
         try:
-            success = await connector.cancel_order(order_id, symbol)
-            if success and order_id in self._orders:
-                self._orders[order_id].status = OrderStatus.CANCELED
-                await self._notify_callbacks(self._orders[order_id], "canceled")
+            success = await connector.cancel_order(order.id, order.symbol)
+            if success:
+                order.status = OrderStatus.CANCELED
+                await self._notify_callbacks(order, "canceled")
             return success
-        except Exception as e:
-            logger.error(f"Failed to cancel order {order_id}: {e}")
+        except Exception as exc:
+            logger.error(f"Failed to cancel order: {exc}")
             return False
 
     async def _cancel_paper_order(self, order_id: str) -> bool:
@@ -921,33 +957,28 @@ class OrderManager:
         return False
 
     async def get_order(
-        self,
-        order_id: str,
-        symbol: str,
-        exchange: str = "binance",
-        trading_mode: Optional[str] = None,
+        self, order_id: str, symbol: str, exchange: str = "binance",
+        trading_mode: Optional[str] = None, account_id: Optional[str] = None,
     ) -> Optional[Order]:
-        if self._operation_mode_conflicts(order_id, trading_mode):
-            logger.error(
-                "Refused get_order with conflicting mode: "
-                f"order_id={order_id} requested={trading_mode} "
-                f"stored={(self._order_meta.get(order_id) or {}).get('mode')}"
-            )
+        key = self._order_key(order_id, account_id=account_id, exchange=exchange, symbol=symbol)
+        if key is None or self._operation_mode_conflicts(key, trading_mode):
             return None
-        if self._resolve_operation_mode(order_id=order_id, trading_mode=trading_mode) == "paper":
-            return self._orders.get(order_id)
-
-        connector = self._resolve_cached_exchange(exchange, account_id=self._order_meta.get(order_id, {}).get("account_id"))
+        if self._resolve_operation_mode(order_id=key, trading_mode=trading_mode) == "paper":
+            return self._orders.get(key)
+        cached = self._orders[key]
+        metadata = self._order_meta[key]
+        connector = self._resolve_cached_exchange(exchange, account_id=metadata.get("account_id"))
         if not connector:
             return None
-
         try:
-            order = await connector.get_order(order_id, symbol)
+            order = await connector.get_order(cached.id, cached.symbol)
             if order is not None:
-                self._orders[order_id] = order
+                if not order.exchange:
+                    order.exchange = exchange
+                self._cache_live_order(order, metadata)
             return order
-        except Exception as e:
-            logger.error(f"Failed to get order {order_id}: {e}")
+        except Exception as exc:
+            logger.error(f"Failed to get order: {exc}")
             return None
 
     async def get_open_orders(
@@ -961,7 +992,7 @@ class OrderManager:
             return [
                 o for o in self._orders.values()
                 if o.status == OrderStatus.OPEN
-                and self._resolve_operation_mode(order_id=o.id) == "paper"
+                and self._resolve_operation_mode(order_id=o.cache_key or o.id) == "paper"
                 and (symbol is None or o.symbol == symbol)
                 and (exchange is None or o.exchange == exchange)
             ]
@@ -980,7 +1011,7 @@ class OrderManager:
                     for row in rows:
                         if not getattr(row, "exchange", ""):
                             row.exchange = ex_name
-                        self._order_meta.setdefault(row.id, {"mode": "live", "account_id": "main"})
+                        self._cache_live_order(row, {"mode": "live", "account_id": "main"})
                     return rows
                 except Exception as ex:
                     logger.warning(f"Failed to get open orders from {ex_name}: {ex}")
@@ -998,7 +1029,6 @@ class OrderManager:
                     if key in seen:
                         continue
                     seen.add(key)
-                    self._orders[row.id] = row
                     merged.append(row)
             merged.sort(key=lambda x: self._ts_sort_key(x.timestamp), reverse=True)
             return merged
@@ -1010,8 +1040,9 @@ class OrderManager:
         try:
             orders = await connector.get_open_orders(symbol)
             for order in orders:
-                self._orders[order.id] = order
-                self._order_meta.setdefault(order.id, {"mode": "live", "account_id": "main"})
+                if not order.exchange:
+                    order.exchange = exchange
+                self._cache_live_order(order, {"mode": "live", "account_id": "main"})
             return orders
         except Exception as e:
             logger.error(f"Failed to get open orders: {e}")
@@ -1042,7 +1073,7 @@ class OrderManager:
         cancelled = 0
         for order in orders:
             if await self.cancel_order(
-                order.id,
+                order.cache_key or order.id,
                 order.symbol,
                 exchange,
                 trading_mode=resolved_mode,
@@ -1050,11 +1081,11 @@ class OrderManager:
                 cancelled += 1
         return cancelled
 
-    def get_order_by_id(self, order_id: str) -> Optional[Order]:
-        return self._orders.get(order_id)
+    def get_order_by_id(self, order_id: str, **scope: Any) -> Optional[Order]:
+        return self._orders.get(self._order_key(order_id, **scope))
 
-    def get_order_metadata(self, order_id: str) -> Dict[str, Any]:
-        return dict(self._order_meta.get(order_id) or {})
+    def get_order_metadata(self, order_id: str, **scope: Any) -> Dict[str, Any]:
+        return dict(self._order_meta.get(self._order_key(order_id, **scope)) or {})
 
     def get_all_orders(self) -> List[Order]:
         return list(self._orders.values())

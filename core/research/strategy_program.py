@@ -334,8 +334,8 @@ def _dedupe_indicator_specs(items: List[StrategyIndicatorSpec]) -> List[Strategy
 def _series_for_indicator(df: pd.DataFrame, spec: StrategyIndicatorSpec) -> pd.Series:
     source = str(spec.source or "close").strip().lower() or "close"
     if source not in df.columns:
-        source = "close"
-    base = pd.to_numeric(df[source], errors="coerce").replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0.0)
+        raise ValueError(f"missing strategy source: {source}")
+    base = pd.to_numeric(df[source], errors="coerce").replace([np.inf, -np.inf], np.nan).ffill()
     period = max(1, int(spec.period or 1))
     kind = str(spec.kind or "price").strip().lower()
 
@@ -371,8 +371,8 @@ def _resolve_operand(operand: Any, series_map: Dict[str, pd.Series], index: pd.I
         return series_map[token]
     try:
         return pd.Series(float(operand), index=index, dtype=float)
-    except Exception:
-        return pd.Series(0.0, index=index, dtype=float)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unknown strategy operand: {operand!r}") from exc
 
 
 def _evaluate_condition(cond: StrategyCondition, series_map: Dict[str, pd.Series], index: pd.Index) -> pd.Series:

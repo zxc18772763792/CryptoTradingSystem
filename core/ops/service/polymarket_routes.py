@@ -181,6 +181,16 @@ def _resolve_under_repo(value: str, *, default: str = "") -> Path:
     return candidate
 
 
+def _resolve_profile_output(value: str) -> Path:
+    candidate = _resolve_under_repo(value)
+    profile_root = (Path(ops_api.settings.BASE_DIR) / "data" / "profiles" / "polymarket").resolve()
+    if not candidate.is_relative_to(profile_root) or candidate.suffix.lower() != ".json":
+        raise ValueError("profile output must be a .json file under data/profiles/polymarket")
+    if candidate.exists():
+        raise ValueError("profile output already exists; choose a new versioned filename")
+    return candidate
+
+
 def _resolve_report_dir(value: str) -> Path:
     return _resolve_under_repo(value, default="data/reports")
 
@@ -446,7 +456,7 @@ async def polymarket_paper_profile_promote(request: Request, payload: ops_api.Po
                 ),
                 allow_unsafe=payload.allow_unsafe,
             )
-            paths = save_paper_strategy_profile(profile, _resolve_repo_path(payload.output_path))
+            paths = save_paper_strategy_profile(profile, _resolve_profile_output(payload.output_path), overwrite=False)
             audit_state["extra"] = {"profile_path": paths.get("profile_path"), "tokens": len(profile.get("token_ids") or [])}
             return ops_api._ok({"paths": paths, "profile": profile})
         except Exception as exc:

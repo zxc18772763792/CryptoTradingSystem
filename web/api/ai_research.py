@@ -1773,12 +1773,13 @@ def _review_is_model_issue(row: Dict[str, Any]) -> bool:
 
 
 def _serialize_autonomy_order(order: Any) -> Dict[str, Any]:
-    meta = order_manager.get_order_metadata(order.id)
+    meta = order_manager.get_order_metadata(getattr(order, "cache_key", "") or order.id)
     order_type = getattr(getattr(order, "type", None), "value", getattr(order, "type", "")) or ""
     order_side = getattr(getattr(order, "side", None), "value", getattr(order, "side", "")) or ""
     order_status = getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or ""
     return {
-        "id": order.id,
+        "id": getattr(order, "cache_key", "") or order.id,
+        "exchange_order_id": order.id,
         "exchange": getattr(order, "exchange", ""),
         "symbol": getattr(order, "symbol", ""),
         "symbol_norm": _normalize_review_symbol(getattr(order, "symbol", "")),

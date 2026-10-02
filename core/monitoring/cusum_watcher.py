@@ -177,9 +177,8 @@ async def _demote_on_decay(app: FastAPI, candidate: Any) -> str:
                 reason="CUSUM decay triggered → demoted paper→shadow",
             )
         except ValueError as exc:
-            logger.warning(f"cusum_watcher: transition paper→shadow failed: {exc}; forcing retired")
-            candidate.status = "retired"
-            return "retired"
+            logger.warning(f"cusum_watcher: transition paper→shadow failed: {exc}")
+            return current
         return target
 
     elif current == "shadow_running":
@@ -193,8 +192,8 @@ async def _demote_on_decay(app: FastAPI, candidate: Any) -> str:
                 reason="CUSUM decay triggered again → retired",
             )
         except ValueError as exc:
-            logger.warning(f"cusum_watcher: transition shadow→retired failed: {exc}; forcing retired")
-            candidate.status = "retired"
+            logger.warning(f"cusum_watcher: transition shadow→retired failed: {exc}")
+            return current
         return target
 
     # Already retired or unknown — no further action

@@ -253,7 +253,7 @@ async def governance_set_kill_switch(request: Request, payload: ops_api.Governan
     return ops_api._ok(result)
 
 
-@router.post("/governance/audit/query")
+@router.post("/governance/audit/query", dependencies=[Depends(require_ops_permissions_dependency("read_audit"))])
 async def governance_query_audit(request: Request, payload: ops_api.GovernanceAuditQuery):
     _ = get_request_auth(request)
     rows = await ops_api.list_governance_audit_records(

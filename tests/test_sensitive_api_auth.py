@@ -563,6 +563,7 @@ def test_account_mutation_api_key_must_have_manage_accounts_permission(monkeypat
 
 
 def test_account_summary_requires_read_trading_state_permission(monkeypatch):
+    monkeypatch.setenv("OPS_TOKEN", "test-only-dummy-token")
     app = _build_app(("/api/trading", trading_accounts.router))
     client = TestClient(app)
     monkeypatch.setattr(trading_api.account_manager, "list_accounts", lambda: [])

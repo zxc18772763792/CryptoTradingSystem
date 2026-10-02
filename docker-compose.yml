@@ -48,6 +48,7 @@ services:
     build: .
     command: ["python", "-m", "core.news.service.worker"]
     environment:
+      - NEWS_WORKER_HEARTBEAT_FILE=/tmp/news_worker_heartbeat
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-crypto}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD env var is required}@db:5432/${POSTGRES_DB:-crypto_trading}
       - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD env var is required}@redis:6379/0
     volumes:
@@ -60,6 +61,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "scripts/check_news_worker_health.py", "--max-age", "900"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 900s
     mem_limit: 1g
     networks:
       - crypto_net

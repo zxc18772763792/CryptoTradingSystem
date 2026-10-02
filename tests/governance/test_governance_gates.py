@@ -263,15 +263,16 @@ def test_boolean_relaxations_count_as_risk_increase(monkeypatch):
         assert result["risk_delta_score"] > 0
 
 
-def test_activate_risk_config_clears_runtime_halt_when_kill_switch_disabled():
+def test_activate_risk_config_preserves_daily_halt_when_kill_switch_disabled():
     async def _run():
         await init_db()
         actor = GovernanceIdentity(actor="governance_bot", role="SYSTEM")
+        original_kill = risk_manager._governance_kill_switch
         original_halted = risk_manager._trading_halted  # noqa: SLF001
         original_reason = risk_manager._halt_reason  # noqa: SLF001
         try:
             risk_manager._trading_halted = True  # noqa: SLF001
-            risk_manager._halt_reason = "governance kill_switch enabled"  # noqa: SLF001
+            risk_manager._halt_reason = "daily loss limit"  # noqa: SLF001
             await _activate_risk_config(
                 base_version=1,
                 config={
@@ -285,20 +286,24 @@ def test_activate_risk_config_clears_runtime_halt_when_kill_switch_disabled():
             )
             return risk_manager._trading_halted, risk_manager._halt_reason  # noqa: SLF001
         finally:
+            risk_manager._governance_kill_switch = original_kill
             risk_manager._trading_halted = original_halted  # noqa: SLF001
             risk_manager._halt_reason = original_reason  # noqa: SLF001
 
     halted, reason = asyncio.run(_run())
-    assert halted is False
-    assert reason == ""
+    assert halted is True
+    assert reason == "daily loss limit"
 
 
 def test_activate_risk_config_kill_switch_toggle_keeps_runtime_state_consistent():
     async def _run():
         await init_db()
         actor = GovernanceIdentity(actor="governance_bot", role="SYSTEM")
+        original_kill = risk_manager._governance_kill_switch
         original_halted = risk_manager._trading_halted  # noqa: SLF001
         original_reason = risk_manager._halt_reason  # noqa: SLF001
+        risk_manager._trading_halted = True
+        risk_manager._halt_reason = "daily loss limit"
         snapshots = []
         try:
             toggle_plan = [True, False, True, False]
@@ -314,17 +319,18 @@ def test_activate_risk_config_kill_switch_toggle_keeps_runtime_state_consistent(
                     },
                     actor=actor,
                 )
-                snapshots.append((bool(risk_manager._trading_halted), str(risk_manager._halt_reason or "")))  # noqa: SLF001
+                snapshots.append((bool(risk_manager._governance_kill_switch), bool(risk_manager._trading_halted), str(risk_manager._halt_reason or "")))  # noqa: SLF001
             return snapshots
         finally:
+            risk_manager._governance_kill_switch = original_kill
             risk_manager._trading_halted = original_halted  # noqa: SLF001
             risk_manager._halt_reason = original_reason  # noqa: SLF001
 
     states = asyncio.run(_run())
-    assert states[0] == (True, "governance kill_switch enabled")
-    assert states[1] == (False, "")
-    assert states[2] == (True, "governance kill_switch enabled")
-    assert states[3] == (False, "")
+    assert states[0] == (True, True, "daily loss limit")
+    assert states[1] == (False, True, "daily loss limit")
+    assert states[2] == (True, True, "daily loss limit")
+    assert states[3] == (False, True, "daily loss limit")
 
 
 def test_live_transition_requires_dual_approval():

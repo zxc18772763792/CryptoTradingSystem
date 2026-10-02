@@ -67,27 +67,39 @@ class PerformanceAnalyzer:
             性能指标
         """
         equity_curve = np.array(result.equity_curve)
-        trades = result.trades
+        trades = [t for t in result.trades if getattr(t, "trade_stage", "unknown") not in {"open", "funding"}]
+        periods_per_year = 365.0
+        periods = max(0, len(equity_curve) - 1)
+        timestamps = getattr(result, "equity_timestamps", [])
+        if timestamps and len(timestamps) == len(equity_curve) and periods:
+            index = pd.DatetimeIndex(pd.to_datetime(timestamps, utc=True))
+            if index.hasnans or not index.is_monotonic_increasing or index.has_duplicates:
+                raise ValueError("Equity timestamps must be finite and strictly increasing")
+            elapsed_days = (index[-1] - index[0]).total_seconds() / 86400.0
+            periods_per_year = periods * 365.0 / elapsed_days
+        else:
+            # Backward compatibility for old results without timestamp metadata.
+            elapsed_days = float(periods)
 
         # 计算收益率
         returns = self._calculate_returns(equity_curve)
 
         # 计算各项指标
         total_return = result.total_return_pct
-        annual_return = self._annualize_return(total_return, len(equity_curve))
-        monthly_return = annual_return / 12
-        daily_return = self._calculate_daily_return(returns)
+        annual_return = self._annualize_return(total_return, periods, periods_per_year)
+        monthly_return = (1 + annual_return) ** (1 / 12) - 1
+        daily_return = (1 + total_return) ** (1 / elapsed_days) - 1 if elapsed_days > 0 else 0.0
 
         # 风险指标
-        volatility = self._calculate_volatility(returns)
+        volatility = self._calculate_volatility(returns, periods_per_year)
         max_drawdown = result.max_drawdown_pct
         var_95 = self._calculate_var(returns, 0.95)
         cvar_95 = self._calculate_cvar(returns, 0.95)
 
         # 风险调整收益
-        sharpe = self._calculate_sharpe(returns)
-        sortino = self._calculate_sortino(returns)
-        calmar = self._calculate_calmar(annual_return, max_drawdown)
+        sharpe = self._calculate_sharpe(returns, periods_per_year)
+        sortino = self._calculate_sortino(returns, periods_per_year)
+        calmar = self._calculate_calmar(annual_return, max_drawdown / 100.0)
 
         # 交易指标
         trade_stats = self._analyze_trades(trades)
@@ -119,8 +131,8 @@ class PerformanceAnalyzer:
             max_consecutive_wins=trade_stats["max_consecutive_wins"],
             max_consecutive_losses=trade_stats["max_consecutive_losses"],
             total_trades=len(trades),
-            trading_days=len(equity_curve),
-            avg_trades_per_day=len(trades) / len(equity_curve) if len(equity_curve) > 0 else 0,
+            trading_days=int(np.ceil(elapsed_days)),
+            avg_trades_per_day=len(trades) / elapsed_days if elapsed_days > 0 else 0,
             gross_pnl=gross_pnl,
             fee_cost=fee_cost,
             slippage_cost=slippage_cost,
@@ -135,12 +147,12 @@ class PerformanceAnalyzer:
             return np.array([])
         return np.diff(equity_curve) / equity_curve[:-1]
 
-    def _annualize_return(self, total_return: float, periods: int) -> float:
+    def _annualize_return(self, total_return: float, periods: int, periods_per_year: float = 365.0) -> float:
         """年化收益率"""
         if periods <= 0:
             return 0
         # 加密货币 7×24 全年交易，使用 365 天
-        years = periods / 365
+        years = periods / periods_per_year
         if years <= 0:
             return total_return
         return (1 + total_return) ** (1 / years) - 1
@@ -151,11 +163,11 @@ class PerformanceAnalyzer:
             return 0
         return float(np.mean(returns))
 
-    def _calculate_volatility(self, returns: np.ndarray) -> float:
+    def _calculate_volatility(self, returns: np.ndarray, periods_per_year: float = 365.0) -> float:
         """计算年化波动率"""
         if len(returns) < 2:
             return 0
-        return float(np.std(returns) * np.sqrt(365))
+        return float(np.std(returns) * np.sqrt(periods_per_year))
 
     def _calculate_var(self, returns: np.ndarray, confidence: float) -> float:
         """计算VaR"""
@@ -170,25 +182,25 @@ class PerformanceAnalyzer:
         var = self._calculate_var(returns, confidence)
         return float(np.mean(returns[returns <= var]))
 
-    def _calculate_sharpe(self, returns: np.ndarray) -> float:
+    def _calculate_sharpe(self, returns: np.ndarray, periods_per_year: float = 365.0) -> float:
         """计算夏普比率"""
         if len(returns) < 2:
             return 0
-        mean_return = np.mean(returns) * 365
-        std_return = np.std(returns) * np.sqrt(365)
+        mean_return = np.mean(returns) * periods_per_year
+        std_return = np.std(returns) * np.sqrt(periods_per_year)
         if std_return == 0:
             return 0
         return float((mean_return - self.risk_free_rate) / std_return)
 
-    def _calculate_sortino(self, returns: np.ndarray) -> float:
+    def _calculate_sortino(self, returns: np.ndarray, periods_per_year: float = 365.0) -> float:
         """计算索提诺比率"""
         if len(returns) < 2:
             return 0
-        mean_return = np.mean(returns) * 365
+        mean_return = np.mean(returns) * periods_per_year
         downside_returns = returns[returns < 0]
         if len(downside_returns) == 0:
             return float("inf")
-        downside_std = np.std(downside_returns) * np.sqrt(365)
+        downside_std = np.std(downside_returns) * np.sqrt(periods_per_year)
         if downside_std == 0:
             return 0
         return float((mean_return - self.risk_free_rate) / downside_std)
@@ -214,9 +226,9 @@ class PerformanceAnalyzer:
 
         close_like = [
             t for t in trades
-            if getattr(t, "trade_stage", "") in {"close", "funding"} or float(getattr(t, "pnl", 0.0) or 0.0) != 0.0
+            if getattr(t, "trade_stage", "unknown") not in {"open", "funding"}
         ]
-        pnls = [float(t.pnl) for t in close_like if float(getattr(t, "pnl", 0.0) or 0.0) != 0]
+        pnls = [float(t.pnl) for t in close_like]
         wins = [p for p in pnls if p > 0]
         losses = [p for p in pnls if p < 0]
 
@@ -241,10 +253,12 @@ class PerformanceAnalyzer:
                 consecutive_wins += 1
                 consecutive_losses = 0
                 max_consecutive_wins = max(max_consecutive_wins, consecutive_wins)
-            else:
+            elif pnl < 0:
                 consecutive_losses += 1
                 consecutive_wins = 0
                 max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+            else:
+                consecutive_wins = consecutive_losses = 0
 
         return {
             "win_rate": win_rate,
@@ -261,18 +275,19 @@ class PerformanceAnalyzer:
         result: BacktestResult,
     ) -> pd.DataFrame:
         """生成月度收益表"""
-        if not result.trades:
+        closed_trades = [t for t in result.trades if getattr(t, "trade_stage", "unknown") not in {"open", "funding"}]
+        if not closed_trades:
             return pd.DataFrame()
 
         # 按月分组交易
         trades_df = pd.DataFrame([
             {"date": t.timestamp, "pnl": t.pnl}
-            for t in result.trades
+            for t in closed_trades
         ])
         trades_df["date"] = pd.to_datetime(trades_df["date"])
         trades_df = trades_df.set_index("date")
 
-        monthly = trades_df.resample("M").agg({
+        monthly = trades_df.resample("ME").agg({
             "pnl": "sum"
         })
 

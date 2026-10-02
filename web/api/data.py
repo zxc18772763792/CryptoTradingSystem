@@ -6965,7 +6965,7 @@ async def get_replay_status(replay_id: str):
     }
 
 
-@router.get("/replay/{replay_id}/next")
+@router.post("/replay/{replay_id}/next", dependencies=[Depends(require_sensitive_ops_permissions("manage_data_sources"))])
 async def replay_next(replay_id: str, steps: int = 1):
     session = _get_replay_session(replay_id)
     if not session:

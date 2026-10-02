@@ -102,9 +102,10 @@ async def _refresh_binance_time_offset(
         return offset
 
 
-def _binance_credentials(account_id: Optional[str] = None) -> Dict[str, str]:
+def _binance_credentials(account_id: Optional[str] = None) -> Dict[str, Any]:
     credentials = account_manager.get_exchange_credentials(account_id, "binance")
     return {
+        "sandbox": str(credentials.get("sandbox", False)).strip().lower() in {"true", "1", "yes", "on"},
         "api_key": str(credentials.get("api_key") or "").strip(),
         "api_secret": str(credentials.get("api_secret") or "").strip(),
         "proxy": str(credentials.get("proxy") or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip(),
@@ -113,7 +114,7 @@ def _binance_credentials(account_id: Optional[str] = None) -> Dict[str, str]:
 
 def binance_has_credentials(account_id: Optional[str] = None) -> bool:
     creds = _binance_credentials(account_id)
-    return bool(creds["api_key"] and creds["api_secret"])
+    return bool(creds["api_key"] and creds["api_secret"] and not creds["sandbox"])
 
 
 def binance_market_symbol(symbol: Optional[str]) -> Optional[str]:
@@ -144,6 +145,8 @@ async def binance_signed_request(
     account_id: Optional[str] = None,
 ) -> Any:
     credentials = _binance_credentials(account_id)
+    if credentials.get("sandbox"):
+        raise RuntimeError("Binance sandbox requires the sandbox-configured CCXT connector; fast REST is disabled")
     api_key = credentials["api_key"]
     api_secret = credentials["api_secret"]
     if not api_key or not api_secret:

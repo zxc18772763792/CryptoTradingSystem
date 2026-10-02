@@ -478,6 +478,8 @@ class TestBinanceConnector:
                     {
                         "symbol": "BTC/USDT",
                         "side": "long",
+                        "contractSize": 1.0,
+                        "linear": True,
                         "contracts": 1,
                         "entryPrice": 100,
                         "markPrice": 101,

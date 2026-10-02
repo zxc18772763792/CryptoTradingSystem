@@ -5,11 +5,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from loguru import logger
 
 from core.audit import audit_logger
 from core.ops.service.auth import get_request_auth
 from core.risk.circuit_breaker import circuit_breaker, run_circuit_breaker_checks
-from web.api.auth import require_sensitive_ops_auth
+from web.api.auth import require_sensitive_ops_permissions
 
 router = APIRouter()
 
@@ -36,7 +37,7 @@ async def get_circuit_breaker_state(request: Request):
     return snap
 
 
-@router.post("/circuit-breaker/evaluate", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.post("/circuit-breaker/evaluate", dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change"))])
 async def evaluate_circuit_breaker(
     request: Request,
 ):
@@ -45,7 +46,7 @@ async def evaluate_circuit_breaker(
     return report
 
 
-@router.post("/circuit-breaker/reset", dependencies=[Depends(require_sensitive_ops_auth)])
+@router.post("/circuit-breaker/reset", dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change"))])
 async def reset_circuit_breaker(
     request: Request,
     payload: CircuitBreakerResetRequest,
@@ -73,16 +74,17 @@ async def reset_circuit_breaker(
 
     try:
         await audit_logger.log(
+            module="risk",
             actor=operator,
             action=f"circuit_breaker.{action}",
-            target=target,
             details={
+                "target": target,
                 "changed": bool(changed),
                 "note": payload.note or "",
             },
         )
     except Exception:
-        pass
+        logger.exception("Failed to audit circuit breaker reset")
 
     return {
         "scope": scope,

@@ -36,6 +36,21 @@
                        # 同时停止新闻/LLM/PM worker
 ```
 
+启停与自动恢复按“工程绝对路径 + 端口”识别实例。Python 进程由
+`scripts/managed_entry.py --instance-port <端口> --module <模块>` 启动；
+不同工作树、不同端口的 Web 和 worker 不会互相去重或停止。停止前还会重新核对
+进程命令和创建时间，避免使用过期 PID。
+
+2026-10-01 之前启动的进程没有此身份标记，新脚本会拒绝接管或停止它。
+首次升级应先用旧启动器停止旧实例，或由维护者核对工程、端口和 PID 后停止，
+再用本启动器启动；不要只按 `python.exe` 或模块名批量结束进程。
+计划任务与 supervisor 互斥锁也带工程身份。首次升级时应由维护者核对并停用旧的
+`CryptoTradingSystem_WebSupervisor_<端口>` 任务，避免旧任务与新实例同时恢复服务。
+
+Docker Compose 的 `news_service` 使用 worker 循环心跳探针，允许最长 900 秒的
+单轮处理时间；Web 继续使用 `/livez`。心跳仅表示 worker 循环推进，新闻源错误与
+处理积压仍应结合 source state、LLM 队列和日志检查。
+
 需要重装或更新依赖时：
 
 ```powershell

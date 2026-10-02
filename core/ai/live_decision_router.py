@@ -758,9 +758,11 @@ class LiveAIDecisionRouter:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
             )
-            action = str(payload.get("action") or "allow").strip().lower()
+            if not isinstance(payload, dict) or not isinstance(payload.get("action"), str):
+                raise ValueError("invalid decision schema: action is required")
+            action = payload["action"].strip().lower()
             if action not in _SUPPORTED_ACTIONS:
-                action = "allow"
+                raise ValueError("invalid decision schema: unsupported action")
             confidence = _coerce_float(payload.get("confidence", 0.5), 0.5, low=0.0, high=1.0)
             reason = str(payload.get("reason") or "model_decision").strip()[:140] or "model_decision"
             blocked = action == "block"

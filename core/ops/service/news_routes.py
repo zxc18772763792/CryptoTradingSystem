@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 
 from core.audit.ops_audit import ops_audit_scope
 from core.ops.service import api as ops_api
-from core.ops.service.auth import get_request_auth
+from core.ops.service.auth import get_request_auth, require_ops_permissions_dependency
 
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_ops_permissions_dependency("manage_news"))])
 
 
 @router.post("/news/pull_now")

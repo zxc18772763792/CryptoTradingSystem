@@ -16,6 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
+. (Join-Path $PSScriptRoot "scripts\managed_process.ps1")
 
 function Open-WebConsole {
     param([int]$WebPort)
@@ -47,7 +48,7 @@ function Get-ListeningPid {
 
 function Get-WorkerPid {
     $workers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -like "*core.news.service.worker*"
+        Test-ManagedPythonInstance $_ $PSScriptRoot $Port "core.news.service.worker"
     }
     if (-not $workers) { return $null }
     return [int]($workers | Select-Object -First 1).ProcessId
@@ -55,7 +56,7 @@ function Get-WorkerPid {
 
 function Get-LlmWorkerPid {
     $workers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -like "*core.news.service.llm_worker*"
+        Test-ManagedPythonInstance $_ $PSScriptRoot $Port "core.news.service.llm_worker"
     }
     if (-not $workers) { return $null }
     return [int]($workers | Select-Object -First 1).ProcessId
@@ -63,7 +64,7 @@ function Get-LlmWorkerPid {
 
 function Get-PmWorkerPid {
     $workers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -like "*prediction_markets.polymarket.worker*"
+        Test-ManagedPythonInstance $_ $PSScriptRoot $Port "prediction_markets.polymarket.worker"
     }
     if (-not $workers) { return $null }
     return [int]($workers | Select-Object -First 1).ProcessId
@@ -288,6 +289,7 @@ function Get-RunningWebSupervisors {
                 $cmd = [string]$_.CommandLine
                 $name -and $name.ToLowerInvariant() -eq "powershell.exe" -and
                 $cmd -and [int]$_.ProcessId -ne [int]$PID -and
+                $cmd -match [regex]::Escape((Join-Path $PSScriptRoot "scripts\supervise_web.ps1")) -and
                 $cmd -match '(?i)-File\s+(?:"[^"]*supervise_web\.ps1"|[^\s"]*supervise_web\.ps1)(?:\s|$)' -and
                 $cmd -match ("(?i)-Port\s+{0}(?:\s|$)" -f [int]$Port)
             }
@@ -453,7 +455,7 @@ Ensure-ResearchUniverseRefreshTask -EnvName $EnvName
 $pidOnPort = Get-ListeningPid -PortNumber $Port
 if ($pidOnPort) {
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$pidOnPort" -ErrorAction SilentlyContinue
-    if ($proc -and ($proc.CommandLine -like "*uvicorn*web.main:app*" -or $proc.CommandLine -like "*main.py --mode web*")) {
+    if ($proc -and (Test-ManagedPythonInstance $proc $PSScriptRoot $Port "uvicorn")) {
         Write-Host ("Service already listening on {0}:{1} (PID={2})." -f $BindHost, $Port, $pidOnPort)
         Write-Host "Requested startup profile: $startupProfile"
         if ($ignoredEnvWorkerFlags.Count) {
@@ -528,7 +530,7 @@ $webStderrPath = Join-Path $PSScriptRoot ("logs\uvicorn_web_{0}.err.log" -f $sta
 
 $proc = Start-Process `
     -FilePath $pythonExe `
-    -ArgumentList @("-m", "uvicorn", "web.main:app", "--host", $BindHost, "--port", "$Port") `
+    -ArgumentList @("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "uvicorn", "web.main:app", "--host", $BindHost, "--port", "$Port") `
     -WorkingDirectory $PSScriptRoot `
     -RedirectStandardOutput $webStdoutPath `
     -RedirectStandardError $webStderrPath `
@@ -548,7 +550,7 @@ if ($shouldStartWorker) {
     } else {
         $workerProc = Start-Process `
             -FilePath $pythonExe `
-            -ArgumentList @("-m", "core.news.service.worker") `
+            -ArgumentList @("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "core.news.service.worker") `
             -WorkingDirectory $PSScriptRoot `
             -PassThru
         Write-Host "Started news worker PID=$($workerProc.Id)"
@@ -562,7 +564,7 @@ if ($shouldStartLlmWorker) {
     } else {
         $llmProc = Start-Process `
             -FilePath $pythonExe `
-            -ArgumentList @("-m", "core.news.service.llm_worker") `
+            -ArgumentList @("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "core.news.service.llm_worker") `
             -WorkingDirectory $PSScriptRoot `
             -PassThru
         Write-Host "Started news LLM worker PID=$($llmProc.Id)"
@@ -576,7 +578,7 @@ if ($shouldStartPmWorker) {
     } else {
         $pmProc = Start-Process `
             -FilePath $pythonExe `
-            -ArgumentList @("-m", "prediction_markets.polymarket.worker") `
+            -ArgumentList @("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "prediction_markets.polymarket.worker") `
             -WorkingDirectory $PSScriptRoot `
             -PassThru
         Write-Host "Started Polymarket worker PID=$($pmProc.Id)"

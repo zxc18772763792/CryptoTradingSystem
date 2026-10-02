@@ -64,46 +64,35 @@ def _configure_db_from_cfg(cfg: Dict[str, Any]) -> None:
 
 
 def _fallback_quote_from_market_snapshot(sub: Dict[str, Any], market_row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    payload_market = ((market_row.get("payload") or {}).get("market") or {})
-    bid = payload_market.get("bestBid")
-    ask = payload_market.get("bestAsk")
-    spread = payload_market.get("spread")
-    last_price = payload_market.get("lastTradePrice")
+    # Gamma prices are indexed by token/outcome. Market-level bid/ask are not.
+    import json
+    import math
+    from prediction_markets.polymarket.utils import parse_ts_any
+
+    market = ((market_row.get("payload") or {}).get("market") or {})
+    def values(key):
+        raw = market.get(key) or []
+        return json.loads(raw) if isinstance(raw, str) else raw
     try:
-        bid_f = float(bid) if bid not in (None, "") else None
-    except Exception:
-        bid_f = None
-    try:
-        ask_f = float(ask) if ask not in (None, "") else None
-    except Exception:
-        ask_f = None
-    midpoint = None
-    if bid_f is not None and ask_f is not None:
-        midpoint = (bid_f + ask_f) / 2.0
-    try:
-        price_f = float(last_price) if last_price not in (None, "") else None
-    except Exception:
-        price_f = None
-    if midpoint is None and price_f is None:
+        tokens, outcomes, prices = values("clobTokenIds"), values("outcomes"), values("outcomePrices")
+        if not (len(tokens) == len(outcomes) == len(prices)):
+            return None
+        index = [str(t) for t in tokens].index(str(sub.get("token_id") or ""))
+        if str(outcomes[index]).upper() != str(sub.get("outcome") or "YES").upper():
+            return None
+        price = float(prices[index])
+        source_time = market.get("updatedAt") or market.get("updated_at")
+        if not source_time or not math.isfinite(price) or not 0 <= price <= 1:
+            return None
+        ts = parse_ts_any(source_time)
+    except (ValueError, TypeError, IndexError, OverflowError):
         return None
-    try:
-        spread_f = float(spread) if spread not in (None, "") else None
-    except Exception:
-        spread_f = None
     return {
-        "ts": utc_now(),
-        "market_id": str(sub.get("market_id") or ""),
-        "token_id": str(sub.get("token_id") or ""),
-        "outcome": str(sub.get("outcome") or "YES").upper(),
-        "price": float(midpoint if midpoint is not None else price_f or 0.0),
-        "bid": bid_f,
-        "ask": ask_f,
-        "midpoint": midpoint,
-        "spread": spread_f,
-        "depth1": None,
-        "depth5": None,
-        "fetched_at": utc_now(),
-        "payload": {"source": "gamma_market_snapshot", "market": payload_market},
+        "ts": ts, "market_id": str(sub.get("market_id") or ""),
+        "token_id": str(sub.get("token_id") or ""), "outcome": str(outcomes[index]).upper(),
+        "price": price, "midpoint": price, "bid": None, "ask": None,
+        "spread": None, "depth1": None, "depth5": None, "fetched_at": utc_now(),
+        "payload": {"source": "gamma_market_snapshot", "degraded": True, "market": market},
     }
 
 
@@ -196,6 +185,7 @@ async def _poll_quotes_once(cfg: Dict[str, Any], categories: Optional[List[str]]
     alerts = {"inserted": 0}
     try:
         quotes = await reader.fetch_quotes_for_subscriptions(subscriptions)
+        has_clob_quotes = bool(quotes)
         if not quotes and subscriptions:
             market_map = await get_markets_map([str(item.get("market_id") or "") for item in subscriptions])
             for sub in subscriptions:
@@ -206,7 +196,10 @@ async def _poll_quotes_once(cfg: Dict[str, Any], categories: Optional[List[str]]
                 if quote:
                     quotes.append(quote)
         await insert_quotes(quotes)
-        await set_source_state("clob_rest", cursor_type="ts", cursor_value=str(len(quotes)), last_ts=utc_now(), mark_success=True)
+        if has_clob_quotes:
+            await set_source_state("clob_rest", cursor_type="ts", cursor_value=str(len(quotes)), last_ts=utc_now(), mark_success=True)
+        elif subscriptions:
+            await set_source_state("clob_rest", last_error="No executable CLOB quotes; Gamma fallback is indicative only", mark_failure=True)
     except Exception as exc:
         err = format_exception(exc)
         await set_source_state("clob_rest", last_error=err, mark_failure=True, paused_until=utc_now() + timedelta(minutes=2))

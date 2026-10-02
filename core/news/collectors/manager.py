@@ -376,6 +376,7 @@ class MultiSourceNewsCollector:
             source_stats: Dict[str, Dict[str, Any]] = {}
             errors: List[str] = list(setup_errors)
             all_items: List[Dict[str, Any]] = []
+            cursor_updates: Dict[str, Any] = {}
             source_count = max(1, len(specs))
             per_source = max(10, min(250, int(math.ceil(max_records / source_count * 1.6))))
 
@@ -428,13 +429,7 @@ class MultiSourceNewsCollector:
                     items, new_cursor = await task
                     source_stats[spec.name]["pulled_count"] = len(items)
                     source_stats[spec.name]["cursor_after"] = new_cursor
-                    await news_db.set_source_state(
-                        spec.name,
-                        cursor_type="ts",
-                        cursor_value=new_cursor,
-                        clear_error=True,
-                        mark_success=True,
-                    )
+                    cursor_updates[spec.name] = new_cursor
                 except Exception as exc:
                     err_msg = f"{spec.name} incremental pull failed: {exc}"
                     logger.warning(err_msg)
@@ -467,7 +462,11 @@ class MultiSourceNewsCollector:
                         item["source"] = spec.name
                     all_items.append(item)
 
-            return self._merge_results(all_items, source_stats, errors, max_records)
+            # Persist the entire fetched batch before acknowledging any cursor.
+            # max_records limits fetch budgets, never durable delivery.
+            bundle = self._merge_results(all_items, source_stats, errors, max(1, len(all_items)))
+            bundle["source_cursors"] = cursor_updates
+            return bundle
         finally:
             self._close_collectors(specs)
 

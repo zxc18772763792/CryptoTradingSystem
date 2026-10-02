@@ -8,6 +8,7 @@ stale or unverifiable number.
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -41,7 +42,7 @@ class PriceReadResult:
 
     @property
     def ok(self) -> bool:
-        return self.price is not None and self.price > 0 and not self.is_stale
+        return self.price is not None and math.isfinite(self.price) and self.price > 0 and not self.is_stale
 
     def to_metadata(self) -> dict[str, Any]:
         return {
@@ -78,7 +79,7 @@ def _float_or_none(value: Any) -> Optional[float]:
         out = float(value)
     except (TypeError, ValueError):
         return None
-    return out
+    return out if math.isfinite(out) else None
 
 
 def _positive_or_none(value: Any) -> Optional[float]:

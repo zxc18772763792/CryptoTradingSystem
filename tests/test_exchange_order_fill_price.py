@@ -40,6 +40,8 @@ def _order_payload(**overrides):
 def test_connectors_use_ccxt_average_for_market_fill(connector_class, name):
     connector = object.__new__(connector_class)
     connector.name = name
+    from types import SimpleNamespace
+    connector.config = SimpleNamespace(default_type="spot")
 
     parsed = connector._parse_order(_order_payload())
 

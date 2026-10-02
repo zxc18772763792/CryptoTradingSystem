@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from prediction_markets.polymarket import db as pm_db
@@ -21,7 +21,7 @@ def test_paper_limit_buy_fills_against_latest_ask(tmp_path: Path):
             await pm_db.insert_quotes(
                 [
                     {
-                        "ts": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                        "ts": (datetime.now(timezone.utc) - timedelta(seconds=30)),
                         "market_id": "m1",
                         "token_id": "tok_yes",
                         "outcome": "YES",
@@ -32,7 +32,7 @@ def test_paper_limit_buy_fills_against_latest_ask(tmp_path: Path):
                         "spread": 0.02,
                         "depth1": 100.0,
                         "depth5": 500.0,
-                        "fetched_at": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                        "fetched_at": (datetime.now(timezone.utc) - timedelta(seconds=30)),
                     }
                 ]
             )
@@ -69,7 +69,7 @@ def test_paper_limit_order_stays_open_until_sweep(tmp_path: Path):
             await pm_db.insert_quotes(
                 [
                     {
-                        "ts": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                        "ts": (datetime.now(timezone.utc) - timedelta(seconds=30)),
                         "market_id": "m1",
                         "token_id": "tok_yes",
                         "outcome": "YES",
@@ -80,7 +80,7 @@ def test_paper_limit_order_stays_open_until_sweep(tmp_path: Path):
                         "spread": 0.06,
                         "depth1": 100.0,
                         "depth5": 500.0,
-                        "fetched_at": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                        "fetched_at": (datetime.now(timezone.utc) - timedelta(seconds=30)),
                     }
                 ]
             )
@@ -101,7 +101,7 @@ def test_paper_limit_order_stays_open_until_sweep(tmp_path: Path):
             await pm_db.insert_quotes(
                 [
                     {
-                        "ts": datetime(2026, 3, 3, 0, 1, tzinfo=timezone.utc),
+                        "ts": (datetime.now(timezone.utc) - timedelta(seconds=1)),
                         "market_id": "m1",
                         "token_id": "tok_yes",
                         "outcome": "YES",
@@ -112,7 +112,7 @@ def test_paper_limit_order_stays_open_until_sweep(tmp_path: Path):
                         "spread": 0.02,
                         "depth1": 100.0,
                         "depth5": 500.0,
-                        "fetched_at": datetime(2026, 3, 3, 0, 1, tzinfo=timezone.utc),
+                        "fetched_at": (datetime.now(timezone.utc) - timedelta(seconds=1)),
                     }
                 ]
             )
@@ -214,7 +214,7 @@ def test_paper_summary_marks_positions_to_latest_quote(tmp_path: Path):
             await pm_db.insert_quotes(
                 [
                     {
-                        "ts": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                        "ts": (datetime.now(timezone.utc) - timedelta(seconds=30)),
                         "market_id": "m1",
                         "token_id": "tok_yes",
                         "outcome": "YES",
@@ -225,7 +225,7 @@ def test_paper_summary_marks_positions_to_latest_quote(tmp_path: Path):
                         "spread": 0.02,
                         "depth1": 100.0,
                         "depth5": 500.0,
-                        "fetched_at": datetime(2026, 3, 3, tzinfo=timezone.utc),
+                        "fetched_at": (datetime.now(timezone.utc) - timedelta(seconds=30)),
                     }
                 ]
             )
@@ -237,7 +237,7 @@ def test_paper_summary_marks_positions_to_latest_quote(tmp_path: Path):
             await pm_db.insert_quotes(
                 [
                     {
-                        "ts": datetime(2026, 3, 3, 0, 1, tzinfo=timezone.utc),
+                        "ts": (datetime.now(timezone.utc) - timedelta(seconds=1)),
                         "market_id": "m1",
                         "token_id": "tok_yes",
                         "outcome": "YES",
@@ -248,7 +248,7 @@ def test_paper_summary_marks_positions_to_latest_quote(tmp_path: Path):
                         "spread": 0.02,
                         "depth1": 100.0,
                         "depth5": 500.0,
-                        "fetched_at": datetime(2026, 3, 3, 0, 1, tzinfo=timezone.utc),
+                        "fetched_at": (datetime.now(timezone.utc) - timedelta(seconds=1)),
                     }
                 ]
             )

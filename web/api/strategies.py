@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 import numpy as np
 import pandas as pd
@@ -45,7 +45,7 @@ from core.trading.order_manager import order_manager
 from core.trading.position_manager import PositionSide, position_manager
 from strategies import ALL_STRATEGIES
 from strategies.quantitative.intraday_cross_section import INTRADAY_CROSS_SECTION_SPECS
-from web.api.auth import require_sensitive_ops_permissions
+from web.api.auth import require_request_permissions, require_sensitive_ops_permissions
 from web.api.backtest import (
     _load_backtest_inputs,
     _pairs_hedge_ratio_bounds,
@@ -57,6 +57,43 @@ from web.api.backtest import (
 )
 
 router = APIRouter()
+
+
+def _contains_live_mode(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            (key in {"runtime_mode", "trading_mode", "mode"} and str(item).strip().lower() == "live")
+            or (isinstance(item, (dict, list)) and _contains_live_mode(item))
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_live_mode(item) for item in value)
+    return False
+
+
+async def require_strategy_mutation_permissions(request: Request):
+    """Authorize both explicit live intent and mutations of existing live instances."""
+    auth = await require_sensitive_ops_permissions("manage_strategies")(request)
+    payload = {}
+    if request.method in {"POST", "PUT"}:
+        try:
+            payload = await request.json()
+        except ValueError:
+            pass  # FastAPI validates malformed/missing bodies at the endpoint.
+    targets = []
+    name = request.path_params.get("name")
+    if name:
+        targets.append(strategy_manager.get_strategy_info(name) or {})
+    if request.url.path.endswith("/start-all"):
+        targets.extend(strategy_manager.list_strategies())
+    if isinstance(payload, dict):
+        for item in (payload.get("strategies") or []) if isinstance(payload.get("strategies"), list) else []:
+            if isinstance(item, dict) and item.get("name"):
+                imported_name = f"{payload.get('rename_prefix') or ''}{item['name']}"
+                targets.append(strategy_manager.get_strategy_info(imported_name) or {})
+    if _contains_live_mode(payload) or _contains_live_mode(targets):
+        require_request_permissions(request, "approve_live")
+    return auth
 
 _SENSITIVE_EXPORT_KEYS = {
     "api_key",
@@ -2333,7 +2370,7 @@ async def export_all_strategies():
     return {"strategies": items, "count": len(items)}
 
 
-@router.post("/import", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+@router.post("/import", dependencies=[Depends(require_strategy_mutation_permissions)])
 async def import_strategies(payload: StrategyImportRequest):
     strategy_classes = _get_strategy_classes()
     imported = []
@@ -2499,7 +2536,7 @@ async def get_aggregated_signals(symbol: str):
     return strategy_manager.get_aggregated_signals(symbol)
 
 
-@router.post("/start-all", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+@router.post("/start-all", dependencies=[Depends(require_strategy_mutation_permissions)])
 async def start_all_strategies():
     auto_registered = await _auto_register_defaults_for_start_all()
     await strategy_manager.start_all()
@@ -2544,7 +2581,7 @@ async def stop_all_strategies():
     return {"success": True, "results": stop_results}
 
 
-@router.post("/register", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+@router.post("/register", dependencies=[Depends(require_strategy_mutation_permissions)])
 async def register_strategy(request: StrategyRegisterRequest):
     # Reject mojibake / non-ASCII names. Such names break URL-encoded round-trips
     # (PowerShell GBK console once corrupted "指数" into stray bytes, so every
@@ -2778,7 +2815,7 @@ async def get_live_vs_backtest(name: str, initial_capital: float = 10000):
     }
 
 
-@router.post("/{name}/start", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+@router.post("/{name}/start", dependencies=[Depends(require_strategy_mutation_permissions)])
 async def start_strategy(name: str):
     success = await strategy_manager.start_strategy(name)
     if success:
@@ -2812,7 +2849,7 @@ async def pause_strategy(name: str):
     raise HTTPException(status_code=400, detail="Failed to pause strategy")
 
 
-@router.put("/{name}/runtime-mode", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+@router.put("/{name}/runtime-mode", dependencies=[Depends(require_strategy_mutation_permissions)])
 async def set_strategy_runtime_mode(name: str, request: StrategyRuntimeModeRequest):
     """Switch a registered instance between paper and live (dropdown backend).
 
@@ -2843,7 +2880,7 @@ async def set_strategy_runtime_mode(name: str, request: StrategyRuntimeModeReque
     return {"success": True, "name": name, "runtime_mode": result.get("runtime_mode"), "changed": bool(result.get("changed"))}
 
 
-@router.put("/{name}/params", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+@router.put("/{name}/params", dependencies=[Depends(require_strategy_mutation_permissions)])
 async def update_strategy_params(name: str, request: StrategyUpdateRequest):
     info = strategy_manager.get_strategy_info(name)
     if not info:
@@ -2871,7 +2908,7 @@ async def update_strategy_params(name: str, request: StrategyUpdateRequest):
     raise HTTPException(status_code=400, detail="Failed to update params")
 
 
-@router.put("/{name}/config", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+@router.put("/{name}/config", dependencies=[Depends(require_strategy_mutation_permissions)])
 async def update_strategy_config(name: str, request: StrategyConfigUpdateRequest):
     info = strategy_manager.get_strategy_info(name)
     if not info:
@@ -2898,7 +2935,7 @@ async def update_strategy_config(name: str, request: StrategyConfigUpdateRequest
     }
 
 
-@router.put("/{name}/allocation", dependencies=[Depends(require_sensitive_ops_permissions("manage_strategies"))])
+@router.put("/{name}/allocation", dependencies=[Depends(require_strategy_mutation_permissions)])
 async def update_strategy_allocation(name: str, request: StrategyAllocationRequest):
     success = strategy_manager.update_strategy_allocation(name, request.allocation)
     if success:

@@ -2325,16 +2325,50 @@ class ExecutionEngine:
         current_price: float,
     ) -> Dict[str, Any]:
         metadata = self._effective_profit_management_metadata(position)
+        pending_id = metadata.get("partial_take_profit_pending_order_id")
+        if pending_id:
+            pending = await order_manager.get_order(
+                str(pending_id), position.symbol, position.exchange,
+                trading_mode=self._current_trading_mode(), account_id=position.account_id,
+            )
+            if pending is None:
+                return {"applied": False, "reason": "pending_order_unknown"}
+            status = self._order_status_value(getattr(pending, "status", "open"))
+            if status not in {"closed", "canceled", "expired", "rejected"}:
+                return {"applied": False, "reason": "pending_fill"}
+            filled = float(getattr(pending, "filled", 0.0) or 0.0)
+            initial_qty = float(metadata.get("partial_take_profit_pending_position_qty") or 0.0)
+            if float(position.quantity or 0.0) > initial_qty - filled + 1e-12:
+                return {"applied": False, "reason": "pending_fill_reconciliation"}
+            accounted = float(metadata.get("partial_take_profit_pending_accounted_qty") or 0.0)
+            metadata["partial_take_profit_confirmed_quantity"] = float(metadata.get("partial_take_profit_confirmed_quantity") or 0.0) + max(0.0, filled - accounted)
+            metadata.pop("partial_take_profit_pending_order_id", None)
+            position.metadata = metadata
         close_qty, skip_reason = self._calculate_partial_take_profit_quantity(
             position,
             current_price=current_price,
             fraction=metadata.get("partial_take_profit_fraction"),
         )
+        target = float(metadata.get("partial_take_profit_target_quantity") or close_qty)
+        confirmed = float(metadata.get("partial_take_profit_confirmed_quantity") or 0.0)
+        metadata["partial_take_profit_target_quantity"] = target
+        close_qty = min(float(position.quantity or 0.0), max(0.0, target - confirmed))
+        if target > 0 and confirmed >= target - 1e-12:
+            metadata["partial_take_profit_done"] = True
+            metadata["partial_take_profit_done_at"] = datetime.now(timezone.utc).isoformat()
+            metadata["profit_management_last_event"] = "partial_take_profit"
+            position.metadata = metadata
+            if not metadata.get("preserve_take_profit_after_partial"):
+                position.take_profit = None
+            position_manager._persist_scope_state(force=True)
+            return {"applied": True, "reason": "confirmed_fill", "position": position}
         if close_qty <= 0:
             metadata["partial_take_profit_skip_reason"] = skip_reason or "partial_unavailable"
             position.metadata = metadata
             return {"applied": False, "reason": metadata["partial_take_profit_skip_reason"]}
 
+        initial_position_qty = float(position.quantity or 0.0)
+        position.metadata = metadata
         close_side = "sell" if getattr(position, "side", None) == PositionSide.LONG else "buy"
         result = await self._execute_manual_order_single(
             exchange=str(getattr(position, "exchange", "") or ""),
@@ -2366,6 +2400,18 @@ class ExecutionEngine:
             metadata["partial_take_profit_skip_reason"] = "execution_rejected"
             position.metadata = metadata
             return {"applied": False, "reason": "execution_rejected"}
+
+        executed = float(result.get("executed_quantity", result.get("filled", 0.0)) or 0.0)
+        metadata["partial_take_profit_confirmed_quantity"] = confirmed + executed
+        if executed < close_qty - 1e-12:
+            if str(result.get("status") or "open").lower() not in {"closed", "canceled", "expired", "rejected"}:
+                metadata["partial_take_profit_pending_order_id"] = str(result.get("order_id") or "")
+                metadata["partial_take_profit_pending_position_qty"] = initial_position_qty
+                metadata["partial_take_profit_pending_accounted_qty"] = executed
+            position.metadata = metadata
+            position_manager._persist_scope_state(force=True)
+            return {"applied": False, "reason": "pending_fill", "filled": executed}
+        position.metadata = metadata
 
         refreshed = position_manager.get_position(
             str(getattr(position, "exchange", "") or ""),
@@ -2572,7 +2618,7 @@ class ExecutionEngine:
             await asyncio.sleep(min(0.25, max(0.0, deadline - asyncio.get_running_loop().time())))
             try:
                 refreshed = await order_manager.get_order(
-                    str(getattr(order, "id", "")),
+                    str(getattr(order, "cache_key", "") or getattr(order, "id", "")),
                     symbol,
                     exchange,
                     trading_mode=self._current_trading_mode(),
@@ -3660,6 +3706,20 @@ class ExecutionEngine:
         position_manager._persist_scope_state(force=material_change)
         return material_change
 
+    @staticmethod
+    def _reconciliation_account_id(account_id: str) -> str:
+        return account_id if account_manager.requires_live_connector_isolation(account_id) else "main"
+
+    def _has_unallocated_venue_position(self, exchange: str, symbol: str, account_id: str) -> bool:
+        owner = self._reconciliation_account_id(account_id)
+        return any(
+            str(getattr(pos, "exchange", "")).lower() == str(exchange).lower()
+            and self._canonical_symbol(pos.symbol) == self._canonical_symbol(symbol)
+            and self._reconciliation_account_id(str(getattr(pos, "account_id", "main"))) == owner
+            and bool((getattr(pos, "metadata", {}) or {}).get("reconciliation_required"))
+            for pos in position_manager.get_all_positions()
+        )
+
     async def _reconcile_local_positions_with_exchange(self) -> None:
         """In live mode, drop stale local positions that no longer exist on exchange."""
         if self._current_trading_mode() == "paper":
@@ -3689,21 +3749,21 @@ class ExecutionEngine:
             account_id = str(getattr(pos, "account_id", "main") or "main")
             if local_symbol and local_side in {"long", "short"}:
                 active_local_keys.add((account_id, exchange_name, local_symbol, local_side))
-            grouped.setdefault((exchange_name, account_id), []).append(pos)
+            grouped.setdefault((exchange_name, self._reconciliation_account_id(account_id)), []).append(pos)
         for intent in pending_intents:
             exchange_name = str(intent.get("exchange") or "").strip().lower()
             account_id = str(intent.get("account_id") or "main")
             if exchange_name:
-                grouped.setdefault((exchange_name, account_id), [])
+                grouped.setdefault((exchange_name, self._reconciliation_account_id(account_id)), [])
 
-        for (exchange_name, account_id), positions in grouped.items():
+        for (exchange_name, owner_account_id), positions in grouped.items():
             group_pending_intents = [
                 item
                 for item in pending_intents
                 if str(item.get("exchange") or "").strip().lower() == exchange_name
-                and str(item.get("account_id") or "main") == account_id
+                and self._reconciliation_account_id(str(item.get("account_id") or "main")) == owner_account_id
             ]
-            connector = await self._ensure_exchange_connector(exchange_name, account_id=account_id)
+            connector = await self._ensure_exchange_connector(exchange_name, account_id=owner_account_id)
             if not connector:
                 continue
             default_type = str(getattr(getattr(connector, "config", None), "default_type", "") or "").lower()
@@ -3783,6 +3843,27 @@ class ExecutionEngine:
                 exchange_snapshot = exchange_side_snapshots.get((local_symbol, local_side))
                 if exchange_snapshot is not None:
                     self._live_reconcile_absence_counts.pop(position_key, None)
+                    siblings = [p for p in positions
+                                if self._canonical_symbol(p.symbol) == local_symbol
+                                and str(getattr(p.side, "value", "")).lower() == local_side]
+                    if len(siblings) > 1:
+                        allocated = sum(float(p.quantity or 0.0) for p in siblings)
+                        venue_qty = float(exchange_snapshot.get("quantity") or 0.0)
+                        metadata = dict(getattr(local_pos, "metadata", {}) or {})
+                        if abs(allocated - venue_qty) > max(1e-12, venue_qty * 1e-8):
+                            metadata["reconciliation_required"] = {
+                                "reason": "shared_venue_allocation_mismatch",
+                                "allocated_quantity": allocated, "venue_quantity": venue_qty,
+                            }
+                            logger.error("Shared venue allocation mismatch; new entries blocked")
+                        else:
+                            metadata.pop("reconciliation_required", None)
+                        local_pos.metadata = metadata
+                        local_pos.update_price(float(exchange_snapshot.get("current_price") or local_pos.entry_price))
+                        position_manager._persist_scope_state(force=True)
+                        continue  # never copy an aggregate balance into individual lots
+                    local_pos.metadata = dict(getattr(local_pos, "metadata", {}) or {})
+                    local_pos.metadata.pop("reconciliation_required", None)
                     if self._sync_local_position_from_exchange(local_pos, exchange_snapshot):
                         logger.warning(
                             "Synchronized local live position from exchange snapshot: "
@@ -3863,6 +3944,7 @@ class ExecutionEngine:
 
             intents_changed = False
             for intent in group_pending_intents:
+                account_id = str(intent.get("account_id") or "main")
                 symbol_key = self._canonical_symbol(str(intent.get("symbol") or ""))
                 side = "long" if str(intent.get("side") or "").lower() == "buy" else "short"
                 snapshot = exchange_side_snapshots.get((symbol_key, side))
@@ -4073,6 +4155,13 @@ class ExecutionEngine:
                 return await self._close_position_in_active_mode(signal, PositionSide.LONG)
             if signal.signal_type == SignalType.CLOSE_SHORT:
                 return await self._close_position_in_active_mode(signal, PositionSide.SHORT)
+
+            if self._current_trading_mode() == "live":
+                owner = str((signal.metadata or {}).get("account_id") or "main")
+                venue = self._resolve_signal_exchange(signal, owner)
+                if self._has_unallocated_venue_position(venue, signal.symbol, owner):
+                    logger.error("Signal blocked pending shared venue position allocation")
+                    return None
 
             try:
                 from core.structural.risk_gate import structural_risk_gate  # noqa: PLC0415
@@ -5299,7 +5388,7 @@ class ExecutionEngine:
                             close_order_mode = "limit_first_partial"
                             with contextlib.suppress(Exception):
                                 await order_manager.cancel_order(
-                                    str(getattr(limit_first_order, "id", "")),
+                                    str(getattr(limit_first_order, "cache_key", "") or getattr(limit_first_order, "id", "")),
                                     signal.symbol,
                                     exchange,
                                 )
@@ -5354,7 +5443,7 @@ class ExecutionEngine:
                         close_order_mode = "market_fallback"
                         with contextlib.suppress(Exception):
                             await order_manager.cancel_order(
-                                str(getattr(limit_first_order, "id", "")),
+                                str(getattr(limit_first_order, "cache_key", "") or getattr(limit_first_order, "id", "")),
                                 signal.symbol,
                                 exchange,
                             )
@@ -5501,6 +5590,8 @@ class ExecutionEngine:
         fee_usd = float(cost_details.get("fee_usd", 0.0) or 0.0)
         slippage_cost_usd = float(cost_details.get("slippage_cost_usd", 0.0) or 0.0)
         closed = None
+        previous_realized = float(getattr(position, "realized_pnl", 0.0) or 0.0)
+        gross_close_pnl = 0.0
         if executed_close_qty > 0:
             closed = position_manager.close_position(
                 exchange=exchange,
@@ -5510,6 +5601,8 @@ class ExecutionEngine:
                 account_id=account_id,
                 strategy=strategy_lookup,
             )
+            if closed:
+                gross_close_pnl = float(closed.realized_pnl or 0.0) - previous_realized
             if not closed:
                 source = str((getattr(position, "metadata", {}) or {}).get("source") or "").strip().lower()
                 if source != "exchange_live":
@@ -5522,6 +5615,7 @@ class ExecutionEngine:
                     else:
                         gross_pnl = (entry_price - close_price) * executed_close_qty
                 closed = SimpleNamespace(realized_pnl=gross_pnl)
+                gross_close_pnl = gross_pnl
 
             risk_manager.record_trade(
                 {
@@ -5532,7 +5626,7 @@ class ExecutionEngine:
                     "signal_type": signal.signal_type.value,
                     "fill_price": float(close_price or 0.0),
                     "quantity": float(executed_close_qty or 0.0),
-                    "pnl": float(closed.realized_pnl or 0.0) - fee_usd - slippage_cost_usd,
+                    "pnl": gross_close_pnl - fee_usd - slippage_cost_usd,
                     "notional": float(close_price * executed_close_qty),
                     "fee_usd": fee_usd,
                     "slippage_cost_usd": slippage_cost_usd,
@@ -5551,7 +5645,6 @@ class ExecutionEngine:
                     "action": "close",
                 },
             )
-        gross_close_pnl = float(getattr(closed, "realized_pnl", 0.0) or 0.0)
         close_pnl = gross_close_pnl - fee_usd - slippage_cost_usd
         if executed_close_qty > 0:
             await self._record_live_strategy_trade(
@@ -5807,7 +5900,15 @@ class ExecutionEngine:
             or ((not is_sell) and existing_position and existing_position.side == PositionSide.SHORT)
         )
 
-        if active_mode == "live" and not reduce_only and not closes_existing:
+        risk_close_only = closes_existing and (
+            reduce_only or raw_amount <= float(existing_position.quantity or 0.0)
+        )
+        if risk_close_only:
+            reduce_only = True  # venue-enforced close: cannot race into a reverse entry
+        if active_mode == "live" and not risk_close_only and self._has_unallocated_venue_position(exchange, symbol, account_id):
+            return None
+
+        if active_mode == "live" and not risk_close_only:
             pending_intent = self._find_unresolved_live_order_intent(
                 exchange=exchange,
                 symbol=symbol,
@@ -5852,7 +5953,7 @@ class ExecutionEngine:
             order_value=float(order_value or 0.0),
             account_equity=float(account_equity or 0.0),
             signal_ts=datetime.now(timezone.utc),
-            allow_close=closes_existing,
+            allow_close=risk_close_only,
             spread_bps=None,
             timeframe=None,
             source="manual_order",
@@ -5868,7 +5969,7 @@ class ExecutionEngine:
             order_value=order_value,
             leverage=leverage,
             strategy_allocation=1.0,
-            allow_close=closes_existing,
+            allow_close=risk_close_only,
         ):
             return None
 
@@ -6159,7 +6260,8 @@ class ExecutionEngine:
             risk_manager.record_trade(trade_record)
 
         result = {
-            "order_id": order.id,
+            "order_id": getattr(order, "cache_key", "") or order.id,
+            "exchange_order_id": order.id,
             "status": order.status.value,
             "price": fill_price,
             "amount": order.amount,
@@ -6308,12 +6410,14 @@ class ExecutionEngine:
             if not child:
                 return None
 
-            filled = sum(float(x.get("filled") or x.get("amount") or 0.0) for x in child)
-            notional = sum(float(x.get("filled") or x.get("amount") or 0.0) * float(x.get("price") or 0.0) for x in child)
+            filled = sum(float(x.get("filled") or 0.0) for x in child)
+            notional = sum(float(x.get("filled") or 0.0) * float(x.get("price") or 0.0) for x in child)
             avg_price = (notional / filled) if filled > 0 else 0.0
             merged = {
                 "order_id": f"{mode}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}",
-                "status": "closed",
+                "status": ("closed" if filled >= float(amount) - 1e-12 else
+                           "open" if any(str(x.get("status", "open")).lower() not in
+                               {"closed", "canceled", "expired", "rejected"} for x in child) else "canceled"),
                 "price": avg_price,
                 "amount": float(amount),
                 "filled": filled,

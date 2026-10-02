@@ -84,7 +84,12 @@ def test_load_model_weights_rejects_feature_mismatch(tmp_path):
         load_model_weights(bad)
 
 
-def test_exported_weights_artifact_matches_feature_order():
+def test_exported_weights_artifact_matches_feature_order(tmp_path, monkeypatch):
+    import json
+    import core.research.pump_precursor as precursor
+    target = tmp_path / "weights.json"
+    target.write_text(json.dumps(_model()), encoding="utf-8")
+    monkeypatch.setattr(precursor, "DEFAULT_WEIGHTS_PATH", target)
     model = load_model_weights()
     assert model["features"] == FEATURES
     assert len(model["weights"]) == len(FEATURES)

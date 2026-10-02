@@ -46,7 +46,8 @@ def test_managed_supervisor_has_bounded_restart_and_operator_stop_protocol():
     assert "Start-Process -Wait waits for the entire descendant tree" in supervisor
     assert "Web process missing; restarting" in supervisor
     assert "function Get-WebProcesses" in supervisor
-    assert '$portToken = "--port $Port"' in supervisor
+    assert "Test-ManagedPythonInstance $_ $ProjectRoot $Port $CommandToken" in supervisor
+    assert "Stop-ManagedPythonInstance" in supervisor
     assert "-EncodedCommand" in supervisor
     assert "Bool-PowerShellLiteral" in supervisor
     assert '"-DisableSupervisorBootstrap;"' in supervisor
