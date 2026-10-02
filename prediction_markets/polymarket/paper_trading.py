@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from prediction_markets.polymarket import db as pm_db
-from prediction_markets.polymarket.utils import utc_now
+from prediction_markets.polymarket.utils import utc_now, parse_ts_any
 
 
 @dataclass
@@ -17,6 +18,7 @@ class PaperRiskLimits:
     max_price: float = 0.99
     min_price: float = 0.01
     fee_rate: float = 0.0
+    max_quote_age_seconds: float = 120.0
 
 
 def _clean_side(side: str) -> str:
@@ -28,14 +30,14 @@ def _clean_side(side: str) -> str:
 
 def _clean_price(price: Any) -> float:
     value = float(price)
-    if value <= 0.0 or value >= 1.0:
+    if not math.isfinite(value) or value <= 0.0 or value >= 1.0:
         raise ValueError("price must be between 0 and 1")
     return value
 
 
 def _clean_size(size: Any) -> float:
     value = float(size)
-    if value <= 0.0:
+    if not math.isfinite(value) or value <= 0.0:
         raise ValueError("size must be positive")
     return value
 
@@ -95,60 +97,50 @@ class PolymarketPaperTrader:
                 "price": price_f,
                 "size": size_f,
                 "payload": _json_safe(metadata or {}),
-            }
+            },
+            risk_limits=asdict(self.limits)
         )
         if fill_immediately:
             filled = await self.try_fill_order(order["order_id"])
             return filled or order
         return order
 
-    async def try_fill_order(self, order_id: str, quote: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    async def try_fill_order(self, order_id: str, quote: Optional[Dict[str, Any]] = None,
+                             *, simulation_time: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
         order = await pm_db.get_paper_order(order_id)
+        if order and str(order.get("account_id")) != self.account_id:
+            raise ValueError("paper order belongs to another account")
         if not order or order.get("status") not in {"OPEN", "PARTIAL"}:
             return order
         quote = quote or await pm_db.get_latest_quote(str(order.get("token_id") or ""))
-        if not quote:
+        now = parse_ts_any(simulation_time) if simulation_time is not None else utc_now()
+        if not quote or not self._quote_is_executable(order, quote, now):
             return order
         fill_price = self._match_price(order, quote)
-        if fill_price is None:
+        if fill_price is None or not math.isfinite(fill_price) or not 0 < fill_price < 1:
             return order
-        remaining = max(0.0, float(order.get("size") or 0.0) - float(order.get("filled_size") or 0.0))
-        if remaining <= 0:
-            return order
-        fee = fill_price * remaining * max(0.0, float(self.limits.fee_rate or 0.0))
-        fill = await pm_db.record_paper_fill(
-            {
-                "fill_id": f"pm-fill-{uuid.uuid4().hex[:20]}",
-                "order_id": order["order_id"],
-                "account_id": self.account_id,
-                "ts": utc_now(),
-                "market_id": order["market_id"],
-                "token_id": order["token_id"],
-                "outcome": order["outcome"],
-                "side": order["side"],
-                "price": fill_price,
-                "size": remaining,
-                "fee_paid": fee,
-                "quote_id": quote.get("id"),
-                "payload": {"quote": _json_safe(quote)},
-            }
-        )
-        await pm_db.apply_paper_fill_to_account(fill)
-        previous_notional = float(order.get("avg_fill_price") or 0.0) * float(order.get("filled_size") or 0.0)
-        new_size = float(order.get("filled_size") or 0.0) + remaining
-        avg_price = (previous_notional + fill_price * remaining) / new_size if new_size > 0 else None
-        return await pm_db.update_paper_order(
-            order["order_id"],
-            {
-                "status": "FILLED",
-                "filled_size": new_size,
-                "avg_fill_price": avg_price,
-                "fee_paid": float(order.get("fee_paid") or 0.0) + fee,
-            },
+        return await pm_db.fill_paper_order_atomically(
+            order_id, account_id=self.account_id, price=fill_price,
+            fee_rate=float(self.limits.fee_rate), quote=_json_safe(quote), ts=now,
         )
 
+    def _quote_is_executable(self, order: Dict[str, Any], quote: Dict[str, Any], now: datetime) -> bool:
+        if str(quote.get("token_id") or "") != str(order.get("token_id") or ""):
+            return False
+        if not quote.get("ts") or str((quote.get("payload") or {}).get("source") or "").startswith("gamma"):
+            return False
+        try:
+            age = (parse_ts_any(now) - parse_ts_any(quote["ts"])).total_seconds()
+            if not 0 <= age <= self.limits.max_quote_age_seconds:
+                return False
+            # A midpoint/last-trade price is not an executable side of the book.
+            side_price = quote.get("ask" if order.get("side") == "BUY" else "bid")
+            return side_price is not None and math.isfinite(float(side_price)) and 0 < float(side_price) < 1
+        except (ValueError, TypeError, OverflowError):
+            return False
+
     async def sweep_open_orders(self) -> Dict[str, Any]:
-        orders = await pm_db.list_paper_orders(self.account_id, status="OPEN", limit=1000)
+        orders = await pm_db.list_paper_orders(self.account_id, status="ACTIVE", limit=1000)
         filled = []
         for order in orders:
             updated = await self.try_fill_order(order["order_id"])
@@ -157,7 +149,7 @@ class PolymarketPaperTrader:
         return {"checked": len(orders), "filled": len(filled), "items": filled}
 
     async def cancel(self, order_id: str) -> Dict[str, Any]:
-        order = await pm_db.cancel_paper_order(order_id)
+        order = await pm_db.cancel_paper_order(order_id, account_id=self.account_id)
         if not order:
             raise ValueError(f"unknown order_id: {order_id}")
         return order
@@ -174,7 +166,7 @@ class PolymarketPaperTrader:
     async def get_summary(self, quote_overrides: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
         account = await self.ensure_account()
         positions = await pm_db.list_paper_positions(self.account_id)
-        orders = await pm_db.list_paper_orders(self.account_id, status="OPEN", limit=1000)
+        orders = await pm_db.list_paper_orders(self.account_id, status="ACTIVE", limit=1000)
         quote_overrides = quote_overrides or {}
         enriched_positions = []
         positions_value = 0.0
@@ -228,14 +220,18 @@ class PolymarketPaperTrader:
         current = next((item for item in positions if str(item.get("token_id") or "") == str(token_id or "")), None)
         current_size = float((current or {}).get("size") or 0.0)
         current_avg = float((current or {}).get("avg_price") or 0.0)
-        open_orders = await pm_db.list_paper_orders(self.account_id, status="OPEN", limit=1000)
+        open_orders = await pm_db.list_paper_orders(self.account_id, status="ACTIVE", limit=1000)
         if side == "BUY":
             account = await self.ensure_account()
             fee = notional * max(0.0, float(self.limits.fee_rate or 0.0))
             available_cash = float(account.get("cash") or 0.0) - self._reserved_cash(open_orders)
             if available_cash < notional + fee:
                 raise ValueError("insufficient paper cash")
-            position_notional = current_size * current_avg + notional
+            pending_notional = sum(
+                float(o.get("price") or 0.0) * max(0.0, float(o.get("size") or 0.0) - float(o.get("filled_size") or 0.0))
+                for o in open_orders if o.get("side") == "BUY" and o.get("token_id") == token_id
+            )
+            position_notional = current_size * current_avg + pending_notional + notional
             if position_notional > self.limits.max_position_notional:
                 raise ValueError(
                     f"position notional {position_notional:.2f} exceeds max_position_notional {self.limits.max_position_notional:.2f}"

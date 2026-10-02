@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -8,6 +8,13 @@ from fastapi.testclient import TestClient
 from core.ops.service import api as ops_api
 from core.ops.service.api import create_router
 from prediction_markets.polymarket import db as pm_db
+
+
+@pytest.fixture(autouse=True)
+def _paper_clock(monkeypatch):
+    # Freeze live paper execution at the fixture's time; replay uses its own clock.
+    monkeypatch.setattr("prediction_markets.polymarket.paper_trading.utc_now",
+                        lambda: datetime(2026, 3, 3, 0, 1, tzinfo=timezone.utc))
 
 
 def _quote(token_id: str, minute: int, bid: float, ask: float):
@@ -256,7 +263,7 @@ def test_ops_polymarket_profile_promote_and_strategy_once_profile_path(monkeypat
         ),
         encoding="utf-8",
     )
-    profile_path = tmp_path / "profile.json"
+    profile_path = tmp_path / "data" / "profiles" / "polymarket" / "profile.json"
     app = FastAPI()
     app.include_router(create_router())
     client = TestClient(app)
@@ -330,7 +337,7 @@ def test_ops_polymarket_profile_promote_rejects_failed_guardrails(monkeypatch, t
     try:
         rejected = client.post(
             "/ops/polymarket/paper/profile/promote",
-            json={"report_path": str(report_path), "account_id": "bad", "output_path": str(tmp_path / "bad_profile.json")},
+            json={"report_path": str(report_path), "account_id": "bad", "output_path": str(tmp_path / "data" / "profiles" / "polymarket" / "bad_profile.json")},
             headers=headers,
         )
         assert rejected.status_code == 200
@@ -343,7 +350,7 @@ def test_ops_polymarket_profile_promote_rejects_failed_guardrails(monkeypatch, t
             json={
                 "report_path": str(report_path),
                 "account_id": "bad",
-                "output_path": str(tmp_path / "bad_profile.json"),
+                "output_path": str(tmp_path / "data" / "profiles" / "polymarket" / "bad_profile.json"),
                 "allow_unsafe": True,
             },
             headers=headers,

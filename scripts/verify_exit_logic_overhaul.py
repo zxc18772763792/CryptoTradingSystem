@@ -374,7 +374,7 @@ def build_report() -> str:
             "",
             f"- Active strategy close share: `{_pct(bollinger_active_closes, bollinger_closes)}`",
             f"- Win rate: `{0.0 if bollinger_win_rate is None else bollinger_win_rate:.4f}`",
-            f"- Acceptance active close share `>=20%`: `{'PASS' if bollinger_active_share >= 0.20 else 'FAIL'}`",
+            f"- Acceptance active close share `>=20%`: `{'UNVERIFIED_NO_LOCAL_DATA' if btc_1h.empty else ('PASS' if bollinger_active_share >= 0.20 else 'FAIL')}`",
             "",
             "## Local 30-Day Multi-Strategy SL Share",
             "",
@@ -393,7 +393,7 @@ def build_report() -> str:
         [
             "",
             f"- Aggregate stop_loss share: `{_pct(multi_strategy_reasons.get('stop_loss', 0), multi_closes)}`",
-            f"- Acceptance stop_loss share `<=30%`: `{'PASS' if multi_stop_loss_share <= 0.30 and multi_closes > 0 else 'FAIL'}`",
+            f"- Acceptance stop_loss share `<=30%`: `{'UNVERIFIED_NO_LOCAL_DATA' if btc_1h.empty else ('PASS' if multi_stop_loss_share <= 0.30 and multi_closes > 0 else 'FAIL')}`",
             "",
             "## Phase 7 ATR Protection",
             "",

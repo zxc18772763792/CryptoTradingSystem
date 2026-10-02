@@ -209,21 +209,21 @@ class PolymarketPaperReplay:
             metadata={"replay": True, "signal": decision.reason, "quote_ts": str(quote.get("ts") or "")},
             fill_immediately=False,
         )
-        order = await self.trader.try_fill_order(order["order_id"], quote=quote)
+        order = await self.trader.try_fill_order(order["order_id"], quote=quote, simulation_time=parse_ts_any(quote["ts"]))
         return {"ts": quote.get("ts"), "action": decision.action, "reason": decision.reason, "midpoint": mid, "order": order}
 
     async def _sweep_with_quote(self, quote: Dict[str, Any]) -> Dict[str, Any]:
         token_id = str(quote.get("token_id") or "")
         if not token_id:
             return {"checked": 0, "filled": 0, "items": []}
-        orders = await pm_db.list_paper_orders(self.config.account_id, status="OPEN", limit=1000)
+        orders = await pm_db.list_paper_orders(self.config.account_id, status="ACTIVE", limit=1000)
         filled = []
         checked = 0
         for order in orders:
             if str(order.get("token_id") or "") != token_id:
                 continue
             checked += 1
-            updated = await self.trader.try_fill_order(order["order_id"], quote=quote)
+            updated = await self.trader.try_fill_order(order["order_id"], quote=quote, simulation_time=parse_ts_any(quote["ts"]))
             if updated and updated.get("status") == "FILLED":
                 filled.append(updated)
         return {"checked": checked, "filled": len(filled), "items": filled}

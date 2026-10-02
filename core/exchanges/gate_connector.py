@@ -261,6 +261,7 @@ class GateConnector(BaseExchange):
     ) -> Order:
         try:
             client = await self._ensure_client()
+            amount = self._to_contract_amount(symbol, amount)
             ccxt_order = await client.create_order(
                 symbol=symbol,
                 type=order_type.value,
@@ -307,7 +308,7 @@ class GateConnector(BaseExchange):
                     Position(
                         symbol=pos.get("symbol", ""),
                         side=pos.get("side", ""),
-                        amount=float(pos.get("contracts", 0) or 0),
+                        amount=float(pos.get("contracts", 0) or 0) * self._contract_size(str(pos.get("symbol") or ""), position=pos),
                         entry_price=float(pos.get("entryPrice", 0) or 0),
                         current_price=float(pos.get("markPrice", 0) or 0),
                         unrealized_pnl=float(pos.get("unrealizedPnl", 0) or 0),
@@ -337,6 +338,7 @@ class GateConnector(BaseExchange):
             self._handle_error(e, f"get_trades({symbol})")
 
     def _parse_order(self, ccxt_order: dict) -> Order:
+        ccxt_order = self._normalize_ccxt_order_quantities(ccxt_order)
         status_map = {
             "open": OrderStatus.OPEN,
             "closed": OrderStatus.CLOSED,

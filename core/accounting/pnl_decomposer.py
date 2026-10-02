@@ -257,8 +257,13 @@ class PnLDecomposer:
                 gross = (lot.price - close_price) * consume
 
             realized_gross += gross
-            consumed_fee += fee * close_fraction
-            consumed_slip += slippage_cost * close_fraction
+            entry_fraction = consume / max(lot.qty, 1e-12)
+            entry_fee = lot.fee * entry_fraction
+            entry_slip = lot.slippage_cost * entry_fraction
+            consumed_fee += fee * close_fraction + entry_fee
+            consumed_slip += slippage_cost * close_fraction + entry_slip
+            lot.fee -= entry_fee
+            lot.slippage_cost -= entry_slip
 
             if consume >= lot.qty - 1e-12:
                 pos._lots.pop(0)

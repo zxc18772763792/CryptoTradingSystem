@@ -93,19 +93,16 @@ def _params_key(params: Optional[Dict[str, Any]]) -> Tuple:
 
 
 def _fingerprint(df: pd.DataFrame) -> Tuple:
-    """Cheap content identity for a price frame.
+    """Order-sensitive identity of every factor input and the complete index."""
+    import hashlib
 
-    Index plus the close column is enough: two frames sharing both are the same
-    replay input. Deliberately not id()-based -- the optimize pool ships a fresh
-    unpickled copy of the frame to every trial, so object identity would never
-    match and the cross-trial reuse this exists for would never happen.
-    """
-    idx = df.index
     try:
-        close_hash = int(pd.util.hash_pandas_object(df["close"], index=False).sum())
-    except Exception:
-        close_hash = 0
-    return (len(df), str(idx[0]), str(idx[-1]), close_hash)
+        values = pd.util.hash_pandas_object(df, index=True).values.tobytes()
+    except TypeError:
+        # Unhashable external metadata must not collapse to a shared cache key.
+        values = pd.util.hash_pandas_object(df.astype(str), index=True).values.tobytes()
+    return (tuple(map(str, df.columns)), tuple(map(str, df.dtypes)),
+            hashlib.sha256(values).hexdigest())
 
 
 def _store_get(key: Tuple) -> Optional[pd.Series]:

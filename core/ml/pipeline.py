@@ -418,9 +418,12 @@ def split_dataset(dataset: MLDataSet, *, test_size: float) -> MLDataSplit:
             details={"samples": sample_count, "test_size": float(test_size)},
         )
 
-    X_train = dataset.features.iloc[:train_count].copy()
+    # Labels look ahead by forward_bars in the source frame. Dropping that many
+    # prepared rows is conservative even when feature warmup removed source bars.
+    train_end = max(0, train_count - max(0, int(dataset.forward_bars)))
+    X_train = dataset.features.iloc[:train_end].copy()
     X_test = dataset.features.iloc[train_count:].copy()
-    y_train = dataset.labels.iloc[:train_count].copy()
+    y_train = dataset.labels.iloc[:train_end].copy()
     y_test = dataset.labels.iloc[train_count:].copy()
 
     if X_train.empty or X_test.empty:

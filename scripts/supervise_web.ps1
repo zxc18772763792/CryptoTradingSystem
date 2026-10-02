@@ -24,6 +24,7 @@ if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
 }
 $ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
 Set-Location $ProjectRoot
+. (Join-Path $PSScriptRoot "managed_process.ps1")
 
 $runtimeDir = Join-Path $ProjectRoot "runtime"
 $logDir = Join-Path $ProjectRoot "logs"
@@ -65,30 +66,13 @@ function Write-SupervisorState {
 
 function Get-MatchingPythonProcesses {
     param([string]$CommandToken)
-    return @(
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object {
-                $name = [string]$_.Name
-                $cmd = [string]$_.CommandLine
-                $name -and
-                $name.ToLowerInvariant() -in @("python.exe", "pythonw.exe") -and
-                $cmd -and
-                $cmd.ToLowerInvariant().Contains($CommandToken.ToLowerInvariant())
-            }
-    )
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        Test-ManagedPythonInstance $_ $ProjectRoot $Port $CommandToken
+    })
 }
 
 function Get-WebProcesses {
-    $portToken = "--port $Port"
-    $matches = @(
-        @(Get-MatchingPythonProcesses -CommandToken "web.main:app") +
-        @(Get-MatchingPythonProcesses -CommandToken "main.py --mode web")
-    )
-    return @(
-        $matches |
-            Where-Object { ([string]$_.CommandLine).Contains($portToken) } |
-            Sort-Object ProcessId -Unique
-    )
+    return @(Get-MatchingPythonProcesses -CommandToken "uvicorn")
 }
 
 function Test-WebRunning {
@@ -158,7 +142,7 @@ function Invoke-WebRestart {
     $restartStamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $stdout = Join-Path $logDir ("web_restart_{0}.out.log" -f $restartStamp)
     $stderr = Join-Path $logDir ("web_restart_{0}.err.log" -f $restartStamp)
-    $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $ProjectRoot `
+    $proc = Start-Process -FilePath "powershell.exe" -ArgumentList $args -WorkingDirectory $ProjectRoot -WindowStyle Hidden `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     # PowerShell's Start-Process -Wait waits for the entire descendant tree on
     # Windows. The startup wrapper intentionally leaves Uvicorn running, so
@@ -177,7 +161,7 @@ function Start-MissingWorker {
     if ($running.Count -gt 1) {
         $keep = $running | Sort-Object CreationDate | Select-Object -First 1
         foreach ($extra in @($running | Where-Object { [int]$_.ProcessId -ne [int]$keep.ProcessId })) {
-            Stop-Process -Id $extra.ProcessId -Force -ErrorAction SilentlyContinue
+            Stop-ManagedPythonInstance $extra $ProjectRoot $Port $Module
             Write-SupervisorLog "Stopped duplicate $Label PID=$($extra.ProcessId); kept oldest PID=$($keep.ProcessId)." "WARN"
         }
         $script:workerMissingStreaks[$Label] = 0
@@ -200,15 +184,16 @@ function Start-MissingWorker {
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $stdout = Join-Path $logDir ("{0}_{1}.out.log" -f ($Label -replace "[^a-zA-Z0-9]", "_"), $stamp)
     $stderr = Join-Path $logDir ("{0}_{1}.err.log" -f ($Label -replace "[^a-zA-Z0-9]", "_"), $stamp)
-    $proc = Start-Process -FilePath $PythonExecutable -ArgumentList @("-m", $Module) `
-        -WorkingDirectory $ProjectRoot -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+    $proc = Start-Process -FilePath $PythonExecutable -ArgumentList @("`"$(Join-Path $ProjectRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", $Module) `
+        -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Write-SupervisorLog "Restarted $Label PID=$($proc.Id)."
     Write-SupervisorState "running" $Label "restarted pid=$($proc.Id)"
     return $true
 }
 
 $createdNew = $false
-$mutex = New-Object System.Threading.Mutex($true, "Local\CryptoTradingSystem_WebSupervisor_$Port", [ref]$createdNew)
+$instanceName = Get-ManagedInstanceName $ProjectRoot $Port
+$mutex = New-Object System.Threading.Mutex($true, "Local\$instanceName", [ref]$createdNew)
 if (-not $createdNew) {
     Write-SupervisorLog "A supervisor already owns port $Port; duplicate exiting." "WARN"
     exit 0
@@ -274,7 +259,7 @@ try {
                     Write-SupervisorLog "Liveness failure threshold reached; recycling web process." "ERROR"
                     Write-SupervisorState "unresponsive" "web" "recycling after $livenessFailures failures"
                     foreach ($webProc in @(Get-WebProcesses)) {
-                        Stop-Process -Id $webProc.ProcessId -Force -ErrorAction SilentlyContinue
+                        Stop-ManagedPythonInstance $webProc $ProjectRoot $Port "uvicorn"
                     }
                     $livenessFailures = 0
                     continue

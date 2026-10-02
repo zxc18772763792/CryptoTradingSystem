@@ -53,8 +53,9 @@ async def cancel_order(
     order_id: str,
     symbol: str,
     exchange: str = "binance",
+    account_id: Optional[str] = None,
 ):
-    return await trading_api.cancel_order(order_id=order_id, symbol=symbol, exchange=exchange)
+    return await trading_api.cancel_order(order_id=order_id, symbol=symbol, exchange=exchange, account_id=account_id)
 
 
 @router.delete("/orders", dependencies=[Depends(require_sensitive_ops_permissions("manage_orders"))])

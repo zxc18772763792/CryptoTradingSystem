@@ -9,6 +9,7 @@ from enum import Enum
 from typing import Optional, Any, AsyncGenerator, Dict, List
 import asyncio
 import time
+import math
 from loguru import logger
 
 from config.exchanges import ExchangeConfig, ExchangeType
@@ -93,6 +94,8 @@ class Order:
     status: OrderStatus = OrderStatus.OPEN
     timestamp: Optional[datetime] = None
     exchange: str = ""
+    account_id: str = "main"
+    cache_key: str = ""
 
 
 @dataclass
@@ -121,6 +124,45 @@ class BaseExchange(ABC):
     """交易所基类"""
 
     _ERROR_LOG_REPEAT_WINDOW_SEC = 300.0
+
+    def _contract_size(self, symbol: str, *, position: Optional[Dict[str, Any]] = None) -> float:
+        client = getattr(self, "_client", None)
+        markets = getattr(client, "markets", None)
+        market = markets.get(symbol, {}) if isinstance(markets, dict) else {}
+        if not market and callable(getattr(client, "market", None)):
+            try:
+                market = client.market(symbol)
+            except (KeyError, ValueError):
+                market = {}
+        if not isinstance(market, dict):
+            market = {}
+        if position:
+            market = {**market, **{k: v for k, v in position.items() if k in {"contractSize", "linear", "inverse"} and v is not None}}
+        derivative = bool(market.get("contract") or market.get("swap") or market.get("future")
+                          or str(getattr(self.config, "default_type", "spot")) in {"swap", "future", "futures"}
+                          or (position is not None and "contracts" in position))
+        if not derivative:
+            return 1.0
+        if market.get("inverse") or market.get("linear") is False:
+            raise ValueError("inverse contracts are unsupported by the base-quantity execution model")
+        size = float(market.get("contractSize") or 0.0)
+        if not math.isfinite(size) or size <= 0:
+            raise ValueError(f"missing/invalid contractSize for {symbol}")
+        return size
+
+    def _to_contract_amount(self, symbol: str, base_amount: float) -> float:
+        amount = float(base_amount) / self._contract_size(symbol)
+        if not math.isfinite(amount) or amount <= 0:
+            raise ValueError("order amount must be finite and positive")
+        return amount
+
+    def _normalize_ccxt_order_quantities(self, order: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(order)
+        size = self._contract_size(str(order.get("symbol") or ""))
+        for key in ("amount", "filled", "remaining"):
+            if order.get(key) is not None:
+                normalized[key] = float(order[key]) * size
+        return normalized
 
     def __init__(self, config: ExchangeConfig):
         self.config = config

@@ -44,6 +44,8 @@ def test_binance_oi_fallback_needs_archive_for_30d_history(monkeypatch):
 
 def test_holder_snapshot_universe_includes_watchlist(tmp_path, monkeypatch):
     oc = _load("snapshot_onchain_features")
+    monkeypatch.setattr(oc, "AMBUSH_DIR", tmp_path)
+    (tmp_path / "manifest.json").write_text(json.dumps({"symbols": {f"COIN{i}": {} for i in range(60)}}), encoding="utf-8")
     latest = tmp_path / "latest.json"
     latest.write_text(json.dumps({"full_ranking": [{"base": "newcoin"}, {"base": "AAA"}]}), encoding="utf-8")
     monkeypatch.setattr(oc, "WATCHLIST_LATEST", latest)

@@ -91,10 +91,11 @@ def load_paper_strategy_profile(path: Path) -> Dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
-def save_paper_strategy_profile(profile: Dict[str, Any], path: Path) -> Dict[str, str]:
+def save_paper_strategy_profile(profile: Dict[str, Any], path: Path, *, overwrite: bool = True) -> Dict[str, str]:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(profile, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    with target.open("w" if overwrite else "x", encoding="utf-8") as stream:
+        stream.write(json.dumps(profile, ensure_ascii=False, indent=2, default=str))
     return {"profile_path": str(target)}
 
 

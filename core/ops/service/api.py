@@ -43,7 +43,7 @@ from core.governance.service import (
     upsert_api_user as governance_upsert_api_user,
 )
 from core.marketdata.runtime_price_provider import get_realtime_price
-from core.ops.service.auth import get_ops_token, get_request_auth, ops_token_configured, require_ops_auth
+from core.ops.service.auth import get_ops_token, get_request_auth, ops_token_configured, require_ops_auth, require_ops_permissions_dependency
 from core.runtime.bootstrap import runtime_bootstrap
 from core.research.orchestrator import (
     create_manual_proposal,
@@ -211,7 +211,7 @@ class PolymarketPaperProfilePromoteRequest(BaseModel):
     report_path: str
     token_ids: List[str] = Field(default_factory=list)
     account_id: str = Field(default="default", min_length=1, max_length=64)
-    output_path: str = Field(default="data/reports/polymarket_paper_strategy_profile.json")
+    output_path: str = Field(default="data/profiles/polymarket/paper_strategy_profile.json")
     execute_default: bool = False
     min_segments: int = Field(default=2, ge=0, le=100000)
     min_positive_segments: int = Field(default=1, ge=0, le=100000)
@@ -1165,7 +1165,10 @@ def create_router() -> APIRouter:
 
     if str(os.getenv("OPS_ALLOW_MANUAL_SIGNAL") or "").strip().lower() in {"1", "true", "yes", "on", "y"}:
 
-        @router.post("/trading/submit_manual_signal")
+        @router.post("/trading/submit_manual_signal", dependencies=[
+            Depends(require_ops_permissions_dependency("manage_orders")),
+            Depends(require_ops_permissions_dependency("approve_live")),
+        ])
         async def trading_submit_manual_signal(request: Request, payload: ManualSignalRequest):
             auth = get_request_auth(request)
             params = payload.model_dump()

@@ -103,6 +103,7 @@ class BacktestResult:
     avg_trade_return: float
     trades: List[BacktestTrade] = field(default_factory=list)
     equity_curve: List[float] = field(default_factory=list)
+    equity_timestamps: List[datetime] = field(default_factory=list)
     daily_returns: List[float] = field(default_factory=list)
 
     # New summary fields
@@ -559,6 +560,7 @@ class BacktestEngine:
             "entry_price": exec_price,
             "margin": margin,
             "notional_entry": notional,
+            "entry_fee": fee,
             "timestamp": timestamp,
             "strategy": signal.strategy_name,
             "funding_pnl": 0.0,
@@ -646,6 +648,7 @@ class BacktestEngine:
             "entry_price": exec_price,
             "margin": margin,
             "notional_entry": notional,
+            "entry_fee": fee,
             "timestamp": timestamp,
             "strategy": signal.strategy_name,
             "funding_pnl": 0.0,
@@ -721,7 +724,8 @@ class BacktestEngine:
         # so it already contains both legs' slippage. ``slippage_cost`` remains
         # reportable attribution only; subtracting it again double-charges the
         # simulated account.
-        net_pnl = gross_pnl + accrued_funding - fee
+        close_cash_flow = gross_pnl + accrued_funding - fee
+        net_pnl = close_cash_flow - float(pos.get("entry_fee", 0.0))
         signal_metadata = self._signal_metadata(signal)
         resolved_exit_reason = str(
             exit_reason
@@ -729,7 +733,8 @@ class BacktestEngine:
             or ("signal_close" if signal and signal.signal_type in {SignalType.CLOSE_LONG, SignalType.CLOSE_SHORT} else "")
         ).strip() or None
 
-        self._capital += margin + net_pnl
+        # The entry fee was already debited when opening the position.
+        self._capital += margin + close_cash_flow
         self._turnover_notional += notional
 
         trade = BacktestTrade(
@@ -928,6 +933,7 @@ class BacktestEngine:
             avg_trade_return=avg_trade_return,
             trades=self._trades,
             equity_curve=self._equity_curve,
+            equity_timestamps=list(self._equity_index),
             daily_returns=self._daily_returns,
             cost_breakdown=cost_breakdown,
             turnover_notional=self._turnover_notional,

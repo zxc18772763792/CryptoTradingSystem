@@ -601,11 +601,12 @@ async def _on_strategy_signal(signal: Any) -> None:
 
 
 async def _on_order_event(order: Any, event: str) -> None:
-    meta = order_manager.get_order_metadata(order.id)
+    meta = order_manager.get_order_metadata(getattr(order, "cache_key", "") or order.id)
     payload = {
         "event": event,
         "order": {
-            "id": order.id,
+            "id": getattr(order, "cache_key", "") or order.id,
+        "exchange_order_id": order.id,
             "exchange": order.exchange,
             "symbol": order.symbol,
             "side": order.side.value,
@@ -2764,19 +2765,19 @@ async def websocket_endpoint(websocket: WebSocket):
         return
     await websocket.accept()
     queue = await event_bus.subscribe(maxsize=300)
-    await websocket.send_json(
-        {
-            "event": "hello",
-            "payload": {
-                "mode": execution_engine.get_trading_mode(),
-                "server_time": datetime.now(timezone.utc).isoformat(),
-            },
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-    )
     recv_task: Optional[asyncio.Task] = None
     send_task: Optional[asyncio.Task] = None
     try:
+        await websocket.send_json(
+            {
+                "event": "hello",
+                "payload": {
+                    "mode": execution_engine.get_trading_mode(),
+                    "server_time": datetime.now(timezone.utc).isoformat(),
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         while True:
             recv_task = asyncio.create_task(websocket.receive_text())
             send_task = asyncio.create_task(queue.get())

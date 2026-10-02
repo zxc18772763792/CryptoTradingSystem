@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 from collections import Counter, deque
+from core.data.parquet_lock import parquet_partition_lock as _file_lock
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
@@ -59,25 +60,26 @@ def _trim_audit_file(target: Path, max_rows: int = _MAX_AUDIT_ROWS) -> None:
     past a size threshold, so it can't grow without bound and the O(n) outcome
     backfill rewrite stays bounded. Best-effort; never breaks recording.
     """
-    try:
-        if not target.exists() or target.stat().st_size <= _MAX_AUDIT_BYTES:
-            return
-        rows = deque(_iter_jsonl_rows(target), maxlen=max(1, int(max_rows)))
-        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+    with _file_lock(target):
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                for row in rows:
-                    fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
-            os.replace(tmp_name, target)
-        except Exception:
+            if not target.exists() or target.stat().st_size <= _MAX_AUDIT_BYTES:
+                return
+            rows = deque(_iter_jsonl_rows(target), maxlen=max(1, int(max_rows)))
+            fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
             try:
-                if os.path.exists(tmp_name):
-                    os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
-    except Exception:
-        pass
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    for row in rows:
+                        fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
+                os.replace(tmp_name, target)
+            except Exception:
+                try:
+                    if os.path.exists(tmp_name):
+                        os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
+        except Exception:
+            pass
 
 
 def record_gate_counterfactual(
@@ -108,8 +110,9 @@ def record_gate_counterfactual(
         "later_outcome_ref": later_outcome_ref,
     }
     target.parent.mkdir(parents=True, exist_ok=True)
-    with target.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
+    with _file_lock(target):
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
     _trim_audit_file(target)
     return row
 
@@ -131,77 +134,78 @@ def update_gate_counterfactual_outcomes(
     unless ``force`` is truthy in the outcome item.
     """
     target = _resolve_audit_path(path)
-    rows = list(iter_gate_counterfactuals(target))
-    if not rows:
-        return {"updated": 0, "total": 0, "path": str(target)}
+    with _file_lock(target):
+        rows = list(iter_gate_counterfactuals(target))
+        if not rows:
+            return {"updated": 0, "total": 0, "path": str(target)}
 
-    normalized = [dict(item or {}) for item in outcomes or [] if isinstance(item, dict)]
-    force_available = any(bool(item.get("force")) for item in normalized)
-    by_trace: Dict[str, List[int]] = {}
-    by_subject: Dict[tuple[str, str], List[int]] = {}
-    by_subject_any_type: Dict[str, List[int]] = {}
-    for idx, outcome in enumerate(normalized):
-        trace_id = str(outcome.get("trace_id") or "").strip()
-        if trace_id:
-            by_trace.setdefault(trace_id, []).append(idx)
-        subject_id = str(outcome.get("subject_id") or "").strip()
-        if not subject_id:
-            continue
-        subject_type = str(outcome.get("subject_type") or "").strip()
-        if subject_type:
-            by_subject.setdefault((subject_type, subject_id), []).append(idx)
-        else:
-            by_subject_any_type.setdefault(subject_id, []).append(idx)
-
-    updated = 0
-    for row in rows:
-        if row.get("later_outcome_ref") and not force_available:
-            continue
-        candidate_indexes: List[int] = []
-        trace_id = str(row.get("trace_id") or "").strip()
-        if trace_id:
-            candidate_indexes.extend(by_trace.get(trace_id, []))
-        subject_id = str(row.get("subject_id") or "").strip()
-        if subject_id:
-            subject_type = str(row.get("subject_type") or "").strip()
-            if subject_type:
-                candidate_indexes.extend(by_subject.get((subject_type, subject_id), []))
-            candidate_indexes.extend(by_subject_any_type.get(subject_id, []))
-
-        for outcome_idx in sorted(set(candidate_indexes)):
-            outcome = normalized[outcome_idx]
-            if row.get("later_outcome_ref") and not bool(outcome.get("force")):
+        normalized = [dict(item or {}) for item in outcomes or [] if isinstance(item, dict)]
+        force_available = any(bool(item.get("force")) for item in normalized)
+        by_trace: Dict[str, List[int]] = {}
+        by_subject: Dict[tuple[str, str], List[int]] = {}
+        by_subject_any_type: Dict[str, List[int]] = {}
+        for idx, outcome in enumerate(normalized):
+            trace_id = str(outcome.get("trace_id") or "").strip()
+            if trace_id:
+                by_trace.setdefault(trace_id, []).append(idx)
+            subject_id = str(outcome.get("subject_id") or "").strip()
+            if not subject_id:
                 continue
-            row["later_outcome_ref"] = str(
-                outcome.get("later_outcome_ref")
-                or outcome.get("outcome_ref")
-                or outcome.get("status")
-                or ""
-            )
-            row["later_outcome"] = {
-                key: value
-                for key, value in outcome.items()
-                if key not in {"force", "trace_id", "subject_id", "subject_type"}
-            }
-            row["outcome_recorded_at"] = _now_iso()
-            updated += 1
-            break
+            subject_type = str(outcome.get("subject_type") or "").strip()
+            if subject_type:
+                by_subject.setdefault((subject_type, subject_id), []).append(idx)
+            else:
+                by_subject_any_type.setdefault(subject_id, []).append(idx)
 
-    if updated:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                for row in rows:
-                    fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
-            os.replace(tmp_name, target)
-        except Exception:
+        updated = 0
+        for row in rows:
+            if row.get("later_outcome_ref") and not force_available:
+                continue
+            candidate_indexes: List[int] = []
+            trace_id = str(row.get("trace_id") or "").strip()
+            if trace_id:
+                candidate_indexes.extend(by_trace.get(trace_id, []))
+            subject_id = str(row.get("subject_id") or "").strip()
+            if subject_id:
+                subject_type = str(row.get("subject_type") or "").strip()
+                if subject_type:
+                    candidate_indexes.extend(by_subject.get((subject_type, subject_id), []))
+                candidate_indexes.extend(by_subject_any_type.get(subject_id, []))
+
+            for outcome_idx in sorted(set(candidate_indexes)):
+                outcome = normalized[outcome_idx]
+                if row.get("later_outcome_ref") and not bool(outcome.get("force")):
+                    continue
+                row["later_outcome_ref"] = str(
+                    outcome.get("later_outcome_ref")
+                    or outcome.get("outcome_ref")
+                    or outcome.get("status")
+                    or ""
+                )
+                row["later_outcome"] = {
+                    key: value
+                    for key, value in outcome.items()
+                    if key not in {"force", "trace_id", "subject_id", "subject_type"}
+                }
+                row["outcome_recorded_at"] = _now_iso()
+                updated += 1
+                break
+
+        if updated:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
             try:
-                os.unlink(tmp_name)
-            except OSError:
-                pass
-            raise
-    return {"updated": updated, "total": len(rows), "path": str(target)}
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    for row in rows:
+                        fh.write(json.dumps(row, ensure_ascii=True, sort_keys=True) + "\n")
+                os.replace(tmp_name, target)
+            except Exception:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
+        return {"updated": updated, "total": len(rows), "path": str(target)}
 
 
 def summarize_gate_counterfactuals(path: str | Path | None = None, *, limit: Optional[int] = None) -> Dict[str, Any]:

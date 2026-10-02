@@ -231,6 +231,8 @@ def test_query_and_account_methods_reconnect_through_ensure_client(connector_cls
                 {
                     "symbol": "BTC/USDT",
                     "side": "long",
+                    "contractSize": 1.0,
+                    "linear": True,
                     "contracts": 0.5,
                     "entryPrice": 27000,
                     "markPrice": 27100,

@@ -620,7 +620,7 @@ async def pull_source_once(
         source_names=[source],
     )
     items = bundle.get("items") or []
-    raw_stats = await news_db.save_news_raw(items)
+    raw_stats = await news_db.save_news_raw(items, source_cursors=bundle.get("source_cursors"))
     inserted = raw_stats.get("inserted") or []
     queue_stats = await news_db.enqueue_llm_tasks(inserted, min_importance=_min_importance())
 
@@ -721,6 +721,12 @@ async def worker_loop(cfg: Dict[str, Any], *, once: bool = False, pull_enabled: 
             next_llm_due = now + llm_interval
             did_work = True
 
+        heartbeat_path = os.environ.get("NEWS_WORKER_HEARTBEAT_FILE", "").strip()
+        if heartbeat_path:
+            try:
+                Path(heartbeat_path).touch()
+            except OSError as exc:
+                logger.warning(f"news worker heartbeat failed: {exc}")
         if once:
             break
         if not did_work:

@@ -23,8 +23,9 @@ if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ProjectRoot = Split-Path -Parent $PSScriptRoot
 }
 $ProjectRoot = [System.IO.Path]::GetFullPath($ProjectRoot)
+. (Join-Path $PSScriptRoot "managed_process.ps1")
 if ([string]::IsNullOrWhiteSpace($TaskName)) {
-    $TaskName = "CryptoTradingSystem_WebSupervisor_{0}" -f $Port
+    $TaskName = Get-ManagedInstanceName $ProjectRoot $Port
 }
 
 $supervisorScript = Join-Path $PSScriptRoot "supervise_web.ps1"

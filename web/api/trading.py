@@ -1378,7 +1378,7 @@ class StoplossPolicyUpdateRequest(BaseModel):
 
 
 def _serialize_order(order: Any) -> Dict[str, Any]:
-    meta = order_manager.get_order_metadata(order.id)
+    meta = order_manager.get_order_metadata(getattr(order, "cache_key", "") or order.id)
     order_type = str(
         getattr(getattr(order, "type", None), "value", getattr(order, "type", "")) or ""
     ).lower()
@@ -1391,7 +1391,8 @@ def _serialize_order(order: Any) -> Dict[str, Any]:
     if take_profit is None and "take_profit" in order_type and order_price > 0:
         take_profit = order_price
     return {
-        "id": order.id,
+        "id": getattr(order, "cache_key", "") or order.id,
+        "exchange_order_id": order.id,
         "exchange": order.exchange,
         "symbol": order.symbol,
         "side": order.side.value,
@@ -5571,7 +5572,7 @@ async def _get_orders_locked(
                 if not (
                     str(getattr(o, "id", "")).startswith("paper_")
                     or bool(
-                        order_manager.get_order_metadata(str(getattr(o, "id", ""))).get(
+                        order_manager.get_order_metadata(str(getattr(o, "cache_key", "") or getattr(o, "id", ""))).get(
                             "paper"
                         )
                     )
@@ -5770,17 +5771,20 @@ async def cancel_order(
     order_id: str,
     symbol: str,
     exchange: str = "binance",
+    account_id: Optional[str] = None,
 ):
     async with execution_engine.mode_access_guard():
-        return await _cancel_order_locked(order_id=order_id, symbol=symbol, exchange=exchange)
+        return await _cancel_order_locked(order_id=order_id, symbol=symbol, exchange=exchange, account_id=account_id)
 
 
 async def _cancel_order_locked(
     order_id: str,
     symbol: str,
     exchange: str = "binance",
+    account_id: Optional[str] = None,
 ):
-    success = await order_manager.cancel_order(order_id, symbol, exchange)
+    scope = {"account_id": account_id} if account_id is not None else {}
+    success = await order_manager.cancel_order(order_id, symbol, exchange, **scope)
     if success:
         _schedule_audit_log(
             module="trading",
@@ -6436,7 +6440,8 @@ async def _close_position_locked(req: PositionCloseRequest):
         "side": matched_side,
         "quantity": qty,
         "order": {
-            "id": order.id,
+            "id": getattr(order, "cache_key", "") or order.id,
+        "exchange_order_id": order.id,
             "status": getattr(
                 getattr(order, "status", None),
                 "value",
@@ -9787,7 +9792,7 @@ async def get_pnl_heatmap(
         fallback_orders = []
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         for order in order_manager.get_recent_orders(limit=5000):
-            meta = order_manager.get_order_metadata(str(getattr(order, "id", "") or ""))
+            meta = order_manager.get_order_metadata(str(getattr(order, "cache_key", "") or getattr(order, "id", "") or ""))
             if _infer_trade_item_mode(
                 payload=meta,
                 account_id=getattr(order, "account_id", None),

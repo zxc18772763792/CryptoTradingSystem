@@ -105,7 +105,7 @@ def _risk_cfg_from_runtime() -> Dict[str, Any]:
         "allowed_symbols": [],
         "allowed_timeframes": [],
         "reduce_only": False,
-        "kill_switch": bool(report.get("trading_halted", False)),
+        "kill_switch": bool(getattr(risk_manager, "_governance_kill_switch", False)),
     }
 
 
@@ -126,7 +126,9 @@ def _is_list_expanded(base: Any, proposed: Any) -> bool:
         return False
     left = {str(x) for x in base}
     right = {str(x) for x in proposed}
-    return right > left
+    # Empty means unrestricted. Any newly permitted member increases risk,
+    # including replacement sets and removing the last restriction.
+    return bool(left) and (not right or bool(right - left))
 
 
 def _risk_delta_score(base: Dict[str, Any], proposed: Dict[str, Any]) -> float:
@@ -163,6 +165,7 @@ async def ensure_risk_config_initialized(actor: str = "system") -> Dict[str, Any
         result = await session.execute(select(RiskConfig).where(RiskConfig.is_active.is_(True)).limit(1))
         row = result.scalars().first()
         if row:
+            risk_manager._governance_kill_switch = bool((row.config or {}).get("kill_switch", False))
             return {
                 "version": int(row.version),
                 "config": dict(row.config or {}),
@@ -239,12 +242,9 @@ async def _activate_risk_config(
             "max_leverage": float(config.get("max_leverage", risk_manager.max_leverage)),
         }
     )
-    if bool(config.get("kill_switch", False)):
-        # Reuse existing halt path.
-        risk_manager._trading_halted = True  # noqa: SLF001
-        risk_manager._halt_reason = "governance kill_switch enabled"  # noqa: SLF001
-    else:
-        risk_manager.reset_halt()
+    # Governance is an independent gate in the decision engine. Applying its
+    # config must never reset the daily-loss halt, PNL baseline or grace period.
+    risk_manager._governance_kill_switch = bool(config.get("kill_switch", False))
     return {"version": new_version, "config": config}
 
 

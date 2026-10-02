@@ -19,6 +19,10 @@ INVALID = {"name": "exec", "direction": "high", "expr": {"op": "eval", "args": [
 
 
 def _loop(tmp_path, monkeypatch, outputs):
+    import core.research.pump_precursor as precursor
+    monkeypatch.setattr(precursor, "load_model_weights", lambda: {
+        "features": precursor.FEATURES, "weights": [1.0] * len(precursor.FEATURES), "bias": 0.0,
+    })
     panel = synthetic_panel(signal=True)
     rng = np.random.default_rng(1)
     weekly = panel[panel["date"].dt.dayofweek == 0][["base", "date"]].copy()

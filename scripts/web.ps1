@@ -27,6 +27,7 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
+. (Join-Path $PSScriptRoot "managed_process.ps1")
 
 $script:WorkerDefinitions = @(
     [pscustomobject]@{
@@ -58,6 +59,7 @@ function Get-WebSupervisorProcesses {
                 $cmd = [string]$_.CommandLine
                 $name -and $name.ToLowerInvariant() -eq "powershell.exe" -and
                 $cmd -and
+                $cmd -match [regex]::Escape((Join-Path $projectRoot "scripts\supervise_web.ps1")) -and
                 [int]$_.ProcessId -ne [int]$PID -and
                 $cmd -match '(?i)-File\s+(?:"[^"]*supervise_web\.ps1"|[^\s"]*supervise_web\.ps1)(?:\s|$)' -and
                 $cmd -match ("(?i)-Port\s+{0}(?:\s|$)" -f [int]$Port)
@@ -174,43 +176,15 @@ function Format-ConfigValue {
 
 function Get-ObservedWorkerProcesses {
     param([string]$CommandToken)
-
-    $token = [string]$CommandToken
-    $matches = @(
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object {
-                $name = [string]$_.Name
-                $cmd = [string]$_.CommandLine
-                (
-                    $name -and
-                    $name.ToLowerInvariant() -in @("python.exe", "pythonw.exe") -and
-                    $cmd -and
-                    [int]$_.ProcessId -ne [int]$PID -and
-                    $cmd.ToLowerInvariant().Contains($token.ToLowerInvariant())
-                )
-            }
-    )
-    return $matches
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        Test-ManagedPythonInstance $_ $projectRoot $Port $CommandToken
+    })
 }
 
 function Get-ManagedWebProcesses {
-    $matches = @(
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-            Where-Object {
-                $name = [string]$_.Name
-                $cmd = [string]$_.CommandLine
-                (
-                    $name -and
-                    $name.ToLowerInvariant() -in @("python.exe", "pythonw.exe") -and
-                    $cmd -and
-                    (
-                        $cmd -like "*uvicorn*web.main:app*" -or
-                        $cmd -like "*main.py --mode web*"
-                    )
-                )
-            }
-    )
-    return $matches
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        Test-IsManagedWebProcess $_
+    })
 }
 
 function Format-ObservedWorkerState {
@@ -248,13 +222,7 @@ function Format-ObservedWorkerState {
 
 function Test-IsManagedWebProcess {
     param($ProcessRecord)
-
-    if (-not $ProcessRecord) {
-        return $false
-    }
-
-    $cmd = [string]$ProcessRecord.CommandLine
-    return $cmd -like "*uvicorn*web.main:app*" -or $cmd -like "*main.py --mode web*"
+    return (Test-ManagedPythonInstance $ProcessRecord $projectRoot $Port "uvicorn")
 }
 
 function Get-HealthSummary {
@@ -325,7 +293,7 @@ function Get-ResearchUniverseTaskSummary {
 function Get-WebSupervisorTaskSummary {
     param([int]$PortNumber)
     try {
-        $task = Get-ScheduledTask -TaskName ("CryptoTradingSystem_WebSupervisor_{0}" -f $PortNumber) -ErrorAction Stop
+        $task = Get-ScheduledTask -TaskName (Get-ManagedInstanceName $projectRoot $PortNumber) -ErrorAction Stop
         $state = [string]$task.State
         # A paper managed start registers a delayed logon trigger; a live start
         # registers none. Surface it so reboot behaviour is visible from status.
@@ -607,7 +575,7 @@ function Stop-ManagedProcesses {
     }
     if ($managedWebProcesses.Count) {
         foreach ($proc in $managedWebProcesses) {
-            Stop-Process -Id $proc.ProcessId -Force
+            Stop-ManagedPythonInstance $proc $projectRoot $PortNumber "uvicorn"
             if ([int]$proc.ProcessId -eq [int]$webPid) {
                 Write-Host ("Stopped web service PID={0}" -f $proc.ProcessId)
             } else {
@@ -627,7 +595,7 @@ function Stop-ManagedProcesses {
                 continue
             }
             foreach ($proc in $matched) {
-                Stop-Process -Id $proc.ProcessId -Force
+                Stop-ManagedPythonInstance $proc $projectRoot $PortNumber $worker.Token
                 Write-Host ("Stopped {0} PID={1}" -f $worker.Label, $proc.ProcessId)
                 $stopped = $true
             }

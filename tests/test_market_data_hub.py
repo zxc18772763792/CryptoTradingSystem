@@ -24,7 +24,7 @@ def test_hub_records_ws_tick_with_metadata_and_status_snapshot():
             "last": "68000.5",
             "bid": "68000.0",
             "ask": "68001.0",
-            "timestamp": "2026-05-29T08:00:00+00:00",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         },
     )
 
