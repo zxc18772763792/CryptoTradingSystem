@@ -6,6 +6,14 @@ controls matched on the 30-day move including that pop by 9.5% over 7 days
 (58/69); the same 7-day perp short earned +6.7% per trade after fees and
 2.4% funding (53/70 wins, every year 2023-26, two tail losses near -49%).
 Each strategy keeps its own state file, statistics and retirement rule.
+
+Since 2026-10-04, strategy "caution_hedged": the same caution short plus a
+long, same-notional, equal-weight basket of the 30 most-traded USDT perps
+frozen at discovery (scripts/upbit_caution_hedged_backtest.py). The plain
+short's backtest leaned on down-market weeks (22 of 31) and lost in up-market
+weeks while the coin still lagged the market; the hedged return keeps only
+that relative move. The basket closes with the coin leg (also on a stop) and
+pays its own 0.1% fees and long-side funding.
 Both mirror the backtest's universe: the coin must have traded on Binance
 spot 30 days before the notice. Listing follow-ups (e.g. a changed start
 time) never open a second listing trade: one listing per coin per 30 days.
@@ -52,6 +60,8 @@ from core.research import retirement, signal_evidence
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_caution" / "tracker.json"
 KRW_LISTING_STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_krw_listing" / "tracker.json"
+CAUTION_HEDGED_STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_caution_hedged" / "tracker.json"
+BASKET_FEE = 0.001
 SPOT = "https://api.binance.com/api/v3"
 UPBIT = "https://api-manager.upbit.com/api/v1/announcements"
 FAPI = "https://fapi.binance.com/fapi/v1"
@@ -62,6 +72,8 @@ CAUTION = re.compile(r"유의\s*종목\s*지정")
 RELEASED = re.compile(r"지정\s*해제")
 NOT_TICKER = {"KRW", "BTC", "USDT", "ETH"}
 BACKTEST_REFERENCE = "31 perps 2022-26: +7.5%/trade after fees+funding, 90% CI [+4.2, +11.8], win 74%, no stops"
+HEDGED_REFERENCE = ("30 perps 2022-26, short coin + long top-30 basket: +5.0%/trade, 90% CI [+1.4, +10.6], win 23/30, "
+                    "sd 14%; up-market +13.4% / down-market +2.4%; 2026 alone (18 trades) -0.05%")
 KRW_LISTING_REFERENCE = "70 perps 2023-26: +6.5%/trade after fees+funding, 90% CI [+3.5, +9.1], win 74%, 2 stops near -49%"
 KRW_LISTING = re.compile(r"(신규\s*)?거래\s*지원\s*안내.*KRW|KRW.*(신규\s*)?거래\s*지원|(KRW|원화)[^(]*마켓[^(]*(추가|상장|오픈)|(원화|KRW)\s*마켓\s*(신규\s*)?상장")
 NOT_LISTING = re.compile(r"유의|거래\s*지원\s*종료|유통량")
@@ -121,6 +133,9 @@ STRATEGIES: Dict[str, Dict[str, Any]] = {
                 "dedupe": False},
     "krw_listing": {"match": krw_listing_tickers, "state_path": KRW_LISTING_STATE_PATH, "rule": "upbit_krw_listing",
                     "reference": KRW_LISTING_REFERENCE, "dedupe": True},
+    # same signal as "caution", judged on the coin short plus the frozen basket long
+    "caution_hedged": {"match": caution_tickers, "state_path": CAUTION_HEDGED_STATE_PATH, "rule": "upbit_caution_hedged",
+                       "reference": HEDGED_REFERENCE, "dedupe": False, "hedged": True},
 }
 
 
@@ -265,6 +280,8 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
                 logger.debug(f"upbit caution tracker: {key} update failed: {exc}")
         if trade.get("symbol") and not trade.get("backfilled") and "evidence" in trade:
             await _record_trade_evidence(client, trade, perps, now)
+            if spec.get("hedged"):
+                await _settle_hedge(client, trade)
         if "reason" not in trade and llm_extract is not None:
             try:
                 body = await _notice_body(client, trade["notice_id"])
@@ -312,12 +329,39 @@ async def _record_trade_evidence(client, trade: Dict[str, Any], perps: Dict[str,
         logger.debug(f"upbit caution tracker: evidence for {trade.get('ticker')} failed: {exc}")
 
 
+async def _settle_hedge(client, trade: Dict[str, Any]) -> None:
+    """Close the basket leg with the coin leg: same closes, its own fees and long-side funding."""
+    if trade["status"] not in {"closed", "stopped"} or not trade.get("exit_at") or "hedged_return_pct" in trade:
+        return
+    symbols = ((trade.get("evidence") or {}).get("market_basket") or {}).get("symbols") or []
+    if not symbols:
+        trade["hedge"] = {"error": "no basket frozen at discovery"}
+        return
+    entry_ms, exit_ms = int(trade["entry_at"]), int(trade["exit_at"])
+    try:
+        leg = await signal_evidence.basket_return(client, symbols, entry_ms, exit_ms)
+        funding = await signal_evidence.basket_funding(client, symbols, entry_ms, exit_ms)
+    except Exception as exc:  # noqa: BLE001 - retried next pass
+        logger.debug(f"upbit hedged tracker: basket for {trade.get('ticker')} failed: {exc}")
+        return
+    if leg is None or funding is None:
+        return  # too few legs resolved: retry next pass
+    basket_pct = leg["return_pct"] - funding * 100 - BASKET_FEE * 100
+    trade["hedge"] = {**leg, "funding_pct": round(funding * 100, 4), "fee_pct": BASKET_FEE * 100,
+                      "net_basket_pct": round(basket_pct, 3)}
+    trade["hedged_return_pct"] = round(float(trade["return_pct"]) + basket_pct, 3)
+
+
 def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
     spec = STRATEGIES[strategy]
     trades = list(state.get("trades", {}).values())
     forward = [t for t in trades if not t.get("backfilled") and not t.get("late") and t.get("symbol")]
     done = [t for t in forward if t.get("status") in {"closed", "stopped"}]
-    returns = [float(t["return_pct"]) for t in done if t.get("return_pct") is not None]
+    if spec.get("hedged"):
+        done = [t for t in done if t.get("hedged_return_pct") is not None]  # complete only once the basket settled
+        returns = [float(t["hedged_return_pct"]) for t in done]
+    else:
+        returns = [float(t["return_pct"]) for t in done if t.get("return_pct") is not None]
     hedged = [float(t["evidence"]["market_control"]["hedged_return_pct"]) for t in done
               if (t.get("evidence") or {}).get("market_control")]
     return {
@@ -334,6 +378,8 @@ def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
         "forward_win_rate": round(float(np.mean([r > 0 for r in returns])), 3) if returns else None,
         "forward_late": sum(bool(t.get("late") and t.get("symbol")) for t in trades),
         "forward_hedged_mean_return_pct": round(float(np.mean(hedged)), 2) if hedged else None,
+        "forward_unhedged_mean_return_pct": (round(float(np.mean([float(t["return_pct"]) for t in done])), 2)
+                                             if done and spec.get("hedged") else None),
         "evidence_coverage": {
             "completed": len(done),
             "book_at_entry": sum("mid" in ((t.get("evidence") or {}).get("book_at_entry") or {}) for t in done),

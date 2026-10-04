@@ -37,6 +37,9 @@ RULES: Dict[str, Dict[str, Any]] = {
     # added 2026-10-01 with the daily reversal tracker, before its first forward day;
     # unit = net % per position per day; mean from scripts/xs_reversal_backtest.py
     "xs_reversal": {"min_n": 180, "unit": "day", "backtest_mean_pct": 0.057},
+    # added 2026-10-04 with the hedged Upbit caution tracker, before its first forward trade;
+    # mean from scripts/upbit_caution_hedged_backtest.py
+    "upbit_caution_hedged": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 5.0},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",

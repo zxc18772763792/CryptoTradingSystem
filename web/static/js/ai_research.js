@@ -6603,6 +6603,14 @@ ${confirmHint}`,
       note: 'Upbit 新增 KRW 交易对当天通常先冲高约 30%。以公告当日 UTC 收盘价纸面做空币安永续，7 天后收盘平仓，+40% 止损，计手续费与资金费（冲高后空头资金费偏高，回测均值 −2.4%）。尾部风险大：回测最差两笔约 −49%。同一币 30 天内的后续公告（如开盘时间变更）不重复开仓。纸面记录，不下单。',
       showReason: false,
     },
+    caution_hedged: {
+      id: 'ai-upbit-caution-hedged-tracker',
+      anchors: ['ai-upbit-caution-tracker', 'ai-supply-factor-tracker'],
+      title: 'Upbit 交易警示后 7 天做空（对冲版）· 纸面跟踪',
+      note: '同一警示信号：做空币安永续的同时，等额做多发现公告时成交额最大的 30 个永续等权篮子，两腿同进同出（币止损时篮子当日平仓），各自计手续费与资金费。只赚警示币相对大盘的部分，不依赖大盘下跌。表中"收益"为对冲后收益。纸面记录，不下单。',
+      showReason: false,
+      hedged: true,
+    },
   };
 
   function renderUpbitCautionTracker(payload, strategy = 'caution') {
@@ -6629,7 +6637,7 @@ ${confirmHint}`,
       <div class="u-note" style="margin-top:4px;">当时证据：入场盘口 ${Number(s.evidence_coverage?.book_at_entry || 0)}/${Number(s.evidence_coverage?.completed || 0)} · 5 分钟路径 ${Number(s.evidence_coverage?.path || 0)} · 同期市场对照 ${Number(s.evidence_coverage?.market_control || 0)}（扣除市场后均值 ${pct(s.forward_hedged_mean_return_pct)}）。晚到 = 入场收盘后才发现公告，不计入前向统计。</div>
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${esc(cfg.note)}</div>
       ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>代币</th><th>公告时间</th><th>状态</th><th>收益（空头）</th><th>资金费</th>${cfg.showReason ? '<th>原因</th>' : ''}<th></th></tr></thead><tbody>
-        ${trades.map((t) => `<tr><td>${esc(t.symbol || t.ticker)}</td><td>${esc(t.notice_at ? fmtTs(new Date(t.notice_at)) : '--')}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td><td style="color:${Number(t.return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.return_pct)}</td><td>${t.funding == null ? '--' : pct(Number(t.funding) * 100)}</td>${cfg.showReason ? `<td title="${esc(t.reason?.summary_en || '')}">${esc(reasonNames[t.reason?.reason] || '--')}</td>` : ''}<td>${t.backfilled ? '回填' : (t.late ? '晚到' : '')}</td></tr>`).join('')}
+        ${trades.map((t) => `<tr><td>${esc(t.symbol || t.ticker)}</td><td>${esc(t.notice_at ? fmtTs(new Date(t.notice_at)) : '--')}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td>${(() => { const v = cfg.hedged ? t.hedged_return_pct : t.return_pct; return `<td style="color:${Number(v) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(v)}</td>`; })()}<td>${t.funding == null ? '--' : pct(Number(t.funding) * 100)}</td>${cfg.showReason ? `<td title="${esc(t.reason?.summary_en || '')}">${esc(reasonNames[t.reason?.reason] || '--')}</td>` : ''}<td>${t.backfilled ? '回填' : (t.late ? '晚到' : '')}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每 30 分钟检查一次 Upbit 公告。</div>'}`;
   }
 
@@ -6639,6 +6647,9 @@ ${confirmHint}`,
     } catch (err) { /* optional panel */ }
     try {
       renderUpbitCautionTracker(await aiApi('/upbit-krw-listing', { timeoutMs: 12000 }), 'krw_listing');
+    } catch (err) { /* optional panel */ }
+    try {
+      renderUpbitCautionTracker(await aiApi('/upbit-caution-hedged', { timeoutMs: 12000 }), 'caution_hedged');
     } catch (err) { /* optional panel */ }
   }
 

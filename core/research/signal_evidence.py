@@ -128,3 +128,18 @@ async def basket_return(client, symbols: List[str], entry_ms: int, exit_ms: int)
     # mean = what an equal-weight long earns; median = the typical coin (one +100% leg moves the mean a lot)
     return {"return_pct": round(sum(moves) / len(moves) * 100, 3), "median_return_pct": round(median(moves) * 100, 3),
             "legs": len(moves), "basket": len(symbols)}
+
+
+async def basket_funding(client, symbols: List[str], entry_ms: int, exit_ms: int) -> Optional[float]:
+    """Mean funding a long pays per basket leg for settlements in (entry_ms, exit_ms]; None if < half resolve."""
+    paid = []
+    for symbol in symbols:
+        resp = await client.get(f"{FAPI}/fundingRate", params={"symbol": symbol, "startTime": entry_ms + 1,
+                                                               "endTime": exit_ms, "limit": 1000})
+        rows = resp.json() if resp.status_code == 200 else None
+        if not isinstance(rows, list):
+            continue
+        paid.append(sum(float(r["fundingRate"]) for r in rows if entry_ms < int(r["fundingTime"]) <= exit_ms))
+    if not paid or len(paid) * 2 < len(symbols):
+        return None
+    return sum(paid) / len(paid)

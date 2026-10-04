@@ -36,7 +36,8 @@ WATCHLIST_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "pump_wat
 VERDICT_STATE_PATH = exchange_notices.PROJECT_ROOT / "data" / "research" / "tracker_verdicts.json"
 TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解锁前做空", "supply_factor": "供给通胀因子",
                  "upbit_caution": "Upbit 警示后做空", "upbit_krw_listing": "Upbit 韩元上币后做空",
-                 "unlock_short_t7": "解锁前最后一周做空", "xs_reversal": "日线横截面反转"}
+                 "unlock_short_t7": "解锁前最后一周做空", "xs_reversal": "日线横截面反转",
+                 "upbit_caution_hedged": "Upbit 警示后做空（对冲版）"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
 UPBIT_INTERVAL_SEC = 1800
@@ -213,6 +214,10 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _status["upbit_caution"] = await upbit_caution_tracker.tick(client, llm_extract=_llm_upbit_reason)
             await _verdict_alert("upbit_caution", _status["upbit_caution"])
 
+        async def upbit_caution_hedged():
+            _status["upbit_caution_hedged"] = await upbit_caution_tracker.tick(client, strategy="caution_hedged")
+            await _verdict_alert("upbit_caution_hedged", _status["upbit_caution_hedged"])
+
         async def upbit_krw_listing():
             _status["upbit_krw_listing"] = await upbit_caution_tracker.tick(client, strategy="krw_listing")
             await _verdict_alert("upbit_krw_listing", _status["upbit_krw_listing"])
@@ -236,6 +241,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("supply", UNLOCK_INTERVAL_SEC, now, force, supply)
         await _run_job("upbit", UPBIT_INTERVAL_SEC, now, force, upbit_caution)
         await _run_job("upbit_krw_listing", UPBIT_INTERVAL_SEC, now, force, upbit_krw_listing)
+        await _run_job("upbit_caution_hedged", UPBIT_INTERVAL_SEC, now, force, upbit_caution_hedged)
         if delist_risk.MODEL_PATH.exists():
             await _run_job("delist_risk", DELIST_RISK_INTERVAL_SEC, now, force, delist)
     return status()
