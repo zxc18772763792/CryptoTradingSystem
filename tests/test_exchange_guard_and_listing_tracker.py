@@ -191,3 +191,40 @@ def test_young_trade_keeps_waiting_for_its_announcement(tmp_path):
     state_path = tmp_path / "tracker.json"
     asyncio.run(lt.tick(Young(now_ms), llm_extract=None, history={"161": [], "48": []}, state_path=state_path))
     assert "tokenomics" not in json.loads(state_path.read_text(encoding="utf-8"))["trades"]["NEWUSDT"]
+
+
+def test_prelaunch_and_listed_perps_are_never_marked_delisted(tmp_path):
+    # 2026-10-01: CTUSDT was in exchangeInfo one minute before it opened; klines answered 400
+    # and the trade was frozen as "delisted" although the contract then traded normally.
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    seen = []
+
+    class Exchange(_FakeClient):
+        def __init__(self, now_ms, onboard, status, gone=False):
+            super().__init__(now_ms)
+            self.onboard, self.status, self.gone = onboard, status, gone
+
+        async def get(self, url, params=None):
+            if url.endswith("/exchangeInfo"):
+                rows = [] if self.gone else [{"symbol": "NEWUSDT", "baseAsset": "NEW", "contractType": "PERPETUAL",
+                                              "quoteAsset": "USDT", "underlyingType": "COIN",
+                                              "onboardDate": self.onboard, "status": self.status}]
+                return _Resp({"symbols": rows})
+            if url.endswith("/klines"):
+                seen.append(params["symbol"])
+                return _Resp({"code": -1121, "msg": "Invalid symbol."}, 400)
+            return await super().get(url, params)
+
+    started = datetime.fromtimestamp((now_ms - 10 * DAY) / 1000, timezone.utc).isoformat()
+
+    def run(ex, name):
+        path = tmp_path / f"{name}.json"
+        if not path.exists():
+            lt.save_state({"started_at": started, "trades": {}}, path)
+        asyncio.run(lt.tick(ex, llm_extract=None, history=None, state_path=path))
+        return json.loads(path.read_text(encoding="utf-8"))["trades"]["NEWUSDT"]["status"]
+
+    assert run(Exchange(now_ms, onboard=now_ms + 60_000, status="PENDING_TRADING"), "prelaunch") == "waiting_d2"
+    assert seen == []  # not polled before it opens
+    assert run(Exchange(now_ms, onboard=now_ms - DAY, status="TRADING"), "live") == "waiting_d2"  # a 400 while listed is transient
+    assert run(Exchange(now_ms, onboard=now_ms - DAY, status="SETTLING", gone=True), "live") == "delisted"  # really gone
