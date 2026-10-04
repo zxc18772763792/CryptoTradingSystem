@@ -256,3 +256,64 @@ def test_notice_first_seen_after_entry_close_is_late_and_excluded(world, tmp_pat
     assert aaa["late"] is True and aaa["backfilled"] is False and aaa["status"] == "closed"
     assert summary["forward_late"] == 1 and summary["forward_completed"] == 0
     assert summary["retirement"]["verdict"] == "collecting"
+
+
+
+def _hedged(world, path):
+    return asyncio.run(uc.tick(world, state_path=path, strategy="caution_hedged"))
+
+
+def test_hedged_variant_adds_the_frozen_basket_leg(world, tmp_path):
+    path = tmp_path / "hedged.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    world.path = lambda k: (1.0, 1.0 if k == 0 else 0.9)  # coin -10% after entry
+    world.basket_close = lambda k: 1.1 if k >= 1 else 1.0  # market +10% over the hold
+    _hedged(world, path)
+    trade = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]
+    assert trade["evidence"]["market_basket"]["symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert "reason" not in trade  # no LLM labelling in the hedged copy
+
+    world.now = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)
+    summary = _hedged(world, path)
+    trade = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]
+    coin = (0.10 - uc.ROUND_TRIP_COST - 0.002) * 100
+    basket = 10.0 + 0.2 - uc.BASKET_FEE * 100  # +10% price, longs RECEIVE 0.2% (funding -0.002), 0.1% fees
+    assert trade["return_pct"] == pytest.approx(coin)
+    assert trade["hedge"]["net_basket_pct"] == pytest.approx(basket)
+    assert trade["hedged_return_pct"] == pytest.approx(coin + basket)
+    assert summary["forward_completed"] == 1 and summary["forward_mean_return_pct"] == pytest.approx(round(coin + basket, 2))
+    assert summary["forward_unhedged_mean_return_pct"] == pytest.approx(round(coin, 2))
+    assert json.loads(path.read_text(encoding="utf-8"))["retirement_rule"]["min_n"] == 20
+
+
+def test_hedged_basket_closes_on_the_coin_stop_day(world, tmp_path):
+    path = tmp_path / "hedged.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    world.path = lambda k: (1.5 if k == 3 else 1.0, 1.0)  # coin stopped on day 3
+    world.basket_close = lambda k: 1.0 + 0.01 * k        # basket +3% by the day-3 close, +7% by day 7
+    _hedged(world, path)
+    world.now = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)
+    _hedged(world, path)
+    trade = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]
+    assert trade["status"] == "stopped"
+    assert trade["hedge"]["return_pct"] == pytest.approx(3.0)  # closed with the coin, not held to day 7
+    assert trade["hedged_return_pct"] == pytest.approx(trade["return_pct"] + 3.0 + 0.2 - 0.1)
+
+
+def test_hedged_trade_waits_while_the_basket_cannot_settle(world, tmp_path):
+    path = tmp_path / "hedged.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    _hedged(world, path)
+    world.now = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)
+    real_get = world.get
+
+    async def no_basket_klines(url, params=None, headers=None):
+        if url.endswith("/klines") and (params or {}).get("symbol") in {"BTCUSDT", "ETHUSDT"}:
+            return _Resp([], 500)
+        return await real_get(url, params, headers)
+
+    world.get = no_basket_klines
+    summary = _hedged(world, path)
+    trade = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]
+    assert trade["status"] == "closed" and "hedged_return_pct" not in trade
+    assert summary["forward_completed"] == 0  # a trade without its hedge leg is not booked

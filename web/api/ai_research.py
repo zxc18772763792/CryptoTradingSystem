@@ -6371,6 +6371,17 @@ async def get_unlock_short_t7_tracker():
     return {"summary": unlock_short_tracker.summary(state, "t7"), "trades": trades[:80]}
 
 
+@router.get("/upbit-caution-hedged")
+async def get_upbit_caution_hedged_tracker():
+    """Forward paper tracker: Upbit caution short hedged with a liquid-perp basket long (research only)."""
+    from core.research import upbit_caution_tracker
+
+    path = upbit_caution_tracker.CAUTION_HEDGED_STATE_PATH
+    state = await asyncio.to_thread(upbit_caution_tracker.load_state, path)
+    trades = sorted(state.get("trades", {}).values(), key=lambda t: t.get("notice_at") or "", reverse=True)
+    return {"summary": upbit_caution_tracker.summary(state, "caution_hedged"), "trades": trades[:80]}
+
+
 @router.get("/xs-reversal")
 async def get_xs_reversal_tracker():
     """Forward paper tracker: daily cross-sectional reversal on 1h bars (research only)."""
