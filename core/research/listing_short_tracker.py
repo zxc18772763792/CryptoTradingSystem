@@ -160,7 +160,8 @@ async def _new_perps(client, since_ms: float) -> List[Dict[str, Any]]:
     resp = await client.get(f"{FAPI}/fapi/v1/exchangeInfo")
     resp.raise_for_status()
     return [
-        {"symbol": s["symbol"], "base": s.get("baseAsset") or s["symbol"][:-4], "onboard_ms": int(s["onboardDate"])}
+        {"symbol": s["symbol"], "base": s.get("baseAsset") or s["symbol"][:-4], "onboard_ms": int(s["onboardDate"]),
+         "contract_status": s.get("status")}
         for s in resp.json().get("symbols", [])
         if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT"
         and s.get("underlyingType") == "COIN" and int(s.get("onboardDate") or 0) >= since_ms
@@ -180,14 +181,21 @@ async def tick(client, *, llm_extract=None, history: Optional[Dict[str, List[Dic
             perps[symbol] = {k: trade[k] for k in ("symbol", "base", "onboard_ms")}
     for perp in perps.values():
         trade = state["trades"].setdefault(perp["symbol"], {
-            **perp, "backfilled": perp["onboard_ms"] < started.timestamp() * 1000,
+            **{k: perp[k] for k in ("symbol", "base", "onboard_ms")},
+            "backfilled": perp["onboard_ms"] < started.timestamp() * 1000,
             "discovered_at": now.isoformat(), "status": "waiting_d2",
         })
+        # Binance lists a perp in exchangeInfo before it opens; klines then answer 400.
+        # (2026-10-01: CTUSDT was found one minute before launch and wrongly marked delisted.)
+        if now.timestamp() * 1000 < perp["onboard_ms"]:
+            continue
         if trade["status"] not in {"closed", "stopped", "delisted"}:  # finished trades keep their result
             resp = await client.get(f"{FAPI}/fapi/v1/klines", params={"symbol": perp["symbol"], "interval": "1d",
                                                                    "startTime": perp["onboard_ms"] - 86_400_000, "limit": 20})
-            if resp.status_code == 400:  # the contract no longer exists: stop polling it
-                trade.update(status="delisted", updated_at=now.isoformat())
+            if resp.status_code == 400:
+                if perp.get("contract_status") in {"TRADING", "PENDING_TRADING"}:
+                    continue  # still listed: a transient 400, retry next pass
+                trade.update(status="delisted", updated_at=now.isoformat())  # gone from exchangeInfo: stop polling
             elif resp.status_code == 200:
                 bars = [[int(b[0]), float(b[1]), float(b[2]), float(b[3]), float(b[4])] for b in resp.json()]
                 funding = []
