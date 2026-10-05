@@ -25,16 +25,23 @@ HISTORY_PATH = ANNOUNCEMENT_DIR / "history.json"
 FLAGS_PATH = ANNOUNCEMENT_DIR / "active_flags.json"
 CMS_LIST_URL = "https://www.binance.com/bapi/composite/v1/public/cms/article/list/query"
 CMS_DETAIL_URL = "https://www.binance.com/bapi/composite/v1/public/cms/article/detail/query"
-CATALOGS = ("161", "48")  # delisting, new listings (Binance files some notices under either)
+# delisting, new listings, latest news. Monitoring-tag notices are filed under 49:
+# until 2026-10-06 the guard read only 161/48 and saw 1 of 26 monitoring-tag notices.
+CATALOGS = ("161", "48", "49")
 
 SEVERITY = {"delist": 3, "futures_delist": 2, "monitoring_tag": 1}
 MONITORING_TAG_DAYS = 180
+INITIAL_BACKFILL_PAGES = 12
 POST_EFFECTIVE_GRACE_DAYS = 7
 
 _DELIST = re.compile(r"^Binance Will Delist (.+?) on (\d{4}-\d{2}-\d{2})", re.I)
 _FUTURES_DELIST = re.compile(r"Binance Futures Will Delist", re.I)
 _MONITORING = re.compile(r"Monitoring Tag", re.I)
 _MONITORING_REMOVE = re.compile(r"Remov\w* (the )?Monitoring Tag", re.I)
+# "Extend the Monitoring Tag to Include A, B & C" / "... to GPS on <date>", up to a following
+# ", Remove ..." / " and Remove ..." clause or the trailing " on <date>".
+_MONITORING_ADD = re.compile(r"Monitoring Tag (?:to Include|to)\s+(.+?)(?:,?\s+and\s+Remove\b|,\s*Remove\b|\s+on\s+\d{4}-\d{2}-\d{2}|$)", re.I)
+_MONITORING_DROP = re.compile(r"Remove the Monitoring Tag for\s+(.+?)(?:,?\s+and\s+(?:the\s+|Remove\s+the\s+)?Seed Tag\b|,?\s+and\s+Remove\b|,\s*Remove\b|\s+on\s+\d{4}-\d{2}-\d{2}|$)", re.I)
 _DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
@@ -48,6 +55,20 @@ def _split_tokens(text: str) -> List[str]:
     return tokens
 
 
+def parse_monitoring_changes(title: str) -> Dict[str, List[str]]:
+    """Coins added to / removed from the monitoring tag by one notice (seed-tag changes ignored)."""
+    text = str(title or "")
+    added: List[str] = []
+    removed: List[str] = []
+    m = _MONITORING_ADD.search(text)
+    if m and not re.match(r"(?i)\s*(Monthly|Frequency)\b", m.group(1)):
+        added = [t for t in _split_tokens(m.group(1)) if not t.isdigit()]
+    m = _MONITORING_DROP.search(text)
+    if m:
+        removed = [t for t in _split_tokens(m.group(1)) if not t.isdigit()]
+    return {"added": added, "removed": removed}
+
+
 def parse_notice(title: str) -> Optional[Dict[str, Any]]:
     """Return {kind, tokens, effective_date} for a delisting-type title, else None."""
     text = str(title or "").strip()
@@ -59,14 +80,13 @@ def parse_notice(title: str) -> Optional[Dict[str, Any]]:
         date = _DATE.search(text)
         return {"kind": "futures_delist", "tokens": [t.upper() for t in tokens if t],
                 "effective_date": date.group(1) if date else None} if tokens else None
-    if _MONITORING.search(text) and not _MONITORING_REMOVE.search(text):
-        # "Extend the Monitoring Tag to Include A, B": "Include" must win over "Tag to".
-        marker = r"\bInclude\b" if re.search(r"\bInclude\b", text, re.I) else r"\bTag to\b|\bTag on\b|\bTag:\s*"
-        after = re.split(marker, text, maxsplit=1, flags=re.I)
-        if len(after) == 2:
-            body = _DATE.sub("", after[1]).replace(" on ", " ")
-            tokens = [t for t in _split_tokens(body) if not t.isdigit()]
-            return {"kind": "monitoring_tag", "tokens": tokens, "effective_date": None} if tokens else None
+    if _MONITORING.search(text):
+        # Mixed titles ("Include A & B, Remove the Monitoring Tag for C, ...") add A and B and
+        # clear C; they used to be skipped whole because they mention a removal.
+        changes = parse_monitoring_changes(text)
+        if changes["added"] or changes["removed"]:
+            return {"kind": "monitoring_tag", "tokens": changes["added"], "removed": changes["removed"],
+                    "effective_date": None}
     return None
 
 
@@ -90,7 +110,10 @@ async def refresh_history(client, history: Dict[str, List[Dict[str, Any]]], max_
     for cat in CATALOGS:
         known = {a.get("code") for a in history.get(cat, [])}
         fresh: List[Dict[str, Any]] = []
-        for page in range(1, max_pages + 1):
+        # A catalog with no history yet (49 was added on 2026-10-06) is filled back far enough
+        # to cover the 180-day monitoring-tag window (~50 news articles a month).
+        pages = max_pages if known else max(max_pages, INITIAL_BACKFILL_PAGES)
+        for page in range(1, pages + 1):
             resp = await client.get(CMS_LIST_URL, params={"type": 1, "catalogId": int(cat), "pageNo": page, "pageSize": 50})
             resp.raise_for_status()
             batch = [a for cc in ((resp.json().get("data") or {}).get("catalogs") or []) for a in (cc.get("articles") or [])]
@@ -132,7 +155,8 @@ def active_flags(history: Dict[str, List[Dict[str, Any]]], now: Optional[datetim
     now = now or datetime.now(timezone.utc)
     flags: Dict[str, Dict[str, Any]] = {}
     seen = set()
-    for article in (a for cat in CATALOGS for a in history.get(cat, [])):
+    articles = sorted((a for cat in CATALOGS for a in history.get(cat, [])), key=lambda a: int(a.get("release_ms") or 0))
+    for article in articles:
         if article.get("code") in seen:
             continue
         seen.add(article.get("code"))
@@ -145,7 +169,12 @@ def active_flags(history: Dict[str, List[Dict[str, Any]]], now: Optional[datetim
             expires = effective + timedelta(days=POST_EFFECTIVE_GRACE_DAYS)
         else:
             expires = announced + timedelta(days=MONITORING_TAG_DAYS if notice["kind"] == "monitoring_tag" else 30)
-        if not (announced <= now <= expires):
+        if announced > now:
+            continue
+        for token in notice.get("removed") or []:  # a later notice lifted the tag
+            if flags.get(token, {}).get("kind") == "monitoring_tag":
+                del flags[token]
+        if now > expires:
             continue
         for token in notice["tokens"]:
             current = flags.get(token)

@@ -71,6 +71,12 @@ class World:
             start = int(params["startTime"])
             return _Resp([[start + k * DAY, "1", "1", "1", str(self.basket_close((start + k * DAY - DAY0) // DAY))]
                           for k in range(params["limit"])])
+        if url == uc.BITHUMB_NOTICES:
+            return _Resp(getattr(self, "bithumb_notices", []))
+        if url == uc.BITHUMB_MARKETS:
+            return _Resp([{"market": f"KRW-{t}", "korean_name": t, "english_name": t,
+                           "market_warning": "CAUTION" if t in getattr(self, "bithumb_flags", set()) else "NONE"}
+                          for t in ("AAA", "CCC", "ZZZ")])
         if url == uc.UPBIT:
             return _Resp({"data": {"notices": self.notices if params.get("page") == 1 else []}})
         if url.startswith(uc.UPBIT + "/"):
@@ -317,3 +323,88 @@ def test_hedged_trade_waits_while_the_basket_cannot_settle(world, tmp_path):
     trade = json.loads(path.read_text(encoding="utf-8"))["trades"]["AAA|7001"]
     assert trade["status"] == "closed" and "hedged_return_pct" not in trade
     assert summary["forward_completed"] == 0  # a trade without its hedge leg is not booked
+
+
+
+def _bithumb(world, path, strategy="bithumb_caution"):
+    return asyncio.run(uc.tick(world, state_path=path, strategy=strategy))
+
+
+def test_bithumb_notice_in_kst_maps_to_its_utc_day(world, tmp_path):
+    world.bithumb_notices = [
+        {"categories": ["거래유의"], "title": "에이에이(AAA) 거래유의종목 지정", "pc_url": "https://feed.bithumb.com/notice/9001",
+         "published_at": "2026-10-05 15:00:00", "modified_at": "2026-10-05 14:59:00"},
+        {"categories": ["거래유의"], "title": "비비(BBB) 거래유의종목 지정 해제", "pc_url": "https://feed.bithumb.com/notice/9000",
+         "published_at": "2026-10-05 14:00:00", "modified_at": "2026-10-05 14:00:00"},
+    ]
+    path = tmp_path / "bithumb.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    _bithumb(world, path)
+    trades = json.loads(path.read_text(encoding="utf-8"))["trades"]
+    assert set(trades) == {"AAA|bt-9001"}  # the release notice is ignored
+    t = trades["AAA|bt-9001"]
+    assert t["day0_ms"] == DAY0 and t["notice_at"].startswith("2026-10-05T06:00")  # 15:00 KST = 06:00 UTC
+    assert t["source"] == "bithumb_notice" and t["status"] == "waiting_entry" and t["symbol"] == "AAAUSDT"
+
+
+def test_bithumb_flag_baseline_then_new_designation_and_no_double_count(world, tmp_path):
+    path = tmp_path / "bithumb.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    world.bithumb_flags = {"ZZZ"}  # already designated before the tracker started
+    _bithumb(world, path)
+    state = json.loads(path.read_text(encoding="utf-8"))
+    assert state["trades"] == {} and state["bithumb_caution_flags"] == ["ZZZ"]  # baseline only
+
+    world.bithumb_flags = {"ZZZ", "AAA"}  # AAA newly designated, seen through the market list
+    world.now = NOTICE_AT + timedelta(hours=3)
+    _bithumb(world, path)
+    trades = json.loads(path.read_text(encoding="utf-8"))["trades"]
+    flag_keys = [k for k in trades if k.startswith("AAA|bt-flag-")]
+    assert len(flag_keys) == 1 and trades[flag_keys[0]]["source"] == "bithumb_market_warning"
+
+    world.bithumb_notices = [{"categories": ["거래유의"], "title": "에이에이(AAA) 거래유의종목 지정",
+                              "pc_url": "https://feed.bithumb.com/notice/9001", "published_at": "2026-10-05 15:00:00"}]
+    world.now = NOTICE_AT + timedelta(hours=4)
+    _bithumb(world, path)
+    trades = json.loads(path.read_text(encoding="utf-8"))["trades"]
+    assert len([k for k in trades if k.startswith("AAA|")]) == 1  # the notice for the same designation is not a 2nd trade
+
+
+def test_bithumb_only_figures_exclude_joint_upbit_designations(world, tmp_path, monkeypatch):
+    upbit_state = tmp_path / "upbit.json"
+    uc.save_state({"started_at": "2026-09-01T00:00:00+00:00", "trades": {
+        "AAA|1": {"ticker": "AAA", "day0_ms": DAY0 - 2 * DAY}}}, upbit_state)
+    monkeypatch.setattr(uc, "STATE_PATH", upbit_state)
+    world.bithumb_notices = [{"categories": ["거래유의"], "title": "에이에이(AAA) 거래유의종목 지정",
+                              "pc_url": "https://feed.bithumb.com/notice/9001", "published_at": "2026-10-05 15:00:00"}]
+    world.path = lambda k: (1.0, 1.0 if k == 0 else 0.9)
+    path = tmp_path / "bithumb.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    _bithumb(world, path)
+    world.now = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)
+    summary = _bithumb(world, path)
+    assert summary["forward_completed"] == 1
+    assert summary["forward_bithumb_only_completed"] == 0  # Upbit designated AAA two days earlier: a joint event
+
+
+
+def test_bithumb_outage_keeps_the_flag_baseline(world, tmp_path):
+    path = tmp_path / "bithumb.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    world.bithumb_flags = {"ZZZ"}
+    _bithumb(world, path)
+    real_get = world.get
+
+    async def bithumb_down(url, params=None, headers=None):
+        if "bithumb" in url:
+            raise ConnectionError("tls handshake")
+        return await real_get(url, params, headers)
+
+    world.get = bithumb_down
+    world.bithumb_flags = {"ZZZ", "AAA"}
+    _bithumb(world, path)  # must not raise, must not forget the baseline
+    assert json.loads(path.read_text(encoding="utf-8"))["bithumb_caution_flags"] == ["ZZZ"]
+    world.get = real_get
+    world.now = NOTICE_AT + timedelta(hours=3)
+    _bithumb(world, path)  # back up: AAA's designation is still caught
+    assert any(k.startswith("AAA|bt-flag-") for k in json.loads(path.read_text(encoding="utf-8"))["trades"])

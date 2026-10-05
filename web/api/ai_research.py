@@ -6382,6 +6382,18 @@ async def get_upbit_caution_hedged_tracker():
     return {"summary": upbit_caution_tracker.summary(state, "caution_hedged"), "trades": trades[:80]}
 
 
+@router.get("/bithumb-caution")
+async def get_bithumb_caution_tracker(hedged: bool = False):
+    """Forward paper tracker: short after a Bithumb trading-caution designation (out-of-sample, research only)."""
+    from core.research import upbit_caution_tracker
+
+    strategy = "bithumb_caution_hedged" if hedged else "bithumb_caution"
+    path = upbit_caution_tracker.STRATEGIES[strategy]["state_path"]
+    state = await asyncio.to_thread(upbit_caution_tracker.load_state, path)
+    trades = sorted(state.get("trades", {}).values(), key=lambda t: t.get("notice_at") or "", reverse=True)
+    return {"summary": await asyncio.to_thread(upbit_caution_tracker.summary, state, strategy), "trades": trades[:80]}
+
+
 @router.get("/xs-reversal")
 async def get_xs_reversal_tracker():
     """Forward paper tracker: daily cross-sectional reversal on 1h bars (research only)."""

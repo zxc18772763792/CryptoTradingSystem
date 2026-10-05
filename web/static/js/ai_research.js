@@ -6611,6 +6611,21 @@ ${confirmHint}`,
       showReason: false,
       hedged: true,
     },
+    bithumb_caution: {
+      id: 'ai-bithumb-caution-tracker',
+      anchors: ['ai-upbit-caution-hedged-tracker', 'ai-upbit-caution-tracker'],
+      title: 'Bithumb 交易警示后 7 天做空 · 样本外纸面跟踪',
+      note: '规则与 Upbit 警示做空完全相同，信号换成 Bithumb（韩国第二大交易所）的"거래유의종목 지정"。Bithumb 公告历史受反爬保护、公开接口只给最近几条，无法回测，因此这是对 Upbit 结论的样本外检验。两路发现：警示公告本身，以及行情列表里新变为 CAUTION 的币（按首次发现时间）。与 Upbit 7 天内同时警示的币另行标注，"仅 Bithumb"才是独立证据。纸面记录，不下单。',
+      showReason: false,
+    },
+    bithumb_caution_hedged: {
+      id: 'ai-bithumb-caution-hedged-tracker',
+      anchors: ['ai-bithumb-caution-tracker', 'ai-upbit-caution-tracker'],
+      title: 'Bithumb 交易警示后 7 天做空（对冲版）· 样本外纸面跟踪',
+      note: 'Bithumb 警示信号 + 等额做多成交额最大 30 个永续的等权篮子（发现时冻结），两腿同进同出。表中"收益"为对冲后收益。纸面记录，不下单。',
+      showReason: false,
+      hedged: true,
+    },
   };
 
   function renderUpbitCautionTracker(payload, strategy = 'caution') {
@@ -6635,6 +6650,7 @@ ${confirmHint}`,
       <div style="margin-top:6px;color:var(--text-sub);">前向：待入场 ${Number(s.forward_waiting || 0)} · 持有 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)} · 均值 ${pct(s.forward_mean_return_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · 回填 ${Number(s.backfilled || 0)} · 无永续 ${Number(s.no_perp || 0)} · 晚到 ${Number(s.forward_late || 0)}</div>
       ${trackerVerdictLine(s)}
       <div class="u-note" style="margin-top:4px;">当时证据：入场盘口 ${Number(s.evidence_coverage?.book_at_entry || 0)}/${Number(s.evidence_coverage?.completed || 0)} · 5 分钟路径 ${Number(s.evidence_coverage?.path || 0)} · 同期市场对照 ${Number(s.evidence_coverage?.market_control || 0)}（扣除市场后均值 ${pct(s.forward_hedged_mean_return_pct)}）。晚到 = 入场收盘后才发现公告，不计入前向统计。</div>
+      ${s.forward_bithumb_only_completed === undefined ? '' : `<div class="u-note" style="margin-top:4px;">仅 Bithumb（Upbit 7 天内未同时警示，独立证据）：完成 ${Number(s.forward_bithumb_only_completed || 0)} 笔 · 均值 ${pct(s.forward_bithumb_only_mean_return_pct)}</div>`}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${esc(cfg.note)}</div>
       ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>代币</th><th>公告时间</th><th>状态</th><th>收益（空头）</th><th>资金费</th>${cfg.showReason ? '<th>原因</th>' : ''}<th></th></tr></thead><tbody>
         ${trades.map((t) => `<tr><td>${esc(t.symbol || t.ticker)}</td><td>${esc(t.notice_at ? fmtTs(new Date(t.notice_at)) : '--')}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td>${(() => { const v = cfg.hedged ? t.hedged_return_pct : t.return_pct; return `<td style="color:${Number(v) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(v)}</td>`; })()}<td>${t.funding == null ? '--' : pct(Number(t.funding) * 100)}</td>${cfg.showReason ? `<td title="${esc(t.reason?.summary_en || '')}">${esc(reasonNames[t.reason?.reason] || '--')}</td>` : ''}<td>${t.backfilled ? '回填' : (t.late ? '晚到' : '')}</td></tr>`).join('')}
@@ -6650,6 +6666,12 @@ ${confirmHint}`,
     } catch (err) { /* optional panel */ }
     try {
       renderUpbitCautionTracker(await aiApi('/upbit-caution-hedged', { timeoutMs: 12000 }), 'caution_hedged');
+    } catch (err) { /* optional panel */ }
+    try {
+      renderUpbitCautionTracker(await aiApi('/bithumb-caution', { timeoutMs: 12000 }), 'bithumb_caution');
+    } catch (err) { /* optional panel */ }
+    try {
+      renderUpbitCautionTracker(await aiApi('/bithumb-caution?hedged=true', { timeoutMs: 12000 }), 'bithumb_caution_hedged');
     } catch (err) { /* optional panel */ }
   }
 
