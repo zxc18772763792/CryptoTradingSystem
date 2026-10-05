@@ -24,12 +24,12 @@ DAY = 86_400_000
 ])
 def test_parse_notice(title, kind, tokens, date):
     notice = en.parse_notice(title)
+    notice.pop("removed", None)
     assert notice == {"kind": kind, "tokens": tokens, "effective_date": date}
 
 
 @pytest.mark.parametrize("title", [
     "Binance Will List Hyperliquid (HYPE) with Seed Tag Applied",
-    "Binance Will Remove the Monitoring Tag for ABC",
     "Notice of Removal of Spot Trading Pairs - 2026-09-25",
 ])
 def test_parse_notice_ignores_other_titles(title):
@@ -228,3 +228,50 @@ def test_prelaunch_and_listed_perps_are_never_marked_delisted(tmp_path):
     assert seen == []  # not polled before it opens
     assert run(Exchange(now_ms, onboard=now_ms - DAY, status="TRADING"), "live") == "waiting_d2"  # a 400 while listed is transient
     assert run(Exchange(now_ms, onboard=now_ms - DAY, status="SETTLING", gone=True), "live") == "delisted"  # really gone
+
+
+
+@pytest.mark.parametrize("title, added, removed", [
+    # mixed titles used to be skipped whole because they mention a removal
+    ("Binance Will Extend the Monitoring Tag to Include BAL, CTXC & SUN and Remove the Monitoring Tag for MLN & ZEN on 2024-07-01",
+     ["BAL", "CTXC", "SUN"], ["MLN", "ZEN"]),
+    ("Binance Will Extend the Monitoring Tag to Include STMX & TROY, Remove the Monitoring Tag for CVX & SUN, and Remove the Seed Tag for ARKM, BLUR on 2025-01-02",
+     ["STMX", "TROY"], ["CVX", "SUN"]),
+    ("Binance Will Extend the Monitoring Tag to Include ANT, ZEC & ZEN, and Remove the Seed Tag for GMX & SUSHI on 2024-01-04",
+     ["ANT", "ZEC", "ZEN"], []),
+    ("Binance Will Extend the Monitoring Tag to GPS on 2025-03-07", ["GPS"], []),
+    ("Binance Will Remove the Monitoring Tag for ZEC and the Seed Tag for ENA, PYTH on 2025-07-09", [], ["ZEC"]),
+    ("Binance Will Change the Monitoring Tag Inclusion Frequency to Monthly and Extend the Monitoring Tag to Include AERGO & NULS on 2025-03-04",
+     ["AERGO", "NULS"], []),
+])
+def test_monitoring_changes_cover_mixed_titles(title, added, removed):
+    assert en.parse_monitoring_changes(title) == {"added": added, "removed": removed}
+
+
+def test_monitoring_tag_removal_clears_the_flag_and_catalog_49_is_read():
+    ms = lambda s: int(datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp() * 1000)  # noqa: E731
+    history = {"161": [], "48": [], "49": [
+        {"code": "x", "title": "Binance Will Extend the Monitoring Tag to Include AAA & BBB on 2026-06-01", "release_ms": ms("2026-06-01")},
+        {"code": "y", "title": "Binance Will Extend the Monitoring Tag to Include CCC, Remove the Monitoring Tag for AAA on 2026-08-01", "release_ms": ms("2026-08-01")},
+    ]}
+    flags = en.active_flags(history, now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    assert set(flags) == {"BBB", "CCC"}  # AAA's tag was lifted by the later notice
+
+
+
+def test_an_empty_catalog_is_backfilled_deeper_than_a_known_one():
+    calls = []
+
+    class Cms:
+        async def get(self, url, params=None):
+            calls.append((params["catalogId"], params["pageNo"]))
+            page = params["pageNo"]
+            arts = [{"code": f"{params['catalogId']}-{page}-{i}", "title": "x", "releaseDate": 1} for i in range(50)]
+            return _Resp({"data": {"catalogs": [{"articles": arts}]}})
+
+    history = {"161": [{"code": "161-1-0"}], "48": [{"code": "48-1-0"}], "49": []}
+    asyncio.run(en.refresh_history(Cms(), history))
+    pages = {c: max(p for cc, p in calls if cc == c) for c in (161, 48, 49)}
+    assert pages[161] == 1 and pages[48] == 1          # known catalogs stop at the first page with a known code
+    assert pages[49] == en.INITIAL_BACKFILL_PAGES      # the new catalog reaches back ~6+ months
+    assert len(history["49"]) == 50 * en.INITIAL_BACKFILL_PAGES
