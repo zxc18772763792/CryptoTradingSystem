@@ -168,11 +168,16 @@ _LISTENER_WATCHDOG_ENABLED = _env_bool("LISTENER_WATCHDOG_ENABLED", True)
 # (core/research/announcement_short_tracker.py). It needs ~90 s polling, which the
 # 5-minute research scheduler cannot give, so it runs as its own runtime task.
 _ANNOUNCEMENT_SHORT_ENABLED = _env_bool("ANNOUNCEMENT_SHORT_TRACKER_ENABLED", True)
-# Readiness used to fail on ANY stale WS symbol: one thin coin (MOVE/USDT, ticking every
-# 2-3 min, 2026-10-07) held /readyz at 503 while the feed was healthy. Now a stale share
-# above this fraction fails readiness; fewer is reported as "degraded" with the names.
+# Readiness used to fail on ANY stale WS symbol: thin coins (MOVE/USDT, USUAL/USDT ticking
+# every 2-3 min, 2026-10-07) held /readyz at 503 while the feed was healthy, and with only
+# ~6 subscribed symbols a share threshold alone still flapped. Now readiness fails when a
+# core symbol (these tick constantly, so staleness means a feed problem) or more than this
+# share of symbols is stale; anything less is "degraded" with the names listed.
 # Trading does not rely on this gate: the agent checks each symbol's freshness itself.
-_READINESS_MAX_STALE_FRACTION = min(1.0, max(0.0, _env_float("READINESS_MAX_STALE_SYMBOL_FRACTION", 0.25)))
+_READINESS_MAX_STALE_FRACTION = min(1.0, max(0.0, _env_float("READINESS_MAX_STALE_SYMBOL_FRACTION", 0.5)))
+_READINESS_CORE_SYMBOLS = tuple(
+    s.strip().upper() for s in os.getenv("READINESS_CORE_SYMBOLS", "BTC/USDT,ETH/USDT").split(",") if s.strip()
+)
 _LISTENER_WATCHDOG_PORT = int(_env_float("LISTENER_WATCHDOG_PORT", 8000))
 _LISTENER_WATCHDOG_INTERVAL_SEC = max(5.0, _env_float("LISTENER_WATCHDOG_INTERVAL_SEC", 15.0))
 _LISTENER_WATCHDOG_MAX_FAILURES = max(1, int(_env_float("LISTENER_WATCHDOG_MAX_FAILURES", 3)))
@@ -2894,7 +2899,7 @@ def _parse_health_timestamp(value: Any) -> Optional[datetime]:
         return None
 
 
-def _stale_ws_symbols(limit: int = 10) -> List[str]:
+def _stale_ws_symbols(limit: int = 50) -> List[str]:
     """Names of stale WS ticker symbols, for the readiness report (best effort)."""
     try:
         symbols = market_data_hub.snapshot(include_symbols=True).get("symbols") or {}
@@ -2956,7 +2961,10 @@ def _runtime_readiness_snapshot(app_instance: FastAPI) -> Tuple[bool, Dict[str, 
             stale_count = int(status.get("ws_stale_symbol_count") or 0)
             ws_count = int(status.get("ws_symbol_count") or 0)
             stale_fraction = stale_count / max(ws_count, 1)
-            market_ok = feed_healthy and hub_healthy and stale_fraction <= _READINESS_MAX_STALE_FRACTION
+            stale_names = _stale_ws_symbols() if stale_count else []
+            core_stale = sorted({n for n in stale_names if n.split(":", 1)[-1].upper() in _READINESS_CORE_SYMBOLS})
+            market_ok = (feed_healthy and hub_healthy and not core_stale
+                         and stale_fraction <= _READINESS_MAX_STALE_FRACTION)
             market_check = {
                 "status": ("ok" if stale_count == 0 else "degraded") if market_ok else "stale",
                 "mode": _MARKET_WS_MODE,
@@ -2969,7 +2977,9 @@ def _runtime_readiness_snapshot(app_instance: FastAPI) -> Tuple[bool, Dict[str, 
                 "last_tick_age_ms": status.get("last_tick_age_ms"),
             }
             if stale_count:
-                market_check["stale_symbols"] = _stale_ws_symbols()
+                market_check["stale_symbols"] = stale_names
+            if core_stale:
+                market_check["core_symbols_stale"] = core_stale
             if not market_ok:
                 ready = False
         except Exception as exc:
