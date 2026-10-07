@@ -164,6 +164,10 @@ _EXCHANGE_WATCHDOG_ENABLED = _env_bool(
 # core/utils/listener_watchdog.py). Launchers pin LISTENER_WATCHDOG_PORT to the
 # port they bind; default matches the standard local deployment.
 _LISTENER_WATCHDOG_ENABLED = _env_bool("LISTENER_WATCHDOG_ENABLED", True)
+# Paper tracker that shorts minutes after Binance monitoring-tag / delisting notices
+# (core/research/announcement_short_tracker.py). It needs ~90 s polling, which the
+# 5-minute research scheduler cannot give, so it runs as its own runtime task.
+_ANNOUNCEMENT_SHORT_ENABLED = _env_bool("ANNOUNCEMENT_SHORT_TRACKER_ENABLED", True)
 _LISTENER_WATCHDOG_PORT = int(_env_float("LISTENER_WATCHDOG_PORT", 8000))
 _LISTENER_WATCHDOG_INTERVAL_SEC = max(5.0, _env_float("LISTENER_WATCHDOG_INTERVAL_SEC", 15.0))
 _LISTENER_WATCHDOG_MAX_FAILURES = max(1, int(_env_float("LISTENER_WATCHDOG_MAX_FAILURES", 3)))
@@ -2147,6 +2151,30 @@ async def _ai_research_scheduler_worker(app: FastAPI, stop_event: asyncio.Event)
             await research_scheduler.stop()
 
 
+async def _announcement_short_worker(stop_event: asyncio.Event) -> None:
+    from core.research import announcement_short_tracker as tracker
+    from core.research.exchange_research_runner import _client, _verdict_alert
+
+    for _ in range(30):  # let startup settle before the first poll
+        if stop_event.is_set():
+            return
+        await asyncio.sleep(1)
+    while not stop_event.is_set():
+        try:
+            async with _client() as client:
+                summaries = await tracker.tick(client)
+            for kind, summary in summaries.items():
+                await _verdict_alert(tracker.KINDS[kind]["rule"], summary)
+            _touch_runtime_task("announcement_short", success=True)
+        except Exception as exc:  # noqa: BLE001 - retried next poll
+            _touch_runtime_task("announcement_short", success=False)
+            logger.debug(f"announcement short tracker pass failed: {exc}")
+        for _ in range(tracker.POLL_SEC):
+            if stop_event.is_set():
+                return
+            await asyncio.sleep(1)
+
+
 def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
     factories: Dict[str, Dict[str, Any]] = {
         "runtime": {
@@ -2184,6 +2212,11 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         factories["exchange_watchdog"] = {
             "factory": lambda stop_event: _exchange_watchdog_worker(stop_event),
             "restart_on_failure": True,  # must stay alive for the session lifetime
+        }
+    if _ANNOUNCEMENT_SHORT_ENABLED:
+        factories["announcement_short"] = {
+            "factory": lambda stop_event: _announcement_short_worker(stop_event),
+            "restart_on_failure": True,
         }
     if _LISTENER_WATCHDOG_ENABLED:
         factories["listener_watchdog"] = {

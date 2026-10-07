@@ -38,7 +38,9 @@ TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解�
                  "upbit_caution": "Upbit 警示后做空", "upbit_krw_listing": "Upbit 韩元上币后做空",
                  "unlock_short_t7": "解锁前最后一周做空", "xs_reversal": "日线横截面反转",
                  "upbit_caution_hedged": "Upbit 警示后做空（对冲版）", "bithumb_caution": "Bithumb 警示后做空",
-                 "bithumb_caution_hedged": "Bithumb 警示后做空（对冲版）"}
+                 "bithumb_caution_hedged": "Bithumb 警示后做空（对冲版）",
+                 "announcement_short_monitor": "币安监控标签公告后做空 24h",
+                 "announcement_short_delist": "币安下架公告后做空 4h"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
 UPBIT_INTERVAL_SEC = 1800

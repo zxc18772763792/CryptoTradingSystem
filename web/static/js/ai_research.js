@@ -6701,6 +6701,40 @@ ${confirmHint}`,
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器在每天 00:00 UTC 后的第一个检查建仓。</div>'}`;
   }
 
+  function renderAnnouncementShortTracker(payload) {
+    const anchor = ['ai-bithumb-caution-hedged-tracker', 'ai-upbit-caution-tracker', 'ai-supply-factor-tracker']
+      .map((id) => document.getElementById(id)).find(Boolean);
+    if (!anchor) return;
+    let panel = document.getElementById('ai-announcement-short-tracker');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'ai-announcement-short-tracker';
+      panel.className = 'card';
+      panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
+      anchor.insertAdjacentElement('afterend', panel);
+    }
+    const pct = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(d)}%`);
+    const names = { binance_monitor: '监控标签 · 持有 24h · +50% 止损', binance_delist: '现货下架 · 持有 4h · +30% 止损' };
+    const statusNames = { open: '持有中', closed: '已平仓', stopped: '止损', no_perp: '无永续', no_price: '无报价', delisted: '合约下架' };
+    const kinds = ['binance_monitor', 'binance_delist'];
+    const rows = kinds.flatMap((k) => ((payload?.[k]?.trades) || []).map((t) => ({ ...t, kind: k })))
+      .sort((a, b) => String(b.detected_at || '').localeCompare(String(a.detected_at || ''))).slice(0, 20);
+    const poll = payload?.poll || {};
+    panel.innerHTML = `
+      <h3 style="margin:0;">币安公告后短线做空 · 纸面跟踪</h3>
+      ${kinds.map((k) => { const s = payload?.[k]?.summary || {}; return `<div style="margin-top:6px;color:var(--text-sub);">${esc(names[k])}：完成 ${Number(s.forward_completed || 0)} · 持有 ${Number(s.forward_open || 0)} · 均值 ${pct(s.forward_mean_return_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · 扣大盘 ${pct(s.forward_hedged_mean_return_pct)} · 晚到 ${Number(s.late || 0)} · 中位发现延迟 ${s.median_latency_sec == null ? '--' : `${Number(s.median_latency_sec).toFixed(0)}s`} · 卖 1 万美元实测冲击 ${pct(s.median_sell_10k_impact_pct, 3)}（假设 0.2%）</div>${trackerVerdictLine(s)}`; }).join('')}
+      <div class="u-note" style="margin-top:4px;">每 90 秒检查币安公告栏目（监控标签、下架）。首次发现即按当时最新成交价纸面做空永续，发现延迟计入结果；发布后超过 15 分钟才发现记为"晚到"不计入。收益扣 0.3%（手续费 0.1% + 假设滑点 0.2%）并计资金费；记录入场盘口与卖出 1 万美元的实测冲击，用来检验滑点假设。回测为 120 个组合中挑出，以前向结果为准。最近检查：${esc(poll.last_poll_at ? fmtTs(new Date(poll.last_poll_at)) : '--')}。纸面记录，不下单。</div>
+      ${rows.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>类型</th><th>代币</th><th>公告时间</th><th>发现延迟</th><th>状态</th><th>收益（空头）</th><th>扣大盘</th></tr></thead><tbody>
+        ${rows.map((t) => `<tr><td>${t.kind === 'binance_monitor' ? '监控标签' : '下架'}</td><td>${esc(t.symbol || t.token)}</td><td>${esc(t.published_at ? fmtTs(new Date(t.published_at)) : '--')}</td><td>${t.latency_sec == null ? '--' : `${Number(t.latency_sec).toFixed(0)}s`}${t.late ? ' 晚到' : ''}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td><td style="color:${Number(t.return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.return_pct)}</td><td>${pct(t.evidence?.market_control?.hedged_return_pct)}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；币安大约每月发布 1–2 条监控标签或下架公告。</div>'}`;
+  }
+
+  async function refreshAnnouncementShortTracker() {
+    try {
+      renderAnnouncementShortTracker(await aiApi('/announcement-short', { timeoutMs: 12000 }));
+    } catch (err) { /* optional panel */ }
+  }
+
   async function refreshXsReversalTracker() {
     try {
       renderXsReversalTracker(await aiApi('/xs-reversal', { timeoutMs: 12000 }));
@@ -6748,7 +6782,7 @@ ${confirmHint}`,
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
-    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).then(() => refreshXsReversalTracker()).catch(() => {});
+    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).then(() => refreshXsReversalTracker()).then(() => refreshAnnouncementShortTracker()).catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);

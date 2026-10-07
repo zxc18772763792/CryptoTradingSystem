@@ -6394,6 +6394,14 @@ async def get_bithumb_caution_tracker(hedged: bool = False):
     return {"summary": await asyncio.to_thread(upbit_caution_tracker.summary, state, strategy), "trades": trades[:80]}
 
 
+@router.get("/announcement-short")
+async def get_announcement_short_tracker():
+    """Forward paper tracker: short minutes after Binance monitoring-tag / delisting notices (research only)."""
+    from core.research import announcement_short_tracker
+
+    return await asyncio.to_thread(announcement_short_tracker.load_summaries)
+
+
 @router.get("/xs-reversal")
 async def get_xs_reversal_tracker():
     """Forward paper tracker: daily cross-sectional reversal on 1h bars (research only)."""
