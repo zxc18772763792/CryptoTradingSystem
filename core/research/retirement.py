@@ -44,6 +44,10 @@ RULES: Dict[str, Dict[str, Any]] = {
     # history exists, so the bar is the Upbit backtest the rule was copied from.
     "bithumb_caution": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 7.5},
     "bithumb_caution_hedged": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 5.0},
+    # added 2026-10-07 with the announcement short tracker, before its first forward trade;
+    # means from scripts/announcement_intraday_study.py --frozen (with the registered stops)
+    "announcement_short_monitor": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 4.3},
+    "announcement_short_delist": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 5.8},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",
