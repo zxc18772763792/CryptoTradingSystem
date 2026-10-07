@@ -1449,3 +1449,47 @@ def test_exchange_watchdog_requires_consecutive_failures_and_cooldown(monkeypatc
     # count and the 300s cooldown (loop time barely advances under the fake
     # sleep) blocks every later attempt.
     assert calls["reconnect"] == 1
+
+
+def _ready_with_market(monkeypatch, status):
+    class _Task:
+        @staticmethod
+        def done():
+            return False
+
+    fake_app = FastAPI()
+    fake_app.state.runtime_task_factories = {"runtime": {}}
+    fake_app.state.runtime_supervisor = SimpleNamespace(get_task=lambda name: SimpleNamespace(task=_Task()))
+    now = web_main.datetime.now(web_main.timezone.utc).isoformat()
+    monkeypatch.setattr(web_main.runtime_state, "get_task_diagnostics",
+                        lambda: {"runtime": {"running": True, "state": "running", "last_heartbeat_at": now}})
+    monkeypatch.setattr(web_main, "_is_market_ws_stream_enabled", lambda: True)
+    monkeypatch.setattr(web_main, "_MARKET_WS_MODE", "strategy_primary")
+    monkeypatch.setattr(web_main, "_market_ws_status_snapshot", lambda: status)
+    monkeypatch.setattr(web_main, "_stale_ws_symbols", lambda: ["binance:MOVE/USDT"])
+    return web_main._runtime_readiness_snapshot(fake_app)
+
+
+def test_one_thin_stale_symbol_degrades_but_does_not_fail_readiness(monkeypatch):
+    # 2026-10-07: MOVE/USDT ticking every 2-3 min held /readyz at 503 with a healthy feed.
+    ready, checks = _ready_with_market(monkeypatch, {"feed_healthy": True, "ws_hub_healthy": True,
+                                                     "ws_stale_symbol_count": 1, "ws_symbol_count": 20,
+                                                     "last_tick_age_ms": 500})
+    assert ready is True
+    assert checks["market_data"]["status"] == "degraded"
+    assert checks["market_data"]["stale_symbols"] == ["binance:MOVE/USDT"]
+
+
+def test_many_stale_symbols_or_a_dead_feed_still_fail_readiness(monkeypatch):
+    ready, checks = _ready_with_market(monkeypatch, {"feed_healthy": True, "ws_hub_healthy": True,
+                                                     "ws_stale_symbol_count": 6, "ws_symbol_count": 20})
+    assert ready is False and checks["market_data"]["status"] == "stale"  # 30% > 25%
+    ready, _ = _ready_with_market(monkeypatch, {"feed_healthy": True, "ws_hub_healthy": True,
+                                                "ws_stale_symbol_count": 1, "ws_symbol_count": 2})
+    assert ready is False  # with few symbols one stale symbol is a large share
+    ready, _ = _ready_with_market(monkeypatch, {"feed_healthy": False, "ws_hub_healthy": True,
+                                                "ws_stale_symbol_count": 0, "ws_symbol_count": 20})
+    assert ready is False
+    ready, checks = _ready_with_market(monkeypatch, {"feed_healthy": True, "ws_hub_healthy": True,
+                                                     "ws_stale_symbol_count": 0, "ws_symbol_count": 20})
+    assert ready is True and checks["market_data"]["status"] == "ok" and "stale_symbols" not in checks["market_data"]
