@@ -2213,8 +2213,40 @@ async function loadTradingTabData(){
 await refreshTradingCore();
 scheduleTradingSecondaryLoads();
 }
+function renderResearchTrackers(d){
+const tb=document.getElementById('research-trackers-tbody');if(!tb)return;
+const rows=Array.isArray(d?.trackers)?d.trackers:[];
+const pct=(v,dg=2)=>(v===null||v===undefined||Number.isNaN(Number(v)))?'--':`${Number(v)>=0?'+':''}${Number(v).toFixed(dg)}%`;
+const color=(v)=>(v===null||v===undefined)?'':`color:${Number(v)>=0?'var(--positive)':'var(--negative)'};`;
+const verdictColor={confirmed:'var(--positive)',on_track:'var(--positive)',watch:'var(--warning)',retire:'var(--negative)'};
+if(!rows.length){tb.innerHTML='<tr><td colspan="10">暂无跟踪器</td></tr>';return;}
+tb.innerHTML=rows.map(r=>{
+if(r.error)return `<tr><td>${esc(r.name)}</td><td colspan="9">读取失败：${esc(r.error)}</td></tr>`;
+const ci=Array.isArray(r.ci90_pct)?` <span class="u-hint">[${pct(r.ci90_pct[0])}, ${pct(r.ci90_pct[1])}]</span>`:'';
+const unit=r.unit||'笔';
+const extra=[r.open?`持仓 ${Number(r.open)}`:'',r.waiting?`待入场 ${Number(r.waiting)}`:'',r.late?`晚到 ${Number(r.late)}`:''].filter(Boolean).join(' · ');
+const marks=(r.open_marks||[]).map(m=>`<span style="${color(m.mark_pct)}">${esc(m.label)} ${pct(m.mark_pct,1)}</span>`).join('，');
+const hedgeNote=(r.id||'').includes('hedged')&&marks?' <span class="u-hint">(做空腿)</span>':'';
+const win=r.win_rate===null||r.win_rate===undefined?'--':`${(Number(r.win_rate)*100).toFixed(0)}%`;
+return `<tr><td><strong>${esc(r.name)}</strong><div class="u-hint">${esc(r.group||'')}</div></td>`+
+`<td style="max-width:320px;white-space:normal;">${esc(r.rule||'')}</td>`+
+`<td style="color:${verdictColor[r.verdict]||'var(--text-sub)'};" title="${esc(r.verdict_reason||'')}">${esc(r.verdict_label||r.verdict||'--')}</td>`+
+`<td>${Number(r.n||0)} / ${r.min_n??'--'} ${esc(unit)}${extra?`<div class="u-hint">${esc(extra)}</div>`:''}</td>`+
+`<td style="${color(r.mean_pct)}">${pct(r.mean_pct)}${ci}</td>`+
+`<td>${win}</td>`+
+`<td style="${color(r.total_pct)}">${pct(r.total_pct)}</td>`+
+`<td>${pct(r.backtest_mean_pct)} / ${esc(unit)}</td>`+
+`<td style="white-space:normal;">${marks?marks+hedgeNote:'--'}</td>`+
+`<td>${esc(fmtDateTime(r.updated_at))}</td></tr>`;}).join('');
+const meta=document.getElementById('research-trackers-meta');
+if(meta){const done=rows.reduce((a,r)=>a+Number(r.n||0),0);const open=rows.reduce((a,r)=>a+Number(r.open||0),0);meta.textContent=`共 ${rows.length} 个跟踪器 · 已完成前向 ${done} 个样本 · 持仓 ${open} · 累计 = 前向均值 × 样本数（各跟踪器单位不同：笔 / 天 / 月）· 生成于 ${fmtDateTime(d.generated_at)}`;}
+}
+async function loadResearchTrackers(){
+try{renderResearchTrackers(await api('/ai/research-trackers',{timeoutMs:15000}));}
+catch(e){const tb=document.getElementById('research-trackers-tbody');if(tb)tb.innerHTML=`<tr><td colspan="10">研究跟踪器加载失败：${esc(e.message||'')}</td></tr>`;}
+}
 async function loadStrategiesTabData(){
-await Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
+await Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth(),loadResearchTrackers()]);
 }
 async function loadDataTabData(){
 await ensureDataTabInitialized();
@@ -9351,7 +9383,7 @@ setInterval(()=>{
   if(isTabBootstrapping(tab))return;
   if(tab==='dashboard')refreshDashboardCore();
   else if(tab==='trading')refreshTradingCore();
-  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
+  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadResearchTrackers()]);
   else if(tab==='ai-research')refreshAiResearchModules();
   else if(tab==='ai-agent')refreshAiResearchModules();
 },CORE_TAB_POLL_INTERVAL_MS);

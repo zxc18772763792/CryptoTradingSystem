@@ -705,6 +705,31 @@
                     </div>
 
                     <div class="card wide">
+                        <h3>研究纸面跟踪器 · 前向表现</h3>
+                        <div class="u-hint" style="margin-bottom:6px;">这些是研究用的纸面账本：按事先冻结的规则记录"如果当时照做会怎样"，不下单、不进策略运行器，所以不在上表。只统计规则时点内的前向交易（回填、晚到不计）；判定按首笔交易前登记的退役规则。</div>
+                        <div class="table-container strategy-scroll">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>跟踪器</th>
+                                        <th>规则</th>
+                                        <th>判定</th>
+                                        <th>前向样本</th>
+                                        <th>前向均值（90% 区间）</th>
+                                        <th>胜率</th>
+                                        <th>累计</th>
+                                        <th>回测参照</th>
+                                        <th>持仓（浮动）</th>
+                                        <th>更新</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="research-trackers-tbody"><tr><td colspan="10">加载中...</td></tr></tbody>
+                            </table>
+                        </div>
+                        <div id="research-trackers-meta" class="u-hint" style="margin-top:6px;"></div>
+                    </div>
+
+                    <div class="card wide">
                         <h3>可用策略</h3>
                         <div id="strategies-list" class="strategies-grid">加载中...</div>
                     </div>

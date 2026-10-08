@@ -6394,6 +6394,15 @@ async def get_bithumb_caution_tracker(hedged: bool = False):
     return {"summary": await asyncio.to_thread(upbit_caution_tracker.summary, state, strategy), "trades": trades[:80]}
 
 
+@router.get("/research-trackers")
+async def get_research_trackers():
+    """Forward performance of every paper tracker, one normalized row each (strategies tab, read-only)."""
+    from core.research import tracker_registry
+
+    rows = await asyncio.to_thread(tracker_registry.tracker_rows)
+    return {"generated_at": datetime.now(timezone.utc).isoformat(), "trackers": rows}
+
+
 @router.get("/announcement-short")
 async def get_announcement_short_tracker():
     """Forward paper tracker: short minutes after Binance monitoring-tag / delisting notices (research only)."""
