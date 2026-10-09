@@ -296,6 +296,32 @@ def should_failover_openai_status(status: Any) -> bool:
         return False
 
 
+# Relays that report an exhausted account as HTTP 400 ("credit insufficient balance: balance=0").
+# Another endpoint can still serve the request, so these fail over like a 402.
+_BILLING_ERROR_MARKERS = (
+    "insufficient balance",
+    "insufficient_quota",
+    "insufficient quota",
+    "exceeded your current quota",
+    "payment required",
+    "余额不足",
+)
+
+
+def should_failover_openai_response(status: Any, body: Any = "") -> bool:
+    """Failover statuses, plus billing errors that relays return as 400/402."""
+    if should_failover_openai_status(status):
+        return True
+    try:
+        code = int(status)
+    except Exception:
+        return False
+    if code == 402:
+        return True
+    text = str(body or "").lower()
+    return code == 400 and any(marker in text for marker in _BILLING_ERROR_MARKERS)
+
+
 def responses_api_unavailable(status: Any, error_text: Any = "") -> bool:
     try:
         status_code = int(status)

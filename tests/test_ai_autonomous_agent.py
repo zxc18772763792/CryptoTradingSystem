@@ -29,6 +29,11 @@ def _isolate_agent_overlay(tmp_path, monkeypatch):
     monkeypatch.setattr(_mod.execution_engine, "get_live_trade_review", lambda **kwargs: {"items": []})
     monkeypatch.setattr(_mod.strategy_manager, "get_strategy_allocation", lambda name: 0.0)
     monkeypatch.setattr(_mod.position_manager, "get_all_positions", lambda: [])
+    # The re-entry cooldown reads the process-wide close history; keep tests independent of it.
+    monkeypatch.setattr(_mod.position_manager, "get_closed_positions", lambda limit=None, scope=None: [])
+    # _sample_df rises ~19% a day, which the anti-chase filter would block; it has its own tests
+    # (tests/test_agent_entry_filters.py) and these exercise the decision/execution mechanics.
+    monkeypatch.setattr(settings, "AI_AUTONOMOUS_AGENT_CHASE_MAX_MOVE_24H", 0.0)
     monkeypatch.setattr(
         _mod.risk_manager,
         "get_risk_report",
@@ -3440,7 +3445,8 @@ def test_build_signal_embeds_profit_management_metadata(tmp_path: Path):
     assert metadata["profit_protect_enabled"] is True
     assert metadata["profit_protect_trigger_pct"] >= module._AI_PROFIT_PROTECT_TRIGGER_PCT_MIN
     assert metadata["profit_protect_lock_pct"] > 0.0
-    assert metadata["partial_take_profit_enabled"] is True
+    # Disabled since the 2026-10-09 loss analysis; the levels stay computed for the record.
+    assert metadata["partial_take_profit_enabled"] is False
     assert metadata["partial_take_profit_trigger_pct"] > metadata["profit_protect_trigger_pct"]
     assert metadata["partial_take_profit_fraction"] == pytest.approx(0.5)
     assert metadata["post_partial_trailing_stop_pct"] > 0.0

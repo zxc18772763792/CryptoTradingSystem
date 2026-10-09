@@ -72,6 +72,68 @@ def test_dedicated_ai_models_use_direct_chat_and_gpt_backup(monkeypatch, tmp_pat
         assert len(requests) == 1
 
 
+def test_agent_survives_exhausted_primary_and_backup_rejecting_no_reasoning(monkeypatch, tmp_path):
+    """2026-10-07: primary relay out of credit (HTTP 400) and the GPT backup rejecting reasoning_effort=none
+    left the agent without a single model decision for 34h."""
+    import core.ai.autonomous_agent as agent_module
+    import core.utils.openai_responses as helpers
+
+    monkeypatch.setenv("AI_AGENT_CONFIG_PATH", str(tmp_path / "agent.json"))
+    for name, value in {
+        "AI_MODEL_BASE_URL": "https://primary.test/v1",
+        "AI_MODEL_API_KEY": "primary-key",
+        "AI_MODEL_BACKUP_BASE_URL": "https://backup.test/v1",
+        "AI_MODEL_BACKUP_API_KEY": "backup-key",
+        "AI_MODEL_BACKUP_MODEL": "gpt-5.6-sol",
+        "AI_MODEL_FORCE_CHAT_COMPLETIONS": True,
+        "AI_AUTONOMOUS_AGENT_MODEL": "deepseek-v4.1-flash-特价",
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    helpers.reset_openai_target_preferences()
+    monkeypatch.setattr(agent_module, "_REASONING_EFFORT_OVERRIDES", {})
+    credit = {"error": {"message": "credit insufficient balance: balance=0 required=884", "type": "api_error"}}
+    effort = {"error": {"message": 'gpt-6.1-sol does not support reasoning effort "none"; use low, medium, high, xhigh or max',
+                        "type": "invalid_request_error"}}
+    ok = {"choices": [{"message": {"content": '{"action":"hold","reason":"test"}'}}]}
+    routes = {
+        "https://primary.test/v1/chat/completions": [_FakeResponse(credit, status=400), _FakeResponse(credit, status=400)],
+        "https://backup.test/v1/chat/completions": [_FakeResponse(effort, status=400), _FakeResponse(ok)],
+    }
+    requests = []
+
+    class _RoutedSession:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            requests.append({"url": url, "json": json})
+            return routes[url].pop(0)
+
+    monkeypatch.setattr(agent_module.aiohttp, "ClientSession", lambda **kwargs: _RoutedSession(**kwargs))
+    agent = agent_module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    def call():
+        return asyncio.run(agent._call_provider(provider="codex", model=settings.AI_AUTONOMOUS_AGENT_MODEL, timeout_ms=5000,
+                                                max_tokens=420, temperature=0.15, system_prompt="JSON only", user_prompt="test"))
+
+    with pytest.raises(RuntimeError, match="reasoning effort"):
+        call()  # the out-of-credit primary now fails over; the backup's first rejection still fails this call
+    assert [r["url"] for r in requests] == ["https://primary.test/v1/chat/completions", "https://backup.test/v1/chat/completions"]
+    assert requests[1]["json"]["reasoning_effort"] == "none"
+
+    assert call()["action"] == "hold"
+    backup_calls = [r for r in requests if r["url"].startswith("https://backup.test")]
+    assert backup_calls[-1]["json"]["reasoning_effort"] == "low"
+    assert agent._last_answered_model == {"model": "gpt-5.6-sol", "backup": True}
+    assert all(r["json"]["reasoning_effort"] == "none" for r in requests if r["url"].startswith("https://primary.test"))
+
+
 class _FakeResponse:
     def __init__(self, payload, status: int = 200, *, text_payload: str | None = None, headers: dict | None = None):
         self._payload = payload
