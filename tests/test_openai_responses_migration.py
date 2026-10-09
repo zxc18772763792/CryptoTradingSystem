@@ -1003,6 +1003,43 @@ def test_research_context_generator_fails_over_to_backup_relay(monkeypatch):
     ]
 
 
+def test_research_runs_on_the_backup_relays_gpt_and_fails_over_on_billing_errors(monkeypatch):
+    """2026-10-09: research moved to gpt-6-sol (backup relay only) with the primary relay's DeepSeek behind
+    it; an exhausted account answers 400, which must still fail over."""
+    import core.ai.research_context_generator as module
+    import core.utils.openai_responses as helpers
+
+    for name, value in {
+        "AI_MODEL_BASE_URL": "https://primary.test/v1",
+        "AI_MODEL_API_KEY": "primary-key",
+        "AI_MODEL_BACKUP_BASE_URL": "https://backup.test/v1",
+        "AI_MODEL_BACKUP_API_KEY": "backup-key",
+        "AI_MODEL_FORCE_CHAT_COMPLETIONS": True,
+        "AI_RESEARCH_MODEL": "gpt-6-sol",
+        "AI_RESEARCH_BACKUP_MODEL": "deepseek-v4.1-flash",
+        "AI_RESEARCH_BACKUP_ENDPOINT_FIRST": True,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    helpers.reset_openai_target_preferences()
+    billing = {"error": {"message": "insufficient balance for this request", "type": "api_error"}}
+    ok = {"choices": [{"message": {"content": '{"hypothesis":"fallback ok"}'}}]}
+    capture = {}
+    responses = [_FakeResponse(billing, status=400), _FakeResponse(ok)]
+    monkeypatch.setattr(module.aiohttp, "ClientSession",
+                        lambda **kwargs: _FakeSequenceSession(capture=capture, responses=responses, **kwargs))
+
+    result = asyncio.run(module._call_openai_responses_json("prompt", timeout=10))
+
+    assert result["hypothesis"] == "fallback ok"
+    first, second = capture["requests"]
+    assert first["url"] == "https://backup.test/v1/chat/completions"
+    assert first["json"]["model"] == "gpt-6-sol" and first["json"]["reasoning_effort"] == "low"
+    assert first["headers"]["Authorization"] == "Bearer backup-key"
+    assert second["url"] == "https://primary.test/v1/chat/completions"
+    assert second["json"]["model"] == "deepseek-v4.1-flash" and second["json"]["thinking"] == {"type": "disabled"}
+    assert second["headers"]["Authorization"] == "Bearer primary-key"
+
+
 def test_research_context_generator_sticks_to_backup_until_next_day(monkeypatch, tmp_path):
     import core.ai.research_context_generator as module
     import core.utils.openai_responses as response_helpers
