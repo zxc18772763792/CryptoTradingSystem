@@ -10,8 +10,14 @@ from core.strategies.strategy_manager import StrategyManager
 from core.trading.account_manager import AccountManager, TradingAccount, account_manager
 from core.trading.order_manager import OrderManager, OrderRequest
 from core.exchanges.base_exchange import OrderSide, OrderStatus, OrderType
+from core.marketdata.runtime_price_provider import PriceReadResult
 
 order_manager_module = __import__("core.trading.order_manager", fromlist=["decision_engine"])
+
+
+async def _no_live_price(exchange, symbol, **kwargs):
+    """Paper market orders read a live tick first; these tests pin the request-price fallback."""
+    return PriceReadResult(exchange=str(exchange), symbol=str(symbol), price=None, reason="hub_missing")
 
 
 class _NoopStrategy(StrategyBase):
@@ -295,6 +301,7 @@ def test_order_manager_reports_missing_live_connector(monkeypatch):
 def test_paper_order_runs_governance_and_records_rejection(monkeypatch):
     manager = OrderManager()
     manager.set_paper_trading(True)
+    monkeypatch.setattr(order_manager_module, "get_realtime_price", _no_live_price)
     monkeypatch.setattr(
         account_manager,
         "get_account_mode",
@@ -349,6 +356,7 @@ def test_paper_order_runs_governance_and_records_rejection(monkeypatch):
 def test_paper_order_keeps_fill_simulation_when_governance_allows(monkeypatch):
     manager = OrderManager()
     manager.set_paper_trading(True)
+    monkeypatch.setattr(order_manager_module, "get_realtime_price", _no_live_price)
     monkeypatch.setattr(
         account_manager,
         "get_account_mode",
