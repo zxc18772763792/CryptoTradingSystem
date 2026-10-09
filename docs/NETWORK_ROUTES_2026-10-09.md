@@ -51,7 +51,7 @@
 
 ## 四、同时发现的账户问题（不是线路问题）
 
-- **Coinglass 中转 key 已失效**：10/8 到期，`/api/gateway/account` 返回 401"无效的 API Key"。所有 Coinglass 数据从 10/8 起不可用。
+- **Coinglass 中转 key 曾失效**：10/8 到期后 `/api/gateway/account` 返回 401"无效的 API Key"，所有 Coinglass 数据中断。10/9 晚续费后恢复（标准版 + LSR 专业版，各 11 次/分钟），BTC/ETH/SOL 快照 15:15 UTC 起重新写入。账户接口不返回到期日，到期前要自己记着。
 - **vpsairobot（GPT）余额不足**：返回 403 INSUFFICIENT_BALANCE。代理和研究模块已自动退到 kuaipao 的 deepseek-v4.1-flash。
 
 ## 五、网络变化后怎么重测
