@@ -192,6 +192,12 @@ class Settings(BaseSettings):
     AI_AUTONOMOUS_AGENT_MODE: str = "shadow"  # shadow/execute
     AI_AUTONOMOUS_AGENT_PROVIDER: str = "codex"  # glm/codex(openai-compatible)/claude
     AI_AUTONOMOUS_AGENT_MODEL: str = ""
+    # With the dedicated AI_MODEL_* endpoints: run the agent on the backup endpoint first (its model is
+    # AI_AUTONOMOUS_AGENT_MODEL) and keep the primary endpoint as the fallback, serving FALLBACK_MODEL.
+    AI_AUTONOMOUS_AGENT_BACKUP_ENDPOINT_FIRST: bool = False
+    AI_AUTONOMOUS_AGENT_FALLBACK_MODEL: str = ""
+    # GPT reasoning models accept low..max but not "none"; DeepSeek targets disable thinking anyway.
+    AI_AUTONOMOUS_AGENT_REASONING_EFFORT: str = "low"
     AI_AUTONOMOUS_AGENT_EXCHANGE: str = "binance"
     AI_AUTONOMOUS_AGENT_SYMBOL: str = "BTC/USDT"
     AI_AUTONOMOUS_AGENT_SYMBOL_MODE: str = "manual"  # manual/auto

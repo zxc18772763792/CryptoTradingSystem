@@ -87,6 +87,7 @@ def test_agent_survives_exhausted_primary_and_backup_rejecting_no_reasoning(monk
         "AI_MODEL_BACKUP_MODEL": "gpt-5.6-sol",
         "AI_MODEL_FORCE_CHAT_COMPLETIONS": True,
         "AI_AUTONOMOUS_AGENT_MODEL": "deepseek-v4.1-flash-特价",
+        "AI_AUTONOMOUS_AGENT_REASONING_EFFORT": "none",  # the setting the agent shipped with then
     }.items():
         monkeypatch.setattr(settings, name, value)
     helpers.reset_openai_target_preferences()
@@ -132,6 +133,79 @@ def test_agent_survives_exhausted_primary_and_backup_rejecting_no_reasoning(monk
     assert backup_calls[-1]["json"]["reasoning_effort"] == "low"
     assert agent._last_answered_model == {"model": "gpt-5.6-sol", "backup": True}
     assert all(r["json"]["reasoning_effort"] == "none" for r in requests if r["url"].startswith("https://primary.test"))
+
+
+def test_agent_runs_on_the_backup_relays_gpt_with_the_primary_as_fallback(monkeypatch, tmp_path):
+    """2026-10-09: the agent moved to gpt-6-sol, which only the backup relay serves, and keeps the
+    primary relay's DeepSeek as its fallback; research keeps the original endpoint order."""
+    import core.ai.autonomous_agent as agent_module
+    import core.utils.openai_responses as helpers
+    from core.ai.model_endpoints import research_agent_endpoint_targets
+
+    monkeypatch.setenv("AI_AGENT_CONFIG_PATH", str(tmp_path / "agent.json"))
+    for name, value in {
+        "AI_MODEL_BASE_URL": "https://primary.test/v1",
+        "AI_MODEL_API_KEY": "primary-key",
+        "AI_MODEL_BACKUP_BASE_URL": "https://backup.test/v1",
+        "AI_MODEL_BACKUP_API_KEY": "backup-key",
+        "AI_MODEL_BACKUP_MODEL": "gpt-5.6-sol",
+        "AI_MODEL_FORCE_CHAT_COMPLETIONS": True,
+        "AI_AUTONOMOUS_AGENT_MODEL": "gpt-6-sol",
+        "AI_AUTONOMOUS_AGENT_FALLBACK_MODEL": "deepseek-v4.1-flash",
+        "AI_AUTONOMOUS_AGENT_BACKUP_ENDPOINT_FIRST": True,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    helpers.reset_openai_target_preferences()
+    monkeypatch.setattr(agent_module, "_REASONING_EFFORT_OVERRIDES", {})
+    agent = agent_module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    targets = agent._provider_endpoint_targets("codex")
+    assert [(t["model"], t["api_key"], t["is_backup"], t["index"]) for t in targets] == [
+        ("gpt-6-sol", "backup-key", False, 0),
+        ("deepseek-v4.1-flash", "primary-key", True, 1),
+    ]
+    assert "chat_options" not in targets[0] and targets[1]["chat_options"] == {"thinking": {"type": "disabled"}}
+    research = research_agent_endpoint_targets(primary_model="deepseek-v4.1-flash", backup_model="gpt-5.6-sol")
+    assert [t["api_key"] for t in research] == ["primary-key", "backup-key"]
+
+    ok = {"choices": [{"message": {"content": '{"action":"hold","reason":"test"}'}}]}
+    routes = {
+        "https://backup.test/v1/chat/completions": [_FakeResponse(ok), _FakeResponse({"error": "busy"}, status=503)],
+        "https://primary.test/v1/chat/completions": [_FakeResponse(ok)],
+    }
+    requests = []
+
+    class _RoutedSession:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, url, *, headers=None, json=None, timeout=None):
+            requests.append({"url": url, "json": json, "auth": (headers or {}).get("Authorization")})
+            return routes[url].pop(0)
+
+    monkeypatch.setattr(agent_module.aiohttp, "ClientSession", lambda **kwargs: _RoutedSession(**kwargs))
+
+    def call():
+        return asyncio.run(agent._call_provider(provider="codex", model="gpt-6-sol", timeout_ms=5000, max_tokens=1500,
+                                                temperature=0.15, system_prompt="JSON only", user_prompt="test"))
+
+    assert call()["action"] == "hold"
+    assert requests[0]["url"] == "https://backup.test/v1/chat/completions"
+    assert requests[0]["json"]["model"] == "gpt-6-sol" and requests[0]["json"]["reasoning_effort"] == "low"
+    assert requests[0]["auth"] == "Bearer backup-key" and "thinking" not in requests[0]["json"]
+    assert agent._last_answered_model == {"model": "gpt-6-sol", "backup": False}
+
+    assert call()["action"] == "hold"  # the GPT relay is down: the DeepSeek fallback answers
+    assert [r["url"] for r in requests[1:]] == ["https://backup.test/v1/chat/completions", "https://primary.test/v1/chat/completions"]
+    assert requests[2]["json"]["model"] == "deepseek-v4.1-flash" and requests[2]["json"]["thinking"] == {"type": "disabled"}
+    assert requests[2]["auth"] == "Bearer primary-key"
+    assert agent._last_answered_model == {"model": "deepseek-v4.1-flash", "backup": True}
 
 
 class _FakeResponse:

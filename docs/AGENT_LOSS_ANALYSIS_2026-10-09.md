@@ -13,9 +13,11 @@
 4. "追涨"效应**大部分是回补效应的另一面**（盈利平仓后回补必然是追涨）。
    去掉回补后，首次开仓里 24 小时已同向走了 4% 以上的 19 笔，净 +0.23%（区间 [−0.28%, +0.80%]），并不比其他差。
 5. **模型线路中断**：10/7 13:39 UTC 起，代理再没有一次成功的模型决策，也没有新开仓。
-   - 主线路（kuaipao，deepseek-v4.1-flash）余额为 0，返回 HTTP 400。
+   - 主线路（kuaipao）的 `deepseek-v4.1-flash-特价` 返回 HTTP 400"余额为 0"。
+     **更正（10/9 实测）：** kuaipao 账户有钱，是"特价"通道停了，现在返回"没有可用通道"；普通版 `deepseek-v4.1-flash` 正常。
    - 备用线路（gpt-5.6-sol）拒绝 `reasoning_effort="none"`。
    - 两者都是 400，不触发线路切换。
+   - 10/9 起代理改用备用线路的 `gpt-6-sol`，见第三节。
 
 ## 一、亏损拆解
 
@@ -88,7 +90,8 @@
 | 24 小时同向超过 4% 不开新仓 | 同上，配置 `AI_AUTONOMOUS_AGENT_CHASE_MAX_MOVE_24H=0.04` | 已按决定上线，但见第二节：它的样本内依据大部分来自回补。当作低成本的保险，不是收益来源。设为 0 即关闭。 |
 | 账户余额不足也切换线路 | `core/utils/openai_responses.py` `should_failover_openai_response` | 402，或 400 且正文是 insufficient balance / quota，按可切换处理。 |
 | 备用线路推理强度兼容 | `_note_reasoning_effort_rejection` | 某线路拒绝 `"none"` 后，之后对它改发 `"low"`。每个进程第一次仍会失败一次。已用一次真实请求验证 gpt-5.6-sol 接受 `"low"`，420 token 内返回 JSON。 |
-| 记录由哪个模型回答 | 日志 `config.answered_by` | 主线路是 deepseek、备用是 GPT。评估时要区分，否则改动效果和换模型的效果混在一起。 |
+| 记录由哪个模型回答 | 日志 `config.answered_by` | 两条线路的模型不同。评估时要区分，否则改动效果和换模型的效果混在一起。 |
+| 代理改用 gpt-6-sol（10/9 12:37 UTC） | `.env.local`：`AI_AUTONOMOUS_AGENT_MODEL=gpt-6-sol`、`AI_AUTONOMOUS_AGENT_BACKUP_ENDPOINT_FIRST=true`、`AI_AUTONOMOUS_AGENT_FALLBACK_MODEL=deepseek-v4.1-flash`；`model_endpoints.py` `backup_first` | 只有备用线路（vpsairobot）有 GPT-6，kuaipao 没有。代理先问 vpsairobot 的 gpt-6-sol，失败再问 kuaipao 的 deepseek-v4.1-flash（关深度思考）。推理强度改为可配置，默认 `"low"`，GPT 不接受 `"none"`。研究模块的线路顺序不变。 |
 
 **没有改的：**
 - 最小置信度：没有预测力，见上表。
@@ -128,10 +131,14 @@ python scripts/agent_trade_attribution.py --split 2026-10-09T00:20
   - 入场价落在 5 分钟 K 线范围之外；
   - 4 小时内同币回补；
   - 分批止盈。
-- **模型混杂：** 看 `answered by` 分布。如果主要是备用 GPT 回答，结论只适用于 GPT，不能和 9 月的 deepseek 样本直接比较。
+- **模型：** 00:20 到 12:37 之间代理没有开仓，所以上线后的样本全部来自 gpt-6-sol（12:37 起）。
+  结论只适用于 gpt-6-sol 加新过滤器，不能和 9 月的 deepseek 样本直接比较。
+  `answered by` 里出现 deepseek-v4.1-flash（后备）的决策要单独看。
 
 ## 六、需要人工处理
 
-- **主线路余额（kuaipao）需要充值。**
-  - 不充值：代理靠备用 GPT 线路运行，评估的是另一个模型。
-  - 充值后：恢复 deepseek，和历史样本可比。
+- ~~主线路余额（kuaipao）需要充值~~：误判。账户有钱，是"特价"通道停了。代理已改用 gpt-6-sol。
+- 研究模块（`AI_RESEARCH_MODEL`）仍写着已失效的 `deepseek-v4.1-flash-特价`。
+  现在靠线路切换落到备用的 gpt-5.6-sol，能用。要恢复 deepseek，需改成普通版 `deepseek-v4.1-flash`（非特价价格）。
+- 重启时如果行情连接慢、就绪检查没在启动窗口内通过，启动脚本会跳过启动代理（10/9 12:32 发生过一次，已手动启动）。
+  `AI_AUTONOMOUS_AGENT_AUTO_START` 目前是关的。
