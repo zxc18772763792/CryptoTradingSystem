@@ -38,6 +38,9 @@ def _isolate_shared_ai_endpoints(monkeypatch):
     ):
         monkeypatch.setattr(settings, name, "")
     monkeypatch.setattr(settings, "AI_MODEL_FORCE_CHAT_COMPLETIONS", False)
+    monkeypatch.setattr(settings, "AI_AUTONOMOUS_AGENT_BACKUP_ENDPOINT_FIRST", False)
+    monkeypatch.setattr(settings, "AI_AUTONOMOUS_AGENT_FALLBACK_MODEL", "")
+    monkeypatch.setattr(settings, "AI_AUTONOMOUS_AGENT_REASONING_EFFORT", "low")
 
 
 @pytest.fixture(autouse=True)

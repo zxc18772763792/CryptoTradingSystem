@@ -93,8 +93,8 @@ _DEFAULT_REENTRY_COOLDOWN_SEC = 4 * 3600
 _DEFAULT_CHASE_MAX_MOVE_24H = 0.04
 _REENTRY_CLOSE_SCAN_LIMIT = 1000
 
-# base_url|model pairs that rejected reasoning_effort="none" (GPT relays accept low..max). Later calls
-# send "low" instead of failing every cycle; the first rejection per process still fails that call.
+# base_url|model pairs that rejected the configured reasoning_effort (e.g. "none" on a GPT relay, which
+# accepts low..max). Later calls send "low"; the first rejection per process still fails that call.
 _REASONING_EFFORT_OVERRIDES: Dict[str, str] = {}
 
 
@@ -854,6 +854,8 @@ class AutonomousTradingAgent:
         if provider == "codex":
             return research_agent_endpoint_targets(
                 primary_model=self._provider_model(provider),
+                backup_model=str(self._get("AI_AUTONOMOUS_AGENT_FALLBACK_MODEL", "") or "").strip(),
+                backup_first=bool(self._get("AI_AUTONOMOUS_AGENT_BACKUP_ENDPOINT_FIRST", False)),
             )
         return [
             {
@@ -1899,9 +1901,9 @@ class AutonomousTradingAgent:
                 temperature=temperature_value if temperature_value is not None else 0.0,
                 response_format={"type": "json_object"},
                 stream=False,
-                # The decision loop runs under a 45s hard guard with a small
-                # token budget, so a reasoning model must not spend it thinking.
-                reasoning_effort="none",
+                # The decision loop runs under a 45s hard guard, so keep reasoning
+                # minimal: GPT reasoning models accept low..max but reject "none".
+                reasoning_effort=str(self._get("AI_AUTONOMOUS_AGENT_REASONING_EFFORT", "low") or "low").strip().lower(),
             )
             payload_variants = build_responses_payload_variants(
                 model=model,
