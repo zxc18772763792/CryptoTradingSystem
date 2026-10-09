@@ -1305,6 +1305,7 @@ async def get_balance_history(
     exchange: str = "all",
     limit: int = 500,
     mode: Optional[str] = None,
+    max_points: Optional[int] = None,
 ):
     resolved_mode = (
         str(
@@ -1318,11 +1319,13 @@ async def get_balance_history(
         resolved_mode = (
             "paper" if trading_api.execution_engine.is_paper_mode() else "live"
         )
+    extra: Dict[str, Any] = {"max_points": int(max_points)} if max_points else {}
     history = await trading_api.account_snapshot_manager.get_history(
         hours=hours,
         exchange=exchange,
         limit=limit,
         mode=resolved_mode,
+        **extra,
     )
     return {
         "exchange": exchange,

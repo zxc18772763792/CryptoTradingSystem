@@ -28,9 +28,6 @@
           curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
       then update both `src` and `integrity`.
     -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"
-            integrity="sha384-vsrfeLOOY6KuIYKDlmVH5UiBmgIdB1oEf7p01YgWHuqmOHfZr374+odEv96n9tNC"
-            crossorigin="anonymous"></script>
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"
             integrity="sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7"
             crossorigin="anonymous"></script>
@@ -142,7 +139,8 @@
 
                     <div class="card wide">
                         <h3>资产净值曲线</h3>
-                        <canvas id="equity-chart"></canvas>
+                        <div id="equity-chart" style="height: 340px;"></div>
+                        <div class="u-hint">拖动平移、滚轮缩放、双击复位；上方按钮切换 1 天 / 7 天 / 30 天 / 全部，下方滑块可框选任意时段。</div>
                         <h4 style="margin-top:20px;">净值来源 · 按策略归因</h4>
                         <div id="equity-attribution" aria-live="polite">正在核对策略盈亏…</div>
                     </div>

@@ -9,6 +9,9 @@ from sqlalchemy import delete, select
 
 from config.database import async_session_maker, AccountSnapshot
 
+# Rows read for one downsampled range query (newest kept): ~5 months of 1-minute snapshots.
+_MAX_RANGE_ROWS = 200_000
+
 
 class AccountSnapshotManager:
     """Persist and query account valuation snapshots."""
@@ -65,16 +68,45 @@ class AccountSnapshotManager:
         except Exception as e:
             logger.warning(f"Failed to record account snapshot: {e}")
 
+    @staticmethod
+    def _downsample(rows: List[Any], max_points: int) -> List[Any]:
+        """Keep the last row of each of `max_points` equal time buckets, plus the very first row."""
+        if max_points <= 0 or len(rows) <= max_points:
+            return rows
+        start = rows[0].timestamp
+        width = max((rows[-1].timestamp - start).total_seconds() / max_points, 1e-9)
+        kept: List[Any] = []
+        last_bucket = None
+        for row in rows:
+            bucket = min(max_points - 1, int((row.timestamp - start).total_seconds() / width))
+            if bucket == last_bucket:
+                kept[-1] = row
+            else:
+                kept.append(row)
+                last_bucket = bucket
+        if kept[0] is not rows[0]:
+            kept.insert(0, rows[0])
+        return kept
+
     async def get_history(
         self,
         hours: int = 24,
         exchange: str = "all",
         limit: int = 500,
         mode: Optional[str] = None,
+        max_points: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Get snapshot history for charting."""
+        """Get snapshot history for charting.
+
+        Without `max_points` this returns the newest `limit` rows inside the window. With it, the
+        whole window is returned, downsampled in time to about `max_points` points, so a long range
+        keeps its start instead of being cut to the most recent rows.
+        """
         hours = max(1, hours)
         limit = max(1, min(limit, 5000))
+        if max_points is not None:
+            max_points = max(2, min(int(max_points), 5000))
+            limit = _MAX_RANGE_ROWS
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         async with async_session_maker() as session:
@@ -95,6 +127,8 @@ class AccountSnapshotManager:
 
             result = await session.execute(stmt)
             rows = list(reversed(result.scalars().all()))
+        if max_points is not None:
+            rows = self._downsample([row for row in rows if row.timestamp is not None], max_points)
 
         out: List[Dict[str, Any]] = []
         for row in rows:
