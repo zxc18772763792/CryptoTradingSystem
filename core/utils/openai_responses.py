@@ -300,6 +300,8 @@ def should_failover_openai_status(status: Any) -> bool:
 # Another endpoint can still serve the request, so these fail over like a 402.
 _BILLING_ERROR_MARKERS = (
     "insufficient balance",
+    "insufficient_balance",
+    "insufficient account balance",
     "insufficient_quota",
     "insufficient quota",
     "exceeded your current quota",

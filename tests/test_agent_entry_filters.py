@@ -110,6 +110,7 @@ def test_endpoint_that_rejects_no_reasoning_gets_low_from_the_next_call(monkeypa
 def test_billing_errors_fail_over_but_ordinary_bad_requests_do_not():
     assert should_failover_openai_response(400, '{"error":{"message":"credit insufficient balance: balance=0 required=884"}}')
     assert should_failover_openai_response(402, "")
+    assert should_failover_openai_response(400, '{"code":"INSUFFICIENT_BALANCE","message":"Insufficient account balance"}')
     assert should_failover_openai_response(503, "")
     assert not should_failover_openai_response(400, '{"error":{"message":"does not support reasoning effort"}}')
     assert not should_failover_openai_response(404, "not found")
