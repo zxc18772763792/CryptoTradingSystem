@@ -71,7 +71,7 @@ from core.utils.openai_responses import (
     remember_openai_target_success,
     responses_endpoint,
     responses_api_unavailable,
-    should_failover_openai_status,
+    should_failover_openai_response,
     should_prefer_openai_target_chat_completions,
     target_transport,
     unsupported_responses_parameter,
@@ -85,6 +85,45 @@ _DEFAULT_ANTHROPIC_MODEL = "claude-3-5-sonnet-latest"
 _DEFAULT_GLM_BASE_URL = ""
 _DEFAULT_GLM_MODEL = ""
 _OPENAI_FAILOVER_SCOPE = "ai_autonomous_agent"
+
+# Fresh-entry filters registered after the 2026-10-09 loss analysis (docs/AGENT_LOSS_ANALYSIS_2026-10-09.md):
+# 45% of entries re-bought the same coin a median 2 minutes after closing it (-0.46%/trade vs +0.16%),
+# and entries after a >4% 24h move in the trade's direction did worst over the next 5h.
+_DEFAULT_REENTRY_COOLDOWN_SEC = 4 * 3600
+_DEFAULT_CHASE_MAX_MOVE_24H = 0.04
+_REENTRY_CLOSE_SCAN_LIMIT = 1000
+
+# base_url|model pairs that rejected reasoning_effort="none" (GPT relays accept low..max). Later calls
+# send "low" instead of failing every cycle; the first rejection per process still fails that call.
+_REASONING_EFFORT_OVERRIDES: Dict[str, str] = {}
+
+
+def _chat_payload_for_target(
+    chat_payload: Dict[str, Any],
+    target: Dict[str, Any],
+    base_url: str,
+    model: str,
+) -> Dict[str, Any]:
+    payload = dict(chat_payload, model=model, **target.get("chat_options", {}))
+    override = _REASONING_EFFORT_OVERRIDES.get(f"{base_url}|{model}")
+    if override and payload.get("reasoning_effort"):
+        payload["reasoning_effort"] = override
+    return payload
+
+
+def _note_reasoning_effort_rejection(base_url: str, model: str, status: Any, body: Any, payload: Dict[str, Any]) -> None:
+    text = str(body or "").lower()
+    if str(status) != "400" or not payload.get("reasoning_effort"):
+        return
+    if "reasoning effort" not in text and "reasoning_effort" not in text:
+        return
+    key = f"{base_url}|{model}"
+    if _REASONING_EFFORT_OVERRIDES.get(key) != "low":
+        _REASONING_EFFORT_OVERRIDES[key] = "low"
+        logger.warning(
+            f"autonomous_agent: {model} rejected reasoning_effort={payload.get('reasoning_effort')!r}; "
+            "sending 'low' from the next call"
+        )
 
 _SUPPORTED_PROVIDERS = {"glm", "codex", "claude"}
 _SUPPORTED_MODES = {"shadow", "execute"}
@@ -713,6 +752,8 @@ _AGENT_PERSISTABLE_KEYS = frozenset({
     "AI_AUTONOMOUS_AGENT_SYMBOL_MODE",
     "AI_AUTONOMOUS_AGENT_UNIVERSE_SYMBOLS",
     "AI_AUTONOMOUS_AGENT_SELECTION_TOP_N",
+    "AI_AUTONOMOUS_AGENT_REENTRY_COOLDOWN_SEC",
+    "AI_AUTONOMOUS_AGENT_CHASE_MAX_MOVE_24H",
 })
 
 
@@ -766,6 +807,8 @@ class AutonomousTradingAgent:
         self._last_submit_at: Optional[float] = None
         self._last_model_feedback_at: Optional[float] = None
         self._last_model_attempt_at: Optional[float] = None
+        # Which endpoint model answered the latest provider call (primary vs backup can differ).
+        self._last_answered_model: Optional[Dict[str, Any]] = None
         self._model_feedback_outage_started_at: Optional[float] = None
         self._model_feedback_failure_streak: int = 0
         self._model_feedback_last_failure_kind: Optional[str] = None
@@ -1134,6 +1177,18 @@ class AutonomousTradingAgent:
             "max_tokens": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_MAX_TOKENS", 420), 420, low=32, high=4096),
             "temperature": _coerce_float(self._get("AI_AUTONOMOUS_AGENT_TEMPERATURE", 0.15), 0.15, low=0.0, high=1.5),
             "cooldown_sec": _coerce_int(self._get("AI_AUTONOMOUS_AGENT_COOLDOWN_SEC", 180), 180, low=0, high=86400),
+            "reentry_cooldown_sec": _coerce_int(
+                self._get("AI_AUTONOMOUS_AGENT_REENTRY_COOLDOWN_SEC", _DEFAULT_REENTRY_COOLDOWN_SEC),
+                _DEFAULT_REENTRY_COOLDOWN_SEC,
+                low=0,
+                high=7 * 86400,
+            ),
+            "chase_max_move_24h": _coerce_float(
+                self._get("AI_AUTONOMOUS_AGENT_CHASE_MAX_MOVE_24H", _DEFAULT_CHASE_MAX_MOVE_24H),
+                _DEFAULT_CHASE_MAX_MOVE_24H,
+                low=0.0,
+                high=1.0,
+            ),
             "max_total_exposure_ratio": max_total_exposure_ratio,
             "max_total_exposure_usdt": max_total_exposure_usdt,
             "total_exposure_limit_mode": total_exposure_limit_mode,
@@ -1908,13 +1963,13 @@ class AutonomousTradingAgent:
                                 if resp.status >= 400:
                                     body = (await resp.text())[:300]
                                     err = RuntimeError(f"{provider}_anthropic_http_{resp.status}:{body}")
-                                    if should_failover_openai_status(resp.status):
+                                    if should_failover_openai_response(resp.status, body):
                                         remember_openai_target_failure(
                                             targets,
                                             target_base_url,
                                             scope=_OPENAI_FAILOVER_SCOPE,
                                         )
-                                    if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                                    if idx + 1 < total_targets and should_failover_openai_response(resp.status, body):
                                         last_exc = err
                                         logger.warning(
                                             f"autonomous_agent codex anthropic-style backup failed with "
@@ -1949,6 +2004,7 @@ class AutonomousTradingAgent:
                                             target_base_url,
                                             scope=_OPENAI_FAILOVER_SCOPE,
                                         )
+                                        self._last_answered_model = {"model": target_model, "backup": bool(target.get("is_backup"))}
                                         return parsed_decision
                             if advance_to_next_target:
                                 continue
@@ -1957,19 +2013,20 @@ class AutonomousTradingAgent:
                             target_base_url,
                             scope=_OPENAI_FAILOVER_SCOPE,
                         ):
-                            request_chat_payload = dict(chat_payload, model=target_model, **target.get("chat_options", {}))
+                            request_chat_payload = _chat_payload_for_target(chat_payload, target, target_base_url, target_model)
                             chat_url = chat_completions_endpoint(target_base_url)
                             async with session.post(chat_url, headers=headers, json=request_chat_payload, timeout=request_timeout()) as chat_resp:
                                 if chat_resp.status >= 400:
                                     chat_body = (await chat_resp.text())[:300]
+                                    _note_reasoning_effort_rejection(target_base_url, target_model, chat_resp.status, chat_body, request_chat_payload)
                                     err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
-                                    if should_failover_openai_status(chat_resp.status):
+                                    if should_failover_openai_response(chat_resp.status, chat_body):
                                         remember_openai_target_failure(
                                             targets,
                                             target_base_url,
                                             scope=_OPENAI_FAILOVER_SCOPE,
                                         )
-                                    if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                    if idx + 1 < total_targets and should_failover_openai_response(chat_resp.status, chat_body):
                                         last_exc = err
                                         logger.warning(
                                             "autonomous_agent codex chat-preferred relay failed with "
@@ -2005,11 +2062,12 @@ class AutonomousTradingAgent:
                                 target_base_url,
                                 scope=_OPENAI_FAILOVER_SCOPE,
                             )
+                            self._last_answered_model = {"model": target_model, "backup": bool(target.get("is_backup"))}
                             return parsed_decision
                         for payload_index, payload in enumerate(payload_variants):
                             url = responses_endpoint(target_base_url)
                             request_payload = dict(payload, model=target_model)
-                            request_chat_payload = dict(chat_payload, model=target_model, **target.get("chat_options", {}))
+                            request_chat_payload = _chat_payload_for_target(chat_payload, target, target_base_url, target_model)
                             async with session.post(url, headers=headers, json=request_payload, timeout=request_timeout()) as resp:
                                 if resp.status >= 400:
                                     body = (await resp.text())[:300]
@@ -2027,14 +2085,15 @@ class AutonomousTradingAgent:
                                         async with session.post(chat_url, headers=headers, json=request_chat_payload, timeout=request_timeout()) as chat_resp:
                                             if chat_resp.status >= 400:
                                                 chat_body = (await chat_resp.text())[:300]
+                                                _note_reasoning_effort_rejection(target_base_url, target_model, chat_resp.status, chat_body, request_chat_payload)
                                                 err = RuntimeError(f"{provider}_chat_http_{chat_resp.status}:{chat_body}")
-                                                if should_failover_openai_status(chat_resp.status):
+                                                if should_failover_openai_response(chat_resp.status, chat_body):
                                                     remember_openai_target_failure(
                                                         targets,
                                                         target_base_url,
                                                         scope=_OPENAI_FAILOVER_SCOPE,
                                                     )
-                                                if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                                if idx + 1 < total_targets and should_failover_openai_response(chat_resp.status, chat_body):
                                                     last_exc = err
                                                     logger.warning(
                                                         f"autonomous_agent codex chat/completions failed with "
@@ -2072,6 +2131,7 @@ class AutonomousTradingAgent:
                                             target_base_url,
                                             scope=_OPENAI_FAILOVER_SCOPE,
                                         )
+                                        self._last_answered_model = {"model": target_model, "backup": bool(target.get("is_backup"))}
                                         return parsed_decision
                                     err = RuntimeError(f"{provider}_http_{resp.status}:{body}")
                                     unsupported_param = unsupported_responses_parameter(body)
@@ -2102,13 +2162,13 @@ class AutonomousTradingAgent:
                                             advance_to_next_target = True
                                             break
                                         raise err
-                                    if should_failover_openai_status(resp.status):
+                                    if should_failover_openai_response(resp.status, body):
                                         remember_openai_target_failure(
                                             targets,
                                             target_base_url,
                                             scope=_OPENAI_FAILOVER_SCOPE,
                                         )
-                                    if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                                    if idx + 1 < total_targets and should_failover_openai_response(resp.status, body):
                                         last_exc = err
                                         logger.warning(
                                             f"autonomous_agent codex primary endpoint failed with {resp.status}; "
@@ -2146,6 +2206,7 @@ class AutonomousTradingAgent:
                                 target_base_url,
                                 scope=_OPENAI_FAILOVER_SCOPE,
                             )
+                            self._last_answered_model = {"model": target_model, "backup": bool(target.get("is_backup"))}
                             return parsed_decision
                     except ValueError as exc:
                         remember_openai_target_failure(targets, target_base_url, scope=_OPENAI_FAILOVER_SCOPE)
@@ -3505,7 +3566,9 @@ class AutonomousTradingAgent:
             "profit_protect_enabled": True,
             "profit_protect_trigger_pct": float(profit_protect_trigger_pct),
             "profit_protect_lock_pct": float(profit_protect_lock_pct),
-            "partial_take_profit_enabled": True,
+            # Off since 2026-10-09: exit variants changed nothing in the loss analysis, and the
+            # extra exit leg was usually followed by a same-coin re-entry minutes later.
+            "partial_take_profit_enabled": False,
             "partial_take_profit_trigger_pct": float(partial_take_profit_trigger_pct),
             "partial_take_profit_fraction": float(_AI_PARTIAL_TAKE_PROFIT_FRACTION),
             "post_partial_trailing_stop_pct": float(post_partial_trailing_stop_pct),
@@ -3541,6 +3604,18 @@ class AutonomousTradingAgent:
                 score -= 0.35
                 tradable_now = False
                 notes.append(f"review cooldown {pair_side}")
+
+        if symbol and pair_side and not bool(adjusted.get("has_position")):
+            entry_filter = self._entry_filter_reason(
+                cfg=cfg,
+                symbol=symbol,
+                side=pair_side,
+                r_24h=adjusted.get("r_24h"),
+            )
+            if entry_filter:
+                score -= 0.35
+                tradable_now = False
+                notes.append(entry_filter)
 
         if (
             self._service_instability_guard_active(
@@ -3662,6 +3737,53 @@ class AutonomousTradingAgent:
             streak = max(0, int(summary.get("recent_close_loss_streak_count") or 0))
             return f"review_loss_streak({streak})" if streak > 0 else "review_loss_streak"
 
+        return self._entry_filter_reason(
+            cfg=cfg,
+            symbol=symbol,
+            side=normalized_side,
+            r_24h=(context_payload.get("returns") or {}).get("r_24h"),
+        )
+
+    def _last_close_at(self, *, cfg: Dict[str, Any], symbol: str) -> Optional[datetime]:
+        """When this agent last closed a position on `symbol` (position history is updated at close)."""
+        strategy = str(cfg.get("strategy_name") or "AI_AutonomousAgent").strip()
+        try:
+            closed = position_manager.get_closed_positions(limit=_REENTRY_CLOSE_SCAN_LIMIT)
+        except Exception:
+            return None
+        latest: Optional[datetime] = None
+        for position in closed:
+            if normalize_symbol(getattr(position, "symbol", "")) != symbol:
+                continue
+            if not self._position_owned_by_strategy(position, strategy):
+                continue
+            closed_at = parse_dt(getattr(position, "updated_at", None))
+            if closed_at is not None and (latest is None or closed_at > latest):
+                latest = closed_at
+        return latest
+
+    def _entry_filter_reason(
+        self,
+        *,
+        cfg: Dict[str, Any],
+        symbol: str,
+        side: str,
+        r_24h: Any,
+    ) -> Optional[str]:
+        """Re-entry cooldown and anti-chase filters for a fresh entry (see _DEFAULT_REENTRY_COOLDOWN_SEC)."""
+        if not symbol or side not in {"long", "short"}:
+            return None
+        cooldown_sec = float(cfg.get("reentry_cooldown_sec") or 0.0)
+        if cooldown_sec > 0:
+            closed_at = self._last_close_at(cfg=cfg, symbol=symbol)
+            if closed_at is not None:
+                left_sec = cooldown_sec - (_utc_now() - closed_at).total_seconds()
+                if left_sec > 0:
+                    return f"reentry_cooldown({symbol}:{int(math.ceil(left_sec / 60.0))}m)"
+        chase_limit = float(cfg.get("chase_max_move_24h") or 0.0)
+        move = _safe_float(r_24h, 0.0) * (1.0 if side == "long" else -1.0)
+        if chase_limit > 0 and move > chase_limit:
+            return f"chase_guard({symbol}:{side}:24h{move * 100:+.1f}%>{chase_limit * 100:.0f}%)"
         return None
 
     def _apply_learning_entry_guards(
@@ -4754,6 +4876,7 @@ class AutonomousTradingAgent:
             "position_unrealized_pnl_pct": float(position_unrealized_pnl_pct),
             "market_data_last_bar_at": market_data_last_bar_at,
             "market_data_age_sec": round(float(market_data_age_sec), 3) if market_data_age_sec is not None else None,
+            "r_24h": _safe_float((context_payload.get("returns") or {}).get("r_24h"), 0.0),
         }
         return self._apply_learning_score_adjustments(row=row, cfg=cfg)
 
@@ -5321,6 +5444,10 @@ class AutonomousTradingAgent:
             add_item("local_cooldown", "代理本地下单冷却中", decision_reason, "warn", 18)
         elif decision_reason.startswith("review_cooldown("):
             add_item("review_cooldown", "同方向信号仍在复核冷却", decision_reason, "warn", 16)
+        elif decision_reason.startswith("reentry_cooldown("):
+            add_item("reentry_cooldown", "平仓后同币冷却中", decision_reason, "warn", 16)
+        elif decision_reason.startswith("chase_guard("):
+            add_item("chase_guard", "24 小时已大幅同向波动，不追", decision_reason, "warn", 16)
         elif decision_reason == "review_risk_halt":
             add_item(
                 "review_risk_halt",
@@ -6094,6 +6221,7 @@ class AutonomousTradingAgent:
                                 f"{policy.get('reason') or 'live trading is not permitted'}"
                             )
                     self._last_model_attempt_at = time.time()
+                    self._last_answered_model = None
                     raw_decision = await asyncio.wait_for(
                         self._call_provider(
                             provider=provider,
@@ -6107,6 +6235,8 @@ class AutonomousTradingAgent:
                         timeout=float(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC),
                     )
                     raw_decision_source = "provider"
+                    if self._last_answered_model is None:
+                        self._last_answered_model = {"model": model, "backup": False}
                     self._record_model_feedback_success()
                 except Exception as exc:
                     normalized_exc: Exception = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
@@ -6276,6 +6406,7 @@ class AutonomousTradingAgent:
                 "universe_size": len(cfg.get("universe_symbols") or []),
                 "timeframe": effective_cfg.get("timeframe"),
                 "allow_live": effective_cfg.get("allow_live"),
+                "answered_by": self._last_answered_model if raw_decision_source == "provider" else None,
             },
             "context": {
                 "price": context_payload.get("price"),
