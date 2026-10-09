@@ -28,6 +28,10 @@ from core.trading.binance_rest import (
 )
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
 
+# A live tick further than this from the caller's price is more likely a symbol/scale mismatch
+# (e.g. a 1000x contract) than a real move; the paper fill then keeps the request price.
+_PAPER_LIVE_PRICE_MAX_DEVIATION = 0.15
+
 
 class OrderSource(Enum):
     MANUAL = "manual"
@@ -466,45 +470,70 @@ class OrderManager:
             )
         )
 
+    async def _paper_live_price(self, request: OrderRequest, connector: Any) -> Any:
+        """Fresh market price for a paper fill (hub tick, else REST ticker); None when unavailable."""
+        try:
+            price_read = await get_realtime_price(
+                request.exchange,
+                request.symbol,
+                connector=connector,
+                max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
+                allow_rest_fallback=True,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[PAPER] Failed to fetch ticker for {request.symbol} "
+                f"on {request.exchange}: {e}"
+            )
+            return None
+        return price_read if price_read.ok else None
+
     async def _create_paper_order(self, request: OrderRequest) -> Order:
         order_id = self._next_paper_order_id()
-        fill_price = float(request.price or 0.0)
+        requested_price = float(request.price or 0.0)
+        fill_price = requested_price
+        fill_source = "request" if requested_price > 0 else "none"
+        live_read = None
 
-        if fill_price <= 0:
+        # A market order fills at the market, not at the price the caller carried (often the close
+        # of a bar minutes old): take a fresh tick and keep the request price only as a fallback.
+        if request.order_type == OrderType.MARKET or fill_price <= 0:
             connector = self._resolve_cached_exchange(request.exchange, account_id=request.account_id)
-            if connector:
+            live_read = await self._paper_live_price(request, connector)
+            live_price = float(live_read.price) if live_read is not None else 0.0
+            if live_price > 0 and requested_price > 0 and (
+                abs(live_price / requested_price - 1.0) > _PAPER_LIVE_PRICE_MAX_DEVIATION
+            ):
+                fill_source = "request_live_implausible"
+                logger.warning(
+                    f"[PAPER] live price {live_price} for {request.symbol} is more than "
+                    f"{_PAPER_LIVE_PRICE_MAX_DEVIATION:.0%} from the request price {requested_price}; "
+                    f"filling at the request price"
+                )
+            elif live_price > 0:
+                fill_price = live_price
+                fill_source = "live"
+            elif requested_price > 0:
+                fill_source = "request_fallback"
+            if fill_price <= 0 and connector:
                 try:
-                    price_read = await get_realtime_price(
-                        request.exchange,
-                        request.symbol,
+                    base, quote = self._split_symbol(request.symbol)
+                    quotes = await build_currency_usd_quotes(
                         connector=connector,
-                        max_age_sec=float(getattr(settings, "MARKET_WS_SYMBOL_MAX_AGE_SEC", 10.0) or 10.0),
-                        allow_rest_fallback=True,
+                        currencies=[base, quote],
+                        timeout_sec=1.2,
+                        max_parallel=2,
                     )
-                    fill_price = float(price_read.price or 0.0) if price_read.ok else 0.0
+                    base_usd = float(quotes.get(base, 1.0 if base in STABLE_COINS else 0.0) or 0.0)
+                    quote_usd = float(quotes.get(quote, 1.0 if quote in STABLE_COINS else 0.0) or 0.0)
+                    if base_usd > 0 and quote_usd > 0:
+                        fill_price = base_usd / quote_usd
+                        fill_source = "usd_quotes"
                 except Exception as e:
-                    logger.warning(
-                        f"[PAPER] Failed to fetch ticker for {request.symbol} "
+                    logger.debug(
+                        f"[PAPER] quote fallback failed for {request.symbol} "
                         f"on {request.exchange}: {e}"
                     )
-                if fill_price <= 0:
-                    try:
-                        base, quote = self._split_symbol(request.symbol)
-                        quotes = await build_currency_usd_quotes(
-                            connector=connector,
-                            currencies=[base, quote],
-                            timeout_sec=1.2,
-                            max_parallel=2,
-                        )
-                        base_usd = float(quotes.get(base, 1.0 if base in STABLE_COINS else 0.0) or 0.0)
-                        quote_usd = float(quotes.get(quote, 1.0 if quote in STABLE_COINS else 0.0) or 0.0)
-                        if base_usd > 0 and quote_usd > 0:
-                            fill_price = base_usd / quote_usd
-                    except Exception as e:
-                        logger.debug(
-                            f"[PAPER] quote fallback failed for {request.symbol} "
-                            f"on {request.exchange}: {e}"
-                        )
 
         reference_price = float(fill_price or 0.0)
         fee_rate, slippage_bps = self._resolve_paper_cost_params(request)
@@ -570,6 +599,18 @@ class OrderManager:
             {
                 "paper": True,
                 "paper_reference_price": round(reference_price, 8) if reference_price > 0 else 0.0,
+                "paper_fill_source": fill_source,
+                "paper_requested_price": round(requested_price, 8),
+                # signed: + means the caller's price sat above the live market at submit time
+                "paper_request_vs_live_bps": (
+                    round((requested_price / float(live_read.price) - 1.0) * 10000.0, 2)
+                    if live_read is not None and requested_price > 0
+                    else None
+                ),
+                "paper_live_price_source": str(live_read.source) if live_read is not None else "",
+                "paper_live_price_age_ms": live_read.age_ms if live_read is not None else None,
+                "paper_live_bid": live_read.bid if live_read is not None else None,
+                "paper_live_ask": live_read.ask if live_read is not None else None,
                 "paper_fee_rate": round(fee_rate, 8),
                 "paper_fee_usd": round(fee_usd, 8),
                 "paper_slippage_bps": round(slippage_bps, 4),
