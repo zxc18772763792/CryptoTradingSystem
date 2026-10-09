@@ -34,7 +34,7 @@ from core.utils.openai_responses import (
     remember_openai_target_success,
     responses_endpoint,
     responses_api_unavailable,
-    should_failover_openai_status,
+    should_failover_openai_response,
     target_transport,
 )
 
@@ -257,6 +257,7 @@ async def _call_openai_responses_json(
         research_agent_endpoint_targets(
             primary_model=str(settings.AI_RESEARCH_MODEL or _DEFAULT_OPENAI_MODEL),
             backup_model=str(settings.AI_RESEARCH_BACKUP_MODEL or settings.AI_RESEARCH_MODEL),
+            backup_first=bool(settings.AI_RESEARCH_BACKUP_ENDPOINT_FIRST),
         ),
         scope=_OPENAI_FAILOVER_SCOPE,
     )
@@ -319,13 +320,13 @@ async def _call_openai_responses_json(
                         if resp.status >= 400:
                             body = (await resp.text())[:400]
                             _record_provider_error(resp.status, body)
-                            if should_failover_openai_status(resp.status):
+                            if should_failover_openai_response(resp.status, body):
                                 remember_openai_target_failure(
                                     targets,
                                     base_url,
                                     scope=_OPENAI_FAILOVER_SCOPE,
                                 )
-                            if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                            if idx + 1 < total_targets and should_failover_openai_response(resp.status, body):
                                 logger.warning(
                                     "research_context_generator: anthropic-style backup failed with "
                                     f"{resp.status}; trying backup {idx + 2}/{total_targets}"
@@ -354,13 +355,13 @@ async def _call_openai_responses_json(
                                     if chat_resp.status >= 400:
                                         chat_body = (await chat_resp.text())[:400]
                                         _record_provider_error(chat_resp.status, chat_body)
-                                        if should_failover_openai_status(chat_resp.status):
+                                        if should_failover_openai_response(chat_resp.status, chat_body):
                                             remember_openai_target_failure(
                                                 targets,
                                                 base_url,
                                                 scope=_OPENAI_FAILOVER_SCOPE,
                                             )
-                                        if idx + 1 < total_targets and should_failover_openai_status(chat_resp.status):
+                                        if idx + 1 < total_targets and should_failover_openai_response(chat_resp.status, chat_body):
                                             logger.warning(
                                                 "research_context_generator: chat/completions relay failed with "
                                                 f"{chat_resp.status}; trying backup {idx + 2}/{total_targets}"
@@ -388,13 +389,13 @@ async def _call_openai_responses_json(
                                 )
                                 _last_generation_error.set(None)
                                 return result
-                            if should_failover_openai_status(resp.status):
+                            if should_failover_openai_response(resp.status, body):
                                 remember_openai_target_failure(
                                     targets,
                                     base_url,
                                     scope=_OPENAI_FAILOVER_SCOPE,
                                 )
-                            if idx + 1 < total_targets and should_failover_openai_status(resp.status):
+                            if idx + 1 < total_targets and should_failover_openai_response(resp.status, body):
                                 logger.warning(
                                     f"research_context_generator: primary relay failed with {resp.status}; "
                                     f"trying backup {idx + 2}/{total_targets}"
