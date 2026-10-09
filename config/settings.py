@@ -157,6 +157,9 @@ class Settings(BaseSettings):
     # Network proxy
     HTTP_PROXY: Optional[str] = None
     HTTPS_PROXY: Optional[str] = None
+    # Upstreams reachable without the proxy (comma list, domain suffixes), merged into NO_PROXY at
+    # startup; its own name so an inherited NO_PROXY cannot shadow it. See core/utils/proxy_env.py.
+    PROXY_BYPASS_HOSTS: Optional[str] = None
 
     # Trading
     TRADING_MODE: str = "paper"  # paper/live
