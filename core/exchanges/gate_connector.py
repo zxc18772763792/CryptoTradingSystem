@@ -22,6 +22,9 @@ from core.exchanges.base_exchange import (
     Ticker,
 )
 from core.exchanges.order_parsing import resolve_ccxt_order_fill_price
+from core.utils.proxy_env import bypasses_proxy
+
+_GATE_API_URL = "https://api.gateio.ws"
 
 
 class GateConnector(BaseExchange):
@@ -33,6 +36,8 @@ class GateConnector(BaseExchange):
     async def connect(self) -> bool:
         try:
             proxy_url = str(self.config.proxy or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
+            if proxy_url and not self.config.proxy and bypasses_proxy(_GATE_API_URL):
+                proxy_url = None  # Gate answers direct from here; keep it off the metered proxy
             self._client = ccxt.gate(
                 {
                     "apiKey": self.config.api_key or settings.GATE_API_KEY,
