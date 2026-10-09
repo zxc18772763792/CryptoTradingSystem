@@ -2538,41 +2538,37 @@ state._systemStatusInFlight=false;
 }
 }
 
+// Whole stored history, downsampled server-side; re-read at most once a minute per mode.
+const EQUITY_HISTORY_HOURS=24*365*2;
+const EQUITY_HISTORY_POINTS=1500;
+const EQUITY_HISTORY_REFRESH_MS=60000;
 function initEquity(){
-const c=document.getElementById('equity-chart');
-if(!c)return;
-if(typeof Chart==='undefined'){
-  c.style.display='none';
-  const p=c.parentElement;
-  if(!p)return;
-  let host=p.querySelector('.equity-chart-fallback');
-  if(!host){
-    host=document.createElement('div');
-    host.className='equity-chart-fallback';
-    host.style.height='260px';
-    host.style.width='100%';
-    p.appendChild(host);
-  }
-  equityChart={type:'fallback',host,rows:[]};
-  renderEquityFallback([]);
-  return;
+const host=document.getElementById('equity-chart');
+if(!host)return;
+equityChart={type:typeof Plotly==='undefined'?'fallback':'plotly',host,rows:[],drawn:false};
+if(equityChart.type==='fallback')renderEquityFallback([]);
 }
-c.style.display='';
-try{c.parentElement?.querySelector('.equity-chart-fallback')?.remove();}catch{}
-equityChart=new Chart(c.getContext('2d'),{
-type:'line',
-data:{labels:[],datasets:[{data:[],borderColor:'#3fb950',backgroundColor:'rgba(63,185,80,.15)',fill:true,tension:.2,pointRadius:0}]},
-options:{
-responsive:true,
-maintainAspectRatio:false,
-plugins:{legend:{display:false}},
-scales:{x:{ticks:{autoSkip:true,maxTicksLimit:8}},y:{ticks:{callback:v=>`$${Number(v||0).toFixed(0)}`}}},
+function equityAxisMs(value){
+// x values are Shanghai wall-clock strings without a zone; compare them in that same frame
+const text=String(value??'').trim().replace(' ','T');
+return Date.parse(/[zZ]$/.test(text)?text:`${text}Z`);
 }
-});
+function fitEquityYAxis(ev){
+const host=equityChart?.host,rows=equityChart?.x||[],ys=equityChart?.y||[];
+if(!host||!rows.length||!ev||ev['yaxis.range[0]']!==undefined||ev['yaxis.range']!==undefined)return;
+if(ev['xaxis.autorange']){Plotly.relayout(host,{'yaxis.autorange':true});return;}
+const range=Array.isArray(ev['xaxis.range'])?ev['xaxis.range']:[ev['xaxis.range[0]'],ev['xaxis.range[1]']];
+if(range[0]===undefined||range[1]===undefined)return;
+const lo=equityAxisMs(range[0]),hi=equityAxisMs(range[1]);
+let min=Infinity,max=-Infinity;
+rows.forEach((x,i)=>{const t=equityAxisMs(x);if(t>=lo&&t<=hi){min=Math.min(min,ys[i]);max=Math.max(max,ys[i]);}});
+if(!Number.isFinite(min))return;
+const pad=Math.max((max-min)*0.08,Math.abs(max)*0.0005,1);
+Plotly.relayout(host,{'yaxis.range':[min-pad,max+pad]});
 }
 function buildEquityRows(hist){
 if(!hist?.length)return [];
-const max=220;
+const max=3000;
 const sampled=hist.length>max?hist.filter((_,i)=>i%Math.ceil(hist.length/max)===0):hist;
 return sampled.map(x=>({timestamp:x.timestamp,total:Number(x.total_usd||0)})).filter(x=>Number.isFinite(x.total)&&x.total>0&&toDate(x.timestamp));
 }
@@ -2604,25 +2600,35 @@ const latestX=mapX(rows.length-1).toFixed(2);
 const latestY=mapY(last.total).toFixed(2);
 host.innerHTML=`<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" style="display:block;width:100%;height:260px;border-radius:10px;background:linear-gradient(180deg, rgba(22,34,50,.96), rgba(17,25,37,.92));"><defs><linearGradient id="equity-area-gradient" x1="0" x2="0" y1="0" y2="1"><stop offset="0%" stop-color="${fill}" /><stop offset="100%" stop-color="rgba(99,110,123,0.02)" /></linearGradient></defs><line x1="${left}" y1="${top}" x2="${left}" y2="${height-bottom}" stroke="rgba(148,163,184,.18)" stroke-width="1" /><line x1="${left}" y1="${height-bottom}" x2="${width-right}" y2="${height-bottom}" stroke="rgba(148,163,184,.18)" stroke-width="1" /><line x1="${left}" y1="${top}" x2="${width-right}" y2="${top}" stroke="rgba(148,163,184,.08)" stroke-dasharray="4 4" stroke-width="1" /><line x1="${left}" y1="${height-bottom}" x2="${width-right}" y2="${height-bottom}" stroke="rgba(148,163,184,.08)" stroke-dasharray="4 4" stroke-width="1" /><polygon points="${areaPoints}" fill="url(#equity-area-gradient)" /><polyline points="${points}" fill="none" stroke="${stroke}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" /><circle cx="${latestX}" cy="${latestY}" r="4.5" fill="${stroke}" /><text x="${left}" y="14" fill="#8ea3ba" font-size="12">${esc(fmtAxisDateTime(first.timestamp))}</text><text x="${width-right}" y="14" text-anchor="end" fill="#8ea3ba" font-size="12">${esc(fmtAxisDateTime(last.timestamp))}</text><text x="${left}" y="${height-10}" fill="#e8eef9" font-size="14">最新净值 $${last.total.toFixed(2)}</text><text x="${width-right}" y="${height-10}" text-anchor="end" fill="${stroke}" font-size="13">${delta>=0?'+':''}${delta.toFixed(2)} (${deltaPct.toFixed(2)}%)</text><text x="${width-right}" y="${top+14}" text-anchor="end" fill="#8ea3ba" font-size="12">高点 $${maxVal.toFixed(2)}</text><text x="${width-right}" y="${height-bottom-6}" text-anchor="end" fill="#8ea3ba" font-size="12">低点 $${minVal.toFixed(2)}</text></svg>`;
 }
-function drawEquity(hist){
+function drawEquity(hist,mode){
 if(!equityChart)return;
 const rows=buildEquityRows(hist);
-if(equityChart.type==='fallback'){
 equityChart.rows=rows;
-renderEquityFallback(rows);
-return;
-}
+if(equityChart.type==='fallback'){renderEquityFallback(rows);return;}
+const host=equityChart.host;
 if(!rows.length){
-equityChart.data.labels=[];
-equityChart.data.datasets[0].data=[];
-equityChart.update('none');
+if(equityChart.drawn)Plotly.purge(host);
+equityChart.drawn=false;
+host.innerHTML='<div class="list-item">暂无净值数据</div>';
 return;
 }
-equityChart.data.labels=rows.map(x=>fmtAxisDateTime(x.timestamp));
-equityChart.data.datasets[0].data=rows.map(x=>x.total);
-equityChart.$rawTs=rows.map(x=>x.timestamp);
-equityChart.options.plugins.tooltip={callbacks:{title:items=>{const idx=items?.[0]?.dataIndex;return idx===undefined?'':fmtDateTime(equityChart.$rawTs?.[idx]);}}};
-equityChart.update('none');
+if(!equityChart.drawn)host.innerHTML='';
+equityChart.x=rows.map(r=>klineShanghaiAxisIso(toMs(r.timestamp)));
+equityChart.y=rows.map(r=>r.total);
+// chart colors are literals of the --positive / --negative / surface tokens (Plotly cannot read CSS vars)
+const color=equityChart.y[equityChart.y.length-1]>=equityChart.y[0]?'#20bf78':'#e05260';
+const trace={type:'scatter',mode:'lines',x:equityChart.x,y:equityChart.y,name:'净值',line:{color,width:2},
+hovertemplate:'%{x|%Y-%m-%d %H:%M}<br>净值 $%{y:,.2f}<extra></extra>'};
+const layout={paper_bgcolor:'#162232',plot_bgcolor:'#162232',font:{color:'#c6d4e8',size:12},
+margin:{l:64,r:16,t:40,b:8},showlegend:false,dragmode:'pan',hovermode:'x',uirevision:`equity-${mode||'paper'}`,
+xaxis:plotlyTimeAxis({rangeslider:{visible:true,thickness:0.1,bgcolor:'#121c2b',bordercolor:'#24384f',borderwidth:1},
+rangeselector:{x:0,y:1.1,bgcolor:'#1b2b41',activecolor:'#2f4a68',bordercolor:'#2a3b52',borderwidth:1,font:{color:'#c6d4e8'},
+buttons:[{count:1,label:'1天',step:'day',stepmode:'backward'},{count:7,label:'7天',step:'day',stepmode:'backward'},
+{count:30,label:'30天',step:'day',stepmode:'backward'},{step:'all',label:'全部'}]}}),
+yaxis:{gridcolor:'#24384f',tickprefix:'$',tickformat:',.0f',autorange:true}};
+Plotly.react(host,[trace],layout,{responsive:true,displaylogo:false,scrollZoom:true,
+modeBarButtonsToRemove:['lasso2d','select2d','autoScale2d','toggleSpikelines']});
+if(!equityChart.drawn){host.on('plotly_relayout',fitEquityYAxis);equityChart.drawn=true;}
 }
 function drawPie(dist,mode){const box=document.getElementById('holdings-pie');if(!box)return;if(!dist?.length){box.innerHTML='<div class="list-item">暂无可视化资产分布</div>';return;}if(typeof Plotly==='undefined'){box.innerHTML='<div class="list-item">图表库未加载，饼图暂不可用</div>';return;}box.innerHTML='';const top=dist.slice(0,10);Plotly.newPlot(box,[{type:'pie',labels:top.map(x=>x.currency),values:top.map(x=>Number(x.usd_value||0)),hole:.45,textinfo:'label+percent'}],{margin:{l:5,r:5,t:5,b:5},paper_bgcolor:'#162232',plot_bgcolor:'#162232',font:{color:'#e8eef9'},showlegend:false},{displaylogo:false,responsive:true});schedulePlotlyResize(document.getElementById('dashboard')||document);}
 
@@ -2713,11 +2719,12 @@ const activeType=resolveRuntimeModeSnapshot({statusMode,statsMode,balanceMode});
 const staleCrossModeBalance=Boolean(!balancesFresh&&balanceMode&&balanceMode!==activeType);
 const displayBalances=staleCrossModeBalance?{}:b;
 const historyMode=activeType==='live'?'live':'paper';
-const historyFresh=(statsFresh||balancesFresh||statsLateCache||balancesLateCache||Object.keys(prevHistoryByMode).length)
-  ?await api(`/trading/balances/history?hours=72&exchange=all&limit=500&mode=${encodeURIComponent(historyMode)}`,{timeoutMs:5000}).catch(()=>null)
+const historyDue=!Array.isArray(prevHistoryByMode?.[historyMode])||(Date.now()-Number(state.equityHistoryAt?.[historyMode]||0))>=EQUITY_HISTORY_REFRESH_MS;
+const historyFresh=historyDue&&(statsFresh||balancesFresh||statsLateCache||balancesLateCache||Object.keys(prevHistoryByMode).length)
+  ?await api(`/trading/balances/history?hours=${EQUITY_HISTORY_HOURS}&exchange=all&max_points=${EQUITY_HISTORY_POINTS}&mode=${encodeURIComponent(historyMode)}`,{timeoutMs:8000}).catch(()=>null)
   :null;
 const historyByMode={...prevHistoryByMode};
-if(Array.isArray(historyFresh?.history))historyByMode[historyMode]=historyFresh.history;
+if(Array.isArray(historyFresh?.history)){historyByMode[historyMode]=historyFresh.history;state.equityHistoryAt={...(state.equityHistoryAt||{}),[historyMode]:Date.now()};}
 const historyRows=Array.isArray(historyByMode?.[historyMode])?historyByMode[historyMode]:[];
 if(statsFresh||balancesFresh||statsLateCache||balancesLateCache||Array.isArray(historyFresh?.history)){
   state.lastSummarySnapshot={stats:s,balances:b,historyByMode};
@@ -2763,7 +2770,7 @@ if(hasBalanceSnapshot){
   const pie=document.getElementById('holdings-pie');
   if(pie)pie.innerHTML='<div class=\"list-item\">资产分布暂未返回，稍后自动刷新...</div>';
 }
-drawEquity(historyRows);
+drawEquity(historyRows,historyMode);
 if(state.currentTab==='dashboard'||document.getElementById('dashboard')?.classList.contains('active'))void loadEquityAttribution(activeType);
 renderRisk(mergedRisk);
 if(sr.status==='rejected'&&br.status==='rejected'){const ex=document.getElementById('exchanges-list');if(ex)ex.innerHTML='<div class=\"list-item\">资产接口暂时不可用，系统正在自动重试...</div>';}

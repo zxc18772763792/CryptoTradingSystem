@@ -168,6 +168,8 @@ _LISTENER_WATCHDOG_ENABLED = _env_bool("LISTENER_WATCHDOG_ENABLED", True)
 # (core/research/announcement_short_tracker.py). It needs ~90 s polling, which the
 # 5-minute research scheduler cannot give, so it runs as its own runtime task.
 _ANNOUNCEMENT_SHORT_ENABLED = _env_bool("ANNOUNCEMENT_SHORT_TRACKER_ENABLED", True)
+_EQUITY_SNAPSHOT_ENABLED = _env_bool("EQUITY_SNAPSHOT_WORKER_ENABLED", True)
+_EQUITY_SNAPSHOT_INTERVAL_SEC = max(60, int(_env_float("EQUITY_SNAPSHOT_INTERVAL_SEC", 300.0)))
 # Readiness used to fail on ANY stale WS symbol: thin coins (MOVE/USDT, USUAL/USDT ticking
 # every 2-3 min, 2026-10-07) held /readyz at 503 while the feed was healthy, and with only
 # ~6 subscribed symbols a share threshold alone still flapped. Now readiness fails when a
@@ -2185,6 +2187,29 @@ async def _announcement_short_worker(stop_event: asyncio.Event) -> None:
             await asyncio.sleep(1)
 
 
+async def _equity_snapshot_worker(stop_event: asyncio.Event) -> None:
+    """Record paper equity on a timer so the dashboard curve has history while nobody has the page
+    open (snapshots used to come only from dashboard balance reads: 271 rows in a month). Paper
+    equity is local (anchor + P&L - fees); live equity needs exchange calls, so live keeps relying
+    on balance reads."""
+    from core.trading.account_snapshot import account_snapshot_manager
+
+    while not stop_event.is_set():
+        try:
+            if execution_engine.is_paper_mode():
+                equity = float(await execution_engine.get_account_equity_snapshot() or 0.0)
+                if equity > 0:
+                    await account_snapshot_manager.record_snapshot(total_usd=equity, exchanges={}, mode="paper")
+            _touch_runtime_task("equity_snapshot", success=True)
+        except Exception as exc:  # noqa: BLE001 - retried next interval
+            _touch_runtime_task("equity_snapshot", success=False)
+            logger.debug(f"equity snapshot failed: {exc}")
+        for _ in range(_EQUITY_SNAPSHOT_INTERVAL_SEC):
+            if stop_event.is_set():
+                return
+            await asyncio.sleep(1)
+
+
 def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
     factories: Dict[str, Dict[str, Any]] = {
         "runtime": {
@@ -2222,6 +2247,11 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         factories["exchange_watchdog"] = {
             "factory": lambda stop_event: _exchange_watchdog_worker(stop_event),
             "restart_on_failure": True,  # must stay alive for the session lifetime
+        }
+    if _EQUITY_SNAPSHOT_ENABLED:
+        factories["equity_snapshot"] = {
+            "factory": lambda stop_event: _equity_snapshot_worker(stop_event),
+            "restart_on_failure": True,
         }
     if _ANNOUNCEMENT_SHORT_ENABLED:
         factories["announcement_short"] = {
