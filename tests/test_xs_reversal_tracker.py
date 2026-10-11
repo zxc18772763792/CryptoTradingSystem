@@ -75,6 +75,14 @@ class Exchange:
 def ex(monkeypatch, tmp_path):
     e = Exchange()
     monkeypatch.setattr(xr, "_now", lambda: e.now)
+    # the liquidation shadow's inputs: today's 24h totals (None = unavailable) and the stored prior days
+    e.liquidations, e.store = None, {}
+
+    async def today():
+        return e.liquidations
+
+    monkeypatch.setattr(xr, "_today_liquidations", today)
+    monkeypatch.setattr("core.research.coinglass_daily_store.load_coin", lambda perp, root=None: e.store.get(perp, {}))
     universe = tmp_path / "universe.json"
     universe.write_text(json.dumps({"bases": BASES + ["NOPERP"]}), encoding="utf-8")
     e.state = tmp_path / "state.json"
@@ -109,6 +117,7 @@ def test_daily_cycle_forms_at_midnight_and_settles_with_funding(ex):
     assert sorted(day["shorts"]) == ["C00USDT", "C01USDT", "C02USDT", "C03USDT"]
     assert day["longs"]["C39USDT"]["entry"] == pytest.approx(100.0 * 0.961 ** 10)
     assert summary["universe_size"] == 41 and summary["forward_open"] == 1
+    assert day["liq_filter"]["status"] == "no_data"  # no liquidation lists: the shadow sits out, the main book does not
 
     for s in ex.next_day:
         ex.next_day[s] = 1.10 if s in day["longs"] else 0.95  # longs +10%, shorts -5%
@@ -154,3 +163,47 @@ def test_delisted_position_is_dropped_after_the_grace_period(ex):
     day = json.loads(ex.state.read_text(encoding="utf-8"))["days"]["2026-10-05"]
     assert day["status"] == "closed" and day["missing_positions"] == 1  # a vanished contract does not block settlement
     assert day["longs"]["C39USDT"]["gone"] is True
+
+
+def test_liquidation_shadow_drops_the_shocks_from_the_longs_and_is_judged_on_the_difference(ex):
+    bar_day = D0 - timedelta(days=1)  # the Coinglass bar that closes at the 00:00 formation
+    prior_days = [int((bar_day - timedelta(days=k)).timestamp() * 1000) for k in range(1, 31)]
+    shocked = {"C39", "C38", "C00", "C01", "C02", "C03", "C04", "C05"}  # the top fifth of 40
+    ex.store = {f"{b}USDT": {"base": b, "liquidation": [
+        {"time": t, "aggregated_long_liquidation_usd": 600.0 + (t // 86_400_000) % 7, "aggregated_short_liquidation_usd": 400.0}
+        for t in prior_days]} for b in BASES}
+    ex.liquidations = {b: (1e7 if b in shocked else 1000.0) for b in BASES}
+    ex.run()
+    day = json.loads(ex.state.read_text(encoding="utf-8"))["days"]["2026-10-05"]
+    shadow = day["liq_filter"]
+    assert sorted(day["longs"]) == ["C36USDT", "C37USDT", "C38USDT", "C39USDT"]  # the main book is untouched
+    assert sorted(shadow["flagged"]) == sorted(f"{b}USDT" for b in shocked)
+    assert sorted(shadow["longs"]) == ["C35USDT", "C36USDT", "C37USDT"]  # 32 candidates left: 3 per side
+
+    for s in ex.next_day:
+        ex.next_day[s] = 0.90 if s in ("C38USDT", "C39USDT") else 1.0  # the shocked longs keep falling
+    ex.now = D0 + timedelta(days=1, hours=1, minutes=10)
+    summary = ex.run()
+    day = json.loads(ex.state.read_text(encoding="utf-8"))["days"]["2026-10-05"]
+    funding = 3 * 0.0001
+    main_long = (2 * (-funding) + 2 * (-0.10 - funding)) / 4
+    shadow_long = -funding
+    short_leg = funding
+    assert day["net_per_position_pct"] == pytest.approx(((main_long + short_leg) / 2 - xr.ROUND_TRIP_COST) * 100)
+    assert day["liq_filter"]["net_per_position_pct"] == pytest.approx(((shadow_long + short_leg) / 2 - xr.ROUND_TRIP_COST) * 100)
+    assert day["liq_filter"]["diff_pct"] == pytest.approx((shadow_long - main_long) / 2 * 100)
+    assert summary["liq_filter"]["completed"] == 1 and summary["liq_filter"]["mean_diff_pct"] == pytest.approx(2.5, abs=1e-3)
+    assert json.loads(ex.state.read_text(encoding="utf-8"))["liq_filter_rule"]["min_n"] == 180
+
+
+def test_liquidation_shock_needs_twenty_prior_days():
+    day = D0 - timedelta(days=1)
+    rows = [{"time": int((day - timedelta(days=k)).timestamp() * 1000), "aggregated_long_liquidation_usd": 100.0 + k,
+             "aggregated_short_liquidation_usd": 50.0} for k in range(1, 20)]  # only 19 prior days
+    assert xr.liquidation_shock({"A": 1e6}, {"AUSDT": {"base": "A", "liquidation": rows}}, day) == {}
+    rows.append({"time": int((day - timedelta(days=20)).timestamp() * 1000), "aggregated_long_liquidation_usd": 120.0,
+                 "aggregated_short_liquidation_usd": 50.0})
+    shock = xr.liquidation_shock({"A": 1e6}, {"AUSDT": {"base": "A", "liquidation": rows}}, day)
+    import numpy as np
+    prior = np.log1p([r["aggregated_long_liquidation_usd"] + 50.0 for r in rows])
+    assert shock["AUSDT"] == pytest.approx((np.log1p(1e6) - prior.mean()) / prior.std(ddof=1))
