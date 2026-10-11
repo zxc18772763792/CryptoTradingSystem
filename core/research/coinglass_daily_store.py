@@ -39,8 +39,9 @@ HOUR_MS = 3_600_000
 START_AFTER = timedelta(minutes=15)  # after the 00:00 snapshot and the reversal formation
 REQUEST_SPACING_SEC = 12.0
 TIMEOUT_RETRIES, TIMEOUT_WAIT_SEC = 2, 10.0  # a timed-out request is asked again this many times
-MAX_ATTEMPTS = 3  # a coin that failed on a network error is asked again, at most this many passes a day
+MAX_ATTEMPTS = 3  # passes a day: a coin still incomplete (error, or a bar Coinglass had not published yet) is asked again
 RETRY_UNTIL = timedelta(hours=10)
+RETRY_GAP = timedelta(minutes=20)
 EXCHANGES = "Binance,OKX,Bybit"
 # dataset -> (path, keyed by base or by Binance pair, fields kept)
 DATASETS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
@@ -243,6 +244,10 @@ async def update(day: datetime, *, client=None, root: Optional[Path] = None, sta
         await run(client)
     status["completed_at"] = _now().isoformat()
     status["complete_coins"] = sum(complete(load_coin(perp, root), day) for _, perp in universe())
+    status["universe_coins"] = len(universe())
+    # final: nothing more will be asked today, so the trackers can stop waiting
+    status["final"] = (status["complete_coins"] >= status["universe_coins"] or attempt >= MAX_ATTEMPTS
+                       or _now() >= day + timedelta(days=1) + RETRY_UNTIL)
     save_status(status, status_path)
     logger.info(f"coinglass daily store: day {status['day']} {status['complete_coins']} coins complete, "
                 f"{status['requests']} requests, {len(status['refused'])} refused, {len(status['errors'])} errors")
@@ -262,10 +267,15 @@ def ensure_current(now: Optional[datetime] = None) -> Dict[str, Any]:
     status = load_status()
     if _task is not None and not _task.done():
         return {"status": "updating", **{k: status.get(k) for k in ("day", "requests", "started_at")}}
-    retry = (status.get("day") == f"{day:%Y-%m-%d}" and status.get("completed_at") and status.get("errors")
-             and int(status.get("attempt") or 1) < MAX_ATTEMPTS and now < day + timedelta(days=1) + RETRY_UNTIL)
-    if status.get("day") == f"{day:%Y-%m-%d}" and status.get("completed_at") and not retry:
-        return {"status": "current", **{k: status.get(k) for k in ("day", "complete_coins", "completed_at")}}
+    if status.get("day") == f"{day:%Y-%m-%d}" and status.get("completed_at"):
+        if status.get("final"):
+            return {"status": "current", **{k: status.get(k) for k in ("day", "complete_coins", "completed_at")}}
+        if now >= day + timedelta(days=1) + RETRY_UNTIL:  # out of time for another pass
+            status["final"] = True
+            save_status(status)
+            return {"status": "current", **{k: status.get(k) for k in ("day", "complete_coins", "completed_at")}}
+        if now - datetime.fromisoformat(status["completed_at"]) < RETRY_GAP:
+            return {"status": "waiting_retry", **{k: status.get(k) for k in ("day", "complete_coins", "completed_at")}}
     if now - (day + timedelta(days=1)) < START_AFTER:
         return {"status": "waiting", "day": f"{day:%Y-%m-%d}"}
     from core.data.coinglass_client import coinglass_enabled
