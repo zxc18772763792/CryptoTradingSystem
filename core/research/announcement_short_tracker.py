@@ -275,7 +275,10 @@ def summary(state: Dict[str, Any], kind: str) -> Dict[str, Any]:
         "median_sell_10k_impact_pct": round(float(np.median(impact)), 3) if impact else None,
         "assumed_slippage_pct": 0.2,
         "backtest_reference": spec["reference"],
-        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES[spec["rule"]]),
+        # coins named in one announcement are shorted together: one cluster per notice
+        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES[spec["rule"]],
+                                         clusters=[t.get("notice_code") or int(t.get("entry_ms") or 0) // 86_400_000
+                                                   for t in done]),
     }
 
 

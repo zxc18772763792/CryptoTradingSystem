@@ -50,3 +50,38 @@ def test_verdict_alert_fires_once_per_change(tmp_path, monkeypatch):
     asyncio.run(runner._verdict_alert("supply_factor", retire))
     assert len(sent) == 1 and "供给通胀因子" in sent[0]
     assert json.loads((tmp_path / "verdicts.json").read_text(encoding="utf-8")) == {"supply_factor": "retire"}
+
+
+def _width(v):
+    return v["ci90_pct"][1] - v["ci90_pct"][0]
+
+
+def test_clustered_interval_equals_the_plain_one_with_one_result_per_cluster():
+    returns = [4.0, -1.0, 6.0, 2.5, -3.0, 5.0, 1.0, 3.5]
+    plain = retirement.verdict(returns, RULE)
+    singletons = retirement.verdict(returns, RULE, clusters=list(range(len(returns))))
+    assert singletons["ci90_pct"] == plain["ci90_pct"] and singletons["clusters"] == len(returns)
+    assert "clusters" not in plain
+
+
+def test_results_repeated_inside_a_cluster_add_no_evidence():
+    """Two coins per notice that move identically: the clustered interval is that of the notices alone."""
+    notices = [4.0, -1.0, 6.0, 2.5]
+    doubled = retirement.verdict(notices * 2, RULE, clusters=[0, 1, 2, 3] * 2)
+    assert doubled["clusters"] == 4 and doubled["n"] == 8
+    assert doubled["ci90_pct"] == retirement.verdict(notices, RULE)["ci90_pct"]
+    assert _width(doubled) > _width(retirement.verdict(notices * 2, RULE))  # the naive one is too narrow
+
+
+def test_a_single_cluster_gives_no_interval_and_cannot_confirm():
+    returns = [3.0, 3.2, 2.9, 3.1] * 3
+    assert retirement.verdict(returns, RULE)["verdict"] == "confirmed"  # as if 12 independent results
+    one = retirement.verdict(returns, RULE, clusters=["notice-1"] * 12)
+    assert one["ci90_pct"] is None and one["clusters"] == 1 and one["verdict"] == "on_track"
+
+
+def test_cluster_keys_must_align_and_missing_keys_stand_alone():
+    with pytest.raises(ValueError):
+        retirement.verdict([1.0, 2.0], RULE, clusters=[1])
+    v = retirement.verdict([1.0, 2.0, None, 4.0], RULE, clusters=[None, None, "x", "y"])
+    assert v["n"] == 3 and v["clusters"] == 3  # the None return is dropped with its key

@@ -6394,6 +6394,18 @@ async def get_bithumb_caution_tracker(hedged: bool = False):
     return {"summary": await asyncio.to_thread(upbit_caution_tracker.summary, state, strategy), "trades": trades[:80]}
 
 
+@router.get("/korea-caution")
+async def get_korea_caution_tracker():
+    """Forward paper tracker: Upbit + Bithumb caution designations pooled, hedged short (research only)."""
+    from core.research import upbit_caution_tracker
+
+    strategy = "korea_caution_hedged"
+    path = upbit_caution_tracker.STRATEGIES[strategy]["state_path"]
+    state = await asyncio.to_thread(upbit_caution_tracker.load_state, path)
+    trades = sorted(state.get("trades", {}).values(), key=lambda t: t.get("notice_at") or "", reverse=True)
+    return {"summary": await asyncio.to_thread(upbit_caution_tracker.summary, state, strategy), "trades": trades[:80]}
+
+
 @router.get("/research-trackers")
 async def get_research_trackers():
     """Forward performance of every paper tracker, one normalized row each (strategies tab, read-only)."""

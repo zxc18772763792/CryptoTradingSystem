@@ -25,7 +25,17 @@ passes: the caution notices themselves, and coins whose market_warning in
 Bithumb's market list turns CAUTION (timestamped when first seen; the first
 pass only records a baseline). Joint designations with Upbit are marked so
 Bithumb-only events can be read separately.
-Both mirror the backtest's universe: the coin must have traded on Binance
+
+Since 2026-10-11, "korea_caution_hedged": Upbit and Bithumb caution
+designations pooled into one hedged strategy, so a verdict arrives in about
+half the time. One trade per coin per JOINT_DAYS: the exchange that
+designates first opens it, and the other exchange's designation inside that
+window is only noted on the trade (``joint``). Judged on the hedged return;
+the plain short is kept for reference (the 2026 backtest and the September
+backfill show the plain short mostly earned the market's fall). Its own state
+file and rule: the five trackers above keep running unchanged.
+
+All mirror the backtest's universe: the coin must have traded on Binance
 spot 30 days before the notice. Listing follow-ups (e.g. a changed start
 time) never open a second listing trade: one listing per coin per 30 days.
 
@@ -74,6 +84,7 @@ KRW_LISTING_STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_krw_listing
 CAUTION_HEDGED_STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_caution_hedged" / "tracker.json"
 BITHUMB_STATE_PATH = PROJECT_ROOT / "data" / "research" / "bithumb_caution" / "tracker.json"
 BITHUMB_HEDGED_STATE_PATH = PROJECT_ROOT / "data" / "research" / "bithumb_caution_hedged" / "tracker.json"
+KOREA_HEDGED_STATE_PATH = PROJECT_ROOT / "data" / "research" / "korea_caution_hedged" / "tracker.json"
 BITHUMB_NOTICES = "https://feed-api.bithumb.com/v1/notices"
 BITHUMB_MARKETS = "https://api.bithumb.com/v1/market/all"
 KST = timezone(timedelta(hours=9))
@@ -95,6 +106,8 @@ BITHUMB_REFERENCE = ("no Bithumb history (archive bot-protected): out-of-sample 
                      "31 perps +7.5%/trade")
 BITHUMB_HEDGED_REFERENCE = ("no Bithumb history (archive bot-protected): out-of-sample test of the hedged Upbit caution "
                             "short, 30 perps +5.0%/trade")
+KOREA_HEDGED_REFERENCE = ("Upbit 30 perps 2022-26, short coin + long top-30 basket: +5.0%/trade, 90% CI [+1.4, +10.6]; "
+                          "Bithumb has no history (archive bot-protected) and is pooled under the same rule")
 KRW_LISTING_REFERENCE = "70 perps 2023-26: +6.5%/trade after fees+funding, 90% CI [+3.5, +9.1], win 74%, 2 stops near -49%"
 KRW_LISTING = re.compile(r"(신규\s*)?거래\s*지원\s*안내.*KRW|KRW.*(신규\s*)?거래\s*지원|(KRW|원화)[^(]*마켓[^(]*(추가|상장|오픈)|(원화|KRW)\s*마켓\s*(신규\s*)?상장")
 NOT_LISTING = re.compile(r"유의|거래\s*지원\s*종료|유통량")
@@ -163,7 +176,20 @@ STRATEGIES: Dict[str, Dict[str, Any]] = {
     "bithumb_caution_hedged": {"match": caution_tickers, "state_path": BITHUMB_HEDGED_STATE_PATH,
                                "rule": "bithumb_caution_hedged", "reference": BITHUMB_HEDGED_REFERENCE, "dedupe": True,
                                "dedupe_days": 7, "source": "bithumb", "hedged": True},
+    # Upbit + Bithumb pooled: one trade per coin per JOINT_DAYS, opened by whichever exchange designates first
+    "korea_caution_hedged": {"match": caution_tickers, "state_path": KOREA_HEDGED_STATE_PATH,
+                             "rule": "korea_caution_hedged", "reference": KOREA_HEDGED_REFERENCE, "dedupe": True,
+                             "dedupe_days": JOINT_DAYS, "source": "korea", "hedged": True},
 }
+
+
+def _exchange(record: Dict[str, Any]) -> str:
+    """Exchange behind a notice or trade (records from before the source field are Upbit's)."""
+    return "bithumb" if str(record.get("source") or "").startswith("bithumb") else "upbit"
+
+
+def _listed_at(notice: Dict[str, Any]) -> datetime:
+    return datetime.fromisoformat(notice["first_listed_at"]).astimezone(timezone.utc)
 
 
 def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], day0_ms: int, now_ms: float) -> Dict[str, Any]:
@@ -289,10 +315,14 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
     perps = {sym: int(s.get("onboardDate") or 0) for sym, s in contracts.items() if s.get("status") == "TRADING"}
     basket: Optional[Dict[str, Any]] = None  # fetched at most once per pass, only for a new forward trade
 
-    notices = (await _bithumb_notices(client, state, now) if spec.get("source") == "bithumb" else await _notices(client))
-    # oldest first: the original notice must claim an event before its follow-ups do
-    for notice in sorted(notices, key=lambda n: str(n.get("first_listed_at") or "")):
-        at = datetime.fromisoformat(notice["first_listed_at"]).astimezone(timezone.utc)
+    source = spec.get("source", "upbit")
+    notices = await _notices(client) if source in {"upbit", "korea"} else []
+    if source in {"bithumb", "korea"}:
+        notices += await _bithumb_notices(client, state, now)
+    # oldest first (in UTC: Bithumb flags are stamped in UTC, notices in KST): the original
+    # notice, or the first exchange to designate, must claim an event before its follow-ups do
+    for notice in sorted(notices, key=_listed_at):
+        at = _listed_at(notice)
         if (now - at).days > BACKFILL_DAYS:
             continue
         for ticker in spec["match"](str(notice.get("title") or "")):
@@ -301,8 +331,12 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
                 continue
             day0 = datetime(at.year, at.month, at.day, tzinfo=timezone.utc)
             day0_ms = int(day0.timestamp() * 1000)
-            if spec["dedupe"] and any(t.get("ticker") == ticker and abs(int(t.get("day0_ms") or 0) - day0_ms) < spec.get("dedupe_days", DEDUPE_DAYS) * DAY_MS
-                   for t in state["trades"].values()):
+            window = spec.get("dedupe_days", DEDUPE_DAYS) * DAY_MS
+            claimed = next((t for t in state["trades"].values() if t.get("ticker") == ticker
+                            and abs(int(t.get("day0_ms") or 0) - day0_ms) < window), None) if spec["dedupe"] else None
+            if claimed is not None:
+                if _exchange(notice) != _exchange(claimed):  # pooled: the other exchange designated it too
+                    claimed.setdefault("joint", {}).setdefault(_exchange(notice), at.isoformat())
                 continue  # a follow-up notice (changed start time, update) for an event already recorded
             symbol = next((s for s in (f"{ticker}USDT", f"1000{ticker}USDT") if 0 < perps.get(s, 0) < at.timestamp() * 1000), None)
             if symbol and not await _spot_history_30d(client, ticker, day0_ms):
@@ -437,6 +471,17 @@ def _bithumb_only(done: List[Dict[str, Any]], spec: Dict[str, Any]) -> Dict[str,
             "forward_bithumb_only_mean_return_pct": round(float(np.mean(alone)), 2) if alone else None}
 
 
+def _by_exchange(done: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Pooled tracker: completed hedged trades by the exchange that designated first, and the joint ones."""
+    out: Dict[str, Any] = {}
+    for name, keep in (("upbit", lambda t: _exchange(t) == "upbit"), ("bithumb", lambda t: _exchange(t) == "bithumb"),
+                       ("joint", lambda t: bool(t.get("joint")))):
+        values = [float(t["hedged_return_pct"]) for t in done if keep(t)]
+        out[f"forward_{name}_completed"] = len(values)
+        out[f"forward_{name}_mean_return_pct"] = round(float(np.mean(values)), 2) if values else None
+    return out
+
+
 def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
     spec = STRATEGIES[strategy]
     trades = list(state.get("trades", {}).values())
@@ -444,9 +489,11 @@ def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
     done = [t for t in forward if t.get("status") in {"closed", "stopped"}]
     if spec.get("hedged"):
         done = [t for t in done if t.get("hedged_return_pct") is not None]  # complete only once the basket settled
-        returns = [float(t["hedged_return_pct"]) for t in done]
+        counted = done
+        returns = [float(t["hedged_return_pct"]) for t in counted]
     else:
-        returns = [float(t["return_pct"]) for t in done if t.get("return_pct") is not None]
+        counted = [t for t in done if t.get("return_pct") is not None]
+        returns = [float(t["return_pct"]) for t in counted]
     hedged = [float(t["evidence"]["market_control"]["hedged_return_pct"]) for t in done
               if (t.get("evidence") or {}).get("market_control")]
     return {
@@ -466,6 +513,7 @@ def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
         "forward_unhedged_mean_return_pct": (round(float(np.mean([float(t["return_pct"]) for t in done])), 2)
                                              if done and spec.get("hedged") else None),
         **(_bithumb_only(done, spec) if spec.get("source") == "bithumb" else {}),
+        **(_by_exchange(done) if spec.get("source") == "korea" else {}),
         "evidence_coverage": {
             "completed": len(done),
             "book_at_entry": sum("mid" in ((t.get("evidence") or {}).get("book_at_entry") or {}) for t in done),
@@ -475,5 +523,7 @@ def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
         "strategy": strategy,
         "backtest_reference": spec["reference"],
         "evaluation_ready": len(returns) >= retirement.RULES[spec["rule"]]["min_n"],
-        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES[spec["rule"]]),
+        # coins named in one notice or designated the same UTC day share an entry close: one cluster
+        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES[spec["rule"]],
+                                         clusters=[t.get("day0_ms") for t in counted]),
     }

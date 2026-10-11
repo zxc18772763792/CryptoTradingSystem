@@ -296,7 +296,8 @@ def summary(state: Dict[str, Any], variant: str = "t30") -> Dict[str, Any]:
     trades = list(state.get("trades", {}).values())
     forward = [t for t in trades if not t.get("late")]
     done = [t for t in forward if t.get("status") in {"closed", "stopped", "schedule_changed"}]
-    hedged = [float(t["hedged_return_pct"]) for t in done if t.get("hedged_return_pct") is not None]
+    counted = [t for t in done if t.get("hedged_return_pct") is not None]
+    hedged = [float(t["hedged_return_pct"]) for t in counted]
     return {
         "started_at": state.get("started_at"),
         "updated_at": state.get("updated_at"),
@@ -311,5 +312,7 @@ def summary(state: Dict[str, Any], variant: str = "t30") -> Dict[str, Any]:
         "variant": variant,
         "backtest_reference": spec["reference"],
         "evaluation_ready": len(hedged) >= retirement.RULES[spec["rule"]]["min_n"],
-        "retirement": retirement.verdict(hedged, state.get("retirement_rule") or retirement.RULES[spec["rule"]]),
+        # unlocks entered on the same day share the basket period: one cluster per entry day
+        "retirement": retirement.verdict(hedged, state.get("retirement_rule") or retirement.RULES[spec["rule"]],
+                                         clusters=[t.get("entry_day") for t in counted]),
     }

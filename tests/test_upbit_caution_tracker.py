@@ -408,3 +408,60 @@ def test_bithumb_outage_keeps_the_flag_baseline(world, tmp_path):
     world.now = NOTICE_AT + timedelta(hours=3)
     _bithumb(world, path)  # back up: AAA's designation is still caught
     assert any(k.startswith("AAA|bt-flag-") for k in json.loads(path.read_text(encoding="utf-8"))["trades"])
+
+
+
+def _korea(world, path):
+    return asyncio.run(uc.tick(world, state_path=path, strategy="korea_caution_hedged"))
+
+
+def test_korea_pools_both_exchanges_and_the_first_designation_opens_the_trade(world, tmp_path):
+    # Upbit designates AAA at 15:00 KST = 06:00 UTC; Bithumb's market list shows AAA as CAUTION when first
+    # looked at, 08:00 UTC (stamped in UTC: a plain string sort would wrongly put it first); CCC is
+    # designated by Bithumb alone.
+    world.notices = [{"id": 7001, "title": "에이에이(AAA) 거래 유의 종목 지정 안내", "first_listed_at": "2026-10-05T15:00:00+09:00"}]
+    world.bithumb_notices = [
+        {"categories": ["거래유의"], "title": "씨씨(CCC) 거래유의종목 지정", "pc_url": "https://feed.bithumb.com/notice/9002",
+         "published_at": "2026-10-05 16:00:00"},
+        {"categories": ["거래유의"], "title": "에이에이(AAA) 거래유의종목 지정", "pc_url": "https://feed.bithumb.com/notice/9003",
+         "published_at": "2026-10-05 17:30:00"},  # Bithumb's own notice for AAA, after its flag
+    ]
+    world.bithumb_flags = {"AAA"}
+    path = tmp_path / "korea.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}, "bithumb_caution_flags": []}, path)
+    _korea(world, path)
+    trades = json.loads(path.read_text(encoding="utf-8"))["trades"]
+    assert set(trades) == {"AAA|7001", "CCC|bt-9002"}  # one AAA trade, opened by Upbit
+    assert trades["AAA|7001"]["joint"] == {"bithumb": "2026-10-05T08:00:00+00:00"}
+    assert trades["CCC|bt-9002"]["source"] == "bithumb_notice" and "joint" not in trades["CCC|bt-9002"]
+
+    world.now = NOTICE_AT + timedelta(hours=3)
+    _korea(world, path)  # Bithumb's AAA notice is seen again on every pass: no second trade, joint unchanged
+    again = json.loads(path.read_text(encoding="utf-8"))["trades"]
+    assert set(again) == set(trades) and again["AAA|7001"]["joint"] == trades["AAA|7001"]["joint"]
+
+    world.path = lambda k: (1.0, 1.0 if k == 0 else 0.9)  # both coins -10% after entry, market flat
+    world.now = datetime(2026, 10, 13, 1, tzinfo=timezone.utc)
+    summary = _korea(world, path)
+    assert summary["strategy"] == "korea_caution_hedged" and summary["forward_completed"] == 2
+    assert (summary["forward_upbit_completed"], summary["forward_bithumb_completed"], summary["forward_joint_completed"]) == (1, 1, 1)
+    assert summary["forward_unhedged_mean_return_pct"] is not None
+    verdict = summary["retirement"]
+    assert verdict["n"] == 2 and verdict["clusters"] == 1 and verdict["ci90_pct"] is None  # same entry day: one cluster
+    rule = json.loads(path.read_text(encoding="utf-8"))["retirement_rule"]
+    assert rule["min_n"] == 20 and rule["backtest_mean_pct"] == 5.0
+
+
+def test_korea_counts_a_new_designation_after_the_window(world, tmp_path):
+    world.notices = [
+        {"id": 7101, "title": "에이에이(AAA) 거래 유의 종목 지정 기간 연장 안내", "first_listed_at": "2026-10-05T15:00:00+09:00"},
+        {"id": 7100, "title": "에이에이(AAA) 거래 유의 종목 지정 안내", "first_listed_at": "2026-09-27T15:00:00+09:00"},
+    ]
+    world.bithumb_notices = [{"categories": ["거래유의"], "title": "에이에이(AAA) 거래유의종목 지정",
+                              "pc_url": "https://feed.bithumb.com/notice/9001", "published_at": "2026-09-29 10:00:00"}]
+    path = tmp_path / "korea.json"
+    uc.save_state({"started_at": "2026-09-01T00:00:00+00:00", "trades": {}}, path)
+    _korea(world, path)
+    trades = json.loads(path.read_text(encoding="utf-8"))["trades"]
+    assert set(trades) == {"AAA|7100", "AAA|7101"}  # Bithumb's 9/29 notice falls in Upbit's 9/27 window
+    assert trades["AAA|7100"]["joint"] == {"bithumb": "2026-09-29T01:00:00+00:00"}

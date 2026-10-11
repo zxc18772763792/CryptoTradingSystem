@@ -59,7 +59,12 @@ TRACKERS: List[Dict[str, Any]] = [
     {"id": "supply_factor", "name": "供给通胀因子", "group": "因子", "unit": "月", "rule_key": "supply_factor",
      "rule": "每月按未来 90 天新增供给排序，多低空高三分位，持有 30 天", "load": _supply},
     {"id": "xs_reversal", "name": "日线横截面反转", "group": "因子", "unit": "天", "rule_key": "xs_reversal",
-     "rule": "每天 00:00 UTC 做多跌离均线最深 10%、做空最高 10%，持有 24h", "load": _xs_reversal},
+     "rule": "每天 00:00 UTC 做多跌离均线最深 10%、做空最高 10%，持有 24h。回测仅 +0.057%/天，180 天测不出：只能发现明显亏损，"
+             "或远好于回测（约 +0.3%/天以上）", "load": _xs_reversal},
+    {"id": "korea_caution_hedged", "name": "韩国交易所警示后做空 · 对冲版（Upbit + Bithumb 合并）", "group": "韩国交易所",
+     "unit": "笔", "rule_key": "korea_caution_hedged",
+     "rule": "Upbit 或 Bithumb 交易警示当日收盘做空永续 7 天 + 等额做多成交额前 30 篮子；同一币 7 天内只开一笔，先警示的交易所开仓",
+     "load": _korean("korea_caution_hedged")},
     {"id": "upbit_caution", "name": "Upbit 警示后做空", "group": "韩国交易所", "unit": "笔", "rule_key": "upbit_caution",
      "rule": "交易警示当日收盘做空币安永续 7 天，+40% 止损", "load": _korean("caution")},
     {"id": "upbit_caution_hedged", "name": "Upbit 警示后做空 · 对冲版", "group": "韩国交易所", "unit": "笔",
@@ -89,10 +94,11 @@ def _open_marks(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
         trades = m.load_state(m.VARIANTS["t30" if tid == "unlock_short" else "t7"]["state_path"]).get("trades", {}).values()
         return [{"label": t.get("token"), "mark_pct": t.get("mark_return_pct")} for t in trades
                 if t.get("status") == "open" and not t.get("late")]
-    if tid.startswith(("upbit_", "bithumb_")):
+    if tid.startswith(("upbit_", "bithumb_", "korea_")):
         from core.research import upbit_caution_tracker as m
         strategy = {"upbit_caution": "caution", "upbit_caution_hedged": "caution_hedged", "upbit_krw_listing": "krw_listing",
-                    "bithumb_caution": "bithumb_caution", "bithumb_caution_hedged": "bithumb_caution_hedged"}[tid]
+                    "bithumb_caution": "bithumb_caution", "bithumb_caution_hedged": "bithumb_caution_hedged",
+                    "korea_caution_hedged": "korea_caution_hedged"}[tid]
         trades = m.load_state(m.STRATEGIES[strategy]["state_path"]).get("trades", {}).values()
         return [{"label": t.get("ticker"), "mark_pct": t.get("return_pct")} for t in trades
                 if t.get("status") in {"open", "waiting_entry"} and t.get("symbol") and not t.get("backfilled") and not t.get("late")]
@@ -134,6 +140,7 @@ def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
         verdict=verdict.get("verdict"),
         verdict_label=verdict.get("label"),
         verdict_reason=verdict.get("reason"),
+        ci_clusters=verdict.get("clusters"),
         win_rate=_first(summary, "forward_win_rate", "forward_positive_days", "forward_positive_months"),
         hedged_mean_pct=_first(summary, "forward_hedged_mean_return_pct"),
         open=_first(summary, "forward_open"),

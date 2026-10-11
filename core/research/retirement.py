@@ -16,6 +16,16 @@ Verdicts, from completed forward returns (percent per trade or per month):
   on_track    min_n reached, mean positive, not yet significant
 Retiring only labels the tracker and alerts once; recording continues so the
 decision can be audited. Nothing here trades.
+
+The interval is mean +/- 1.645 standard errors. Since 2026-10-11 a tracker
+may pass one cluster key per result (its notice, or its entry day): coins
+named in one notice, or entered on the same day, move together, and counting
+them as independent overstates the evidence. The standard error is then
+cluster-robust, sqrt(G/(G-1) * sum over clusters of the squared residual sum)
+/ n; with one result per cluster it equals the plain formula, and a single
+cluster gives no interval. n and min_n still count results. When this was
+added only two trackers had completed forward results (unlock t-7: one;
+announcement monitor: two from one notice) and no verdict changed.
 """
 from __future__ import annotations
 
@@ -48,6 +58,9 @@ RULES: Dict[str, Dict[str, Any]] = {
     # means from scripts/announcement_intraday_study.py --frozen (with the registered stops)
     "announcement_short_monitor": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 4.3},
     "announcement_short_delist": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 5.8},
+    # added 2026-10-11 with the pooled Korean caution tracker, before its first forward trade: Upbit and
+    # Bithumb designations judged together on the hedged return; the bar is the hedged Upbit backtest.
+    "korea_caution_hedged": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 5.0},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",
@@ -65,21 +78,38 @@ def register(state: Dict[str, Any], tracker: str, registered_at: str) -> Dict[st
     return state["retirement_rule"]
 
 
-def verdict(returns_pct: Sequence[float], rule: Dict[str, Any]) -> Dict[str, Any]:
-    values = [float(r) for r in returns_pct if r is not None and math.isfinite(float(r))]
+def verdict(returns_pct: Sequence[float], rule: Dict[str, Any],
+            clusters: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
+    """``clusters``: one key per return (notice or entry day) for a cluster-robust interval."""
+    if clusters is not None and len(clusters) != len(returns_pct):
+        raise ValueError("clusters must align with returns_pct")
+    keys = list(clusters) if clusters is not None else [None] * len(returns_pct)
+    pairs = [(float(r), ("row", i) if key is None else key)  # a missing key is its own cluster
+             for i, (r, key) in enumerate(zip(returns_pct, keys)) if r is not None and math.isfinite(float(r))]
+    values = [v for v, _ in pairs]
     n, min_n = len(values), int(rule["min_n"])
     out: Dict[str, Any] = {"n": n, "min_n": min_n, "unit": rule.get("unit"), "mean_pct": None,
                            "ci90_pct": None, "verdict": "collecting", "reason": f"不足 {max(3, min_n // 2)} 个样本"}
+    if clusters is not None:
+        out["clusters"] = len({key for _, key in pairs})
     if n == 0:
         out["label"] = VERDICT_LABELS["collecting"]
         return out
     mean = sum(values) / n
     lower: Optional[float] = None
     upper: Optional[float] = None
-    if n >= 2:
+    if n >= 2 and clusters is None:
         sd = math.sqrt(sum((v - mean) ** 2 for v in values) / (n - 1))
         half = Z90 * sd / math.sqrt(n)
         lower, upper = mean - half, mean + half
+    elif n >= 2:
+        sums: Dict[Any, float] = {}
+        for v, key in pairs:
+            sums[key] = sums.get(key, 0.0) + v - mean
+        g = len(sums)
+        if g >= 2:
+            half = Z90 * math.sqrt(g / (g - 1) * sum(s * s for s in sums.values())) / n
+            lower, upper = mean - half, mean + half
     out["mean_pct"] = round(mean, 2)
     out["ci90_pct"] = [round(lower, 2), round(upper, 2)] if lower is not None else None
     decay_bar = float(rule["backtest_mean_pct"]) * float(rule.get("decay_fraction", DECAY_FRACTION))

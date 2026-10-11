@@ -236,7 +236,9 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
     trades = list(state.get("trades", {}).values())
     live = [t for t in trades if not t.get("backfilled")]
     done = [t for t in live if t.get("status") in {"closed", "stopped"}]
-    returns = [float(t["return_pct"]) for t in done if t.get("return_pct") is not None]
+    counted = [t for t in done if t.get("return_pct") is not None]
+    returns = [float(t["return_pct"]) for t in counted]
+    entry_days = [int(t["entry_at"]) // 86_400_000 if t.get("entry_at") else None for t in counted]
     out = {
         "started_at": state.get("started_at"),
         "updated_at": state.get("updated_at"),
@@ -248,6 +250,7 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "forward_win_rate": round(sum(r > 0 for r in returns) / len(returns), 3) if returns else None,
         "backtest_reference": "229 perps 2024-26 (linear short P&L): +1.5%/trade, 90% CI [-2.0, +4.9], median +5.3%, win 59%, worst -57% - not significant",
         "evaluation_ready": len(done) >= 30,
-        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES["listing_short"]),
+        "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES["listing_short"],
+                                         clusters=entry_days),  # perps listed the same day are entered together
     }
     return out
