@@ -6,7 +6,9 @@ coins), the listing tracker every 60 min, the Upbit caution tracker every 30 min
 retirement verdict (core/research/retirement.py) alerts once when it turns
 "retire" or "confirmed". Four times a day it also archives Coinglass's
 all-coin market snapshot, and once a day each universe coin's liquidation
-map (core/research/coinglass_snapshot_archive.py).
+map (core/research/coinglass_snapshot_archive.py); it keeps the daily
+Coinglass bars current (core/research/coinglass_daily_store.py) for the
+7-day composite tracker and the reversal tracker's liquidation shadow.
 Research and risk annotation only: nothing here places or closes orders.
 """
 from __future__ import annotations
@@ -20,6 +22,8 @@ from typing import Any, Dict, Optional, Set
 from loguru import logger
 
 from core.research import (
+    coinglass_composite_tracker,
+    coinglass_daily_store,
     coinglass_snapshot_archive,
     delist_risk,
     exchange_notices,
@@ -44,7 +48,9 @@ TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解�
                  "bithumb_caution_hedged": "Bithumb 警示后做空（对冲版）",
                  "announcement_short_monitor": "币安监控标签公告后做空 24h",
                  "announcement_short_delist": "币安下架公告后做空 4h",
-                 "korea_caution_hedged": "韩国交易所警示后做空（Upbit + Bithumb 合并，对冲版）"}
+                 "korea_caution_hedged": "韩国交易所警示后做空（Upbit + Bithumb 合并，对冲版）",
+                 "coinglass_composite_7d": "Coinglass 七日合成组合",
+                 "xs_reversal_liq_filter": "横截面反转 · 剔除爆仓异常（影子）"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
 UPBIT_INTERVAL_SEC = 1800
@@ -246,12 +252,21 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         async def xs_reversal():
             _status["xs_reversal"] = await xs_reversal_tracker.tick(client)
             await _verdict_alert("xs_reversal", _status["xs_reversal"])
+            await _verdict_alert("xs_reversal_liq_filter", _status["xs_reversal"].get("liq_filter") or {})
 
         async def coinglass_snapshot():
             _status["coinglass_snapshot"] = await coinglass_snapshot_archive.tick()
 
         async def coinglass_liq_map():
             _status["coinglass_liq_map"] = await coinglass_snapshot_archive.tick_liq_maps()
+
+        async def coinglass_store():
+            # returns at once: the day's update (about 2.6 hours of paced requests) runs beside the runner
+            _status["coinglass_daily_store"] = coinglass_daily_store.ensure_current()
+
+        async def coinglass_composite():
+            _status["coinglass_composite"] = await coinglass_composite_tracker.tick(client)
+            await _verdict_alert("coinglass_composite_7d", _status["coinglass_composite"])
 
         async def delist():
             model = delist_risk.load_model()
@@ -274,6 +289,8 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("korea_caution_hedged", UPBIT_INTERVAL_SEC, now, force, korea_caution_hedged)
         await _run_job("coinglass_snapshot", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_snapshot)
         await _run_job("coinglass_liq_map", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_liq_map)
+        await _run_job("coinglass_daily_store", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_store)
+        await _run_job("coinglass_composite", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_composite)
         if delist_risk.MODEL_PATH.exists():
             await _run_job("delist_risk", DELIST_RISK_INTERVAL_SEC, now, force, delist)
     return status()

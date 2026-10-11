@@ -43,6 +43,19 @@ def _xs_reversal() -> Dict[str, Any]:
     return m.summary(m.load_state())
 
 
+def _composite() -> Dict[str, Any]:
+    from core.research import coinglass_composite_tracker as m
+    return m.summary(m.load_state())
+
+
+def _xs_liq_filter() -> Dict[str, Any]:
+    from core.research import xs_reversal_tracker as m
+    summary = m.summary(m.load_state())
+    shadow = summary.get("liq_filter") or {}
+    return {"retirement": shadow.get("retirement"), "started_at": summary.get("started_at"),
+            "updated_at": summary.get("updated_at"), "forward_completed": shadow.get("completed")}
+
+
 def _announcement(kind: str) -> Callable[[], Dict[str, Any]]:
     def load() -> Dict[str, Any]:
         from core.research import announcement_short_tracker as m
@@ -61,6 +74,13 @@ TRACKERS: List[Dict[str, Any]] = [
     {"id": "xs_reversal", "name": "日线横截面反转", "group": "因子", "unit": "天", "rule_key": "xs_reversal",
      "rule": "每天 00:00 UTC 做多跌离均线最深 10%、做空最高 10%，持有 24h。回测仅 +0.057%/天，180 天测不出：只能发现明显亏损，"
              "或远好于回测（约 +0.3%/天以上）", "load": _xs_reversal},
+    {"id": "xs_reversal_liq_filter", "name": "日线横截面反转 · 剔除爆仓异常（影子）", "group": "因子", "unit": "天",
+     "rule_key": "xs_reversal_liq_filter",
+     "rule": "同横截面反转，多头候选剔除当天爆仓异常前 20%；判定看和原版每天的收益差", "load": _xs_liq_filter},
+    {"id": "coinglass_composite_7d", "name": "Coinglass 七日合成组合", "group": "因子", "unit": "期",
+     "rule_key": "coinglass_composite_7d",
+     "rule": "8 个持仓类信号按训练期 IC 加权，每天建一份多空各五分之一、持有 7 天的组合，扣成本和资金费；利润薄，一年内约两成概率能确认",
+     "load": _composite},
     {"id": "korea_caution_hedged", "name": "韩国交易所警示后做空 · 对冲版（Upbit + Bithumb 合并）", "group": "韩国交易所",
      "unit": "笔", "rule_key": "korea_caution_hedged",
      "rule": "Upbit 或 Bithumb 交易警示当日收盘做空永续 7 天 + 等额做多成交额前 30 篮子；同一币 7 天内只开一笔，先警示的交易所开仓",

@@ -61,6 +61,14 @@ RULES: Dict[str, Dict[str, Any]] = {
     # added 2026-10-11 with the pooled Korean caution tracker, before its first forward trade: Upbit and
     # Bithumb designations judged together on the hedged return; the bar is the hedged Upbit backtest.
     "korea_caution_hedged": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 5.0},
+    # added 2026-10-11 with the Coinglass composite tracker, before its first forward book. Unit: one
+    # 7-day book (net % after costs and funding), clustered by the week it closes in; 364 books = 52
+    # weeks. Mean from scripts/coinglass_combination_study.py --robustness (training-weight 7d book).
+    "coinglass_composite_7d": {"min_n": 364, "unit": "book", "backtest_mean_pct": 0.174},
+    # added 2026-10-11 with the reversal tracker's liquidation-shock shadow, before its first day.
+    # Unit: shadow minus main net per position per day; mean from the same study's C1 replay with
+    # complete funding.
+    "xs_reversal_liq_filter": {"min_n": 180, "unit": "day", "backtest_mean_pct": 0.031},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",

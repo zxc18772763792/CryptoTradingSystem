@@ -13,7 +13,7 @@ SLOT_GRACE is skipped, so every file is within 3h of its slot). Each is one gzip
 append-only: data/research/coinglass_snapshots/<YYYY-MM-DD>/<HH>_coins_markets.json.gz with
 ``slot``, ``captured_at`` and the raw ``rows`` (about 1,500 coins, eight relay requests).
 
-Also once a day from 03:00 UTC: the cross-exchange 7-day liquidation map (estimated liquidation
+Also once a day from 06:00 UTC: the cross-exchange 7-day liquidation map (estimated liquidation
 volume by price level) of each coin in the research universe. The relay has no history of it,
 so the idea that price drifts toward large liquidation clusters can only be tested forward.
 One request per coin, LIQ_MAP_BATCH coins per runner pass, progress kept in a partial file; the
@@ -40,7 +40,7 @@ MAX_PAGES = 15
 PAGE_SPACING_SEC = 6.0  # the relay allows 11 requests per rolling minute, shared with other jobs
 BUDGET_RETRIES, BUDGET_WAIT_SEC = 8, 10.0
 UNIVERSE_PATH = PROJECT_ROOT / "data" / "research" / "xs_reversal" / "universe.json"
-LIQ_MAP_HOUR_UTC = 3
+LIQ_MAP_HOUR_UTC = 6  # after the daily store's update (00:15 to about 03:00), so the two never share the relay's minute
 LIQ_MAP_BATCH = 10  # coins per runner pass: about a minute of requests, never a long hold
 
 
