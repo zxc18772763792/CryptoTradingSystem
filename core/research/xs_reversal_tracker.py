@@ -151,7 +151,6 @@ async def _form(client, state: Dict[str, Any], day: datetime, now: datetime) -> 
         record["status"] = "too_few_coins"
         return record
     longs, shorts = legs
-    record["liq_filter"] = await _liq_filter_legs(signal, perps, day)
     marks: Dict[str, float] = {}
     try:
         tick = await client.get(f"{FAPI}/ticker/price")
@@ -159,6 +158,8 @@ async def _form(client, state: Dict[str, Any], day: datetime, now: datetime) -> 
             marks = {r["symbol"]: float(r["price"]) for r in tick.json()}
     except Exception:  # noqa: BLE001 - diagnostic only
         pass
+    # after the marks: the shadow may wait on the relay, and its entries are the same 23:00 closes
+    record["liq_filter"] = await _liq_filter_legs(signal, perps, day)
     record.update(
         status="open",
         longs={s: {"entry": float(closes[s].iloc[-1]), "mark_at_formation": marks.get(s), "signal": round(float(signal[s]), 6)} for s in longs},
@@ -170,32 +171,47 @@ async def _form(client, state: Dict[str, Any], day: datetime, now: datetime) -> 
     return record
 
 
-async def _today_liquidations() -> Optional[Dict[str, float]]:
+async def _today_liquidations(client=None) -> Optional[Dict[str, float]]:
     """24h long+short liquidations per coin summed over LIQ_EXCHANGES, asked right after 00:00
-    (the day just closed). None when any exchange's list cannot be had."""
-    from core.data.coinglass_client import CoinglassBudgetExceeded, CoinglassClient, coinglass_enabled
+    (the day just closed). None when any exchange's list cannot be had.
 
-    if not coinglass_enabled():
-        return None
+    Asked through the daily store's request helper: paced, it waits out a full budget or a relay 429
+    and asks a timed-out request again, so one slow answer at 00:00 does not cost the shadow its day
+    (until 2026-10-11 a single 429 or timeout did)."""
+    from core.data.coinglass_client import CoinglassClient, coinglass_enabled
+    from core.research import coinglass_daily_store as store
+
+    if client is None:
+        if not coinglass_enabled():
+            return None
+        async with CoinglassClient() as own:
+            return await _today_liquidations(own)
+    lists: Dict[str, List[Dict[str, Any]]] = {}
+    last_call = [0.0]
+    for exchange in LIQ_EXCHANGES:
+        rows = await store._ask(client, "/api/futures/liquidation/coin-list", {"exchange": exchange}, last_call)
+        if not rows:  # refused, or an empty list: the day's totals would be missing an exchange
+            return None
+        lists[exchange] = rows
+    return sum_coin_lists(lists)
+
+
+def sum_coin_lists(lists: Dict[str, List[Dict[str, Any]]]) -> Dict[str, float]:
+    """24h liquidations per Coinglass symbol, summed over the exchanges' lists.
+
+    Keyed by the exact symbol, never merged across contract multipliers: Coinglass keeps 1000PEPE
+    (Binance, Bybit) and PEPE (OKX) as two coins, and the aggregated history the store and the
+    backtest read for base PEPE covers only the contracts named PEPE (checked 2026-10-11: the lists'
+    PEPE entries and that history agree to the dollar, while adding 1000PEPE makes today 5x the
+    history). Merging would flag BONK, FLOKI, LUNC, PEPE and SHIB as shocks every day.
+    """
     totals: Dict[str, float] = {}
-    async with CoinglassClient() as client:
-        for exchange in LIQ_EXCHANGES:
-            rows = None
-            for _ in range(4):
-                try:
-                    resp = await client.request_json("/api/futures/liquidation/coin-list", params={"exchange": exchange})
-                    payload = resp.get("payload") or {}
-                    rows = payload.get("data") if str(payload.get("code")) == "0" else None
-                    break
-                except CoinglassBudgetExceeded:
-                    await asyncio.sleep(10)
-            if not isinstance(rows, list):
-                return None
-            for row in rows:
-                coin = str(row.get("symbol") or "").upper()
-                value = pd.to_numeric(row.get("liquidation_usd_24h"), errors="coerce")
-                if coin and value == value:
-                    totals[coin] = totals.get(coin, 0.0) + float(value)
+    for rows in lists.values():
+        for row in rows:
+            coin = str(row.get("symbol") or "").upper().strip()
+            value = pd.to_numeric(row.get("liquidation_usd_24h"), errors="coerce")
+            if coin and value == value:
+                totals[coin] = totals.get(coin, 0.0) + float(value)
     return totals
 
 

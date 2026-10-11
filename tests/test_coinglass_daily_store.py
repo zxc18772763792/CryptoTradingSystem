@@ -101,7 +101,8 @@ def test_ensure_current_waits_starts_and_reports(env, monkeypatch):
 
     async def fake_update(day, **kwargs):
         started.append(day)
-        store.save_status({"day": f"{day:%Y-%m-%d}", "attempt": 1, "completed_at": "x", "complete_coins": 2, "errors": []})
+        store.save_status({"day": f"{day:%Y-%m-%d}", "attempt": 1, "completed_at": (day + timedelta(days=1, minutes=20)).isoformat(),
+                           "complete_coins": 2, "errors": [], "final": True})
 
     monkeypatch.setattr(store, "update", fake_update)
     monkeypatch.setattr("core.data.coinglass_client.coinglass_enabled", lambda: True)
@@ -136,3 +137,52 @@ def test_a_timed_out_request_is_asked_again(env, monkeypatch):
 
     status = asyncio.run(store.update(D, client=Slow()))
     assert status["complete_coins"] == 2 and not status["errors"]  # two timeouts, then answers
+
+
+def test_a_bar_not_yet_published_is_asked_again_and_only_then_final(env, monkeypatch):
+    class Late(Relay):
+        """BBB's day-D bars are not out yet on the first pass."""
+
+        def __init__(self):
+            super().__init__()
+            self.late = True
+
+        async def request_json(self, path, params=None, manual=False):
+            resp = await super().request_json(path, params, manual)
+            if self.late and params["symbol"] in {"BBB", "1000BBBUSDT"}:
+                resp["payload"]["data"] = [r for r in resp["payload"]["data"] if r["time"] < D_MS]
+            return resp
+
+    monkeypatch.setattr(store, "_now", lambda: D + timedelta(days=1, hours=1))  # inside the retry window
+    relay = Late()
+    first = asyncio.run(store.update(D, client=relay))
+    assert first["complete_coins"] == 1 and first["final"] is False and not first["errors"]  # no error, yet incomplete
+    relay.late = False
+    second = asyncio.run(store.update(D, client=relay))
+    assert second["attempt"] == 2 and second["complete_coins"] == 2 and second["final"] is True
+
+
+def test_ensure_current_retries_an_incomplete_day_after_a_gap(env, monkeypatch):
+    opens = D + timedelta(days=1)
+    store.save_status({"day": "2026-10-10", "attempt": 1, "completed_at": (opens + timedelta(hours=3)).isoformat(),
+                       "complete_coins": 1, "errors": [], "final": False})
+    started = []
+
+    async def fake_update(day, **kwargs):
+        started.append(day)
+
+    monkeypatch.setattr(store, "update", fake_update)
+    monkeypatch.setattr("core.data.coinglass_client.coinglass_enabled", lambda: True)
+
+    async def run(now):
+        out = store.ensure_current(now)
+        if store._task is not None:
+            await store._task
+        return out
+
+    assert asyncio.run(run(opens + timedelta(hours=3, minutes=10)))["status"] == "waiting_retry"
+    assert asyncio.run(run(opens + timedelta(hours=3, minutes=25)))["status"] == "started" and started == [D]
+    store._task = None
+    late = asyncio.run(run(opens + timedelta(hours=10, minutes=1)))  # past the retry window: final as it is
+    assert late["status"] == "current" and store.load_status()["final"] is True
+    store._task = None

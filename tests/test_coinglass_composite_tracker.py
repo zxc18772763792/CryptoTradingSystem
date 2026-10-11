@@ -157,3 +157,11 @@ def test_no_book_for_a_day_that_opened_before_the_tracker_started(world):
     ct.save_state({"started_at": (D + timedelta(days=1, hours=1)).isoformat(), "books": {}}, world.state)
     world.run(D + timedelta(days=1, hours=3))
     assert json.loads(world.state.read_text(encoding="utf-8"))["books"] == {}
+
+
+def test_a_final_store_day_forms_with_the_coins_it_has(world, monkeypatch):
+    world.complete = set(PERPS[:32])  # 80%: below READY_SHARE, but nothing more will come today
+    monkeypatch.setattr(store, "load_status", lambda path=None: {"day": D.date().isoformat(), "final": True})
+    world.run(D + timedelta(days=1, hours=3))
+    book = json.loads(world.state.read_text(encoding="utf-8"))["books"][D.date().isoformat()]
+    assert book["partial"] is True and book["coins"] == 32 and book["main"]["status"] == "open"

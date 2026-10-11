@@ -207,3 +207,40 @@ def test_liquidation_shock_needs_twenty_prior_days():
     import numpy as np
     prior = np.log1p([r["aggregated_long_liquidation_usd"] + 50.0 for r in rows])
     assert shock["AUSDT"] == pytest.approx((np.log1p(1e6) - prior.mean()) / prior.std(ddof=1))
+
+
+def test_coin_lists_keep_multiplier_contracts_apart():
+    """The day's total must cover what the stored history covers: Coinglass's PEPE is OKX's PEPE only."""
+    lists = {"Binance": [{"symbol": "1000PEPE", "liquidation_usd_24h": 100.0}, {"symbol": "BTC", "liquidation_usd_24h": 5.0}],
+             "OKX": [{"symbol": "PEPE", "liquidation_usd_24h": 20.0}, {"symbol": "btc", "liquidation_usd_24h": 1.0}],
+             "Bybit": [{"symbol": "1000PEPE", "liquidation_usd_24h": 3.0}, {"symbol": "SHIB1000", "liquidation_usd_24h": 7.0},
+                       {"symbol": "BTC", "liquidation_usd_24h": "n/a"}]}
+    assert xr.sum_coin_lists(lists) == {"1000PEPE": 103.0, "BTC": 6.0, "PEPE": 20.0, "SHIB1000": 7.0}
+
+
+def test_the_days_lists_survive_a_slow_relay_and_fail_whole_on_a_refusal(monkeypatch):
+    from core.research import coinglass_daily_store as store
+
+    monkeypatch.setattr(store, "REQUEST_SPACING_SEC", 0.0)
+    monkeypatch.setattr(store, "TIMEOUT_WAIT_SEC", 0.0)
+
+    class Relay:
+        def __init__(self, refuse=None):
+            self.slow, self.refuse, self.calls = {"OKX"}, refuse, []
+
+        async def request_json(self, path, params=None):
+            exchange = params["exchange"]
+            self.calls.append(exchange)
+            if exchange in self.slow:
+                self.slow.discard(exchange)
+                raise asyncio.TimeoutError()
+            if exchange == self.refuse:
+                return {"payload": {"code": "40300", "msg": "no"}}
+            return {"payload": {"code": "0", "data": [{"symbol": "BTC", "liquidation_usd_24h": 2.0},
+                                                      {"symbol": f"X{exchange}", "liquidation_usd_24h": 1.0}]}}
+
+    relay = Relay()
+    totals = asyncio.run(xr._today_liquidations(relay))
+    assert totals == {"BTC": 6.0, "XBINANCE": 1.0, "XOKX": 1.0, "XBYBIT": 1.0}
+    assert relay.calls == ["Binance", "OKX", "OKX", "Bybit"]  # the timed-out OKX list was asked again
+    assert asyncio.run(xr._today_liquidations(Relay(refuse="Bybit"))) is None

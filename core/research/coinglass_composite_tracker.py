@@ -261,7 +261,7 @@ async def tick(client, *, state_path: Optional[Path] = None, store_root: Optiona
                 coins[perp] = coin
         share = len(coins) / max(1, len(store.universe()))
         status = store.load_status(status_path)
-        finished = status.get("day") == key and bool(status.get("completed_at"))
+        finished = status.get("day") == key and bool(status.get("final"))  # no more passes coming today
         deadline = opens + FORM_DEADLINE
         if now > deadline + LATE_GRACE:
             state["books"][key] = {"status": "missed", "checked_at": now.isoformat(), "coins": len(coins)}
