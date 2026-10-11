@@ -75,3 +75,50 @@ def test_a_full_minute_budget_waits_instead_of_dropping_pages(tmp_path, monkeypa
     relay = Busy([200, 200, 5])
     out = asyncio.run(archive.tick(_at(18, 1), client=relay, root=tmp_path))
     assert out["coins"] == 405 and relay.calls == [1, 2, 3]  # page 1 kept, page 2 asked again
+
+
+class _MapRelay:
+    def __init__(self, refuse=(), fail_on=None):
+        self.refuse, self.fail_on, self.calls = set(refuse), fail_on, []
+
+    async def request_json(self, path, params=None, manual=False):
+        base = params["symbol"]
+        if base == self.fail_on:
+            self.fail_on = None  # a one-off network error
+            raise ConnectionError("relay down")
+        self.calls.append(base)
+        if base in self.refuse:
+            return {"payload": {"code": "40001", "msg": "unsupported symbol"}}
+        return {"payload": {"code": "0", "data": {"data": [{"liqMapV2": {"1.0": [[1.0, 5.0, None, None]]}}], "last_price": 1.0}}}
+
+
+def test_liquidation_maps_are_collected_in_batches_and_written_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "PAGE_SPACING_SEC", 0.0)
+    monkeypatch.setattr(archive, "LIQ_MAP_BATCH", 10)
+    bases = [f"C{i:02d}" for i in range(25)]
+    relay = _MapRelay(refuse={"C03"})
+    assert asyncio.run(archive.tick_liq_maps(_at(2, 59), client=relay, root=tmp_path, bases=bases))["status"] == "idle"
+    first = asyncio.run(archive.tick_liq_maps(_at(3, 1), client=relay, root=tmp_path, bases=bases))
+    assert first == {"status": "collecting", "day": "2026-10-11", "done": 10, "remaining": 15}
+    asyncio.run(archive.tick_liq_maps(_at(3, 5), client=relay, root=tmp_path, bases=bases))
+    done = asyncio.run(archive.tick_liq_maps(_at(3, 9), client=relay, root=tmp_path, bases=bases))
+    assert done["status"] == "captured" and done["coins"] == 25 and done["refused"] == 1
+    assert relay.calls == bases  # every coin asked once, the refused one included and not asked again
+    path = archive.liq_map_path(_at(0), tmp_path)
+    assert path.exists() and not (path.parent / "liq_map_7d.partial.json").exists()
+    import gzip
+    import json
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        saved = json.load(fh)
+    assert saved["maps"]["C00"]["data"]["last_price"] == 1.0 and "error" in saved["maps"]["C03"]
+    assert asyncio.run(archive.tick_liq_maps(_at(9), client=relay, root=tmp_path, bases=bases))["status"] == "done"
+
+
+def test_a_network_error_keeps_the_maps_already_fetched(tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "PAGE_SPACING_SEC", 0.0)
+    relay = _MapRelay(fail_on="C02")
+    bases = ["C00", "C01", "C02", "C03"]
+    with pytest.raises(ConnectionError):
+        asyncio.run(archive.tick_liq_maps(_at(4), client=relay, root=tmp_path, bases=bases))
+    out = asyncio.run(archive.tick_liq_maps(_at(4, 5), client=relay, root=tmp_path, bases=bases))
+    assert out["status"] == "captured" and relay.calls == ["C00", "C01", "C02", "C03"]  # C00, C01 not refetched
