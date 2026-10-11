@@ -6482,7 +6482,7 @@ ${confirmHint}`,
     const groups = r.clusters == null ? '' : `（同一公告或同一天入场算一组，共 ${Number(r.clusters)} 组）`;
     const ci = Array.isArray(r.ci90_pct) ? ` · 90% 区间 [${r.ci90_pct[0]}, ${r.ci90_pct[1]}]%${groups}`
       : (r.clusters === 1 && Number(r.n) >= 2 ? ' · 样本同属 1 组（同一公告或同一天），暂不计算区间' : '');
-    return `<div style="margin-top:4px;">退役判定：<b style="color:${colors[r.verdict] || 'var(--text-sub)'};">${esc(r.label || r.verdict || '--')}</b> · ${esc(r.reason || '')} · 前向 ${Number(r.n || 0)}/${Number(r.min_n || 0)} ${r.unit === 'month' ? '个月' : '笔'}${ci}<span class="u-note">（规则在首个前向结果前登记：满样本后均值≤0、90% 区间上沿&lt;0 或低于回测均值 1/4 即退役）</span></div>`;
+    return `<div style="margin-top:4px;">退役判定：<b style="color:${colors[r.verdict] || 'var(--text-sub)'};">${esc(r.label || r.verdict || '--')}</b> · ${esc(r.reason || '')} · 前向 ${Number(r.n || 0)}/${Number(r.min_n || 0)} ${({ month: '个月', day: '天', book: '期', week: '周' })[r.unit] || '笔'}${ci}<span class="u-note">（规则在首个前向结果前登记：满样本后均值≤0、90% 区间上沿&lt;0 或低于回测均值 1/4 即退役）</span></div>`;
   }
 
   function renderListingShortTracker(payload) {
@@ -6710,6 +6710,7 @@ ${confirmHint}`,
       <h3 style="margin:0;">日线横截面反转（纸面）</h3>
       <div style="margin-top:6px;color:var(--text-sub);">每天 00:00 UTC 按 1h 均线偏离排序：做多跌得最深的 10%、做空涨得最多的 10%，持有 24 小时。前向完成 ${Number(s.forward_completed || 0)} 天 · 每仓净值均值 ${pct(s.forward_mean_net_pct, 3)} · 正收益天数 ${s.forward_positive_days == null ? '--' : `${(Number(s.forward_positive_days) * 100).toFixed(0)}%`} · 晚到 ${Number(s.late || 0)} · 错过 ${Number(s.missed || 0)} · 币池 ${Number(s.universe_size || 0)}</div>
       ${trackerVerdictLine(s)}
+      ${s.liq_filter ? `<div class="u-note" style="margin-top:4px;">影子 · 剔除爆仓异常：完成 ${Number(s.liq_filter.completed || 0)} 天 · 平均每天比原版 ${pct(s.liq_filter.mean_diff_pct, 3)} · 每天约剔除 ${s.liq_filter.flagged_per_day ?? '--'} 个 · 判定：${esc(s.liq_filter.retirement?.label || '--')}（${esc(s.liq_filter.retirement?.reason || '')}）。只在多头候选里剔除当天爆仓异常前 20% 的币，空头不变；回放 596 天平均每天多 +0.031%，区间含 0，要靠前向确认。</div>` : ''}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。日波动约 1.5%，回测均值仅 +0.057%/天，180 天远远测不出这么小的优势（以 80% 把握确认需要约 12 年）。它只能发现两种情况：明显在亏（约 −0.2%/天以下会提前判退役），或远好于回测（约 +0.3%/天以上才有把握确认）。注意：即使真实优势和回测一样，满 180 天时也有约 30% 的概率因均值≤0 被判退役。</div>
       ${days.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>日期</th><th>状态</th><th>币数/每边</th><th>多头腿</th><th>空头腿</th><th>每仓净值</th><th></th></tr></thead><tbody>
         ${days.slice(0, 20).map((d) => `<tr><td>${esc(d.day)}</td><td>${esc(statusNames[d.status] || d.status || '--')}</td><td>${d.coins ?? '--'} / ${d.per_side || '--'}</td><td>${pct(d.long_leg_pct)}</td><td>${pct(d.short_leg_pct)}</td><td style="color:${Number(d.net_per_position_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(d.net_per_position_pct, 3)}</td><td>${d.late ? '晚到' : ''}${d.missing_positions ? ` 缺 ${Number(d.missing_positions)}` : ''}</td></tr>`).join('')}
@@ -6747,6 +6748,42 @@ ${confirmHint}`,
   async function refreshAnnouncementShortTracker() {
     try {
       renderAnnouncementShortTracker(await aiApi('/announcement-short', { timeoutMs: 12000 }));
+    } catch (err) { /* optional panel */ }
+  }
+
+  function renderCoinglassCompositeTracker(payload) {
+    const anchor = ['ai-xs-reversal-tracker', 'ai-upbit-krw-listing-tracker', 'ai-supply-factor-tracker']
+      .map((id) => document.getElementById(id)).find(Boolean);
+    if (!anchor) return;
+    let panel = document.getElementById('ai-coinglass-composite-tracker');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'ai-coinglass-composite-tracker';
+      panel.className = 'card';
+      panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
+      anchor.insertAdjacentElement('afterend', panel);
+    }
+    const s = payload?.summary || {};
+    const books = Array.isArray(payload?.books) ? payload.books : [];
+    const store = payload?.store || {};
+    const pct = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${Number(v).toFixed(d)}%`);
+    const statusNames = { open: '持有中', closed: '已结算', too_few_coins: '币数不足', unresolved: '未能结算', missed: '错过' };
+    const latest = s.latest_book;
+    const names = (list) => (list || []).map((p) => esc(String(p).replace(/USDT$/, ''))).join('、') || '--';
+    panel.innerHTML = `
+      <h3 style="margin:0;">Coinglass 七日合成组合（纸面）</h3>
+      <div style="margin-top:6px;color:var(--text-sub);">每天用 8 个持仓类信号（爆仓、持仓量、资金费率、多空比、主动买卖）的合成分数，做多前五分之一、做空后五分之一，持有 7 天，扣成本和资金费。完成 ${Number(s.main?.completed || 0)} 期 · 每期净值均值 ${pct(s.main?.mean_net_pct, 3)} · 正收益占比 ${s.main?.positive_share == null ? '--' : `${(Number(s.main.positive_share) * 100).toFixed(0)}%`} · 持有中 ${Number(s.main?.open || 0)} 期 · 错过 ${Number(s.missed || 0)} 天</div>
+      ${trackerVerdictLine(s)}
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。利润很薄：每期波动约 3%，即使优势真实存在，跑满一年也只有约两成概率被确认，更可能看到的是"均值为正但不显著"。影子（只取方向、等权）：完成 ${Number(s.shadow?.completed || 0)} 期 · 均值 ${pct(s.shadow?.mean_net_pct, 3)}，只记录不判定。数据：${esc(store.day || '--')} 的日线${store.completed_at ? `已于 ${esc(fmtTs(new Date(store.completed_at)))} 更新完` : '更新中'}（每天约 790 次 Coinglass 请求）。纸面记录，不下单。</div>
+      ${latest ? `<div class="u-note" style="margin-top:4px;">最新一期（${esc(latest.day)}）多头：${names(latest.longs)}；空头：${names(latest.shorts)}</div>` : ''}
+      ${books.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>数据日</th><th>建仓时间</th><th>状态</th><th>多头腿</th><th>空头腿</th><th>成本</th><th>净值</th><th>影子净值</th></tr></thead><tbody>
+        ${books.slice(0, 20).map((b) => { const m = b.main || {}; return `<tr><td>${esc(b.day)}</td><td>${esc(b.formed_at ? fmtTs(new Date(b.formed_at)) : '--')}</td><td>${esc(statusNames[m.status || b.status] || m.status || b.status || '--')}${b.partial ? ' 部分' : ''}</td><td>${pct(m.long_leg_pct)}</td><td>${pct(m.short_leg_pct)}</td><td>${pct(m.cost_pct, 3)}</td><td style="color:${Number(m.net_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.net_pct)}</td><td>${pct(b.shadow?.net_pct)}</td></tr>`; }).join('')}
+      </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；每天 00:15（UTC）起更新数据，更新完建仓。</div>'}`;
+  }
+
+  async function refreshCoinglassCompositeTracker() {
+    try {
+      renderCoinglassCompositeTracker(await aiApi('/coinglass-composite', { timeoutMs: 12000 }));
     } catch (err) { /* optional panel */ }
   }
 
@@ -6797,7 +6834,7 @@ ${confirmHint}`,
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
-    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).then(() => refreshXsReversalTracker()).then(() => refreshAnnouncementShortTracker()).catch(() => {});
+    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).then(() => refreshXsReversalTracker()).then(() => refreshCoinglassCompositeTracker()).then(() => refreshAnnouncementShortTracker()).catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);

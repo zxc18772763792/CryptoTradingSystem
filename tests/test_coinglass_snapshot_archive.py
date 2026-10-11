@@ -97,11 +97,11 @@ def test_liquidation_maps_are_collected_in_batches_and_written_once(tmp_path, mo
     monkeypatch.setattr(archive, "LIQ_MAP_BATCH", 10)
     bases = [f"C{i:02d}" for i in range(25)]
     relay = _MapRelay(refuse={"C03"})
-    assert asyncio.run(archive.tick_liq_maps(_at(2, 59), client=relay, root=tmp_path, bases=bases))["status"] == "idle"
-    first = asyncio.run(archive.tick_liq_maps(_at(3, 1), client=relay, root=tmp_path, bases=bases))
+    assert asyncio.run(archive.tick_liq_maps(_at(5, 59), client=relay, root=tmp_path, bases=bases))["status"] == "idle"
+    first = asyncio.run(archive.tick_liq_maps(_at(6, 1), client=relay, root=tmp_path, bases=bases))
     assert first == {"status": "collecting", "day": "2026-10-11", "done": 10, "remaining": 15}
-    asyncio.run(archive.tick_liq_maps(_at(3, 5), client=relay, root=tmp_path, bases=bases))
-    done = asyncio.run(archive.tick_liq_maps(_at(3, 9), client=relay, root=tmp_path, bases=bases))
+    asyncio.run(archive.tick_liq_maps(_at(6, 5), client=relay, root=tmp_path, bases=bases))
+    done = asyncio.run(archive.tick_liq_maps(_at(6, 9), client=relay, root=tmp_path, bases=bases))
     assert done["status"] == "captured" and done["coins"] == 25 and done["refused"] == 1
     assert relay.calls == bases  # every coin asked once, the refused one included and not asked again
     path = archive.liq_map_path(_at(0), tmp_path)
@@ -119,6 +119,6 @@ def test_a_network_error_keeps_the_maps_already_fetched(tmp_path, monkeypatch):
     relay = _MapRelay(fail_on="C02")
     bases = ["C00", "C01", "C02", "C03"]
     with pytest.raises(ConnectionError):
-        asyncio.run(archive.tick_liq_maps(_at(4), client=relay, root=tmp_path, bases=bases))
-    out = asyncio.run(archive.tick_liq_maps(_at(4, 5), client=relay, root=tmp_path, bases=bases))
+        asyncio.run(archive.tick_liq_maps(_at(7), client=relay, root=tmp_path, bases=bases))
+    out = asyncio.run(archive.tick_liq_maps(_at(7, 5), client=relay, root=tmp_path, bases=bases))
     assert out["status"] == "captured" and relay.calls == ["C00", "C01", "C02", "C03"]  # C00, C01 not refetched

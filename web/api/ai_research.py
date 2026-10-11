@@ -6436,8 +6436,28 @@ async def get_xs_reversal_tracker():
             "coins": record.get("coins"), "per_side": len(record.get("longs") or {}),
             "long_leg_pct": record.get("long_leg_pct"), "short_leg_pct": record.get("short_leg_pct"),
             "net_per_position_pct": record.get("net_per_position_pct"), "missing_positions": record.get("missing_positions"),
+            "liq_filter": {k: (record.get("liq_filter") or {}).get(k) for k in ("status", "net_per_position_pct", "diff_pct")}
+                          | {"flagged": len((record.get("liq_filter") or {}).get("flagged") or [])},
         })
     return {"summary": xs_reversal_tracker.summary(state), "days": days}
+
+
+@router.get("/coinglass-composite")
+async def get_coinglass_composite_tracker():
+    """Forward paper tracker: the 7-day Coinglass positioning composite (research only)."""
+    from core.research import coinglass_composite_tracker as tracker
+    from core.research import coinglass_daily_store as store
+
+    state = await asyncio.to_thread(tracker.load_state)
+
+    def brief(book: dict) -> dict:
+        keep = ("status", "scored", "turnover", "long_leg_pct", "short_leg_pct", "cost_pct", "net_pct", "settled_at")
+        return {**{k: book.get(k) for k in keep}, "longs": sorted(book.get("longs") or {}), "shorts": sorted(book.get("shorts") or {})}
+
+    books = [{"day": day, "status": record.get("status"), "formed_at": record.get("formed_at"), "partial": record.get("partial"),
+              "main": brief(record.get("main") or {}), "shadow": brief(record.get("shadow") or {})}
+             for day, record in sorted(state.get("books", {}).items(), reverse=True)[:30]]
+    return {"summary": tracker.summary(state), "books": books, "store": await asyncio.to_thread(store.load_status)}
 
 
 @router.get("/supply-factor")
