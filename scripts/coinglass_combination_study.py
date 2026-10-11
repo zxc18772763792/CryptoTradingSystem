@@ -495,7 +495,7 @@ def funded_books(score: pd.DataFrame, fwd: pd.DataFrame, fwd_1d: pd.DataFrame, f
             plain_fund.append(fund / h)
             long_leg.append(float(f[long_].mean() - fwd.loc[t][ok].mean()) / h)
             short_leg.append(float(fwd.loc[t][ok].mean() - f[short].mean()) / h)
-            quarters.append(pd.Timestamp(t).to_period("Q"))
+            quarters.append(pd.Timestamp(t).tz_localize(None).to_period("Q"))
             prev = (set(long_), set(short))
     by_quarter = pd.Series(plain_net, index=quarters).groupby(level=0).mean()
     buffered_fund = []
