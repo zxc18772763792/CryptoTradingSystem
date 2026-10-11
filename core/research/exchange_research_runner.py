@@ -4,8 +4,9 @@ Called from the research scheduler tick (every ~5 min) and rate-limited here:
 announcements every 30 min (flags + one-time alerts for held / watchlisted
 coins), the listing tracker every 60 min, the Upbit caution tracker every 30 min. Each paper tracker's pre-registered
 retirement verdict (core/research/retirement.py) alerts once when it turns
-"retire" or "confirmed". Research and risk annotation only:
-nothing here places or closes orders.
+"retire" or "confirmed". Four times a day it also archives Coinglass's
+all-coin market snapshot (core/research/coinglass_snapshot_archive.py).
+Research and risk annotation only: nothing here places or closes orders.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from typing import Any, Dict, Optional, Set
 from loguru import logger
 
 from core.research import (
+    coinglass_snapshot_archive,
     delist_risk,
     exchange_notices,
     listing_short_tracker,
@@ -48,6 +50,8 @@ UPBIT_INTERVAL_SEC = 1800
 # Every pass: the reversal tracker must form its portfolio within 30 min of 00:00
 # UTC, and a pass with nothing due makes no request.
 XS_REVERSAL_INTERVAL_SEC = 240
+# Checked every pass too; only the first pass after each 6-hourly slot spends requests.
+COINGLASS_SNAPSHOT_INTERVAL_SEC = 240
 _last_run: Dict[str, float] = {}
 _status: Dict[str, Any] = {}
 _durations: Dict[str, float] = {}
@@ -242,6 +246,9 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _status["xs_reversal"] = await xs_reversal_tracker.tick(client)
             await _verdict_alert("xs_reversal", _status["xs_reversal"])
 
+        async def coinglass_snapshot():
+            _status["coinglass_snapshot"] = await coinglass_snapshot_archive.tick()
+
         async def delist():
             model = delist_risk.load_model()
             scored = await delist_risk.compute_live_scores(client, model)
@@ -261,6 +268,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("bithumb_caution", UPBIT_INTERVAL_SEC, now, force, bithumb_caution)
         await _run_job("bithumb_caution_hedged", UPBIT_INTERVAL_SEC, now, force, bithumb_caution_hedged)
         await _run_job("korea_caution_hedged", UPBIT_INTERVAL_SEC, now, force, korea_caution_hedged)
+        await _run_job("coinglass_snapshot", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_snapshot)
         if delist_risk.MODEL_PATH.exists():
             await _run_job("delist_risk", DELIST_RISK_INTERVAL_SEC, now, force, delist)
     return status()
