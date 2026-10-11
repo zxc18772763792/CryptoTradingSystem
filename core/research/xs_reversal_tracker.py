@@ -20,9 +20,18 @@ A formation made more than FORMATION_WINDOW after 00:00 is ``late`` (the
 00:00 close was not tradable by then) and stays out of the statistics, like a
 missed day. The mark price at formation is recorded to measure that drift.
 Nothing here places orders.
+
+Shadow since 2026-10-11, ``liq_filter`` (docs/COINGLASS_COMBINATION_STUDY_2026-10-11.md, C1): the
+same portfolio with the day's top fifth of liquidation shocks removed from the long candidates
+(shorts unchanged). liq_shock_z = log(1 + the day's long+short liquidations on Binance+OKX+Bybit)
+against the coin's prior 30 days; the day just closed comes from the three exchanges' 24h coin
+lists asked at formation, the prior days from core/research/coinglass_daily_store.py. Replayed
+on 596 days it added +0.031%/position/day, 90% CI [-0.008, +0.068]. Judged on the daily
+difference shadow minus main (rule "xs_reversal_liq_filter"); the main portfolio never changes.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,8 +55,13 @@ ROUND_TRIP_COST = 0.0015   # per position
 FORMATION_WINDOW = timedelta(minutes=30)
 SETTLE_GRACE = timedelta(days=3)  # after this, settle without positions whose exit never arrived
 HOUR_MS = 3_600_000
-BACKTEST_REFERENCE = ("586 days 2025-02..2026-09, ~127 coins, 12 per side: net +0.057%/position/day after 0.15% "
-                      "costs and funding, 90% CI [-0.046, +0.162], 10/20 months positive (not significant)")
+# corrected 2026-10-11: funding had been missing for 96 of the 131 perps (+0.057% before); the registered
+# retirement rule keeps its 0.057 (rules are frozen at registration)
+BACKTEST_REFERENCE = ("586 days 2025-02..2026-09, ~127 coins, 12 per side: net +0.052%/position/day after 0.15% "
+                      "costs and funding, 90% CI [-0.052, +0.159], 10/20 months positive (not significant)")
+LIQ_EXCHANGES = ("Binance", "OKX", "Bybit")
+LIQ_PRIOR_DAYS, LIQ_MIN_PRIOR = 30, 20
+LIQ_FLAG_SHARE = 0.2  # the top fifth of the day's liquidation shocks leaves the long candidates
 
 
 def _now() -> datetime:
@@ -137,6 +151,7 @@ async def _form(client, state: Dict[str, Any], day: datetime, now: datetime) -> 
         record["status"] = "too_few_coins"
         return record
     longs, shorts = legs
+    record["liq_filter"] = await _liq_filter_legs(signal, perps, day)
     marks: Dict[str, float] = {}
     try:
         tick = await client.get(f"{FAPI}/ticker/price")
@@ -149,7 +164,80 @@ async def _form(client, state: Dict[str, Any], day: datetime, now: datetime) -> 
         longs={s: {"entry": float(closes[s].iloc[-1]), "mark_at_formation": marks.get(s), "signal": round(float(signal[s]), 6)} for s in longs},
         shorts={s: {"entry": float(closes[s].iloc[-1]), "mark_at_formation": marks.get(s), "signal": round(float(signal[s]), 6)} for s in shorts},
     )
+    shadow = record["liq_filter"]
+    if shadow.get("status") == "open":
+        shadow["longs"] = {s: {"entry": float(closes[s].iloc[-1]), "signal": round(float(signal[s]), 6)} for s in shadow["longs"]}
     return record
+
+
+async def _today_liquidations() -> Optional[Dict[str, float]]:
+    """24h long+short liquidations per coin summed over LIQ_EXCHANGES, asked right after 00:00
+    (the day just closed). None when any exchange's list cannot be had."""
+    from core.data.coinglass_client import CoinglassBudgetExceeded, CoinglassClient, coinglass_enabled
+
+    if not coinglass_enabled():
+        return None
+    totals: Dict[str, float] = {}
+    async with CoinglassClient() as client:
+        for exchange in LIQ_EXCHANGES:
+            rows = None
+            for _ in range(4):
+                try:
+                    resp = await client.request_json("/api/futures/liquidation/coin-list", params={"exchange": exchange})
+                    payload = resp.get("payload") or {}
+                    rows = payload.get("data") if str(payload.get("code")) == "0" else None
+                    break
+                except CoinglassBudgetExceeded:
+                    await asyncio.sleep(10)
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                coin = str(row.get("symbol") or "").upper()
+                value = pd.to_numeric(row.get("liquidation_usd_24h"), errors="coerce")
+                if coin and value == value:
+                    totals[coin] = totals.get(coin, 0.0) + float(value)
+    return totals
+
+
+def liquidation_shock(today: Dict[str, float], coins: Dict[str, Dict[str, Any]], day: datetime) -> Dict[str, float]:
+    """liq_shock_z of day D per perp: log(1 + today's total) against the prior LIQ_PRIOR_DAYS daily
+    totals (the study's _prior_z: sample std, at least LIQ_MIN_PRIOR prior days)."""
+    day_ms = int(day.timestamp() * 1000)
+    out: Dict[str, float] = {}
+    for perp, coin in coins.items():
+        base = str(coin.get("base") or "")
+        if base not in today:
+            continue
+        prior = [np.log1p(max(0.0, float(r.get("aggregated_long_liquidation_usd") or 0) + float(r.get("aggregated_short_liquidation_usd") or 0)))
+                 for r in coin.get("liquidation") or [] if day_ms - LIQ_PRIOR_DAYS * 86_400_000 <= int(r["time"]) < day_ms]
+        if len(prior) < LIQ_MIN_PRIOR:
+            continue
+        std = float(np.std(prior, ddof=1))
+        if std > 1e-12:
+            out[perp] = (float(np.log1p(max(0.0, today[base]))) - float(np.mean(prior))) / std
+    return out
+
+
+async def _liq_filter_legs(signal: pd.Series, perps: Dict[str, str], formation_day: datetime) -> Dict[str, Any]:
+    """The shadow's long leg: the reversal longs after dropping the day's top fifth of liquidation shocks."""
+    from core.research import coinglass_daily_store as store
+
+    day = formation_day - timedelta(days=1)  # the Coinglass bar that closes at this formation
+    try:
+        today = await _today_liquidations()
+    except Exception as exc:  # noqa: BLE001 - the shadow is optional; the main portfolio never waits for it
+        return {"status": "no_data", "reason": f"{type(exc).__name__}: {str(exc)[:80]}"}
+    if not today:
+        return {"status": "no_data", "reason": "liquidation lists unavailable"}
+    coins = {perp: store.load_coin(perp) for perp in signal.dropna().index}
+    shock = pd.Series(liquidation_shock(today, {p: c for p, c in coins.items() if c}, day), dtype=float)
+    if len(shock) < MIN_COINS:
+        return {"status": "no_data", "reason": f"liquidation history for {len(shock)} coins"}
+    flagged = set(shock.index[shock.rank(pct=True) > 1 - LIQ_FLAG_SHARE])
+    legs = pick_legs(signal.drop(index=[s for s in signal.index if s in flagged]))
+    if legs is None:
+        return {"status": "too_few_coins"}
+    return {"status": "open", "flagged": sorted(flagged), "scored": int(len(shock)), "longs": legs[0]}
 
 
 async def _exit_close(client, symbol: str, exit_bar_ms: int) -> Tuple[Optional[float], bool]:
@@ -176,9 +264,17 @@ async def _settle(client, record: Dict[str, Any], now: datetime) -> None:
     entry_close_ms = int(record["entry_bar_ms"]) + HOUR_MS
     exit_bar_ms = int(record["entry_bar_ms"]) + 24 * HOUR_MS
     exit_close_ms = exit_bar_ms + HOUR_MS
-    for side in ("longs", "shorts"):
-        for symbol, pos in record[side].items():
+    shadow = record.get("liq_filter") or {}
+    books = [("longs", record["longs"]), ("shorts", record["shorts"])]
+    if shadow.get("status") == "open":
+        books.append(("longs", shadow["longs"]))
+    for side, positions in books:
+        for symbol, pos in positions.items():
             if pos.get("exit") is not None or pos.get("gone"):
+                continue
+            twin = record[side].get(symbol) if positions is not record[side] else None
+            if twin and (twin.get("return") is not None or twin.get("gone")):  # a shadow long the main book holds too
+                pos.update({k: twin[k] for k in ("exit", "funding", "return", "gone") if k in twin})
                 continue
             price, gone = await _exit_close(client, symbol, exit_bar_ms)
             if gone:
@@ -190,7 +286,7 @@ async def _settle(client, record: Dict[str, Any], now: datetime) -> None:
             pos.update(exit=price, funding=round(funding, 8))
             ret = price / pos["entry"] - 1.0
             pos["return"] = round((ret - funding) if side == "longs" else (-ret + funding), 8)
-    pending = [p for side in ("longs", "shorts") for p in record[side].values() if p.get("return") is None and not p.get("gone")]
+    pending = [p for _, positions in books for p in positions.values() if p.get("return") is None and not p.get("gone")]
     overdue = now.timestamp() * 1000 > exit_close_ms + SETTLE_GRACE.total_seconds() * 1000
     if pending and not overdue:
         return
@@ -207,6 +303,15 @@ async def _settle(client, record: Dict[str, Any], now: datetime) -> None:
         net_per_position_pct=round(((legs[0] + legs[1]) / 2 - ROUND_TRIP_COST) * 100, 4),
         missing_positions=sum(1 for side in ("longs", "shorts") for p in record[side].values() if p.get("return") is None),
     )
+    if shadow.get("status") == "open":
+        values = [p["return"] for p in shadow["longs"].values() if p.get("return") is not None]
+        if values:
+            net = (float(np.mean(values)) + legs[1]) / 2 - ROUND_TRIP_COST
+            shadow.update(status="closed", long_leg_pct=round(float(np.mean(values)) * 100, 4),
+                          net_per_position_pct=round(net * 100, 4),
+                          diff_pct=round(net * 100 - record["net_per_position_pct"], 4))
+        else:
+            shadow["status"] = "unresolved"
 
 
 async def tick(client, state_path: Optional[Path] = None, universe_path: Optional[Path] = None) -> Dict[str, Any]:
@@ -220,6 +325,9 @@ async def tick(client, state_path: Optional[Path] = None, universe_path: Optiona
         state["universe"] = json.loads(source.read_text(encoding="utf-8"))["bases"]
         state["universe_frozen_at"] = now.isoformat()
     retirement.register(state, "xs_reversal", now.isoformat())
+    if not state.get("liq_filter_rule"):  # the shadow's own frozen rule, beside the main one
+        state["liq_filter_rule"] = {**retirement.RULES["xs_reversal_liq_filter"],
+                                    "decay_fraction": retirement.DECAY_FRACTION, "registered_at": now.isoformat()}
 
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     key = day.date().isoformat()
@@ -261,4 +369,20 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "last_day_legs": {"longs": sorted(days[last].get("longs") or {}), "shorts": sorted(days[last].get("shorts") or {})} if last else None,
         "backtest_reference": BACKTEST_REFERENCE,
         "retirement": retirement.verdict(returns, rule),
+        "liq_filter": _liq_filter_summary(state, counted),
+    }
+
+
+def _liq_filter_summary(state: Dict[str, Any], counted: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The shadow, judged on its daily difference from the main portfolio (both closed, not late)."""
+    shadow = [d["liq_filter"] for d in counted if (d.get("liq_filter") or {}).get("status") == "closed"]
+    diffs = [float(x["diff_pct"]) for x in shadow]
+    rule = state.get("liq_filter_rule") or retirement.RULES["xs_reversal_liq_filter"]
+    return {
+        "completed": len(diffs),
+        "mean_net_pct": round(float(np.mean([float(x["net_per_position_pct"]) for x in shadow])), 3) if shadow else None,
+        "mean_diff_pct": round(float(np.mean(diffs)), 3) if diffs else None,
+        "flagged_per_day": round(float(np.mean([len(x.get("flagged") or []) for x in shadow])), 1) if shadow else None,
+        "no_data_days": sum((d.get("liq_filter") or {}).get("status") == "no_data" for d in counted),
+        "retirement": retirement.verdict(diffs, rule),
     }
