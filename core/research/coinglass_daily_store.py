@@ -38,6 +38,7 @@ DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
 START_AFTER = timedelta(minutes=15)  # after the 00:00 snapshot and the reversal formation
 REQUEST_SPACING_SEC = 12.0
+TIMEOUT_RETRIES, TIMEOUT_WAIT_SEC = 2, 10.0  # a timed-out request is asked again this many times
 MAX_ATTEMPTS = 3  # a coin that failed on a network error is asked again, at most this many passes a day
 RETRY_UNTIL = timedelta(hours=10)
 EXCHANGES = "Binance,OKX,Bybit"
@@ -158,6 +159,7 @@ async def _ask(client, path: str, params: Dict[str, Any], last_call: List[float]
     """One paced request through the shared budget ledger; None when the relay refuses it for good."""
     from core.data.coinglass_client import CoinglassBudgetExceeded, CoinglassError
 
+    slow = 0
     for _ in range(10):
         wait = REQUEST_SPACING_SEC - (time.monotonic() - last_call[0])
         if wait > 0:
@@ -173,6 +175,13 @@ async def _ask(client, path: str, params: Dict[str, Any], last_call: List[float]
                 await asyncio.sleep(75)
                 continue
             raise
+        except (asyncio.TimeoutError, OSError) as exc:  # the relay is slow now and then (10/11: ~1 in 6)
+            slow += 1
+            if slow > TIMEOUT_RETRIES:
+                raise
+            logger.debug(f"coinglass daily store: {path} {params.get('symbol')} slow ({type(exc).__name__}), asking again")
+            await asyncio.sleep(TIMEOUT_WAIT_SEC)
+            continue
         payload = resp.get("payload") if isinstance(resp, dict) else None
         if isinstance(payload, dict) and str(payload.get("code")) not in {"0", "None"}:
             logger.debug(f"coinglass daily store: {path} {params.get('symbol')} refused: {payload.get('msg')}")
