@@ -32,6 +32,7 @@ SLOT_GRACE = timedelta(hours=3)
 PER_PAGE = 200
 MAX_PAGES = 15
 PAGE_SPACING_SEC = 6.0  # the relay allows 11 requests per rolling minute, shared with other jobs
+BUDGET_RETRIES, BUDGET_WAIT_SEC = 8, 10.0
 
 
 def _now() -> datetime:
@@ -49,12 +50,25 @@ def snapshot_path(slot: datetime, root: Path = ROOT) -> Path:
     return root / f"{slot:%Y-%m-%d}" / f"{slot:%H}_coins_markets.json.gz"
 
 
+async def _request_page(client, page: int) -> Dict[str, Any]:
+    """One page; when the shared minute budget is full, wait for it rather than drop the pages
+    already fetched (a relay 429 still fails the pass, which is retried on the next one)."""
+    from core.data.coinglass_client import CoinglassBudgetExceeded
+
+    for _ in range(BUDGET_RETRIES):
+        try:
+            return await client.request_json("/api/futures/coins-markets", params={"per_page": PER_PAGE, "page": page})
+        except CoinglassBudgetExceeded:
+            await asyncio.sleep(BUDGET_WAIT_SEC)
+    raise RuntimeError("coinglass minute budget stayed full")
+
+
 async def _coins_markets(client) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for page in range(1, MAX_PAGES + 1):
         if page > 1:
             await asyncio.sleep(PAGE_SPACING_SEC)
-        resp = await client.request_json("/api/futures/coins-markets", params={"per_page": PER_PAGE, "page": page})
+        resp = await _request_page(client, page)
         payload = resp.get("payload") if isinstance(resp, dict) else None
         if isinstance(payload, dict) and str(payload.get("code")) not in {"0", "None"}:
             raise RuntimeError(f"coins-markets code {payload.get('code')}: {str(payload.get('msg'))[:80]}")
