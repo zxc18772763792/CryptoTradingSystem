@@ -4626,3 +4626,69 @@ def test_autonomous_agent_refuses_fresh_entry_on_delisting_notice(monkeypatch, t
     assert result["execution"]["reason"] == "exchange_delisting_notice"
     assert submit_mock.await_count == 0
     assert agent.get_status()["last_diagnostics"]["primary"]["code"] == "exchange_delisting_notice"
+
+
+def _bar_cache_agent(monkeypatch, tmp_path: Path, frames):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "LONG", "confidence": 0.72}
+
+    async def _klines(*args, **kwargs):
+        return frames["df"]
+
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", _klines)
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+    provider = AsyncMock(return_value={"action": "hold", "confidence": 0.5, "reason": "wait for confirmation"})
+    monkeypatch.setattr(agent, "_call_provider", provider)
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    return module, agent, provider
+
+
+def test_agent_asks_the_model_once_per_symbol_and_bar(monkeypatch, tmp_path: Path):
+    frames = {"df": _sample_df()}
+    _, agent, provider = _bar_cache_agent(monkeypatch, tmp_path, frames)
+
+    first = asyncio.run(agent.run_once(trigger="test", force=True))
+    second = asyncio.run(agent.run_once(trigger="test", force=True))
+    assert provider.await_count == 1
+    assert first["diagnostics"]["model_output"]["source"] == "provider"
+    assert second["diagnostics"]["model_output"]["source"] == "bar_cache"
+    assert second["decision"]["reason"] == first["decision"]["reason"]
+
+    frames["df"] = _sample_df(periods=121)  # the next bar
+    asyncio.run(agent.run_once(trigger="test", force=True))
+    assert provider.await_count == 2
+    # a manual run always asks the model
+    asyncio.run(agent.run_once(trigger="api_manual", force=True))
+    assert provider.await_count == 3
+
+
+def test_recovery_probes_never_reuse_a_cached_answer(monkeypatch, tmp_path: Path):
+    frames = {"df": _sample_df()}
+    module, agent, provider = _bar_cache_agent(monkeypatch, tmp_path, frames)
+    monkeypatch.setattr(agent, "_service_instability_guard_active", lambda **kwargs: True)
+    monkeypatch.setattr(agent, "_model_recovery_probe_due", lambda cfg: True)
+
+    for _ in range(2):
+        result = asyncio.run(agent.run_once(trigger="test", force=True))
+        assert result["decision"]["action"] == "hold"
+    assert provider.await_count == 2
+
+
+def test_no_discretionary_second_look_inside_the_entry_bar(tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    ctx = {"symbol": "XRP/USDT", "position": {"side": "long"},
+           "market_structure": {"last_bar_at": "2026-10-10T06:45:00+00:00"},
+           "aggregated_signal": {"direction": "SHORT", "confidence": 0.8}}
+    agent._entry_bars["XRP/USDT"] = "2026-10-10T06:45:00+00:00"
+    assert agent._maybe_build_fast_path_hold(cfg={"min_confidence": 0.58}, context_payload=ctx)["reason"] == "entered_this_bar"
+    ctx["market_structure"]["last_bar_at"] = "2026-10-10T07:00:00+00:00"
+    assert agent._maybe_build_fast_path_hold(cfg={"min_confidence": 0.58}, context_payload=ctx) is None

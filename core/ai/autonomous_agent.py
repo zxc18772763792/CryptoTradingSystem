@@ -92,6 +92,10 @@ _OPENAI_FAILOVER_SCOPE = "ai_autonomous_agent"
 _DEFAULT_REENTRY_COOLDOWN_SEC = 4 * 3600
 _DEFAULT_CHASE_MAX_MOVE_24H = 0.04
 _REENTRY_CLOSE_SCAN_LIMIT = 1000
+# One model call per symbol per bar (2026-10-11): 81% of a day's 602 calls repeated a question
+# already answered for the same symbol in the same 15m bar, and two of the first four trades after
+# the 10/9 changes were opened and closed by the model inside one bar (each a 0.2% round trip).
+_BAR_DECISION_CACHE_MAX = 256
 
 # base_url|model pairs that rejected the configured reasoning_effort (e.g. "none" on a GPT relay, which
 # accepts low..max). Later calls send "low"; the first rejection per process still fails that call.
@@ -809,6 +813,9 @@ class AutonomousTradingAgent:
         self._last_model_attempt_at: Optional[float] = None
         # Which endpoint model answered the latest provider call (primary vs backup can differ).
         self._last_answered_model: Optional[Dict[str, Any]] = None
+        # Model decisions keyed by (symbol, bar, position side), and the bar each symbol was entered in.
+        self._bar_decisions: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        self._entry_bars: Dict[str, str] = {}
         self._model_feedback_outage_started_at: Optional[float] = None
         self._model_feedback_failure_streak: int = 0
         self._model_feedback_last_failure_kind: Optional[str] = None
@@ -3812,6 +3819,36 @@ class AutonomousTradingAgent:
             return updated
         return updated
 
+    @staticmethod
+    def _decision_bar_key(context_payload: Dict[str, Any]) -> str:
+        market_structure = dict((context_payload or {}).get("market_structure") or {})
+        return str(market_structure.get("last_bar_at") or "")
+
+    def _bar_cache_key(self, context_payload: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+        bar = self._decision_bar_key(context_payload)
+        symbol = normalize_symbol((context_payload or {}).get("symbol"))
+        if not bar or not symbol:
+            return None
+        side = str(((context_payload or {}).get("position") or {}).get("side") or "").strip().lower()
+        return (symbol, bar, side)
+
+    def _bar_cached_decision(self, context_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        key = self._bar_cache_key(context_payload)
+        entry = self._bar_decisions.get(key) if key else None
+        if entry is None:
+            return None
+        self._last_answered_model = entry.get("answered_by")
+        return dict(entry["decision"])
+
+    def _remember_bar_decision(self, context_payload: Dict[str, Any], raw_decision: Any) -> None:
+        key = self._bar_cache_key(context_payload)
+        if key is None or not isinstance(raw_decision, dict):
+            return
+        self._bar_decisions[key] = {"decision": dict(raw_decision), "answered_by": self._last_answered_model}
+        overflow = len(self._bar_decisions) - _BAR_DECISION_CACHE_MAX
+        for stale in list(self._bar_decisions)[: max(0, overflow)]:
+            self._bar_decisions.pop(stale, None)
+
     def _maybe_build_fast_path_hold(
         self,
         *,
@@ -3845,6 +3882,11 @@ class AutonomousTradingAgent:
         position = context_payload.get("position") if isinstance(context_payload, dict) else {}
         has_position = bool(str((position or {}).get("side") or "").strip().lower())
         if has_position:
+            bar = self._decision_bar_key(context_payload)
+            if bar and self._entry_bars.get(normalize_symbol(context_payload.get("symbol"))) == bar:
+                # Opened in this bar: no discretionary second look until the next one. Stops,
+                # profit protection and the time stop stay with the execution engine.
+                return self._build_hold_decision(cfg=cfg, reason="entered_this_bar", confidence=confidence)
             return None
 
         # Flat symbol + tripped breaker: the only actions the model could take
@@ -5450,6 +5492,8 @@ class AutonomousTradingAgent:
             add_item("reentry_cooldown", "平仓后同币冷却中", decision_reason, "warn", 16)
         elif decision_reason.startswith("chase_guard("):
             add_item("chase_guard", "24 小时已大幅同向波动，不追", decision_reason, "warn", 16)
+        elif decision_reason == "entered_this_bar":
+            add_item("entered_this_bar", "本根 K 线刚开仓，下一根再判断", decision_reason, "info", 30)
         elif decision_reason == "review_risk_halt":
             add_item(
                 "review_risk_halt",
@@ -6178,8 +6222,16 @@ class AutonomousTradingAgent:
                 context_payload=context_payload,
                 force_recovery_probe=bool(force and trigger == "api_manual"),
             )
+            bar_cache_hit = False
+            probing = (
+                not bool((context_payload.get("position") or {}).get("side"))
+                and self._service_instability_guard_active(learning_memory=effective_cfg.get("learning_memory"))
+            )
+            if raw_decision is None and not probing and not bool(force and trigger == "api_manual"):
+                raw_decision = self._bar_cached_decision(context_payload)
+                bar_cache_hit = raw_decision is not None
             if raw_decision is not None:
-                raw_decision_source = "rule_based"
+                raw_decision_source = "bar_cache" if bar_cache_hit else "rule_based"
             else:
                 recovery_probe = (
                     not bool((context_payload.get("position") or {}).get("side"))
@@ -6240,6 +6292,8 @@ class AutonomousTradingAgent:
                     if self._last_answered_model is None:
                         self._last_answered_model = {"model": model, "backup": False}
                     self._record_model_feedback_success()
+                    if not recovery_probe:  # a probe's answer is forced to hold below
+                        self._remember_bar_decision(context_payload, raw_decision)
                 except Exception as exc:
                     normalized_exc: Exception = exc if isinstance(exc, Exception) else RuntimeError(str(exc))
                     if isinstance(exc, asyncio.TimeoutError) and not str(exc).strip():
@@ -6373,6 +6427,10 @@ class AutonomousTradingAgent:
                     if accepted:
                         self._submitted_count += 1
                         self._last_submit_at = time.time()
+                        if decision["action"] in {"buy", "sell"}:
+                            self._entry_bars[normalize_symbol(context_payload.get("symbol"))] = (
+                                self._decision_bar_key(context_payload)
+                            )
 
         diagnostics = self._build_decision_diagnostics(
             cfg=effective_cfg,
@@ -6408,7 +6466,7 @@ class AutonomousTradingAgent:
                 "universe_size": len(cfg.get("universe_symbols") or []),
                 "timeframe": effective_cfg.get("timeframe"),
                 "allow_live": effective_cfg.get("allow_live"),
-                "answered_by": self._last_answered_model if raw_decision_source == "provider" else None,
+                "answered_by": self._last_answered_model if raw_decision_source in {"provider", "bar_cache"} else None,
             },
             "context": {
                 "price": context_payload.get("price"),
