@@ -2222,7 +2222,7 @@ const verdictColor={confirmed:'var(--positive)',on_track:'var(--positive)',watch
 if(!rows.length){tb.innerHTML='<tr><td colspan="10">暂无跟踪器</td></tr>';return;}
 tb.innerHTML=rows.map(r=>{
 if(r.error)return `<tr><td>${esc(r.name)}</td><td colspan="9">读取失败：${esc(r.error)}</td></tr>`;
-const ci=Array.isArray(r.ci90_pct)?` <span class="u-hint">[${pct(r.ci90_pct[0])}, ${pct(r.ci90_pct[1])}]</span>`:'';
+const ci=Array.isArray(r.ci90_pct)?` <span class="u-hint">[${pct(r.ci90_pct[0])}, ${pct(r.ci90_pct[1])}]${r.ci_clusters!=null?` · ${Number(r.ci_clusters)} 组`:''}</span>`:(r.ci_clusters===1&&Number(r.n)>=2?' <span class="u-hint">同属 1 组，暂无区间</span>':'');
 const unit=r.unit||'笔';
 const extra=[r.open?`持仓 ${Number(r.open)}`:'',r.waiting?`待入场 ${Number(r.waiting)}`:'',r.late?`晚到 ${Number(r.late)}`:''].filter(Boolean).join(' · ');
 const marks=(r.open_marks||[]).map(m=>`<span style="${color(m.mark_pct)}">${esc(m.label)} ${pct(m.mark_pct,1)}</span>`).join('，');

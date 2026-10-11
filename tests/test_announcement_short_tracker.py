@@ -141,3 +141,12 @@ def test_delisting_short_stops_and_late_detection_is_not_counted(bn):
     assert late["late"] is True
     summary = ast.load_summaries(bn.dir)["binance_delist"]["summary"]
     assert summary["late"] == 1 and summary["forward_completed"] == 1  # only the on-time trade counts
+
+
+def test_coins_from_one_announcement_are_one_cluster():
+    state = {"trades": {
+        "BICO|n1": {"symbol": "BICOUSDT", "status": "closed", "return_pct": -0.6, "notice_code": "n1", "entry_ms": 1},
+        "CVC|n1": {"symbol": "CVCUSDT", "status": "closed", "return_pct": -8.9, "notice_code": "n1", "entry_ms": 1},
+    }}
+    r = ast.summary(state, "binance_monitor")["retirement"]
+    assert r["n"] == 2 and r["clusters"] == 1 and r["ci90_pct"] is None

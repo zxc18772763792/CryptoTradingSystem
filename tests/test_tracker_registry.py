@@ -17,12 +17,12 @@ def test_every_tracker_has_a_registered_retirement_rule_and_unique_id():
 def test_row_uses_the_trackers_own_verdict_and_isolates_failures():
     spec = {"id": "x", "name": "X", "group": "g", "unit": "笔", "rule": "r", "rule_key": "upbit_caution",
             "load": lambda: {"retirement": {"n": 4, "min_n": 20, "mean_pct": 2.5, "ci90_pct": [0.1, 4.9],
-                                            "verdict": "collecting", "label": "积累样本", "reason": "不足"},
+                                            "verdict": "collecting", "label": "积累样本", "reason": "不足", "clusters": 3},
                              "forward_win_rate": 0.75, "forward_open": 1, "forward_waiting": 2, "forward_late": 1,
                              "updated_at": "2026-10-08T00:00:00+00:00"}}
     row = tr.tracker_row(spec)
     assert row["n"] == 4 and row["mean_pct"] == 2.5 and row["total_pct"] == 10.0
-    assert row["ci90_pct"] == [0.1, 4.9] and row["win_rate"] == 0.75
+    assert row["ci90_pct"] == [0.1, 4.9] and row["win_rate"] == 0.75 and row["ci_clusters"] == 3
     assert (row["open"], row["waiting"], row["late"]) == (1, 2, 1)
     assert row["backtest_mean_pct"] == retirement.RULES["upbit_caution"]["backtest_mean_pct"]
 

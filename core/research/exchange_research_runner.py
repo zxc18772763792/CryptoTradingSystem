@@ -40,7 +40,8 @@ TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解�
                  "upbit_caution_hedged": "Upbit 警示后做空（对冲版）", "bithumb_caution": "Bithumb 警示后做空",
                  "bithumb_caution_hedged": "Bithumb 警示后做空（对冲版）",
                  "announcement_short_monitor": "币安监控标签公告后做空 24h",
-                 "announcement_short_delist": "币安下架公告后做空 4h"}
+                 "announcement_short_delist": "币安下架公告后做空 4h",
+                 "korea_caution_hedged": "韩国交易所警示后做空（Upbit + Bithumb 合并，对冲版）"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
 UPBIT_INTERVAL_SEC = 1800
@@ -229,6 +230,10 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _status["bithumb_caution_hedged"] = await upbit_caution_tracker.tick(client, strategy="bithumb_caution_hedged")
             await _verdict_alert("bithumb_caution_hedged", _status["bithumb_caution_hedged"])
 
+        async def korea_caution_hedged():
+            _status["korea_caution_hedged"] = await upbit_caution_tracker.tick(client, strategy="korea_caution_hedged")
+            await _verdict_alert("korea_caution_hedged", _status["korea_caution_hedged"])
+
         async def upbit_krw_listing():
             _status["upbit_krw_listing"] = await upbit_caution_tracker.tick(client, strategy="krw_listing")
             await _verdict_alert("upbit_krw_listing", _status["upbit_krw_listing"])
@@ -255,6 +260,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("upbit_caution_hedged", UPBIT_INTERVAL_SEC, now, force, upbit_caution_hedged)
         await _run_job("bithumb_caution", UPBIT_INTERVAL_SEC, now, force, bithumb_caution)
         await _run_job("bithumb_caution_hedged", UPBIT_INTERVAL_SEC, now, force, bithumb_caution_hedged)
+        await _run_job("korea_caution_hedged", UPBIT_INTERVAL_SEC, now, force, korea_caution_hedged)
         if delist_risk.MODEL_PATH.exists():
             await _run_job("delist_risk", DELIST_RISK_INTERVAL_SEC, now, force, delist)
     return status()
