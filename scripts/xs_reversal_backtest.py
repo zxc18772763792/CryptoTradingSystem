@@ -60,26 +60,48 @@ async def load_local_1h() -> dict:
 
 
 def fetch_funding(perps: dict, start_ms: int) -> dict:
+    """Every settlement since start_ms per perp, cached and resumable.
+
+    Until 2026-10-11 any non-200 answer (a rate limit, a dropped proxy connection) ended a perp's
+    fetch silently, which left 96 of the 131 perps with no funding at all: the backtest then
+    charged them none. Failures are now retried, and a perp that still fails stops the run
+    instead of being priced without funding.
+    """
     import httpx
 
     cache = json.loads(FUNDING_CACHE.read_text(encoding="utf-8")) if FUNDING_CACHE.exists() else {}
+    failed = []
     with httpx.Client(timeout=30, trust_env=True) as client:
         for base, symbol in perps.items():
             rows = cache.get(symbol) or []
             cursor = max([start_ms] + [int(r[0]) + 1 for r in rows])
             while cursor < time.time() * 1000 - 3_600_000:
-                resp = client.get(f"{rule.FAPI}/fundingRate", params={"symbol": symbol, "startTime": cursor, "limit": 1000})
-                if resp.status_code != 200:
+                page = None
+                for attempt in range(6):
+                    try:
+                        resp = client.get(f"{rule.FAPI}/fundingRate", params={"symbol": symbol, "startTime": cursor, "limit": 1000})
+                        if resp.status_code == 200:
+                            page = [(int(r["fundingTime"]), float(r["fundingRate"])) for r in resp.json()]
+                            break
+                        if resp.status_code == 400:  # unknown symbol: nothing to fetch
+                            page = []
+                            break
+                    except Exception:  # noqa: BLE001 - the proxy drops connections now and then
+                        pass
+                    time.sleep(2 * (attempt + 1))
+                if page is None:
+                    failed.append(symbol)
                     break
-                page = [(int(r["fundingTime"]), float(r["fundingRate"])) for r in resp.json()]
                 if not page:
                     break
                 rows += page
                 cursor = page[-1][0] + 1
                 time.sleep(0.15)
             cache[symbol] = rows
-    OUT.mkdir(parents=True, exist_ok=True)
-    FUNDING_CACHE.write_text(json.dumps(cache), encoding="utf-8")
+            OUT.mkdir(parents=True, exist_ok=True)
+            FUNDING_CACHE.write_text(json.dumps(cache), encoding="utf-8")
+    if failed:
+        raise RuntimeError(f"funding fetch failed for {len(failed)} perps (cached progress kept, rerun): {failed[:10]}")
     return cache
 
 
@@ -92,17 +114,33 @@ def main() -> int:
     ensure_proxy_env(settings)
     closes = asyncio.run(load_local_1h())
     with httpx.Client(timeout=30, trust_env=True) as client:
-        info = client.get(f"{rule.FAPI}/exchangeInfo").json()
+        for attempt in range(5):  # the proxy drops a TLS handshake now and then
+            try:
+                info = client.get(f"{rule.FAPI}/exchangeInfo").json()
+                break
+            except httpx.TransportError:
+                if attempt == 4:
+                    raise
+                time.sleep(3 * (attempt + 1))
     perp_of = rule.perp_symbols(info)
     closes = {b: s for b, s in closes.items() if b in perp_of}
-    print(f"universe: {len(closes)} coins with a USDT perp and >= {MIN_DAYS}d of 1h bars")
     OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "universe.json").write_text(json.dumps({
-        "bases": sorted(closes), "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
-        "rule": f"local 1h history >= {MIN_DAYS}d and a TRADING USDT perp",
-    }, indent=1), encoding="utf-8")
+    universe_file = OUT / "universe.json"
+    if universe_file.exists():
+        # frozen on the first run (2026-10-01): the tracker and the later studies use this list,
+        # so a rerun replays it rather than redrawing it from today's local store
+        frozen = set(json.loads(universe_file.read_text(encoding="utf-8"))["bases"])
+        closes = {b: s for b, s in closes.items() if b in frozen}
+        print(f"universe: {len(closes)} of the {len(frozen)} frozen coins have local 1h bars and a TRADING perp")
+    else:
+        print(f"universe: {len(closes)} coins with a USDT perp and >= {MIN_DAYS}d of 1h bars")
+        universe_file.write_text(json.dumps({
+            "bases": sorted(closes), "created_at": pd.Timestamp.now(tz="UTC").isoformat(),
+            "rule": f"local 1h history >= {MIN_DAYS}d and a TRADING USDT perp",
+        }, indent=1), encoding="utf-8")
     panel = pd.DataFrame(closes).sort_index()
     funding = fetch_funding({b: perp_of[b] for b in closes}, int(panel.index.min().timestamp() * 1000))
+    print(f"funding: {sum(bool(funding.get(perp_of[b])) for b in closes)}/{len(closes)} perps have settlements")
 
     days = []
     for entry_ts in panel.index[(panel.index.hour == 23)]:
