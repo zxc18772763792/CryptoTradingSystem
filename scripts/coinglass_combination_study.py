@@ -51,6 +51,14 @@ C. Filters on existing strategies
 
     python scripts/coinglass_combination_study.py            # all parts (C1 needs the local 1h store)
     python scripts/coinglass_combination_study.py --skip-c1  # without the reversal replay
+    python scripts/coinglass_combination_study.py --robustness   # post-hoc checks below
+
+POST-HOC, added after the first run (they qualify the verdict, never change it): the returns above
+are price only. A long-short perp book held for days also pays or earns funding, and the reversal
+backtest's funding cache turned out to hold settlements for 35 of its 131 perps. --robustness
+fetches Binance's actual funding for every perp (cached in funding_binance.json here) and reports,
+for the composite books: net with funding, net at 0.20% per round trip, each quarter of the test
+days, and each leg; and the reversal filter F1 again with the complete funding.
 """
 from __future__ import annotations
 
@@ -260,8 +268,10 @@ def _quintile_sets(row: pd.Series) -> Tuple[Set[str], Set[str]]:
     return set(pct.index[pct <= 0.2]), set(pct.index[pct > 0.8])
 
 
-def reversal_replay(panel: Dict[str, pd.DataFrame], score_1d: pd.DataFrame) -> pd.DataFrame:
-    """The frozen reversal backtest day by day, unfiltered and with F1/F2 (net per position)."""
+def reversal_replay(panel: Dict[str, pd.DataFrame], score_1d: pd.DataFrame,
+                    funding: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
+    """The frozen reversal backtest day by day, unfiltered and with F1/F2 (net per position).
+    Funding defaults to the backtest's own cache, as pre-registered."""
     from core.research import xs_reversal_tracker as rule
     from scripts.xs_reversal_backtest import FUNDING_CACHE, load_local_1h
 
@@ -269,7 +279,8 @@ def reversal_replay(panel: Dict[str, pd.DataFrame], score_1d: pd.DataFrame) -> p
     perps = _base_to_perp()
     closes = {b: s for b, s in closes.items() if b in perps}
     prices = pd.DataFrame(closes).sort_index()
-    funding = json.loads(FUNDING_CACHE.read_text(encoding="utf-8")) if FUNDING_CACHE.exists() else {}
+    if funding is None:
+        funding = json.loads(FUNDING_CACHE.read_text(encoding="utf-8")) if FUNDING_CACHE.exists() else {}
     # cumulative funding per perp: a window sum is two binary searches instead of a scan
     cum_funding = {}
     for perp, rows in funding.items():
@@ -401,13 +412,163 @@ def report(a: List[Dict[str, Any]], b: List[Dict[str, Any]], c1: List[Dict[str, 
     return "\n".join(lines)
 
 
+# ------------------------------------------------------------------------------------ post-hoc
+FUNDING_PATH = OUT_DIR / "funding_binance.json"
+
+
+def fetch_binance_funding(perps: List[str], start_ms: int, path: Path = FUNDING_PATH) -> Dict[str, List[List[float]]]:
+    """Every funding settlement of each perp since start_ms (resumable; retries instead of giving up)."""
+    import time
+
+    import httpx
+
+    from config.settings import settings
+    from core.utils.proxy_env import ensure_proxy_env
+
+    ensure_proxy_env(settings)
+    cache: Dict[str, List[List[float]]] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    with httpx.Client(timeout=30, trust_env=True) as client:
+        for perp in perps:
+            rows = cache.get(perp) or []
+            cursor = max([start_ms] + [int(r[0]) + 1 for r in rows])
+            while cursor < time.time() * 1000 - 3_600_000:
+                page = None
+                for attempt in range(6):
+                    try:
+                        resp = client.get(f"{single.FAPI}/fapi/v1/fundingRate",
+                                          params={"symbol": perp, "startTime": cursor, "limit": 1000})
+                        if resp.status_code == 200:
+                            page = resp.json()
+                            break
+                        if resp.status_code == 400:  # unknown symbol: nothing to fetch
+                            page = []
+                            break
+                    except Exception:  # noqa: BLE001 - the proxy drops connections now and then
+                        pass
+                    time.sleep(2 * (attempt + 1))
+                if not page:
+                    break
+                rows += [[int(r["fundingTime"]), float(r["fundingRate"])] for r in page]
+                cursor = int(page[-1]["fundingTime"]) + 1
+                time.sleep(0.2)
+            cache[perp] = rows
+            path.write_text(json.dumps(cache), encoding="utf-8")
+    return cache
+
+
+def daily_funding(cache: Dict[str, List[List[float]]], index: pd.DatetimeIndex, columns: List[str]) -> pd.DataFrame:
+    """F[D, perp]: funding settled in (D+1 00:00, D+2 00:00], the first day held after bar D."""
+    out = {}
+    for perp in columns:
+        rows = cache.get(perp) or []
+        if not rows:
+            continue
+        settle = pd.Series([r[1] for r in rows], index=pd.to_datetime([int(r[0]) for r in rows], unit="ms", utc=True))
+        # a settlement at exactly 00:00 belongs to the day that ends there
+        day = (settle.index - pd.Timedelta(milliseconds=1)).floor("D") - pd.Timedelta(days=1)
+        out[perp] = settle.groupby(day).sum()
+    return pd.DataFrame(out).reindex(index=index, columns=columns).fillna(0.0)
+
+
+def funded_books(score: pd.DataFrame, fwd: pd.DataFrame, fwd_1d: pd.DataFrame, funding: pd.DataFrame, h: int,
+                 cost: float) -> Dict[str, Any]:
+    """The plain h-day and the buffered daily book, each net of costs AND funding (long pays, short earns)."""
+    held = funding.rolling(h).sum().shift(-(h - 1))  # funding over days D+1 .. D+h
+    plain_net, plain_fund, long_leg, short_leg, quarters = [], [], [], [], []
+    days = list(score.index)
+    for offset in range(h):
+        prev = None
+        for t in days[offset::h]:
+            s, f = score.loc[t], fwd.loc[t]
+            ok = s.notna() & f.notna()
+            if ok.sum() < MIN_COINS:
+                prev = None
+                continue
+            ranked = s[ok].sort_values(kind="mergesort")
+            k = len(ranked) // 5
+            short, long_ = list(ranked.index[:k]), list(ranked.index[-k:])
+            fund = float(held.loc[t, long_].mean() - held.loc[t, short].mean())
+            turn = 1.0 if prev is None else 0.5 * (len(set(long_) - prev[0]) + len(set(short) - prev[1])) / k
+            spread = float(f[long_].mean() - f[short].mean())
+            net = spread - fund - 2 * turn * cost
+            plain_net.append(net / h)
+            plain_fund.append(fund / h)
+            long_leg.append(float(f[long_].mean() - fwd.loc[t][ok].mean()) / h)
+            short_leg.append(float(fwd.loc[t][ok].mean() - f[short].mean()) / h)
+            quarters.append(pd.Timestamp(t).to_period("Q"))
+            prev = (set(long_), set(short))
+    by_quarter = pd.Series(plain_net, index=quarters).groupby(level=0).mean()
+    buffered_fund = []
+    longs, shorts = set(), set()
+    buffered_net = []
+    for t in score.index:
+        s, f = score.loc[t], fwd_1d.loc[t]
+        ok = s.notna() & f.notna()
+        if ok.sum() < MIN_COINS:
+            longs, shorts = set(), set()
+            continue
+        pct = s[ok].rank(pct=True)
+        new_longs = {c for c in longs if c in pct.index and pct[c] > 1 - EXIT_Q} | set(pct.index[pct > 1 - ENTER_Q])
+        new_shorts = {c for c in shorts if c in pct.index and pct[c] <= EXIT_Q} | set(pct.index[pct <= ENTER_Q])
+        if not new_longs or not new_shorts:
+            continue
+        turn = len(new_longs - longs) / len(new_longs) + len(new_shorts - shorts) / len(new_shorts)
+        fund = float(funding.loc[t, list(new_longs)].mean() - funding.loc[t, list(new_shorts)].mean())
+        buffered_net.append(float(f[list(new_longs)].mean() - f[list(new_shorts)].mean()) - fund - turn * cost)
+        buffered_fund.append(fund)
+        longs, shorts = new_longs, new_shorts
+    return {"plain_net": float(np.mean(plain_net)), "plain_funding": float(np.mean(plain_fund)),
+            "long_leg": float(np.mean(long_leg)), "short_leg": float(np.mean(short_leg)),
+            "plain_by_quarter": {str(q): float(v) for q, v in by_quarter.items()},
+            "buffered_net": float(np.mean(buffered_net)), "buffered_funding": float(np.mean(buffered_fund))}
+
+
+def robustness(panel: Dict[str, pd.DataFrame]) -> Tuple[str, Dict[str, Any]]:
+    perps = list(panel["fwd_1d"].columns)
+    cache = fetch_binance_funding(perps, single._ms(single.START) - 2 * 86_400_000)
+    covered = sum(bool(cache.get(p)) for p in perps)
+    test = panel["fwd_1d"].index >= SPLIT
+    funding = daily_funding(cache, panel["fwd_1d"].index, perps)
+    lines = [f"post-hoc (not the verdict): Binance funding for {covered}/{len(perps)} perps; test days only; "
+             "per day; long pays funding, short earns it"]
+    for h in (3, 7):
+        weights = training_weights(panel, h)
+        for variant, w in (("ic_weighted", weights), ("sign_equal", {k: float(np.sign(v)) for k, v in weights.items()})):
+            score = composite(panel, w)[test]
+            fwd, fwd_1d, fund = panel[f"fwd_{h}d"][test], panel["fwd_1d"][test], funding[test]
+            at_cost = funded_books(score, fwd, fwd_1d, fund, h, COST)
+            at_high = funded_books(score, fwd, fwd_1d, fund, h, 0.002)
+            quarters = ", ".join(f"{q} {v * 100:+.3f}%" for q, v in at_cost["plain_by_quarter"].items())
+            lines.append(f"  {h}d {variant:12s} plain net incl. funding {at_cost['plain_net'] * 100:+.3f}% "
+                         f"(funding {-at_cost['plain_funding'] * 100:+.3f}%; at 0.20% cost {at_high['plain_net'] * 100:+.3f}%) | "
+                         f"buffered {at_cost['buffered_net'] * 100:+.3f}% (funding {-at_cost['buffered_funding'] * 100:+.3f}%; "
+                         f"at 0.20% {at_high['buffered_net'] * 100:+.3f}%) | legs long {at_cost['long_leg'] * 100:+.3f}% "
+                         f"short {at_cost['short_leg'] * 100:+.3f}%")
+            lines.append(f"      quarters (plain, incl. funding): {quarters}")
+    return "\n".join(lines), cache
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--reps", type=int, default=N_PERM)
     parser.add_argument("--skip-c1", action="store_true", help="skip the reversal replay (needs the local 1h store)")
+    parser.add_argument("--robustness", action="store_true", help="post-hoc: funding, higher costs, quarters, legs")
     args = parser.parse_args(argv)
     frames = single.build_panel(single.load_cached())
     panel = add_features(single.build_signals(frames), frames)
+    if args.robustness:
+        text, cache = robustness(panel)
+        score_1d = composite(panel, training_weights(panel, 1))
+        if not args.skip_c1:
+            replay = reversal_replay(panel, score_1d, funding=cache)
+            for r in filter_verdicts(replay):
+                text += (f"\n  reversal {r['filter']} with complete funding: base {r['base_net'] * 100:+.3f}% filtered "
+                         f"{r['filtered_net'] * 100:+.3f}% diff {r['diff'] * 100:+.3f}% "
+                         f"[{r['ci'][0] * 100:+.3f}, {r['ci'][1] * 100:+.3f}] halves {r['first_half'] * 100:+.3f}/"
+                         f"{r['second_half'] * 100:+.3f}")
+        print(text)
+        (OUT_DIR / "combination_robustness.txt").write_text(text, encoding="utf-8")
+        return 0
     a = part_a(panel, reps=args.reps)
     b = part_b(panel, reps=args.reps)
     score_1d = composite(panel, training_weights(panel, 1))

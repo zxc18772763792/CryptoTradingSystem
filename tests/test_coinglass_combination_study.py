@@ -75,3 +75,15 @@ def test_filter_verdicts_judge_f2_on_test_days_only():
     rows = {r["filter"]: r for r in combo.filter_verdicts(replay)}
     assert rows["F1"]["passes"] and rows["F1"]["days"] == len(days)
     assert rows["F2"]["passes"] and rows["F2"]["days"] == int((days >= SPLIT).sum())  # the bad training days do not count
+
+
+def test_daily_funding_counts_each_settlement_in_the_day_it_is_held():
+    ms = lambda s: int(pd.Timestamp(s, tz="UTC").timestamp() * 1000)  # noqa: E731
+    cache = {"AUSDT": [[ms("2025-06-02 00:00"), 0.001],    # ends holding day 06-01 -> bar 05-31
+                       [ms("2025-06-02 08:00"), 0.002],    # held on 06-02 -> bar 06-01
+                       [ms("2025-06-03 00:00"), 0.004]]}   # ends holding day 06-02 -> bar 06-01
+    index = pd.date_range("2025-05-30", periods=5, freq="1D", tz="UTC")
+    f = combo.daily_funding(cache, index, ["AUSDT", "BUSDT"])
+    assert f.loc["2025-05-31", "AUSDT"] == pytest.approx(0.001)
+    assert f.loc["2025-06-01", "AUSDT"] == pytest.approx(0.006)
+    assert f["BUSDT"].sum() == 0.0  # no settlements: no funding
