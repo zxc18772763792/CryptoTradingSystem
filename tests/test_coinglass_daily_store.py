@@ -118,3 +118,21 @@ def test_ensure_current_waits_starts_and_reports(env, monkeypatch):
     assert asyncio.run(run(opens + timedelta(minutes=20)))["status"] == "started" and started == [D]
     assert asyncio.run(run(opens + timedelta(hours=1)))["status"] == "current"
     store._task = None
+
+
+def test_a_timed_out_request_is_asked_again(env, monkeypatch):
+    monkeypatch.setattr(store, "TIMEOUT_WAIT_SEC", 0.0)
+
+    class Slow(Relay):
+        def __init__(self):
+            super().__init__()
+            self.slow_left = 2
+
+        async def request_json(self, path, params=None, manual=False):
+            if self.slow_left:
+                self.slow_left -= 1
+                raise asyncio.TimeoutError()
+            return await super().request_json(path, params, manual)
+
+    status = asyncio.run(store.update(D, client=Slow()))
+    assert status["complete_coins"] == 2 and not status["errors"]  # two timeouts, then answers
