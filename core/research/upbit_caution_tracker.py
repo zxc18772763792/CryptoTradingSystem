@@ -27,8 +27,9 @@ pass only records a baseline). Joint designations with Upbit are marked so
 Bithumb-only events can be read separately.
 
 Since 2026-10-11, "korea_caution_hedged": Upbit and Bithumb caution
-designations pooled into one hedged strategy, so a verdict arrives in about
-half the time. One trade per coin per JOINT_DAYS: the exchange that
+designations pooled into one hedged strategy, so a verdict can arrive sooner
+(not twice as fast: the two exchanges often flag the same coins, so the gain
+is the Bithumb-only designations). One trade per coin per JOINT_DAYS: the exchange that
 designates first opens it, and the other exchange's designation inside that
 window is only noted on the trade (``joint``). Judged on the hedged return;
 the plain short is kept for reference (the 2026 backtest and the September
