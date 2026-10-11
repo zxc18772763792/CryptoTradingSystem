@@ -103,3 +103,11 @@ def test_history_fetches_both_ends_of_a_capped_range(monkeypatch, keep):
     relay = _Relay(keep)
     rows = asyncio.run(study._history(relay, "oi", "AAA", "AAAUSDT", [0.0]))
     assert len(rows) == 1100 and relay.calls == 2
+
+
+def test_long_short_ratio_comes_from_the_finer_percentages():
+    rows = [{"time": 0, "global_account_long_percent": 66.85, "global_account_short_percent": 33.15,
+             "global_account_long_short_ratio": 2.02},
+            {"time": DAY_MS, "global_account_long_short_ratio": 1.5}]  # no percentages: the ratio field
+    series = study._series(rows, "global_account_long_short_ratio")
+    assert series.iloc[0] == pytest.approx(66.85 / 33.15) and series.iloc[1] == 1.5

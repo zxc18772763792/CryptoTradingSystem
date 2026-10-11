@@ -20,6 +20,8 @@ PRE-REGISTERED before the first run (do not tune after seeing results):
     open, exit at the D+1+h 00:00 open. Exception, found before any run: a finished daily
     long/short bar is the snapshot AT its stamp (BTC 10/6-10/10: daily = hourly value at 00:00 of
     the same day), so the bar stamped D+1 is the one that closes day D and is used for day D.
+    L/S = long % / short % (two decimals of a percent) rather than the ratio field (rounded to
+    0.01), also decided before any run.
   Signals (8), all known at D+1 00:00:
     liq_imbalance_1d    (long liq - short liq) / (long + short) on day D     [share of forced selling]
     liq_shock_z         z of log(1 + long + short liq) vs the coin's own prior 30 days
@@ -243,8 +245,23 @@ def load_cached(out_dir: Path = OUT_DIR) -> Dict[str, Dict[str, Any]]:
 
 
 # ----------------------------------------------------------------------------------------- panel
+# ratio field -> (long %, short %) fields carrying more precision than the ratio's two decimals
+RATIO_FROM_PERCENTS = {
+    "global_account_long_short_ratio": ("global_account_long_percent", "global_account_short_percent"),
+    "top_position_long_short_ratio": ("top_position_long_percent", "top_position_short_percent"),
+}
+
+
+def _value(row: Dict[str, Any], field: str) -> float:
+    if field in RATIO_FROM_PERCENTS:
+        long_pct, short_pct = (pd.to_numeric(row.get(f), errors="coerce") for f in RATIO_FROM_PERCENTS[field])
+        if long_pct == long_pct and short_pct == short_pct and short_pct > 0:
+            return float(long_pct) / float(short_pct)
+    return float(pd.to_numeric(row.get(field), errors="coerce"))
+
+
 def _series(rows: List[Dict[str, Any]], field: str) -> pd.Series:
-    values = {pd.Timestamp(int(r["time"]), unit="ms", tz="UTC"): pd.to_numeric(r.get(field), errors="coerce")
+    values = {pd.Timestamp(int(r["time"]), unit="ms", tz="UTC"): _value(r, field)
               for r in rows or [] if r.get("time") is not None}
     return pd.Series(values, dtype=float).sort_index()
 
