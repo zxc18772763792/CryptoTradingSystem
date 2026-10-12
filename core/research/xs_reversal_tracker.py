@@ -400,5 +400,6 @@ def _liq_filter_summary(state: Dict[str, Any], counted: List[Dict[str, Any]]) ->
         "mean_diff_pct": round(float(np.mean(diffs)), 3) if diffs else None,
         "flagged_per_day": round(float(np.mean([len(x.get("flagged") or []) for x in shadow])), 1) if shadow else None,
         "no_data_days": sum((d.get("liq_filter") or {}).get("status") == "no_data" for d in counted),
+        "forward_open": sum((d.get("liq_filter") or {}).get("status") == "open" for d in (state.get("days") or {}).values()),
         "retirement": retirement.verdict(diffs, rule),
     }
