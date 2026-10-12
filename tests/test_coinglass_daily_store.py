@@ -33,8 +33,11 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "STORE_DIR", tmp_path / "store")
     monkeypatch.setattr(store, "STATUS_PATH", tmp_path / "store" / "_status.json")
     monkeypatch.setattr(store, "SEED_DIR", tmp_path / "seed")
+    monkeypatch.setattr(store, "WIDE_UNIVERSE_PATH", tmp_path / "wide.json")  # absent unless a test writes it
+    monkeypatch.setattr(store, "WIDE_SEED_DIR", tmp_path / "wide_seed")
     monkeypatch.setattr(store, "REQUEST_SPACING_SEC", 0.0)
     (tmp_path / "seed").mkdir()
+    (tmp_path / "wide_seed").mkdir()
     return tmp_path
 
 
@@ -186,3 +189,25 @@ def test_ensure_current_retries_an_incomplete_day_after_a_gap(env, monkeypatch):
     late = asyncio.run(run(opens + timedelta(hours=10, minutes=1)))  # past the retry window: final as it is
     assert late["status"] == "current" and store.load_status()["final"] is True
     store._task = None
+
+
+def test_the_wide_coins_come_after_the_research_universe_and_seed_from_their_study(env, monkeypatch):
+    (env / "wide.json").write_text(json.dumps({"held_out": {"CCC": "CCCUSDT", "AAA": "AAAUSDT"}}), encoding="utf-8")
+    monkeypatch.setattr(store, "WIDE_COINS", False)
+    assert store.update_universe() == store.universe()  # switched off: the research universe only
+    monkeypatch.setattr(store, "WIDE_COINS", True)
+    assert store.update_universe() == [("AAA", "AAAUSDT"), ("BBB", "1000BBBUSDT"), ("CCC", "CCCUSDT")]  # no duplicate AAA
+
+    seed_rows = {d: [_row(d, D_MS - k * DAY_MS) for k in range(1, 80)] for d in store.DATASETS}
+    (env / "wide_seed" / "CCCUSDT.json").write_text(json.dumps({"base": "CCC", **seed_rows}), encoding="utf-8")
+    assert store.seed() == 1 and len(store.load_coin("CCCUSDT")["oi"]) == store.KEEP_DAYS + 1
+
+    relay = Relay()
+    status = asyncio.run(store.update(D, client=relay))
+    assert status["universe_coins"] == 3 and status["complete_coins"] == 3 and status["final"] is True
+    order = []
+    for _, symbol, _ in relay.calls:
+        name = symbol.replace("1000", "").replace("USDT", "")
+        if name not in order:
+            order.append(name)
+    assert order == ["AAA", "BBB", "CCC"]  # the 131 first: their composite forms as early as before

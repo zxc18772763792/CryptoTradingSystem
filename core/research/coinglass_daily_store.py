@@ -15,6 +15,11 @@ research runner, never inside its pass. Long/short ratio bars are snapshots AT t
 day D's value is the snapshot at D+1 00:00: the closed daily bars up to D come from the daily
 history and the D+1 00:00 snapshot from the hourly history (the daily bar stamped D+1 would still
 be moving). Research only: nothing here trades.
+
+Since 2026-10-12 the update also keeps the held-out coins of the equal-weight wide composite current
+(the 103 most-traded perps outside the 131, scripts/coinglass_wide_study.py; about 620 more requests
+a day, seeded from that study's download). They come after the 131, so the 131-coin composite forms
+as early as before; the whole pass takes about 4.7 hours.
 """
 from __future__ import annotations
 
@@ -33,6 +38,9 @@ STATUS_PATH = STORE_DIR / "_status.json"
 SEED_DIR = PROJECT_ROOT / "data" / "research" / "coinglass_positioning" / "raw"
 UNIVERSE_PATH = PROJECT_ROOT / "data" / "research" / "xs_reversal" / "universe.json"
 PERP_SYMBOLS_PATH = PROJECT_ROOT / "data" / "research" / "lsr_positioning" / "perp_symbols.json"
+WIDE_UNIVERSE_PATH = PROJECT_ROOT / "data" / "research" / "coinglass_wide" / "universe.json"
+WIDE_SEED_DIR = PROJECT_ROOT / "data" / "research" / "coinglass_wide" / "raw"
+WIDE_COINS = True  # keep the held-out coins current too (the equal-weight wide composite tracker, since 2026-10-12)
 KEEP_DAYS = 60
 DAY_MS = 86_400_000
 HOUR_MS = 3_600_000
@@ -86,6 +94,25 @@ def universe() -> List[Tuple[str, str]]:
     return [(b, perps[b]) for b in bases if perps.get(b)]
 
 
+def held_out() -> List[Tuple[str, str]]:
+    """(coin, Binance perp) of the wide study's held-out coins; none when that universe is absent."""
+    if not WIDE_UNIVERSE_PATH.exists():
+        return []
+    return sorted(json.loads(WIDE_UNIVERSE_PATH.read_text(encoding="utf-8"))["held_out"].items())
+
+
+def wide_universe() -> List[Tuple[str, str]]:
+    """The research universe, then the held-out coins: the wide composite's coins."""
+    known = universe()
+    seen = {perp for _, perp in known}
+    return known + [(coin, perp) for coin, perp in held_out() if perp not in seen]
+
+
+def update_universe() -> List[Tuple[str, str]]:
+    """The coins the daily update keeps current, the research universe first."""
+    return wide_universe() if WIDE_COINS else universe()
+
+
 def coin_path(perp: str, root: Optional[Path] = None) -> Path:
     return (root or STORE_DIR) / f"{perp}.json"
 
@@ -115,20 +142,23 @@ def merge(coin: Dict[str, Any], dataset: str, rows: List[Dict[str, Any]], newest
 
 
 def seed(root: Optional[Path] = None, seed_dir: Optional[Path] = None) -> int:
-    """Start each coin from the study's download, once."""
+    """Start each coin from its study's download, once (the held-out coins from the wide study's)."""
     seeded = 0
-    seed_dir = seed_dir or SEED_DIR
-    for base, perp in universe():
-        if coin_path(perp, root).exists() or not (seed_dir / f"{perp}.json").exists():
-            continue
-        raw = json.loads((seed_dir / f"{perp}.json").read_text(encoding="utf-8"))
-        coin: Dict[str, Any] = {"base": raw.get("base") or base, "perp": perp}
-        for dataset in DATASETS:
-            rows = raw.get(dataset) or []
-            if rows:
-                merge(coin, dataset, rows, max(int(r["time"]) for r in rows))
-        save_coin(perp, coin, root)
-        seeded += 1
+    sources = [(universe(), seed_dir or SEED_DIR)]
+    if WIDE_COINS and seed_dir is None:
+        sources.append((held_out(), WIDE_SEED_DIR))
+    for coins, directory in sources:
+        for base, perp in coins:
+            if coin_path(perp, root).exists() or not (directory / f"{perp}.json").exists():
+                continue
+            raw = json.loads((directory / f"{perp}.json").read_text(encoding="utf-8"))
+            coin: Dict[str, Any] = {"base": raw.get("base") or base, "perp": perp}
+            for dataset in DATASETS:
+                rows = raw.get(dataset) or []
+                if rows:
+                    merge(coin, dataset, rows, max(int(r["time"]) for r in rows))
+            save_coin(perp, coin, root)
+            seeded += 1
     return seeded
 
 
@@ -215,7 +245,7 @@ async def update(day: datetime, *, client=None, root: Optional[Path] = None, sta
     last_call = [0.0]
 
     async def run(cg) -> None:
-        for base, perp in universe():
+        for base, perp in update_universe():
             coin = load_coin(perp, root) or {"base": base, "perp": perp}
             changed = False
             for dataset in DATASETS:
@@ -243,8 +273,9 @@ async def update(day: datetime, *, client=None, root: Optional[Path] = None, sta
     else:
         await run(client)
     status["completed_at"] = _now().isoformat()
-    status["complete_coins"] = sum(complete(load_coin(perp, root), day) for _, perp in universe())
-    status["universe_coins"] = len(universe())
+    coins = update_universe()
+    status["complete_coins"] = sum(complete(load_coin(perp, root), day) for _, perp in coins)
+    status["universe_coins"] = len(coins)
     # final: nothing more will be asked today, so the trackers can stop waiting
     status["final"] = (status["complete_coins"] >= status["universe_coins"] or attempt >= MAX_ATTEMPTS
                        or _now() >= day + timedelta(days=1) + RETRY_UNTIL)

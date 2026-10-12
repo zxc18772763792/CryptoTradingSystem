@@ -69,6 +69,12 @@ RULES: Dict[str, Dict[str, Any]] = {
     # Unit: shadow minus main net per position per day; mean from the same study's C1 replay with
     # complete funding.
     "xs_reversal_liq_filter": {"min_n": 180, "unit": "day", "backtest_mean_pct": 0.031},
+    # added 2026-10-12 with the equal-weight wide composite tracker, before its first book: the
+    # training ICs' signs with equal weight on the 131 coins plus the 103 held-out top-200 perps.
+    # Mean: that book's net per 7-day book in scripts/coinglass_wide_study.py (A2, sign-equal,
+    # 2025-05..2026-10). The variant was chosen after seeing it, so the mean is likely high; here it
+    # only sets the decay bar, which a high mean makes stricter, not looser.
+    "coinglass_composite_7d_wide_eq": {"min_n": 364, "unit": "book", "backtest_mean_pct": 0.40},
 }
 VERDICT_LABELS = {
     "collecting": "积累样本",

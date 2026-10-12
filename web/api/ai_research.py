@@ -6443,12 +6443,15 @@ async def get_xs_reversal_tracker():
 
 
 @router.get("/coinglass-composite")
-async def get_coinglass_composite_tracker():
-    """Forward paper tracker: the 7-day Coinglass positioning composite (research only)."""
+async def get_coinglass_composite_tracker(variant: str = "main"):
+    """Forward paper tracker: the 7-day Coinglass positioning composite (research only); variant=wide
+    is the same rule on the wide universe (131 + the held-out top-200 coins)."""
     from core.research import coinglass_composite_tracker as tracker
     from core.research import coinglass_daily_store as store
 
-    state = await asyncio.to_thread(tracker.load_state)
+    if variant not in tracker.VARIANTS:
+        raise HTTPException(status_code=400, detail=f"unknown variant: {variant}")
+    state = await asyncio.to_thread(tracker.load_state, tracker.VARIANTS[variant]["state_path"])
 
     def brief(book: dict) -> dict:
         keep = ("status", "scored", "turnover", "long_leg_pct", "short_leg_pct", "cost_pct", "net_pct", "settled_at")
@@ -6457,7 +6460,7 @@ async def get_coinglass_composite_tracker():
     books = [{"day": day, "status": record.get("status"), "formed_at": record.get("formed_at"), "partial": record.get("partial"),
               "main": brief(record.get("main") or {}), "shadow": brief(record.get("shadow") or {})}
              for day, record in sorted(state.get("books", {}).items(), reverse=True)[:30]]
-    return {"summary": tracker.summary(state), "books": books, "store": await asyncio.to_thread(store.load_status)}
+    return {"summary": tracker.summary(state, variant), "books": books, "store": await asyncio.to_thread(store.load_status)}
 
 
 @router.get("/supply-factor")

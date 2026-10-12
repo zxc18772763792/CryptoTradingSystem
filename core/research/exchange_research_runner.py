@@ -50,6 +50,7 @@ TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解�
                  "announcement_short_delist": "币安下架公告后做空 4h",
                  "korea_caution_hedged": "韩国交易所警示后做空（Upbit + Bithumb 合并，对冲版）",
                  "coinglass_composite_7d": "Coinglass 七日合成组合",
+                 "coinglass_composite_7d_wide_eq": "Coinglass 七日合成组合 · 等权扩池",
                  "xs_reversal_liq_filter": "横截面反转 · 剔除爆仓异常（影子）"}
 ALERT_VERDICTS = {"retire", "confirmed"}
 
@@ -268,6 +269,10 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _status["coinglass_composite"] = await coinglass_composite_tracker.tick(client)
             await _verdict_alert("coinglass_composite_7d", _status["coinglass_composite"])
 
+        async def coinglass_composite_wide():
+            _status["coinglass_composite_wide"] = await coinglass_composite_tracker.tick(client, variant="wide")
+            await _verdict_alert("coinglass_composite_7d_wide_eq", _status["coinglass_composite_wide"])
+
         async def delist():
             model = delist_risk.load_model()
             scored = await delist_risk.compute_live_scores(client, model)
@@ -291,6 +296,8 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("coinglass_liq_map", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_liq_map)
         await _run_job("coinglass_daily_store", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_store)
         await _run_job("coinglass_composite", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_composite)
+        if coinglass_daily_store.WIDE_COINS:  # the wide book needs the held-out coins kept current
+            await _run_job("coinglass_composite_wide", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_composite_wide)
         if delist_risk.MODEL_PATH.exists():
             await _run_job("delist_risk", DELIST_RISK_INTERVAL_SEC, now, force, delist)
     return status()
