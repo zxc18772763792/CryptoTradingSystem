@@ -427,6 +427,7 @@ def fetch_binance_funding(perps: List[str], start_ms: int, path: Path = FUNDING_
 
     ensure_proxy_env(settings)
     cache: Dict[str, List[List[float]]] = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    failed: List[str] = []
     with httpx.Client(timeout=30, trust_env=True) as client:
         for perp in perps:
             rows = cache.get(perp) or []
@@ -446,6 +447,9 @@ def fetch_binance_funding(perps: List[str], start_ms: int, path: Path = FUNDING_
                     except Exception:  # noqa: BLE001 - the proxy drops connections now and then
                         pass
                     time.sleep(2 * (attempt + 1))
+                if page is None:  # every attempt failed: never price this perp without funding
+                    failed.append(perp)
+                    break
                 if not page:
                     break
                 rows += [[int(r["fundingTime"]), float(r["fundingRate"])] for r in page]
@@ -453,6 +457,8 @@ def fetch_binance_funding(perps: List[str], start_ms: int, path: Path = FUNDING_
                 time.sleep(0.2)
             cache[perp] = rows
             path.write_text(json.dumps(cache), encoding="utf-8")
+    if failed:
+        raise RuntimeError(f"funding fetch failed for {len(failed)} perps (progress kept, rerun): {failed[:10]}")
     return cache
 
 
