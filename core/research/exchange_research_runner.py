@@ -261,6 +261,9 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         async def coinglass_liq_map():
             _status["coinglass_liq_map"] = await coinglass_snapshot_archive.tick_liq_maps()
 
+        async def coinglass_net_position():
+            _status["coinglass_net_position"] = await coinglass_snapshot_archive.tick_net_positions()
+
         async def coinglass_store():
             # returns at once: the day's update (about 2.6 hours of paced requests) runs beside the runner
             _status["coinglass_daily_store"] = coinglass_daily_store.ensure_current()
@@ -294,6 +297,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("korea_caution_hedged", UPBIT_INTERVAL_SEC, now, force, korea_caution_hedged)
         await _run_job("coinglass_snapshot", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_snapshot)
         await _run_job("coinglass_liq_map", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_liq_map)
+        await _run_job("coinglass_net_position", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_net_position)
         await _run_job("coinglass_daily_store", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_store)
         await _run_job("coinglass_composite", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_composite)
         if coinglass_daily_store.WIDE_COINS:  # the wide book needs the held-out coins kept current

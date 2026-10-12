@@ -152,6 +152,7 @@
   - 数据页链上面板：鲸鱼转账、交易所链上流入流出、交易所余额、现货净流入；
   - 后台采集器：`core/data/coinglass_registry.py` 里登记了 30 个数据集，默认只采 BTC/ETH/SOL。
 - **10/11 起存档：** 全币快照每天 4 份、131 个币的 7 天爆仓地图每天 1 份（`core/research/coinglass_snapshot_archive.py`）。
+- **10/13 起存档：** 234 个币的币安净多空持仓日线，每天 08:00（UTC）起补上缺的日子，全部历史只追加（`data/research/coinglass_net_position/`）。这是 10/12 新信号研究里唯一的线索，留作以后用新数据复核。
 - **检验过：**
   - 10/9 多空比（用币安的同类数据）：没有信号，见 `docs/LSR_POSITIONING_STUDY_2026-10-09.md`；
   - 10/11 八个单信号（持仓量、资金费率、爆仓、散户/大户多空比、主动买卖）：单独都不够付成本，见 `docs/COINGLASS_POSITIONING_STUDY_2026-10-11.md`；

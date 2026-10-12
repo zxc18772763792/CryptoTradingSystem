@@ -19,6 +19,15 @@ so the idea that price drifts toward large liquidation clusters can only be test
 One request per coin, LIQ_MAP_BATCH coins per runner pass, progress kept in a partial file; the
 day's maps end up in <YYYY-MM-DD>/liq_map_7d.json.gz. All requests go through the shared
 Coinglass budget ledger. Nothing here trades.
+
+Also once a day from 08:00 UTC (since 2026-10-13): Binance's daily net position change (net long
+and net short change, /api/futures/v2/net-position/history) for each coin of the 234-coin wide
+universe. Of the seven unused datasets tested on 10/12 (docs/COINGLASS_NEW_SIGNALS_STUDY_2026-10-12.md)
+it was the one lead: below the pass bar, but incremental to the composite and stronger in the
+last 12 months. The user asked to keep it, so it can be judged on data collected after the test.
+Each coin keeps its whole history, append-only, in data/research/coinglass_net_position/<PERP>.json
+(seeded from the study's download, which ends on 10-10); a pass asks NET_POSITION_BATCH coins for
+the closed days they lack, one request each, and a bar once stored is never overwritten.
 """
 from __future__ import annotations
 
@@ -40,8 +49,15 @@ MAX_PAGES = 15
 PAGE_SPACING_SEC = 6.0  # the relay allows 11 requests per rolling minute, shared with other jobs
 BUDGET_RETRIES, BUDGET_WAIT_SEC = 8, 10.0
 UNIVERSE_PATH = PROJECT_ROOT / "data" / "research" / "xs_reversal" / "universe.json"
-LIQ_MAP_HOUR_UTC = 6  # after the daily store's update (00:15 to about 03:00), so the two never share the relay's minute
+LIQ_MAP_HOUR_UTC = 6  # after the daily store's update (00:15 to about 05:00), so the two never share the relay's minute
 LIQ_MAP_BATCH = 10  # coins per runner pass: about a minute of requests, never a long hold
+NET_POSITION_HOUR_UTC = 8  # after the liquidation maps (06:00 to about 07:30)
+NET_POSITION_BATCH = 10
+NET_POSITION_DIR = PROJECT_ROOT / "data" / "research" / "coinglass_net_position"
+NET_POSITION_SEED_DIR = PROJECT_ROOT / "data" / "research" / "coinglass_wide" / "raw_new"
+NET_POSITION_FIRST_DAY = datetime(2024, 1, 1, tzinfo=timezone.utc)  # a coin with no seed starts here
+NET_POSITION_FIELDS = ("time", "net_long_change", "net_short_change")
+DAY_MS = 86_400_000
 
 
 def _now() -> datetime:
@@ -188,6 +204,102 @@ async def tick_liq_maps(now: Optional[datetime] = None, *, client=None, root: Pa
     refused = sum("error" in m for m in state["maps"].values())
     logger.info(f"coinglass liquidation maps {label}: {len(state['maps'])} coins, {refused} refused")
     return {"status": "captured", "day": label, "coins": len(state["maps"]), "refused": refused}
+
+
+def net_position_coins() -> List[Tuple[str, str]]:
+    """(coin, Binance perp) of the wide universe: the 131 research coins, then the held-out ones."""
+    from core.research import coinglass_daily_store as store
+
+    return store.wide_universe()
+
+
+def _net_position_file(perp: str, root: Path) -> Path:
+    return root / f"{perp}.json"
+
+
+def load_net_positions(perp: str, root: Path = NET_POSITION_DIR, seed_dir: Path = NET_POSITION_SEED_DIR) -> Dict[str, Any]:
+    """A coin's archive; the first time, its rows from the 10/12 study's download."""
+    path = _net_position_file(perp, root)
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8"))
+    seed = seed_dir / f"{perp}.json"
+    rows = (json.loads(seed.read_text(encoding="utf-8")).get("net_position") or []) if seed.exists() else []
+    return {"perp": perp, "seeded_from": str(seed.name) if rows else None,
+            "rows": [{k: r.get(k) for k in NET_POSITION_FIELDS} for r in rows if r.get("time") is not None]}
+
+
+async def _fetch_net_positions(client, perp: str, archive: Dict[str, Any], need_ms: int) -> int:
+    """Ask for the closed days after the newest stored bar up to ``need_ms``; append the new ones."""
+    stamps = [int(r["time"]) for r in archive["rows"]]
+    start = max(stamps) + DAY_MS if stamps else int(NET_POSITION_FIRST_DAY.timestamp() * 1000)
+    if start > need_ms:
+        return 0
+    payload = await _request(client, "/api/futures/v2/net-position/history",
+                             {"exchange": "Binance", "symbol": perp, "interval": "1d", "start_time": start,
+                              "end_time": need_ms + DAY_MS - 1, "limit": 4500})
+    data = (payload or {}).get("data") if isinstance(payload, dict) else None
+    known = set(stamps)
+    new = [{k: r.get(k) for k in NET_POSITION_FIELDS} for r in data or []
+           if isinstance(r, dict) and r.get("time") is not None and int(r["time"]) not in known
+           and start <= int(r["time"]) <= need_ms]  # closed days only; a stored bar is never rewritten
+    archive["rows"] = sorted(archive["rows"] + new, key=lambda r: int(r["time"]))
+    archive["updated_at"] = _now().isoformat()
+    return len(new)
+
+
+async def tick_net_positions(now: Optional[datetime] = None, *, client=None, root: Path = NET_POSITION_DIR,
+                             seed_dir: Path = NET_POSITION_SEED_DIR,
+                             coins: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]:
+    """Bring each coin's daily net position up to yesterday, NET_POSITION_BATCH coins per runner pass."""
+    now = now or _now()
+    if now.hour < NET_POSITION_HOUR_UTC:
+        return {"status": "idle", "checked_at": now.isoformat()}
+    day = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)  # the last closed day
+    label = f"{day:%Y-%m-%d}"
+    need_ms = int(day.timestamp() * 1000)
+    coins = net_position_coins() if coins is None else coins
+    status_path = root / "_status.json"
+    status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
+    if status.get("day") != label:
+        status = {"day": label, "done": [], "refused": {}, "new_bars": 0}
+    if len(status["done"]) >= len(coins):
+        return {"status": "done", "day": label, "coins": len(coins), "refused": len(status["refused"])}
+    todo = [perp for _, perp in coins if perp not in status["done"]][:NET_POSITION_BATCH]
+
+    async def run(cg) -> None:
+        for i, perp in enumerate(todo):
+            if i:
+                await asyncio.sleep(PAGE_SPACING_SEC)
+            archive = load_net_positions(perp, root, seed_dir)
+            try:
+                status["new_bars"] += await _fetch_net_positions(cg, perp, archive, need_ms)
+            except RelayRefused as exc:  # no such series for this coin: recorded, not asked again today
+                status["refused"][perp] = str(exc)[:120]
+            root.mkdir(parents=True, exist_ok=True)
+            _net_position_file(perp, root).write_text(json.dumps(archive, ensure_ascii=False), encoding="utf-8")
+            status["done"].append(perp)
+
+    try:
+        if client is None:
+            from core.data.coinglass_client import CoinglassClient, coinglass_enabled
+
+            if not coinglass_enabled():
+                return {"status": "disabled", "day": label}
+            async with CoinglassClient() as own:
+                await run(own)
+        else:
+            await run(client)
+    finally:  # keep the coins this pass finished even when a 429 or a network error ends it early
+        status["checked_at"] = _now().isoformat()
+        root.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(json.dumps(status, ensure_ascii=False, indent=1), encoding="utf-8")
+    remaining = len(coins) - len(status["done"])
+    if remaining:
+        return {"status": "collecting", "day": label, "done": len(status["done"]), "remaining": remaining}
+    logger.info(f"coinglass net position {label}: {len(coins)} coins, {status['new_bars']} new bars, "
+                f"{len(status['refused'])} refused")
+    return {"status": "captured", "day": label, "coins": len(coins), "new_bars": status["new_bars"],
+            "refused": len(status["refused"])}
 
 
 def iter_snapshots(root: Path = ROOT) -> Iterator[Tuple[str, str, List[Dict[str, Any]]]]:
