@@ -173,7 +173,7 @@ def test_liquidation_shadow_drops_the_shocks_from_the_longs_and_is_judged_on_the
         {"time": t, "aggregated_long_liquidation_usd": 600.0 + (t // 86_400_000) % 7, "aggregated_short_liquidation_usd": 400.0}
         for t in prior_days]} for b in BASES}
     ex.liquidations = {b: (1e7 if b in shocked else 1000.0) for b in BASES}
-    ex.run()
+    assert ex.run()["liq_filter"]["forward_open"] == 1
     day = json.loads(ex.state.read_text(encoding="utf-8"))["days"]["2026-10-05"]
     shadow = day["liq_filter"]
     assert sorted(day["longs"]) == ["C36USDT", "C37USDT", "C38USDT", "C39USDT"]  # the main book is untouched
@@ -193,6 +193,9 @@ def test_liquidation_shadow_drops_the_shocks_from_the_longs_and_is_judged_on_the
     assert day["liq_filter"]["net_per_position_pct"] == pytest.approx(((shadow_long + short_leg) / 2 - xr.ROUND_TRIP_COST) * 100)
     assert day["liq_filter"]["diff_pct"] == pytest.approx((shadow_long - main_long) / 2 * 100)
     assert summary["liq_filter"]["completed"] == 1 and summary["liq_filter"]["mean_diff_pct"] == pytest.approx(2.5, abs=1e-3)
+    days = json.loads(ex.state.read_text(encoding="utf-8"))["days"]
+    open_days = [k for k, d in days.items() if (d.get("liq_filter") or {}).get("status") == "open"]
+    assert "2026-10-05" not in open_days and summary["liq_filter"]["forward_open"] == len(open_days)  # the next day may open
     assert json.loads(ex.state.read_text(encoding="utf-8"))["liq_filter_rule"]["min_n"] == 180
 
 

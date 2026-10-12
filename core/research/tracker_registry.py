@@ -53,7 +53,8 @@ def _xs_liq_filter() -> Dict[str, Any]:
     summary = m.summary(m.load_state())
     shadow = summary.get("liq_filter") or {}
     return {"retirement": shadow.get("retirement"), "started_at": summary.get("started_at"),
-            "updated_at": summary.get("updated_at"), "forward_completed": shadow.get("completed")}
+            "updated_at": summary.get("updated_at"), "forward_completed": shadow.get("completed"),
+            "forward_open": shadow.get("forward_open")}
 
 
 def _announcement(kind: str) -> Callable[[], Dict[str, Any]]:
