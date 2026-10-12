@@ -91,13 +91,12 @@ ALPHA = 0.05 / (len(SIGNALS) * len(single.HORIZONS))
 
 
 # ----------------------------------------------------------------------------------------- fetch
-async def _series(client, name: str, coin: str, pair: str, last_call: List[float]) -> List[Dict[str, Any]]:
-    """All rows of one dataset from its first day to the study's end; a page that fills the limit is
-    followed by a request for the older part it left out."""
-    path, kind, extra, first_day, limit = NEW[name]
-    params: Dict[str, Any] = {**extra, "limit": limit}
-    params.update({"symbol": pair, "exchange": "Binance"} if kind == "pair" else {"symbol": coin})
-    lo, hi = single._ms(first_day), single._ms(single.END) - 1
+CHUNK_DAYS = 240  # a window this long per request once a whole-range request has timed out
+
+
+async def _window(client, path: str, params: Dict[str, Any], lo: int, hi: int, limit: int,
+                  last_call: List[float]) -> Dict[int, Dict[str, Any]]:
+    """Rows in [lo, hi]; a page that fills the limit is followed by a request for the older part it left out."""
     by_ts: Dict[int, Dict[str, Any]] = {}
     for _ in range(6):
         page = await single._coinglass(client, path, {**params, "start_time": lo, "end_time": hi}, last_call)
@@ -106,6 +105,20 @@ async def _series(client, name: str, coin: str, pair: str, last_call: List[float
         if len(stamps) < min(limit, single.PAGE_CAP) or min(stamps) <= lo + 2 * single.DAY_MS:
             break
         hi = min(stamps) - 1
+    return by_ts
+
+
+async def _series(client, name: str, coin: str, pair: str, last_call: List[float], chunked: bool = False) -> List[Dict[str, Any]]:
+    """All rows of one dataset from its first day to the study's end. ``chunked``: in CHUNK_DAYS
+    windows, for a series whose whole-range answer timed out (the 4h depth history is ~650KB)."""
+    path, kind, extra, first_day, limit = NEW[name]
+    params: Dict[str, Any] = {**extra, "limit": limit}
+    params.update({"symbol": pair, "exchange": "Binance"} if kind == "pair" else {"symbol": coin})
+    lo, end = single._ms(first_day), single._ms(single.END) - 1
+    step = CHUNK_DAYS * single.DAY_MS if chunked else end - lo + 1
+    by_ts: Dict[int, Dict[str, Any]] = {}
+    for start in range(lo, end + 1, step):
+        by_ts.update(await _window(client, path, params, start, min(start + step - 1, end), limit, last_call))
     return [by_ts[t] for t in sorted(by_ts) if t < single._ms(single.END)]
 
 
@@ -124,7 +137,8 @@ async def fetch_all(coins: Dict[str, str]) -> None:
                 if name in payload:
                     continue
                 try:
-                    payload[name] = await _series(client, name, coin, pair, last_call)
+                    timed_out = "Timeout" in str((payload.get("errors") or {}).get(name, ""))
+                    payload[name] = await _series(client, name, coin, pair, last_call, chunked=timed_out)
                     payload.get("errors", {}).pop(name, None)
                 except RuntimeError as exc:
                     if "business code" in str(exc):  # the relay has no such series for this coin: final
