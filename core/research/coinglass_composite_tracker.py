@@ -22,6 +22,17 @@ Frozen rule:
 The book of the equal-weight variant (training-IC signs, equal magnitude) is recorded beside it as
 a shadow and never judged. Verdict: core/research/retirement.py rule "coinglass_composite_7d" on
 the main books, clustered by the ISO week they close in. Nothing here places orders.
+
+Since 2026-10-12 a second tracker, "wide", judges the equal-weight book (the training ICs' signs,
+SHADOW_WEIGHTS) on the 131 coins plus the 103 most-traded perps outside them, and records the
+IC-weighted book beside it as its shadow. Why (docs/COINGLASS_WIDE_STUDY_2026-10-12.md): on the 103
+coins the weights never saw, the composite still ranked well (IC +0.035), but the pre-registered
+IC-weighted book netted about zero after costs and funding, while the equal-weight variant netted
++0.069%/day there and +0.40% per book on all 234 coins. That variant was picked after seeing those
+secondary results (it also led on 10/11), so only this forward record can confirm it; the user
+asked for it to run anyway. Own state file and rule "coinglass_composite_7d_wide_eq". It forms once
+the store has 90% of the 234 coins, about two hours after the 131-coin book (the store asks the 131
+first).
 """
 from __future__ import annotations
 
@@ -55,6 +66,17 @@ LATE_GRACE = timedelta(minutes=30)  # a pass this long after the deadline with n
 SETTLE_GRACE = timedelta(days=1)
 BACKTEST_REFERENCE = ("2025-05..2026-10 out of sample, weights from 2024-01..2025-05: +0.17% per 7-day book after 0.12% "
                       "costs and Binance funding (sd 3.1%), positive in 5 of 7 quarters; the equal-weight variant 7 of 7")
+WIDE_STATE_PATH = PROJECT_ROOT / "data" / "research" / "coinglass_composite_wide_eq" / "tracker.json"
+WIDE_BACKTEST_REFERENCE = ("2025-05..2026-10, 234 coins (103 never seen by the weights), the training ICs' signs with equal "
+                           "weight: +0.40% per 7-day book after 0.12% costs and Binance funding (+0.48% on the 103 alone); "
+                           "chosen after it beat the IC-weighted book in two studies' secondary results, so it is likely high")
+# tracker -> its state, universe, rule and books: the judged book is "main", the other one its shadow
+VARIANTS: Dict[str, Dict[str, Any]] = {
+    "main": {"state_path": STATE_PATH, "rule": "coinglass_composite_7d", "reference": BACKTEST_REFERENCE,
+             "universe": lambda: store.universe(), "books": (("main", WEIGHTS), ("shadow", SHADOW_WEIGHTS))},
+    "wide": {"state_path": WIDE_STATE_PATH, "rule": "coinglass_composite_7d_wide_eq", "reference": WIDE_BACKTEST_REFERENCE,
+             "universe": lambda: store.wide_universe(), "books": (("main", SHADOW_WEIGHTS), ("shadow", WEIGHTS))},
+}
 
 
 def _now() -> datetime:
@@ -188,12 +210,13 @@ def _turnover(new: Tuple[List[str], List[str]], old: Optional[Dict[str, Any]]) -
 
 
 def form(state: Dict[str, Any], day: datetime, now: datetime, prices: Dict[str, float],
-         coins: Dict[str, Dict[str, Any]], partial: bool) -> Dict[str, Any]:
+         coins: Dict[str, Dict[str, Any]], partial: bool,
+         books: Tuple[Tuple[str, Dict[str, float]], ...] = (("main", WEIGHTS), ("shadow", SHADOW_WEIGHTS))) -> Dict[str, Any]:
     frames = frames_from_store(coins, day)
     day_signals = {name: frame.loc[pd.Timestamp(day)] for name, frame in signals(frames).items()}
     record: Dict[str, Any] = {"formed_at": now.isoformat(), "coins": len(coins), "partial": partial}
     previous = state["books"].get((day - timedelta(days=HOLD_DAYS)).date().isoformat()) or {}
-    for variant, weights in (("main", WEIGHTS), ("shadow", SHADOW_WEIGHTS)):
+    for variant, weights in books:
         scores = composite_row(day_signals, weights)
         scores = scores[[p for p in scores.index if prices.get(p)]]
         legs = books_from_scores(scores)
@@ -243,23 +266,25 @@ async def settle(client, record: Dict[str, Any], now: datetime, prices: Dict[str
                     net_pct=round((long_leg + short_leg - cost) * 100, 4), missing_positions=len(pending))
 
 
-async def tick(client, *, state_path: Optional[Path] = None, store_root: Optional[Path] = None,
+async def tick(client, *, variant: str = "main", state_path: Optional[Path] = None, store_root: Optional[Path] = None,
                status_path: Optional[Path] = None) -> Dict[str, Any]:
-    state_path = state_path or STATE_PATH
+    spec = VARIANTS[variant]
+    state_path = state_path or spec["state_path"]
     state = load_state(state_path)
     now = _now()
-    retirement.register(state, "coinglass_composite_7d", now.isoformat())
+    retirement.register(state, spec["rule"], now.isoformat())
     day = store.last_closed_day(now)
     key = day.date().isoformat()
     opens = day + timedelta(days=1)
     # a day's book only when the tracker was already running as the day opened
     if key not in state["books"] and datetime.fromisoformat(state["started_at"]) <= opens:
         coins: Dict[str, Dict[str, Any]] = {}
-        for _, perp in store.universe():
+        universe = spec["universe"]()
+        for _, perp in universe:
             coin = store.load_coin(perp, store_root)
             if store.complete(coin, day):
                 coins[perp] = coin
-        share = len(coins) / max(1, len(store.universe()))
+        share = len(coins) / max(1, len(universe))
         status = store.load_status(status_path)
         finished = status.get("day") == key and bool(status.get("final"))  # no more passes coming today
         deadline = opens + FORM_DEADLINE
@@ -267,7 +292,8 @@ async def tick(client, *, state_path: Optional[Path] = None, store_root: Optiona
             state["books"][key] = {"status": "missed", "checked_at": now.isoformat(), "coins": len(coins)}
         elif share >= READY_SHARE or (finished and len(coins) >= MIN_COINS) or (now > deadline and len(coins) >= MIN_COINS):
             try:
-                state["books"][key] = form(state, day, now, await _prices(client), coins, partial=share < READY_SHARE)
+                state["books"][key] = form(state, day, now, await _prices(client), coins, partial=share < READY_SHARE,
+                                           books=spec["books"])
             except Exception as exc:  # noqa: BLE001 - retried next pass
                 logger.warning(f"coinglass composite: forming {key} failed: {exc}")
         save_state(state, state_path)
@@ -279,34 +305,35 @@ async def tick(client, *, state_path: Optional[Path] = None, store_root: Optiona
             await settle(client, record, now, prices)
     state["updated_at"] = now.isoformat()
     save_state(state, state_path)
-    return summary(state)
+    return summary(state, variant)
 
 
-def summary(state: Dict[str, Any]) -> Dict[str, Any]:
+def summary(state: Dict[str, Any], variant: str = "main") -> Dict[str, Any]:
+    spec = VARIANTS[variant]
     records = state.get("books", {})
     out: Dict[str, Any] = {"started_at": state.get("started_at"), "updated_at": state.get("updated_at"),
                            "days_total": len(records), "missed": sum(r.get("status") == "missed" for r in records.values()),
-                           "backtest_reference": BACKTEST_REFERENCE, "hold_days": HOLD_DAYS}
-    for variant in ("main", "shadow"):
-        closed = [(day, r[variant]) for day, r in sorted(records.items())
-                  if (r.get(variant) or {}).get("status") == "closed"]
+                           "backtest_reference": spec["reference"], "hold_days": HOLD_DAYS}
+    for book_variant in ("main", "shadow"):
+        closed = [(day, r[book_variant]) for day, r in sorted(records.items())
+                  if (r.get(book_variant) or {}).get("status") == "closed"]
         returns = [float(b["net_pct"]) for _, b in closed]
         weeks = [pd.Timestamp(b["settled_at"]).isocalendar() for _, b in closed]
         clusters = [int(w[0]) * 100 + int(w[1]) for w in weeks]
         part = {
-            "open": sum((r.get(variant) or {}).get("status") == "open" for r in records.values()),
+            "open": sum((r.get(book_variant) or {}).get("status") == "open" for r in records.values()),
             "completed": len(returns),
             "mean_net_pct": round(float(np.mean(returns)), 3) if returns else None,
             "positive_share": round(float(np.mean([v > 0 for v in returns])), 3) if returns else None,
             "mean_long_leg_pct": round(float(np.mean([b["long_leg_pct"] for _, b in closed])), 3) if closed else None,
             "mean_short_leg_pct": round(float(np.mean([b["short_leg_pct"] for _, b in closed])), 3) if closed else None,
         }
-        if variant == "main":
-            rule = state.get("retirement_rule") or retirement.RULES["coinglass_composite_7d"]
+        if book_variant == "main":
+            rule = state.get("retirement_rule") or retirement.RULES[spec["rule"]]
             part["retirement"] = retirement.verdict(returns, rule, clusters=clusters)
             out.update(retirement=part["retirement"], forward_completed=len(returns), forward_open=part["open"],
                        forward_mean_net_pct=part["mean_net_pct"], forward_win_rate=part["positive_share"])
-        out[variant] = part
+        out[book_variant] = part
     latest = max((d for d, r in records.items() if (r.get("main") or {}).get("longs")), default=None)
     if latest:
         book = records[latest]["main"]

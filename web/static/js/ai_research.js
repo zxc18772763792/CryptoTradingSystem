@@ -6751,14 +6751,16 @@ ${confirmHint}`,
     } catch (err) { /* optional panel */ }
   }
 
-  function renderCoinglassCompositeTracker(payload) {
-    const anchor = ['ai-xs-reversal-tracker', 'ai-upbit-krw-listing-tracker', 'ai-supply-factor-tracker']
+  function renderCoinglassCompositeTracker(payload, variant = 'main') {
+    const wide = variant === 'wide';
+    const panelId = wide ? 'ai-coinglass-composite-wide-tracker' : 'ai-coinglass-composite-tracker';
+    const anchor = (wide ? ['ai-coinglass-composite-tracker'] : ['ai-xs-reversal-tracker', 'ai-upbit-krw-listing-tracker', 'ai-supply-factor-tracker'])
       .map((id) => document.getElementById(id)).find(Boolean);
     if (!anchor) return;
-    let panel = document.getElementById('ai-coinglass-composite-tracker');
+    let panel = document.getElementById(panelId);
     if (!panel) {
       panel = document.createElement('section');
-      panel.id = 'ai-coinglass-composite-tracker';
+      panel.id = panelId;
       panel.className = 'card';
       panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
       anchor.insertAdjacentElement('afterend', panel);
@@ -6770,11 +6772,21 @@ ${confirmHint}`,
     const statusNames = { open: '持有中', closed: '已结算', too_few_coins: '币数不足', unresolved: '未能结算', missed: '错过' };
     const latest = s.latest_book;
     const names = (list) => (list || []).map((p) => esc(String(p).replace(/USDT$/, ''))).join('、') || '--';
+    const intro = wide
+      ? '同样 8 个信号只取方向、等权，用于 234 个币：原来的 131 个，加上币安成交额前 200 名里另外 103 个（包括 HYPE，这些币权重从没见过）。做多前五分之一、做空后五分之一，持有 7 天，扣成本和资金费。'
+      : '每天用 8 个持仓类信号（爆仓、持仓量、资金费率、多空比、主动买卖）的合成分数，做多前五分之一、做空后五分之一，持有 7 天，扣成本和资金费。';
+    const powerNote = wide
+      ? '这个版本是看过次要结果后挑的，回测数字偏乐观。每期波动约 3.7%，即使优势和回测一样，跑满一年也只有约四成概率被确认。'
+      : '利润很薄：每期波动约 3%，即使优势真实存在，跑满一年也只有约两成概率被确认，更可能看到的是"均值为正但不显著"。';
+    const shadowName = wide ? '按训练期 IC 加权（原版权重）' : '只取方向、等权';
+    const dataNote = wide
+      ? '每天约多 620 次 Coinglass 请求，原来的 131 个币先更新，所以扩池版大约 05:00（UTC）建仓，比原版晚约两小时'
+      : '每天约 790 次 Coinglass 请求';
     panel.innerHTML = `
-      <h3 style="margin:0;">Coinglass 七日合成组合（纸面）</h3>
-      <div style="margin-top:6px;color:var(--text-sub);">每天用 8 个持仓类信号（爆仓、持仓量、资金费率、多空比、主动买卖）的合成分数，做多前五分之一、做空后五分之一，持有 7 天，扣成本和资金费。完成 ${Number(s.main?.completed || 0)} 期 · 每期净值均值 ${pct(s.main?.mean_net_pct, 3)} · 正收益占比 ${s.main?.positive_share == null ? '--' : `${(Number(s.main.positive_share) * 100).toFixed(0)}%`} · 持有中 ${Number(s.main?.open || 0)} 期 · 错过 ${Number(s.missed || 0)} 天</div>
+      <h3 style="margin:0;">Coinglass 七日合成组合${wide ? ' · 等权扩池' : ''}（纸面）</h3>
+      <div style="margin-top:6px;color:var(--text-sub);">${intro}完成 ${Number(s.main?.completed || 0)} 期 · 每期净值均值 ${pct(s.main?.mean_net_pct, 3)} · 正收益占比 ${s.main?.positive_share == null ? '--' : `${(Number(s.main.positive_share) * 100).toFixed(0)}%`} · 持有中 ${Number(s.main?.open || 0)} 期 · 错过 ${Number(s.missed || 0)} 天</div>
       ${trackerVerdictLine(s)}
-      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。利润很薄：每期波动约 3%，即使优势真实存在，跑满一年也只有约两成概率被确认，更可能看到的是"均值为正但不显著"。影子（只取方向、等权）：完成 ${Number(s.shadow?.completed || 0)} 期 · 均值 ${pct(s.shadow?.mean_net_pct, 3)}，只记录不判定。数据：${esc(store.day || '--')} 的日线${store.completed_at ? `已于 ${esc(fmtTs(new Date(store.completed_at)))} 更新完` : '更新中'}（每天约 790 次 Coinglass 请求）。纸面记录，不下单。</div>
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${powerNote}影子（${shadowName}）：完成 ${Number(s.shadow?.completed || 0)} 期 · 均值 ${pct(s.shadow?.mean_net_pct, 3)}，只记录不判定。数据：${esc(store.day || '--')} 的日线${store.completed_at ? `已于 ${esc(fmtTs(new Date(store.completed_at)))} 更新完` : '更新中'}（${dataNote}）。纸面记录，不下单。</div>
       ${latest ? `<div class="u-note" style="margin-top:4px;">最新一期（${esc(latest.day)}）多头：${names(latest.longs)}；空头：${names(latest.shorts)}</div>` : ''}
       ${books.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>数据日</th><th>建仓时间</th><th>状态</th><th>多头腿</th><th>空头腿</th><th>成本</th><th>净值</th><th>影子净值</th></tr></thead><tbody>
         ${books.slice(0, 20).map((b) => { const m = b.main || {}; return `<tr><td>${esc(b.day)}</td><td>${esc(b.formed_at ? fmtTs(new Date(b.formed_at)) : '--')}</td><td>${esc(statusNames[m.status || b.status] || m.status || b.status || '--')}${b.partial ? ' 部分' : ''}</td><td>${pct(m.long_leg_pct)}</td><td>${pct(m.short_leg_pct)}</td><td>${pct(m.cost_pct, 3)}</td><td style="color:${Number(m.net_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.net_pct)}</td><td>${pct(b.shadow?.net_pct)}</td></tr>`; }).join('')}
@@ -6784,6 +6796,9 @@ ${confirmHint}`,
   async function refreshCoinglassCompositeTracker() {
     try {
       renderCoinglassCompositeTracker(await aiApi('/coinglass-composite', { timeoutMs: 12000 }));
+    } catch (err) { /* optional panel */ }
+    try {
+      renderCoinglassCompositeTracker(await aiApi('/coinglass-composite?variant=wide', { timeoutMs: 12000 }), 'wide');
     } catch (err) { /* optional panel */ }
   }
 

@@ -124,6 +124,7 @@ def test_a_book_is_settled_net_of_funding_and_turnover_costs():
 def world(monkeypatch, tmp_path):
     coins = _coins()
     monkeypatch.setattr(store, "universe", lambda: [(perp[:-4], perp) for perp in PERPS])
+    monkeypatch.setattr(store, "held_out", lambda: [])
     monkeypatch.setattr(store, "load_coin", lambda perp, root=None: coins.get(perp, {}))
     monkeypatch.setattr(store, "load_status", lambda path=None: {})
     w = type("World", (), {})()
@@ -165,3 +166,29 @@ def test_a_final_store_day_forms_with_the_coins_it_has(world, monkeypatch):
     world.run(D + timedelta(days=1, hours=3))
     book = json.loads(world.state.read_text(encoding="utf-8"))["books"][D.date().isoformat()]
     assert book["partial"] is True and book["coins"] == 32 and book["main"]["status"] == "open"
+
+
+def test_the_wide_tracker_judges_the_equal_weight_book_on_its_own_coins_state_and_rule(world, monkeypatch, tmp_path):
+    extra = {f"X{i:02d}USDT": dict(_coins(seed=1)[PERPS[i]], perp=f"X{i:02d}USDT", base=f"X{i:02d}") for i in range(10)}
+    coins = {**_coins(), **extra}
+    monkeypatch.setattr(store, "load_coin", lambda perp, root=None: coins.get(perp, {}))
+    monkeypatch.setattr(store, "held_out", lambda: [(p[:-4], p) for p in extra])
+    world.complete = set(PERPS) | set(extra)
+    world.binance.prices.update({p: 10.0 for p in extra})
+    wide_state = tmp_path / "wide.json"
+    ct.save_state({"started_at": (D - timedelta(days=2)).isoformat(), "books": {}}, wide_state)
+    monkeypatch.setattr(ct, "_now", lambda: D + timedelta(days=1, hours=5))
+    summary = asyncio.run(ct.tick(world.binance, variant="wide", state_path=wide_state))
+    state = json.loads(wide_state.read_text(encoding="utf-8"))
+    book = state["books"][D.date().isoformat()]
+    assert book["coins"] == 50 and len(book["main"]["longs"]) == 10  # 50 coins: a fifth per side
+    day_signals = {name: frame.loc[pd.Timestamp(D)] for name, frame in ct.signals(ct.frames_from_store(coins, D)).items()}
+    for variant, weights in (("main", ct.SHADOW_WEIGHTS), ("shadow", ct.WEIGHTS)):  # equal weight judged, IC-weighted shadow
+        expected = ct.composite_row(day_signals, weights).sort_values(kind="mergesort")
+        assert sorted(book[variant]["longs"]) == sorted(expected.index[-10:])
+        assert sorted(book[variant]["shorts"]) == sorted(expected.index[:10])
+    assert book["main"]["longs"] != book["shadow"]["longs"]
+    rule = state["retirement_rule"]
+    assert rule["min_n"] == 364 and rule["backtest_mean_pct"] == 0.40
+    assert summary["backtest_reference"] == ct.WIDE_BACKTEST_REFERENCE
+    assert not json.loads(world.state.read_text(encoding="utf-8"))["books"]  # the 131-coin tracker is untouched
