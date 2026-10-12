@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -122,3 +123,59 @@ def test_a_network_error_keeps_the_maps_already_fetched(tmp_path, monkeypatch):
         asyncio.run(archive.tick_liq_maps(_at(7), client=relay, root=tmp_path, bases=bases))
     out = asyncio.run(archive.tick_liq_maps(_at(7, 5), client=relay, root=tmp_path, bases=bases))
     assert out["status"] == "captured" and relay.calls == ["C00", "C01", "C02", "C03"]  # C00, C01 not refetched
+
+
+DAY = 86_400_000
+
+
+class _NetRelay:
+    """Daily net-position bars for any window; logs (symbol, start, end) of every request."""
+
+    def __init__(self, refuse=()):
+        self.calls, self.refuse = [], set(refuse)
+
+    async def request_json(self, path, params=None):
+        assert path == "/api/futures/v2/net-position/history" and params["exchange"] == "Binance"
+        self.calls.append((params["symbol"], params["start_time"], params["end_time"]))
+        if params["symbol"] in self.refuse:
+            return {"payload": {"code": "40300", "msg": "not in plan"}}
+        rows = [{"time": t, "net_long_change": 1.0, "net_short_change": -1.0, "net_position_change_cum": 0.0}
+                for t in range(params["start_time"], params["end_time"] + 1, DAY)]
+        return {"payload": {"code": "0", "data": rows}}
+
+
+def test_net_positions_extend_the_study_download_and_ask_only_missing_days(tmp_path, monkeypatch):
+    monkeypatch.setattr(archive, "PAGE_SPACING_SEC", 0.0)
+    monkeypatch.setattr(archive, "NET_POSITION_BATCH", 2)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    d0 = int(datetime(2026, 10, 10, tzinfo=timezone.utc).timestamp() * 1000)  # the study's last day
+    (seed / "AAAUSDT.json").write_text(json.dumps({"net_position": [
+        {"time": d0 - k * DAY, "net_long_change": 5.0, "net_short_change": 2.0, "net_long_change_cum": 9.0} for k in range(3)]}),
+        encoding="utf-8")
+    coins = [("AAA", "AAAUSDT"), ("BBB", "BBBUSDT"), ("CCC", "CCCUSDT")]
+    relay, root = _NetRelay(refuse={"CCCUSDT"}), tmp_path / "np"
+    now = datetime(2026, 10, 13, 8, 5, tzinfo=timezone.utc)  # the last closed day is 10-12
+
+    def tick(at, only=None):
+        return asyncio.run(archive.tick_net_positions(at, client=relay, root=root, seed_dir=seed, coins=only or coins))
+
+    assert tick(now.replace(hour=7))["status"] == "idle"  # before 08:00
+    first = tick(now)
+    assert first["status"] == "collecting" and first["done"] == 2 and first["remaining"] == 1
+    aaa = json.loads((root / "AAAUSDT.json").read_text(encoding="utf-8"))
+    stamps = [r["time"] for r in aaa["rows"]]
+    assert stamps == [d0 + k * DAY for k in range(-2, 3)]  # the seed's 10-08..10-10, then 10-11 and 10-12
+    assert set(aaa["rows"][0]) == {"time", "net_long_change", "net_short_change"}
+    assert aaa["rows"][0]["net_long_change"] == 5.0  # a seeded bar is kept as first seen
+    assert relay.calls[0][1] == d0 + DAY  # asked from the day after the seed
+    assert relay.calls[1][1] == int(archive.NET_POSITION_FIRST_DAY.timestamp() * 1000)  # no seed: from 2024-01-01
+
+    second = tick(now)
+    assert second["status"] == "captured" and second["refused"] == 1
+    assert tick(now)["status"] == "done" and len(relay.calls) == 3  # nothing asked again that day
+
+    relay.calls.clear()
+    tick(now + timedelta(days=1), only=coins[:1])  # the next day: only its one new bar
+    assert relay.calls == [("AAAUSDT", d0 + 3 * DAY, d0 + 4 * DAY - 1)]
+    assert len(json.loads((root / "AAAUSDT.json").read_text(encoding="utf-8"))["rows"]) == 6

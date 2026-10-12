@@ -44,6 +44,10 @@
 补齐之后，这些序列不会自动续上新数据：每小时的定时任务只管 30 个现货币。
 
 - 每天补一次尾部：`python scripts/audit_fill_klines.py --tail-only`。只读首尾文件的统计信息，约 1,300 次请求、几 MB 流量、几分钟。
-- 要不要加成每日定时任务，等用户决定（定时任务属于持久配置）。
+- 10/13 起，按用户决定加了每日定时任务 `CryptoTradingSystem_WideKlineTopUp`：
+  - 每天北京时间 09:20 跑 `scripts/run_wide_kline_topup.ps1`；
+  - 错过时间就开机补跑，限时 1 小时，不会重复启动；
+  - 日志在 `logs/wide_kline_topup.log`。
+  - 首次手动试跑补了 754 个序列、3,770 根 K 线，零错误，用时约 3 分钟。
 - 随时全面复查（包括中间缺口）：`python scripts/audit_fill_klines.py`，加 `--fill` 补齐。全面体检要读所有时间列，约 10 分钟。
 - 报告写在 `data/research/local_klines_audit.json`。
