@@ -56,7 +56,9 @@ TIMEFRAMES = ("1h", "4h", "1d")
 NOT_COINS = {"USDC", "BUSD", "TUSD", "USDP", "PAX", "FDUSD", "DAI", "USDS", "USDSB", "SUSD", "EUR", "GBP", "AUD",
              "EURI", "AEUR", "XUSD", "USD1", "BFUSD", "PYUSD", "RLUSD", "USDE", "UST", "BKRW", "IDRT", "BIDR", "BVND"}
 LEVERAGED = re.compile(r"^[A-Z0-9]{2,}(UP|DOWN|BULL|BEAR)$")
-FUNDING_PER_SECOND = 1.2  # /fapi/v1/fundingRate shares 500 requests / 5 minutes per IP
+FUNDING_PER_SECOND = 0.5  # /fapi/v1/fundingRate shares 500 requests / 5 minutes per IP with the live service;
+# at 1.2/s on 10/13 a rate limit turned into WAF 403s for 546 perps
+BAN_WAIT_SEC = 120  # a 403 (WAF), 418 (ban) or 429: wait it out instead of retrying at once
 
 
 def _utc_naive_ms(ms: int) -> datetime:
@@ -185,6 +187,10 @@ def _last_index(path: Path) -> Optional[datetime]:
         return None
 
 
+def _banned(exc: Exception) -> bool:
+    return any(code in str(exc) for code in ("403", "418", "429"))
+
+
 def fill_funding(perps: List[Dict[str, Any]], tail_only: bool = False) -> Dict[str, Any]:
     limiter = maint.RequestRateLimiter(FUNDING_PER_SECOND)
     added, errors = 0, {}
@@ -192,28 +198,61 @@ def fill_funding(perps: List[Dict[str, Any]], tail_only: bool = False) -> Dict[s
         if tail_only and perp["status"] != "TRADING":
             continue
         path = _series_path(perp["symbol"], "funding_rate")
-        last = _last_index(path)
-        cursor = int(((last + timedelta(milliseconds=1)) if last else START).replace(tzinfo=timezone.utc).timestamp() * 1000)
         stop = int((perp["end"] or datetime.utcnow()).replace(tzinfo=timezone.utc).timestamp() * 1000)
-        rows = []
-        try:
-            while cursor <= stop:
-                page = maint.request_json(maint.FUTURES_HOSTS, "/fapi/v1/fundingRate",
-                                          params={"symbol": perp["raw"], "startTime": cursor, "limit": 1000}, limiter=limiter)
-                if not page:
-                    break
-                rows += [r for r in page if int(r["fundingTime"]) <= stop]
-                cursor = int(page[-1]["fundingTime"]) + 1
-                if len(page) < 1000:
-                    break
-        except Exception as exc:  # noqa: BLE001 - recorded; what was fetched is kept
-            errors[perp["raw"]] = f"{type(exc).__name__}: {str(exc)[:100]}"
-        if rows:
-            frame = pd.DataFrame({"funding_rate": [float(r["fundingRate"]) for r in rows],
-                                  "mark_price": [pd.to_numeric(r.get("markPrice"), errors="coerce") for r in rows]},
-                                 index=pd.DatetimeIndex([_utc_naive_ms(r["fundingTime"]) for r in rows], name="funding_time"))
-            added += _append_parquet(path, frame)
+        for attempt in range(4):
+            last = _last_index(path)
+            cursor = int(((last + timedelta(milliseconds=1)) if last else START).replace(tzinfo=timezone.utc).timestamp() * 1000)
+            rows = []
+            failure = None
+            try:
+                while cursor <= stop:
+                    page = maint.request_json(maint.FUTURES_HOSTS, "/fapi/v1/fundingRate",
+                                              params={"symbol": perp["raw"], "startTime": cursor, "limit": 1000},
+                                              limiter=limiter, attempts=2)
+                    if not page:
+                        break
+                    rows += [r for r in page if int(r["fundingTime"]) <= stop]
+                    cursor = int(page[-1]["fundingTime"]) + 1
+                    if len(page) < 1000:
+                        break
+            except Exception as exc:  # noqa: BLE001 - what was fetched is kept below
+                failure = exc
+            if rows:
+                frame = pd.DataFrame({"funding_rate": [float(r["fundingRate"]) for r in rows],
+                                      "mark_price": [pd.to_numeric(r.get("markPrice"), errors="coerce") for r in rows]},
+                                     index=pd.DatetimeIndex([_utc_naive_ms(r["fundingTime"]) for r in rows], name="funding_time"))
+                added += _append_parquet(path, frame)
+            if failure is None:
+                errors.pop(perp["raw"], None)
+                break
+            errors[perp["raw"]] = f"{type(failure).__name__}: {str(failure)[:100]}"
+            if not _banned(failure):
+                break
+            time.sleep(BAN_WAIT_SEC * (attempt + 1))
     return {"settlements_added": added, "errors": errors}
+
+
+def refill_tolerant(rows: List[Dict[str, Any]], limiter) -> Dict[str, Any]:
+    """Series the maintainer's validator refused whole (one inconsistent bar from Binance): fetch them
+    again, drop only the bars that fail validation, and save the rest."""
+    fixed, dropped = {}, 0
+    for r in rows:
+        if "inconsistent OHLC" not in str(r.get("fill_error", "")) and "invalid OHLCV" not in str(r.get("fill_error", "")):
+            continue
+        key = r["series"]
+        windows = [maint.FetchWindow(int(a.replace(tzinfo=timezone.utc).timestamp() * 1000),
+                                     int(b.replace(tzinfo=timezone.utc).timestamp() * 1000), "tolerant") for a, b in r["windows"]]
+        raw = [row for w in windows for row in maint.fetch_window(key, w, limiter)]
+        good = []
+        for row in raw:
+            try:
+                good += maint.validate_rows([row], key.timeframe)
+            except ValueError:
+                dropped += 1
+        if good:
+            asyncio.run(maint.save_klines_compact(key, maint.rows_to_klines(key, sorted(good, key=lambda x: int(x[0])))))
+        fixed[f"{key.namespace}:{key.symbol}:{key.timeframe}"] = len(good)
+    return {"series": fixed, "bars_dropped": dropped}
 
 
 def fill_premium(perps: List[Dict[str, Any]], limiter, now: datetime, tail_only: bool = False) -> Dict[str, Any]:
@@ -256,6 +295,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--audit", action="store_true", help="plan only: what is missing, no downloads")
     parser.add_argument("--tail-only", action="store_true", help="daily top-up of trading symbols")
     parser.add_argument("--max-requests-per-second", type=float, default=5.0)
+    parser.add_argument("--funding-only", action="store_true", help="only funding settlements (e.g. after a ban)")
     args = parser.parse_args(argv)
 
     from config.settings import settings
@@ -267,6 +307,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     perps, pairs = universe(limiter)
     print(f"perps {len(perps)} ({sum(p['status'] == 'TRADING' for p in perps)} trading), "
           f"spot pairs {len(pairs)} ({sum(p['status'] == 'TRADING' for p in pairs)} trading)", flush=True)
+    if args.funding_only:
+        result = fill_funding(perps, tail_only=args.tail_only)
+        print(f"funding: {result['settlements_added']:,} settlements added, errors {len(result['errors'])}: "
+              f"{list(result['errors'].items())[:3]}", flush=True)
+        return 1 if result["errors"] else 0
     rows = kline_rows(perps, pairs, limiter, now, tail_only=args.tail_only)
     print(afk.summarize(rows, "klines to fill" if not args.tail_only else "tail"), flush=True)
     report: Dict[str, Any] = {"run_at": now.isoformat(), "perps": len(perps), "spot_pairs": len(pairs),
@@ -276,6 +321,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"klines: filled {sum('downloaded' in r for r in filled)} series, {sum(r.get('downloaded', 0) for r in filled):,} bars; "
               f"errors {sum('fill_error' in r for r in filled)}", flush=True)
         report["klines_filled"] = afk._jsonable(filled)
+        report["klines_tolerant"] = refill_tolerant(filled, limiter)
+        if report["klines_tolerant"]["series"]:
+            print(f"klines refilled without bad bars: {report['klines_tolerant']}", flush=True)
         report["funding"] = fill_funding(perps, tail_only=args.tail_only)
         print(f"funding: {report['funding']['settlements_added']:,} settlements added, errors {len(report['funding']['errors'])}", flush=True)
         report["premium_index"] = fill_premium(perps, limiter, now, tail_only=args.tail_only)

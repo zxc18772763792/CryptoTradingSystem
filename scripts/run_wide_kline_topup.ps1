@@ -1,20 +1,22 @@
 param(
     [string]$PythonExe = "F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe",
     [string]$LogPath = "",
-    # A healthy top-up takes a few minutes; an older run is treated as hung.
-    [int]$MaxAgeMinutes = 60,
+    # A healthy top-up takes about 35 minutes; an older run is treated as hung.
+    [int]$MaxAgeMinutes = 110,
     [switch]$Quiet
 )
 
-# Daily top-up of the local Binance klines of the 234-coin wide universe (perps, and spot where
-# Binance lists it, at 1h/4h/1d): scripts/audit_fill_klines.py --tail-only asks only for the bars
-# after each series' last local one. Registered 2026-10-12 as the scheduled task
-# CryptoTradingSystem_WideKlineTopUp (daily; docs/LOCAL_KLINE_STORE_AUDIT_2026-10-12.md).
+# Daily top-up of the local Binance history: since 2026-10-13 every trading USDT perpetual and spot
+# pair at 1h/4h/1d, plus each perp's funding settlements and daily premium index
+# (scripts/collect_binance_history.py --tail-only asks only for what follows each series' last local
+# bar; before, scripts/audit_fill_klines.py --tail-only covered the 234-coin wide universe only).
+# Registered 2026-10-12 as the scheduled task CryptoTradingSystem_WideKlineTopUp (daily;
+# docs/LOCAL_DATA_INVENTORY.md).
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $projectRoot
-$scriptPath = Join-Path $PSScriptRoot "audit_fill_klines.py"
+$scriptPath = Join-Path $PSScriptRoot "collect_binance_history.py"
 if (-not (Test-Path -LiteralPath $PythonExe)) { throw "Pinned Python executable not found: $PythonExe" }
 if (-not (Test-Path -LiteralPath $scriptPath)) { throw "Script not found: $scriptPath" }
 
@@ -25,7 +27,7 @@ function Get-RunningTopUp {
                 $name = [string]$_.Name
                 $cmd = [string]$_.CommandLine
                 ($name.ToLowerInvariant() -in @("python.exe", "pythonw.exe")) -and $cmd -and
-                    $cmd.ToLowerInvariant().Contains("audit_fill_klines.py")
+                    ($cmd.ToLowerInvariant().Contains("audit_fill_klines.py") -or $cmd.ToLowerInvariant().Contains("collect_binance_history.py"))
             }
     )
 }
