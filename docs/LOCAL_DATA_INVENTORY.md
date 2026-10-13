@@ -79,7 +79,9 @@ wide = oi.pivot(index="time", columns="perp", values="close")                # �
   - USUAL 现货 2024-12-17/18 停牌。
 - **资金费率**
   - `funding_rate.parquet`，索引是结算时间（UTC），列是 funding_rate、mark_price。
+  - 654 个永续共 257 万次结算，在交易的永续都已更新到最近 9 小时以内。
   - 币安的结算间隔因币而异，有 8 小时、4 小时、1 小时几种。
+  - 有 8 个永续，交易所信息里的上市日期（onboardDate）比实际开始交易早几天到几个月，例如 GTC、SKL、MASK。币安这些币的第一根 K 线和第一次结算都从实际开始交易那天算起，本地与之一致。
 - **溢价指数**
   - `premium_index_1d.parquet`：永续相对现货指数的溢价，日线开高低收，可以拿来看期现基差。
 
