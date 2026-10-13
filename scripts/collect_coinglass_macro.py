@@ -28,7 +28,9 @@ from scripts import coinglass_positioning_study as single  # noqa: E402
 
 ROOT = PROJECT_ROOT / "data" / "research" / "coinglass_macro"
 SPACING_SEC = 30.0  # gentle: the full-history collector runs beside it on the same relay budget
-DAILY = {"interval": "1d", "limit": 4500}
+# without start/end the relay returns only the newest 1000 daily rows (10/13: the futures/spot volume ratio)
+DAILY = {"interval": "1d", "limit": 4500, "start_time": int(datetime(2018, 1, 1, tzinfo=timezone.utc).timestamp() * 1000),
+         "end_time": int(datetime.now(timezone.utc).timestamp() * 1000)}
 BTC_INDICATORS = (
     "ahr999", "puell-multiple", "pi-cycle-indicator", "golden-ratio-multiplier", "bitcoin/profitable-days",
     "bitcoin/rainbow-chart", "bitcoin/bubble-index", "2-year-ma-multiplier", "200-week-moving-average-heatmap",
