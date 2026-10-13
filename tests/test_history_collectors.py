@@ -53,3 +53,34 @@ def test_spot_filters_and_timeframe_floors():
     assert binance._floor(at, "1h") == datetime(2025, 1, 31, 8, 0)
     assert binance._floor(at, "4h") == datetime(2025, 1, 31, 8, 0)
     assert binance._floor(at, "1d") == datetime(2025, 1, 31, 0, 0)
+
+
+def test_the_weekly_update_tops_up_live_perps_and_leaves_complete_delisted_ones(monkeypatch, tmp_path):
+    monkeypatch.setattr(cg, "RAW", tmp_path / "raw")
+    monkeypatch.setattr(cg, "DATASETS", {k: cg.DATASETS[k] for k in ("oi", "funding")})
+    calls = []
+
+    async def fake_fetch(client, name, entry, start_ms, last_call):
+        calls.append((entry["perp"], name, start_ms))
+        return [{"time": start_ms, "close": "1"}]
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(cg, "fetch_dataset", fake_fetch)
+    monkeypatch.setattr("core.data.coinglass_client.CoinglassClient", _Client)
+    d0 = int(datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    live = {"perp": "AAAUSDT", "coin": "AAA", "status": "TRADING", "listed": "2024-01-01", "delisted": None}
+    gone = {"perp": "BBBUSDT", "coin": "BBB", "status": "SETTLING", "listed": "2023-01-01", "delisted": "2026-09-10"}
+    for entry, oi_last, funding_last in ((live, d0, d0), (gone, d0 + 9 * DAY, d0 + 6 * DAY)):
+        payload = cg.load_raw(entry)
+        payload["datasets"] = {"oi": [{"time": oi_last, "close": "1"}], "funding": [{"time": funding_last, "close": "1"}]}
+        cg.save_raw(payload)
+    asyncio.run(cg.collect([live, gone], update=True))
+    assert sorted(calls) == sorted([("AAAUSDT", "oi", d0 + DAY), ("AAAUSDT", "funding", d0 + DAY),
+                                    ("BBBUSDT", "funding", d0 + 7 * DAY)])  # BBB's oi already reaches its delisting
+    assert [r["time"] for r in cg.load_raw(live)["datasets"]["oi"]] == [d0, d0 + DAY]

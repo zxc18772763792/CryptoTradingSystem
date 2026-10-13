@@ -29,9 +29,11 @@ The aggregated series use Binance+OKX+Bybit like the 10/11 and 10/12 studies; a 
 
 One gzip JSON per perp, raw/<PERP>.json.gz: each dataset's rows as the relay returned them, plus
 the errors and when each dataset was fetched. Resumable: a rerun asks only for datasets that are
-missing or failed (a refusal is an answer and is not asked again). --update asks every dataset for
-the days after its newest stored bar (the monthly top-up). --panels writes one long-format parquet
-per dataset to panels/ for research.
+missing or failed (a refusal is an answer and is not asked again). --update refreshes the perp list
+(new listings get their whole history) and asks every dataset for the days after its newest stored
+bar; a delisted perp is asked only while its data stops before the delisting. Run weekly since
+2026-10-13 (scripts/run_weekly_coinglass_topup.ps1, about 5,800 requests). --panels writes one
+long-format parquet per dataset to panels/ for research, streaming one perp at a time.
 
 Requests go one every 12 s through the shared budget ledger and pause from 00:10 to 05:55 UTC while
 the daily store updates (the relay allows 11 per rolling minute for everything together). About 12
@@ -218,6 +220,8 @@ async def collect(perps: List[Dict[str, Any]], update: bool = False) -> None:
         for i, entry in enumerate(perps):
             payload = load_raw(entry)
             payload["status"], payload["delisted"] = entry["status"], entry.get("delisted")
+            delisted_ms = (_ms(datetime.fromisoformat(entry["delisted"]).replace(tzinfo=timezone.utc))
+                           if entry["status"] == "SETTLING" and entry.get("delisted") else None)
             for name, (_, _, _, first_day, bar_ms) in DATASETS.items():
                 have = payload["datasets"].get(name)
                 if have is not None and not update:
@@ -225,6 +229,8 @@ async def collect(perps: List[Dict[str, Any]], update: bool = False) -> None:
                 if have is not None and name in payload["errors"] and payload["errors"][name].startswith("refused"):
                     continue
                 stamps = [int(r["time"]) for r in have or [] if r.get("time") is not None]
+                if update and delisted_ms is not None and have is not None and (not stamps or max(stamps) >= delisted_ms - bar_ms):
+                    continue  # a delisted perp's series is complete up to its delisting
                 start = max(stamps) + bar_ms if stamps else _ms(first_day)
                 try:
                     rows = await fetch_dataset(client, name, entry, start, last_call)
@@ -250,31 +256,41 @@ async def collect(perps: List[Dict[str, Any]], update: bool = False) -> None:
 
 # ------------------------------------------------------------------------------------------ panels
 def build_panels() -> Dict[str, int]:
-    """One long-format parquet per dataset: perp, coin, time (UTC) and the dataset's numeric fields."""
+    """One long-format parquet per dataset (perp, coin, time UTC, the dataset's fields as float64),
+    written one perp at a time so memory stays small; rows sorted by perp, then time."""
     import pandas as pd
+    import pyarrow as pa
+    import pyarrow.parquet as pq
 
     PANELS.mkdir(parents=True, exist_ok=True)
-    frames: Dict[str, List[Any]] = {name: [] for name in DATASETS}
-    for path in sorted(RAW.glob("*.json.gz")):
-        with gzip.open(path, "rt", encoding="utf-8") as fh:
-            payload = json.load(fh)
-        for name, rows in (payload.get("datasets") or {}).items():
-            if not rows or name not in frames:
-                continue
-            frame = pd.DataFrame(rows)
-            frame.insert(0, "coin", payload["coin"])
-            frame.insert(0, "perp", payload["perp"])
-            frames[name].append(frame)
-    counts = {}
-    for name, parts in frames.items():
-        if not parts:
-            continue
-        panel = pd.concat(parts, ignore_index=True)
-        panel["time"] = pd.to_datetime(panel["time"].astype("int64"), unit="ms", utc=True)
-        for column in panel.columns.difference(["perp", "coin", "time"]):
-            panel[column] = pd.to_numeric(panel[column], errors="coerce")
-        panel.sort_values(["perp", "time"]).reset_index(drop=True).to_parquet(PANELS / f"{name}.parquet", index=False)
-        counts[name] = len(panel)
+    writers: Dict[str, Any] = {}
+    fields: Dict[str, List[str]] = {}
+    counts: Dict[str, int] = {}
+    try:
+        for path in sorted(RAW.glob("*.json.gz")):
+            with gzip.open(path, "rt", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            for name, rows in sorted((payload.get("datasets") or {}).items()):
+                if not rows or name not in DATASETS:
+                    continue
+                frame = pd.DataFrame(rows)
+                if name not in fields:  # the first perp with rows fixes the dataset's columns
+                    fields[name] = sorted(c for c in frame.columns if c != "time")
+                out = pd.DataFrame({"perp": payload["perp"], "coin": payload["coin"],
+                                    "time": pd.to_datetime(frame["time"].astype("int64"), unit="ms", utc=True)})
+                for column in fields[name]:
+                    out[column] = (pd.to_numeric(frame[column], errors="coerce").astype("float64")
+                                   if column in frame else float("nan"))
+                table = pa.Table.from_pandas(out.sort_values("time"), preserve_index=False)
+                if name not in writers:
+                    writers[name] = pq.ParquetWriter(str(PANELS / f"{name}.parquet.tmp"), table.schema, compression="zstd")
+                writers[name].write_table(table.cast(writers[name].schema))
+                counts[name] = counts.get(name, 0) + len(out)
+    finally:
+        for writer in writers.values():
+            writer.close()
+    for name in writers:
+        (PANELS / f"{name}.parquet.tmp").replace(PANELS / f"{name}.parquet")
     return counts
 
 
