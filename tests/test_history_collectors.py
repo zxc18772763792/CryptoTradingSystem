@@ -84,3 +84,16 @@ def test_the_weekly_update_tops_up_live_perps_and_leaves_complete_delisted_ones(
     assert sorted(calls) == sorted([("AAAUSDT", "oi", d0 + DAY), ("AAAUSDT", "funding", d0 + DAY),
                                     ("BBBUSDT", "funding", d0 + 7 * DAY)])  # BBB's oi already reaches its delisting
     assert [r["time"] for r in cg.load_raw(live)["datasets"]["oi"]] == [d0, d0 + DAY]
+
+
+def test_venues_map_hyperliquid_names_and_spot_exchanges():
+    perps = [{"coin": "PEPE", "perp": "1000PEPEUSDT"}, {"coin": "BLZ", "perp": "BLZUSDT"}, {"coin": "XYZ", "perp": "XYZUSDT"}]
+    spot = {"Gate": [{"base_asset": "BLZ"}, {"base_asset": "PEPE"}], "Binance": [{"base_asset": "PEPE"}]}
+    hl = {"Hyperliquid": [{"base_asset": "kPEPE"}, {"base_asset": "BTC"}]}
+    v = cg.venue_map(perps, spot, hl)
+    assert v["hyperliquid"] == {"PEPE": "kPEPE", "BLZ": None, "XYZ": None}
+    assert v["spot"] == {"PEPE": ["Binance", "Gate"], "BLZ": ["Gate"], "XYZ": []}
+    blz = {"coin": "BLZ", "perp": "BLZUSDT", "spot_venues": ["Gate"], "hl_name": None}
+    assert cg.not_listed("hl_ratio", blz) and cg.not_listed("spot_taker", blz)  # no Binance/OKX/Bybit spot
+    assert not cg.not_listed("spot_taker_all", blz) and not cg.not_listed("oi", blz)
+    assert not cg.not_listed("hl_ratio", {"coin": "BLZ", "perp": "BLZUSDT"})  # no catalog loaded: ask
