@@ -17,12 +17,15 @@ Datasets (daily unless noted; the first day asked):
   liquidation   aggregated long / short liquidations, Binance+OKX+Bybit         2020-01-01
   taker         aggregated taker buy / sell volume, Binance+OKX+Bybit           2020-01-01
   spot_taker    spot taker buy / sell volume, Binance+OKX+Bybit                 2020-01-01
+  spot_taker_all  the same over all ten spot exchanges Coinglass covers (adds Gate,
+                Kraken, Bitget, Coinbase, Crypto.com, Upbit, Bitfinex; since 10/15)    2020-01-01
   global_ratio  Binance pair, global account long / short                       2020-01-01
   top_account   Binance pair, top-trader account long / short                   2020-01-01
   top_position  Binance pair, top-trader position long / short                  2020-01-01
   net_position  Binance pair, net long / net short change                       2020-01-01
   depth_4h      aggregated order-book depth within +/-1% of price, 4h bars      2024-10-21
-  hl_ratio      Hyperliquid account long / short                                2025-07-02
+  hl_ratio      Hyperliquid account long / short, asked with Hyperliquid's own   2025-07-02
+                name (kPEPE for PEPE: the 1000x coins carry a k there)
 The aggregated series use Binance+OKX+Bybit like the 10/11 and 10/12 studies; a coin trading as
 1000X on Binance is X on Coinglass and covers only the exchanges that list it so
 (docs/COINGLASS_DATA_CATALOG.md section 5).
@@ -34,6 +37,11 @@ missing or failed (a refusal is an answer and is not asked again). --update refr
 bar; a delisted perp is asked only while its data stops before the delisting. Run weekly since
 2026-10-13 (scripts/run_weekly_coinglass_topup.ps1, about 5,800 requests). --panels writes one
 long-format parquet per dataset to panels/ for research, streaming one perp at a time.
+
+venues.json (from Coinglass's catalog, refreshed with --update) records where each coin trades now:
+its spot exchanges and its Hyperliquid name. The weekly top-up skips a coin's Hyperliquid or spot
+series while it is listed on none of them and nothing is stored; a first collection asks every coin,
+since a delisted pair's history can outlive its listing.
 
 Requests go one every 12 s through the shared budget ledger and pause from 00:10 to 05:55 UTC while
 the daily store updates (the relay allows 11 per rolling minute for everything together). About 12
@@ -67,6 +75,8 @@ RAW = ROOT / "raw"
 PANELS = ROOT / "panels"
 UNIVERSE_PATH = ROOT / "universe.json"
 EXCHANGES = "Binance,OKX,Bybit"
+SPOT_EXCHANGES_ALL = "Binance,OKX,Bybit,Coinbase,Bitget,Gate,Kraken,Crypto.com,Upbit,Bitfinex"  # Coinglass spot, 10/15
+VENUES_PATH = ROOT / "venues.json"
 FIRST_DAY = datetime(2020, 1, 1, tzinfo=timezone.utc)
 LIMIT = 4500
 RELAY_PAGE_CAP = 1000  # some history endpoints cut a page at 1000 rows whatever the limit
@@ -84,6 +94,8 @@ DATASETS: Dict[str, Tuple[str, str, Dict[str, Any], datetime, int]] = {
               {"interval": "1d", "exchange_list": EXCHANGES}, FIRST_DAY, DAY_MS),
     "spot_taker": ("/api/spot/aggregated-taker-buy-sell-volume/history", "coin",
                    {"interval": "1d", "exchange_list": EXCHANGES}, FIRST_DAY, DAY_MS),
+    "spot_taker_all": ("/api/spot/aggregated-taker-buy-sell-volume/history", "coin",
+                       {"interval": "1d", "exchange_list": SPOT_EXCHANGES_ALL}, FIRST_DAY, DAY_MS),
     "global_ratio": ("/api/futures/global-long-short-account-ratio/history", "pair", {"interval": "1d"}, FIRST_DAY, DAY_MS),
     "top_account": ("/api/futures/top-long-short-account-ratio/history", "pair", {"interval": "1d"}, FIRST_DAY, DAY_MS),
     "top_position": ("/api/futures/top-long-short-position-ratio/history", "pair", {"interval": "1d"}, FIRST_DAY, DAY_MS),
@@ -145,6 +157,69 @@ def build_universe(refresh: bool = False) -> List[Dict[str, Any]]:
     return perps
 
 
+# ----------------------------------------------------------------------------------------- venues
+def venue_map(perps: List[Dict[str, Any]], spot_data: Any, hl_data: Any) -> Dict[str, Any]:
+    """Each coin's spot exchanges and Hyperliquid name, from Coinglass's catalog answers."""
+    spot_bases: Dict[str, set] = {}
+    for exchange, rows in (spot_data or {}).items():
+        for r in rows or []:
+            spot_bases.setdefault(str(r.get("base_asset") or "").upper(), set()).add(exchange)
+    hl_rows = hl_data.get("Hyperliquid") if isinstance(hl_data, dict) else hl_data
+    hl_bases = {str(r.get("base_asset")) for r in hl_rows or [] if isinstance(r, dict)}
+    venues: Dict[str, Any] = {"built_at": _now().isoformat(), "spot": {}, "hyperliquid": {}}
+    for p in perps:
+        names = {p["coin"], p["perp"][:-4]}
+        venues["spot"][p["coin"]] = sorted(set().union(*(spot_bases.get(n, set()) for n in names)))
+        venues["hyperliquid"][p["coin"]] = next((n for n in (p["coin"], p["perp"][:-4], "k" + p["coin"]) if n in hl_bases), None)
+    return venues
+
+
+async def _catalog(client, path: str, params: Dict[str, Any]) -> Any:
+    """A catalog answer as returned (a dict per exchange, which single._coinglass would drop)."""
+    from core.data.coinglass_client import CoinglassBudgetExceeded
+
+    for _ in range(10):
+        try:
+            resp = await client.request_json(path, params=params)
+            break
+        except CoinglassBudgetExceeded:
+            await asyncio.sleep(15)
+    else:
+        raise RuntimeError("coinglass budget never freed")
+    payload = resp.get("payload") if isinstance(resp, dict) else None
+    if not isinstance(payload, dict) or str(payload.get("code")) != "0":
+        raise RuntimeError(f"{path}: {str(payload)[:120]}")
+    return payload.get("data")
+
+
+async def load_venues(perps: List[Dict[str, Any]], refresh: bool = False) -> Dict[str, Any]:
+    if VENUES_PATH.exists() and not refresh:
+        return json.loads(VENUES_PATH.read_text(encoding="utf-8"))
+    from core.data.coinglass_client import CoinglassClient
+
+    async with CoinglassClient() as client:
+        spot = await _catalog(client, "/api/spot/supported-exchange-pairs", {})
+        await asyncio.sleep(12)
+        hl = await _catalog(client, "/api/futures/supported-exchange-pairs", {"exchange": "Hyperliquid"})
+    venues = venue_map(perps, spot, hl)
+    ROOT.mkdir(parents=True, exist_ok=True)
+    VENUES_PATH.write_text(json.dumps(venues, ensure_ascii=False, indent=1), encoding="utf-8")
+    return venues
+
+
+def not_listed(name: str, entry: Dict[str, Any]) -> bool:
+    """True when the catalog says the coin trades on none of the venues a dataset covers."""
+    if "spot_venues" not in entry:  # no catalog loaded: ask
+        return False
+    if name == "hl_ratio":
+        return entry.get("hl_name") is None
+    if name == "spot_taker":
+        return not set(entry["spot_venues"]) & set(EXCHANGES.split(","))
+    if name == "spot_taker_all":
+        return not entry["spot_venues"]
+    return False
+
+
 # ----------------------------------------------------------------------------------------- relay
 def _in_quiet_window(now: datetime) -> bool:
     (h0, m0), (h1, m1) = QUIET_UTC
@@ -176,7 +251,8 @@ async def _window(client, name: str, params: Dict[str, Any], lo: int, hi: int, l
 async def fetch_dataset(client, name: str, entry: Dict[str, Any], start_ms: int, last_call: List[float]) -> List[Dict[str, Any]]:
     """Rows from start_ms to the last closed bar; after a timeout, asked again in yearly pieces."""
     _, kind, extra, _, _ = DATASETS[name]
-    params = {**extra, **({"symbol": entry["perp"], "exchange": "Binance"} if kind == "pair" else {"symbol": entry["coin"]})}
+    symbol = (entry.get("hl_name") or entry["coin"]) if name == "hl_ratio" else entry["coin"]
+    params = {**extra, **({"symbol": entry["perp"], "exchange": "Binance"} if kind == "pair" else {"symbol": symbol})}
     end = _ms(_now().replace(hour=0, minute=0, second=0, microsecond=0)) - 1  # bars that closed by today's 00:00
     try:
         rows = await _window(client, name, params, start_ms, end, last_call)
@@ -231,6 +307,8 @@ async def collect(perps: List[Dict[str, Any]], update: bool = False) -> None:
                 stamps = [int(r["time"]) for r in have or [] if r.get("time") is not None]
                 if update and delisted_ms is not None and have is not None and (not stamps or max(stamps) >= delisted_ms - bar_ms):
                     continue  # a delisted perp's series is complete up to its delisting
+                if update and not stamps and not_listed(name, entry):
+                    continue  # not on Hyperliquid / no spot pair there, and nothing stored: nothing to top up
                 start = max(stamps) + bar_ms if stamps else _ms(first_day)
                 try:
                     rows = await fetch_dataset(client, name, entry, start, last_call)
@@ -303,7 +381,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(build_panels(), indent=1))
         return 0
     perps = build_universe(refresh=args.update)
-    print(f"{len(perps)} perps ({sum(p['status'] == 'TRADING' for p in perps)} trading), {len(DATASETS)} datasets", flush=True)
+    venues = asyncio.run(load_venues(perps, refresh=args.update))
+    for p in perps:
+        p["spot_venues"] = venues["spot"].get(p["coin"], [])
+        p["hl_name"] = venues["hyperliquid"].get(p["coin"])
+    print(f"{len(perps)} perps ({sum(p['status'] == 'TRADING' for p in perps)} trading), {len(DATASETS)} datasets; "
+          f"on Hyperliquid {sum(p['hl_name'] is not None for p in perps)}, with spot somewhere {sum(bool(p['spot_venues']) for p in perps)}",
+          flush=True)
     asyncio.run(collect(perps, update=args.update))
     return 0
 
