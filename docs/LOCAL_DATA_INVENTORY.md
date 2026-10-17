@@ -18,7 +18,7 @@
 | 币安现货分钟和秒级 K 线 | 同上（`1m`、`5m`、`15m`、`10s` 等） | 30 个默认研究币，约最近 90 天 | 每小时定时任务（ResearchUniverseRefresh） |
 | 币安资金费率 | `data/historical/binance_futures/<币>_USDT/funding_rate.parquet` | 每个永续自 2020-01 或上市起的每一次结算（费率和标记价格） | 每日定时任务 |
 | 币安溢价指数（日线） | `data/historical/binance_futures/<币>_USDT/premium_index_1d.parquet` | 永续相对指数价格的溢价（开高低收），自 2020-01 或上市起 | 每日定时任务 |
-| Coinglass 每币衍生品日线（12 类） | `data/research/coinglass_history/raw/<交易对>.json.gz`；总表 `panels/<数据>.parquet` | 654 个币安永续对应的币，自 2020 年起（深度自 2024-10，Hyperliquid 自 2025-07）；见第二节 | 每周定时任务 |
+| Coinglass 每币衍生品日线（13 类） | `data/research/coinglass_history/raw/<交易对>.json.gz`；总表 `panels/<数据>.parquet` | 654 个币安永续对应的币，自 2020 年起（深度自 2024-10，Hyperliquid 自 2025-07）；见第二节 | 每周定时任务 |
 | Coinglass 市场整体指标（约 70 项） | `data/research/coinglass_macro/<名称>.json` | 恐慌贪婪、稳定币市值、山寨季、比特币市占率、期权与期货持仓比、Coinbase 溢价、比特币周期指标 24 项、ETF 资金流、期权、交易所余额、借贷利率、大户指数等 | 每周定时任务 |
 | Coinglass 全币快照 | `data/research/coinglass_snapshots/<日期>/<时>_coins_markets.json.gz` | 约 1,500 个币，每天 4 份（00/06/12/18 UTC），自 10/11 起；只有当时的值，补不了历史 | 研究调度器 |
 | Coinglass 爆仓地图（7 天） | `data/research/coinglass_snapshots/<日期>/liq_map_7d.json.gz` | 131 个研究币，每天 1 份，自 10/11 起 | 研究调度器 |
@@ -30,7 +30,7 @@
 | 代币解锁 | `data/research/unlock_study/` | DefiLlama 解锁排期与供给曲线 | 解锁跟踪器 |
 | 币安 Alpha | `data/research/binance_alpha/alpha_market.db` | Alpha 采集器，K 线保留 14 天 | Alpha 采集器 |
 
-## 二、Coinglass 每币日线：12 类数据
+## 二、Coinglass 每币日线：13 类数据
 
 | 名称 | 内容 | 口径 | 最早 |
 |---|---|---|---|
@@ -39,15 +39,16 @@
 | `funding_vol` | 按成交加权的资金费率开高低收 | 全部交易所 | 2023-04 |
 | `liquidation` | 多头、空头爆仓额（美元） | 币安 + OKX + Bybit | 2020 |
 | `taker` | 合约主动买入、卖出额（美元） | 币安 + OKX + Bybit | 2020 |
-| `spot_taker` | 现货主动买入、卖出额（美元） | 币安 + OKX + Bybit | 2020 |
+| `spot_taker` | 现货主动买入、卖出额（美元） | 币安 + OKX + Bybit（和 10/11、10/12 研究同口径） | 2020 |
+| `spot_taker_all` | 同上，Coinglass 收录的全部 10 家现货交易所（另加 Gate、Kraken、Bitget、Coinbase、Crypto.com、Upbit、Bitfinex） | 10 家现货 | 2020 |
 | `global_ratio` | 全部账户多空比（多、空占比） | 币安交易对 | 2020-10 |
 | `top_account` | 大户账户多空比 | 币安交易对 | 2020-05 |
 | `top_position` | 大户持仓多空比 | 币安交易对 | 2020 |
 | `net_position` | 净多头变化、净空头变化（币数量） | 币安交易对 | 2020 |
 | `depth_4h` | 价格上下 1% 以内的买卖挂单（美元和数量），4 小时线 | 币安 + OKX + Bybit | 2024-10-21 |
-| `hl_ratio` | Hyperliquid 账户多空比 | Hyperliquid | 2025-07-02 |
+| `hl_ratio` | Hyperliquid 账户多空比，用 Hyperliquid 自己的名字查（PEPE 查 kPEPE） | Hyperliquid | 2025-07-02 |
 
-10/15 首次收集完成：654 个币全部收齐，没有失败项。原始文件 654 MB，12 张总表共 262 MB。各表覆盖如下：
+10/15 首次收集完成：654 个币全部收齐，没有失败项。同日补了全交易所口径的现货主动买卖，Hyperliquid 也改用它自己的币名重新查了一遍。原始文件约 700 MB，13 张总表共 285 MB。各表覆盖如下：
 
 | 表 | 币数 | 行数 | 有数据的币（2020 / 2022 / 2024 / 2026 年） |
 |---|---:|---:|---|
@@ -56,16 +57,21 @@
 | `funding_vol` | 654 | 53 万 | 2023-04 起；2024 年 387，2026 年 650 |
 | `liquidation`、`taker` | 647 | 各 155 万 | 74 / 166 / 378 / 589 |
 | `spot_taker` | 450 | 111 万 | 98 / 165 / 301 / 450 |
+| `spot_taker_all` | 601 | 149 万 | 98 / 165 / 341 / 601 |
 | `global_ratio`、`top_account`、`top_position` | 644 | 各约 60 万 | 68 / 130 / 347 / 644 |
 | `net_position` | 644 | 77 万 | 2021 年起有值；2022 年 130，2026 年 644 |
 | `depth_4h` | 647 | 279 万 | 2024-10 起；2024 年 375，2026 年 644 |
-| `hl_ratio` | 191 | 8 万 | 2025-07 起；2026 年 185 |
+| `hl_ratio` | 198 | 8 万 | 2025-07 起；2025 年 189，2026 年 191 |
 
 几类数据缺少某些币，原因如下：
 - `funding` 缺 112 个币，全部是已下架的，中转站对没有当前持仓的币算不出按持仓加权的资金费率，返回 500。这些币仍有 `funding_vol` 和币安本地资金费率。
 - 交易对类数据缺 10 个已下架的交易对。
-- `spot_taker` 缺 204 个，这些币三家交易所都没有现货。
-- `hl_ratio` 缺 463 个，这些币不在 Hyperliquid 上，或者在那边的名字不同。
+- `spot_taker` 缺 204 个：这些币在币安、OKX、Bybit 都没有现货。其中 151 个在另外 7 家交易所有现货，已经由 `spot_taker_all` 补上。剩下 53 个在 Coinglass 收录的 10 家交易所都没有现货，多数是已下架的币。
+- `hl_ratio` 缺 456 个：
+  - 440 个没在 Hyperliquid 上市；
+  - 16 个在 Coinglass 的 Hyperliquid 清单里但查不到数据（FTM、BLZ、LOOM、BADGER 等，多是已在 Hyperliquid 下架的老币）。
+  - 1000 倍合约在 Hyperliquid 上带 k 前缀（kPEPE、kBONK、kSHIB、kFLOKI、kLUNC、kNEIRO、kDOGS），这 7 个已改用这些名字补上。
+- 每个币在哪些交易所有现货、在 Hyperliquid 上叫什么，记录在 `data/research/coinglass_history/venues.json`，由 Coinglass 的交易对清单生成，每周更新时刷新。每周补数据时，没上 Hyperliquid、也从没存到过数据的币不再请求，约省 440 次。
 
 读之前要知道的几点：
 
