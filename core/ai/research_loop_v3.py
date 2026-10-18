@@ -397,6 +397,12 @@ async def start_round(force: bool = False) -> bool:
         _process = await asyncio.create_subprocess_exec(*args, cwd=str(PROJECT_ROOT), stdout=log_file,
                                                          stderr=asyncio.subprocess.STDOUT, stdin=asyncio.subprocess.DEVNULL, **kwargs)
     logger.info(f"research loop v3: round started (pid {_process.pid})")
+
+    def schedule_next(s: Dict[str, Any]) -> None:  # manual or scheduled, the next round is one interval away
+        interval = ResearchLoopV3Config.model_validate(s["config"]).interval_seconds
+        s["next_run_at"] = (_utc_now() + timedelta(seconds=interval)).isoformat()
+
+    await asyncio.to_thread(update_state, schedule_next)
     return True
 
 
@@ -412,6 +418,4 @@ async def tick() -> None:
     due = state.get("next_run_at")
     if due and now < datetime.fromisoformat(due):
         return
-    if await start_round():
-        next_run = (now + timedelta(seconds=cfg.interval_seconds)).isoformat()
-        await asyncio.to_thread(update_state, lambda s: s.update(next_run_at=next_run))
+    await start_round()
