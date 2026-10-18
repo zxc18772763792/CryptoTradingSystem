@@ -6340,6 +6340,38 @@ async def run_ai_research_loop_v2_once(request: Request):
     return loop.request_run()
 
 
+@router.get("/research-loop-v3")
+async def get_ai_research_loop_v3():
+    """Research loop v3: LLM factor formulas on the full local panel, 7-day returns (research only)."""
+    from core.ai import research_loop_v3
+
+    return await asyncio.to_thread(research_loop_v3.status)
+
+
+@router.patch("/research-loop-v3", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
+async def configure_ai_research_loop_v3(payload: Dict[str, Any]):
+    from core.ai import research_loop_v3
+    from pydantic import ValidationError
+
+    if set(payload) - set(research_loop_v3.ResearchLoopV3Config.model_fields):
+        raise HTTPException(status_code=422, detail="Unknown research loop v3 configuration field")
+    try:
+        return await asyncio.to_thread(research_loop_v3.configure, payload)
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/research-loop-v3/run", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_research"))])
+async def run_ai_research_loop_v3_once():
+    from core.ai import research_loop_v3
+
+    snapshot = await asyncio.to_thread(research_loop_v3.status)
+    if snapshot["attempts_today"] >= snapshot["config"]["max_rounds_per_day"]:
+        raise HTTPException(status_code=409, detail="今日研究预算已用完，请等待预算重置")
+    started = await research_loop_v3.start_round(force=True)
+    return {**(await asyncio.to_thread(research_loop_v3.status)), "requested": started}
+
+
 @router.get("/listing-short")
 async def get_listing_short_tracker():
     """Paper tracker for the new-perp D2->D14 short (research only)."""
