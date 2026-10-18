@@ -107,6 +107,13 @@ class ResearchScheduler:
         await get_cross_sectional_loop(app).tick()
 
         try:
+            # Starts a round in its own process when due; never waits for it.
+            from core.ai import research_loop_v3
+            await research_loop_v3.tick()
+        except Exception as exc:  # noqa: BLE001 - must not starve the queue below
+            logger.debug(f"research loop v3 tick failed: {exc}")
+
+        try:
             # Background and non-overlapping: a slow exchange pass must not hold up the queue below.
             from core.research.exchange_research_runner import start_background_tick
             start_background_tick()

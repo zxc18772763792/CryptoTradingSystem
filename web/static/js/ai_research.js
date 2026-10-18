@@ -6474,6 +6474,62 @@ ${confirmHint}`,
       </tbody></table></div>` : '<div class="u-note">台账为空。启用后每轮由模型提出 1–5 个公式。</div>'}`;
   }
 
+  function ensureResearchLoopV3Panel() {
+    const cockpit = document.getElementById('ai-iteration-cockpit');
+    if (!cockpit) return null;
+    let panel = document.getElementById('ai-research-loop-v3');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'ai-research-loop-v3';
+      panel.className = 'card';
+      panel.style.cssText = 'margin-top:12px;padding:12px 14px;font-size:12px;color:var(--text-soft);';
+      panel.addEventListener('click', (event) => {
+        const action = event.target?.closest?.('[data-v3-action]')?.getAttribute('data-v3-action');
+        if (action === 'toggle') toggleResearchLoopV3().catch((err) => notify(err?.message || '操作失败', true));
+        if (action === 'run') runResearchLoopV3Once().catch((err) => notify(err?.message || '无法启动研究', true));
+      });
+      cockpit.insertAdjacentElement('afterend', panel);
+    }
+    return panel;
+  }
+
+  function renderResearchLoopV3(payload) {
+    const panel = ensureResearchLoopV3Panel();
+    if (!panel) return;
+    const config = payload?.config || {};
+    const statusNames = {
+      paused: '已暂停', waiting: '已启用 · 等待下一轮', loading: '读取本地面板', observing: '检查冻结公式的新增数据',
+      generating: '模型正在提出因子公式', evaluating: '打乱检验与扣成本回测中', retry_scheduled: '本轮失败 · 下一轮重试',
+    };
+    const reasonNames = {
+      insufficient_sample: '样本不足', low_coverage: '覆盖率不足', no_development_signal: '开发期无信号', no_holdout_signal: '留出期无信号',
+      resid_below_multiplicity_bar: '扣掉已知因子后未过多重检验门槛', no_net_edge_after_costs: '扣成本和资金费后不赚', carried_by_few_coins: '依赖少数币',
+    };
+    const num = (v, d = 2) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : Number(v).toFixed(d));
+    const pct = (v) => (v === null || v === undefined || Number.isNaN(Number(v)) ? '--' : `${Number(v) >= 0 ? '+' : ''}${(Number(v) * 100).toFixed(2)}%`);
+    const formulas = Array.isArray(payload?.top_formulas) ? payload.top_formulas : [];
+    const frozen = Array.isArray(payload?.frozen) ? payload.frozen : [];
+    const busy = !!payload?.running || !!payload?.busy;
+    const budgetLeft = Number(config.max_rounds_per_day || 0) - Number(payload?.attempts_today || 0);
+    panel.innerHTML = `
+      <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;">
+        <h3 style="margin:0;">研究循环 v3 · 全量本地数据因子（7 天收益）</h3>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-sm" data-v3-action="toggle">${config.enabled ? '暂停 v3' : '启用 v3'}</button>
+          <button class="btn btn-sm btn-primary" data-v3-action="run" ${busy || budgetLeft <= 0 ? 'disabled' : ''}>${busy ? '研究进行中…' : '立即研究一轮'}</button>
+        </div>
+      </div>
+      <div style="margin-top:6px;color:var(--text-sub);">${esc(busy ? '一轮正在独立进程中运行' : (statusNames[payload?.status] || payload?.status || '--'))} · 今日 ${Number(payload?.attempts_today || 0)}/${Number(config.max_rounds_per_day || 0)} 轮 · 台账 ${Number(payload?.ledger_size || 0)} 个公式 · 下一个公式的增量门槛 z ≥ ${num(payload?.resid_z_bar)}${config.enabled && payload?.next_run_at ? ` · 下一轮 ${esc(fmtTs(payload.next_run_at))}` : ''}</div>
+      ${payload?.last_error ? `<div style="margin-top:4px;color:var(--warning);">最近失败：${esc(payload.last_error)}</div>` : ''}
+      <div class="u-note" style="margin-top:4px;">每天按公式给约 150 个流动性最好的永续排序，看未来 7 天收益。模型只看到 2020-07~2023-12 的开发期结果；2024 年起的留出期和闸门结论对模型隐藏。通过者冻结后只用新增数据终审，不注册、不下单。</div>
+      <div style="margin-top:10px;font-weight:600;color:var(--text-main);">冻结观察（${frozen.length}）</div>
+      ${frozen.length ? frozen.slice(-6).map((row) => `<div style="padding:4px 0;border-top:1px solid var(--border-subtle);"><b>${esc(row.name)}</b> · ${esc(row.status === 'forward_observing' ? '前向观察中' : row.status === 'forward_passed' ? '前向确认 · 待人工决定' : '前向未确认')} · ${esc(row.forward_note || '')}</div>`).join('') : '<div class="u-note">尚无公式通过闸门。多数公式会被"扣掉已知因子后未过门槛"或"扣成本后不赚"淘汰，这是预期结果。</div>'}
+      <div style="margin-top:10px;font-weight:600;color:var(--text-main);">台账（按留出期增量 z 排序，前 ${Math.min(10, formulas.length)}）</div>
+      ${formulas.length ? `<div style="overflow-x:auto;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>公式</th><th>方向</th><th>开发期 IC / z</th><th>留出期 IC / z</th><th>留出期增量 IC / z</th><th>留出期每期净收益</th><th>结论</th></tr></thead><tbody>
+        ${formulas.map((row) => `<tr><td title="${esc(row.thesis || '')}">${esc(row.name)}</td><td>${row.direction === 'low' ? '低值' : '高值'}</td><td>${num(row.dev?.ic, 3)} / ${num(row.dev?.z)}</td><td>${num(row.holdout?.ic, 3)} / ${num(row.holdout?.z)}</td><td>${num(row.holdout?.resid_ic, 3)} / ${num(row.holdout?.resid_z)}</td><td>${pct(row.holdout?.net_per_book)}</td><td style="color:${row.decision === 'frozen' ? 'var(--positive)' : 'var(--text-faint)'};">${row.decision === 'frozen' ? '冻结观察' : esc((row.reasons || []).map((r) => reasonNames[r] || r).join('；'))}</td></tr>`).join('')}
+      </tbody></table></div>` : '<div class="u-note">台账为空。启用后每轮由模型提出 1–5 个公式。</div>'}`;
+  }
+
   // Pre-registered retirement verdict (core/research/retirement.py), shown on every paper-tracker card.
   function trackerVerdictLine(s) {
     const r = s?.retirement;
@@ -6846,10 +6902,33 @@ ${confirmHint}`,
     notify(payload.requested ? '已安排一轮 v2 研究' : '已有 v2 研究正在执行');
   }
 
+  async function refreshResearchLoopV3() {
+    if (!document.getElementById('ai-iteration-cockpit')) return;
+    try {
+      renderResearchLoopV3(await aiApi('/research-loop-v3', { timeoutMs: 12000 }));
+    } catch (err) {
+      const panel = ensureResearchLoopV3Panel();
+      if (panel) panel.textContent = `研究循环 v3 状态不可用：${err?.message || err}`;
+    }
+  }
+
+  async function toggleResearchLoopV3() {
+    const current = await aiApi('/research-loop-v3', { timeoutMs: 12000 });
+    const enabled = !current?.config?.enabled;
+    renderResearchLoopV3(await aiApi('/research-loop-v3', { method: 'PATCH', body: JSON.stringify({ enabled }), timeoutMs: 15000 }));
+    notify(enabled ? '研究循环 v3 已启用' : '研究循环 v3 已暂停');
+  }
+
+  async function runResearchLoopV3Once() {
+    const payload = await aiApi('/research-loop-v3/run', { method: 'POST', timeoutMs: 15000 });
+    renderResearchLoopV3({ ...payload, busy: !!payload.requested || !!payload.running });
+    notify(payload.requested ? '已启动一轮 v3 研究（独立进程，约 10 分钟）' : '已有 v3 研究正在执行');
+  }
+
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
-    refreshResearchLoopV2().then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).then(() => refreshXsReversalTracker()).then(() => refreshCoinglassCompositeTracker()).then(() => refreshAnnouncementShortTracker()).catch(() => {});
+    refreshResearchLoopV2().then(() => refreshResearchLoopV3()).then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).then(() => refreshXsReversalTracker()).then(() => refreshCoinglassCompositeTracker()).then(() => refreshAnnouncementShortTracker()).catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);

@@ -24,6 +24,7 @@
 | Coinglass 爆仓地图（7 天） | `data/research/coinglass_snapshots/<日期>/liq_map_7d.json.gz` | 131 个研究币，每天 1 份，自 10/11 起 | 研究调度器 |
 | Coinglass 日线数据库（跟踪器用） | `data/research/coinglass_daily/` | 234 个币 × 6 类，滚动保留 60 天 | 研究调度器，每天 00:15 UTC 起 |
 | 币安净多空持仓存档 | `data/research/coinglass_net_position/` | 234 个币，自 2024-01 起，只追加 | 研究调度器，每天 08:00 UTC 起 |
+| 研究循环 v3 面板（缓存） | `data/research/xs_daily_panel/` | 由上面的币安和 Coinglass 本地文件拼成的每天 × 每币宽表（21 个字段、逐日币池、7 天标签、已知因子），590 个曾进入币池的币，自 2020-01 起；说明见 `docs/RESEARCH_LOOP_V3.md` | 研究循环 v3 每轮读取，超过 20 小时自动重建（约 1 分钟） |
 | 研究下载（旧，保留给复现） | `data/research/coinglass_positioning/raw`、`data/research/coinglass_wide/raw`、`raw_new` | 10/11、10/12 研究用的 131 + 103 个币，自 2024-01 起 | 不再更新 |
 | 新闻 | `data/news.db` | 新闻采集器全部历史 | 新闻进程 |
 | 交易所公告 | `data/research/binance_announcements/`、`data/research/upbit/`、Bithumb 标记在跟踪器状态里 | 币安、Upbit、Bithumb 公告 | 研究调度器 |
