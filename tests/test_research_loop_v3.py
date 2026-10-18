@@ -167,3 +167,31 @@ def test_a_round_shows_the_model_development_results_only(monkeypatch, tmp_path)
 
     loop.LOCK_PATH.write_text("{}", encoding="utf-8")  # another round holds the lock
     assert loop.run_round(force=True, log=lambda m: None, generate=model([mom])) == {"skipped": "another_round_running"}
+
+
+def test_any_started_round_books_the_next_one(monkeypatch, tmp_path):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setattr(loop, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(loop, "LOCK_PATH", tmp_path / "round.lock")
+    monkeypatch.setattr(loop, "LOG_PATH", tmp_path / "round.log")
+    monkeypatch.setattr(loop, "_process", None)
+    started = []
+
+    class _Proc:
+        pid, returncode = 4242, None
+
+    async def fake_exec(*args, **kwargs):
+        started.append(args)
+        return _Proc()
+
+    monkeypatch.setattr(loop.asyncio, "create_subprocess_exec", fake_exec)
+    assert asyncio.run(loop.start_round(force=True)) is True  # a manual run ...
+    due = datetime.fromisoformat(loop.load_state()["next_run_at"])
+    assert timedelta(hours=5.9) < due - datetime.now(timezone.utc) < timedelta(hours=6.1)  # ... still books the next slot
+    assert "--force" in started[0]
+    assert asyncio.run(loop.start_round()) is False  # one round at a time
+    loop.update_state(lambda s: s["config"].update(enabled=True))
+    asyncio.run(loop.tick())  # not due yet, and the first one is still running
+    assert len(started) == 1
