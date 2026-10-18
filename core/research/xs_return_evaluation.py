@@ -7,7 +7,12 @@ fifth book still earn after costs and funding?
 Protections carried over from research loop v2 (core/research/xs_evaluation.py), where each was
 calibrated against a false positive on real data:
 * coin-clustered permutation null: every coin gets another coin's whole feature trajectory, which
-  keeps per-coin persistence and market-wide moves; IC z-scores are against that null;
+  keeps per-coin persistence and market-wide moves; IC z-scores are against that null. Where the
+  donor has no value on a day the receiver is scored (listed later, delisted earlier), another
+  random coin that has one fills those days (never the coin itself), so each draw ranks as many
+  coins as the observed day. A plain column permutation kept only 23% of the development-period
+  cells (few perps in 2020-21) and made that null about three times too wide (calibrated
+  2026-10-18);
 * incremental value is measured by orthogonalizing the feature's cross-sectional ranks against
   the known factors' ranks day by day (a copy of a known factor scores ~0), not by blending;
 * the book is checked without the three coins that contribute most, so one meme coin cannot
@@ -31,6 +36,7 @@ from core.research.xs_feature_dsl import evaluate_formula_wide
 MIN_COINS = 30
 COST_ROUND_TRIP = 0.0012
 RESID_FLOOR = 1e-6  # residual norm below this share of the feature's norm = no new information
+MAX_DONOR_HOPS = 40  # 2020 had ~50 live perps of 590: 40 random donors leave ~3% of those cells unfilled
 DEV_START, DEV_END = pd.Timestamp("2020-07-01"), pd.Timestamp("2023-12-31")
 HOLDOUT_START = pd.Timestamp("2024-01-01")
 
@@ -52,10 +58,23 @@ class EvalContext:
         self.periods = {name: (self.dates >= start) & (self.dates <= end) for name, (start, end) in periods.items()}
         self.period_bounds = {name: (str(pd.Timestamp(start).date()), str(pd.Timestamp(end).date()))
                               for name, (start, end) in periods.items()}
+        # Compact layout for the IC work: row t lists that day's ranked coins (universe with a label),
+        # padded to the widest day (~150 of ~590 columns), so ranks and projections touch only them.
+        self.width = max(1, int(self.label_ok.sum(axis=1).max()))
+        order = np.argsort(~self.label_ok, axis=1, kind="stable")[:, : self.width]
+        self.slot = np.take_along_axis(self.label_ok, order, axis=1)
+        self.idx = np.where(self.slot, order, 0)
+        self.rowsel = np.arange(len(self.dates))[:, None]
+        self.fwd_c = self.compact(self.fwd)
         # known factors, ranked in the universe (sign does not matter for orthogonalizing)
         self.factor_names = list(FACTORS)
         self.factor_values = [panel.factors[name].to_numpy(dtype=float) for name in self.factor_names]
-        self.factor_ranks = _factor_ranks(self)
+        self.factor_values_c = [self.compact(v) for v in self.factor_values]
+        self.factor_ranks = [np.where(self.slot, self.compact(r), 0.0) for r in _factor_ranks(self)]
+
+    def compact(self, full: np.ndarray) -> np.ndarray:
+        """(dates x coins) -> (dates x width): each day's ranked coins; padding is missing."""
+        return np.where(self.slot, full[self.rowsel, self.idx], np.nan)
 
 
 def feature_array(formula: Mapping[str, Any], panel: Panel) -> np.ndarray:
@@ -105,10 +124,11 @@ def residualize(scores: np.ndarray, factors: Sequence[np.ndarray], valid: np.nda
     return out
 
 
-def _ic_rows(ctx: EvalContext, feature: np.ndarray, factor_ranks: Optional[List[np.ndarray]] = None) -> Dict[str, np.ndarray]:
-    valid = ctx.label_ok & np.isfinite(feature)
-    rf = centered_ranks(feature, valid)
-    ry = centered_ranks(ctx.fwd, valid)
+def _ic_rows(ctx: EvalContext, feature_c: np.ndarray, factor_ranks: Optional[List[np.ndarray]] = None) -> Dict[str, np.ndarray]:
+    """Daily IC (and residual IC) from compact arrays (EvalContext.compact)."""
+    valid = ctx.slot & np.isfinite(feature_c)
+    rf = centered_ranks(feature_c, valid)
+    ry = centered_ranks(ctx.fwd_c, valid)
     out = {"ic": row_corr(rf, ry, valid), "n": valid.sum(axis=1)}
     if factor_ranks is not None:
         resid = residualize(rf, factor_ranks, valid)
@@ -169,17 +189,43 @@ def books(ctx: EvalContext, feature: np.ndarray, rows: np.ndarray, exclude: Opti
     }
 
 
+def permuted_feature(ctx: EvalContext, feature: np.ndarray, needed_c: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """One null draw (compact): each ranked coin carries another coin's trajectory.
+
+    The donors are one random permutation of all coins, so a coin keeps the same donor every day;
+    cells that donor cannot fill (no value that day) go to further random donors, up to
+    MAX_DONOR_HOPS, never the receiving coin itself. Only ``needed_c`` (the observed feature's
+    scored cells) is filled, so each draw ranks exactly the coins the observed day ranks.
+    """
+    n = feature.shape[1]
+    donor = rng.permutation(n)[ctx.idx]
+    out = feature[ctx.rowsel, donor]
+    out[(donor == ctx.idx) | ~needed_c] = np.nan
+    for _ in range(MAX_DONOR_HOPS):
+        missing = needed_c & ~np.isfinite(out)
+        if not missing.any():
+            break
+        donor = rng.permutation(n)[ctx.idx]
+        candidate = feature[ctx.rowsel, donor]
+        candidate[donor == ctx.idx] = np.nan
+        fill = missing & np.isfinite(candidate)
+        out[fill] = candidate[fill]
+    return out
+
+
 def evaluate(formula: Mapping[str, Any], ctx: EvalContext, *, n_perm: int = 200, seed: int = 0,
              feature: Optional[np.ndarray] = None) -> Dict[str, Dict[str, Any]]:
     """Metrics per period: coverage, IC and z, residual IC and z, nearest known factor, books."""
     feature = feature_array(formula, ctx.panel) if feature is None else feature
+    feature_c = ctx.compact(feature)
     factor_ranks = ctx.factor_ranks
-    observed = _ic_rows(ctx, feature, factor_ranks)
+    observed = _ic_rows(ctx, feature_c, factor_ranks)
     rng = np.random.default_rng(seed)
+    needed_c = ctx.slot & np.isfinite(feature_c)
     null_ic: Dict[str, List[float]] = {name: [] for name in ctx.periods}
     null_resid: Dict[str, List[float]] = {name: [] for name in ctx.periods}
     for _ in range(n_perm):
-        shuffled = feature[:, rng.permutation(feature.shape[1])]
+        shuffled = permuted_feature(ctx, feature, needed_c, rng)
         draw = _ic_rows(ctx, shuffled, factor_ranks)
         for name, rows in ctx.periods.items():
             null_ic[name].append(_mean(draw["ic"][rows]))
@@ -203,7 +249,7 @@ def evaluate(formula: Mapping[str, Any], ctx: EvalContext, *, n_perm: int = 200,
         days = np.flatnonzero(scored)
         half = len(days) // 2
         result["ic_halves"] = [_round(_mean(observed["ic"][days[:half]])), _round(_mean(observed["ic"][days[half:]]))]
-        result.update(_nearest_factor(ctx, feature, rows))
+        result.update(_nearest_factor(ctx, feature_c, rows))
         book = books(ctx, feature, rows)
         contrib = book.pop("_contrib", None)
         result.update(book)
@@ -217,12 +263,12 @@ def evaluate(formula: Mapping[str, Any], ctx: EvalContext, *, n_perm: int = 200,
     return out
 
 
-def _nearest_factor(ctx: EvalContext, feature: np.ndarray, rows: np.ndarray) -> Dict[str, Any]:
+def _nearest_factor(ctx: EvalContext, feature_c: np.ndarray, rows: np.ndarray) -> Dict[str, Any]:
     best_name, best = None, 0.0
-    for name, values in zip(ctx.factor_names, ctx.factor_values):
-        valid = ctx.universe & np.isfinite(feature) & np.isfinite(values)
+    for name, values_c in zip(ctx.factor_names, ctx.factor_values_c):
+        valid = ctx.slot & np.isfinite(feature_c) & np.isfinite(values_c)
         valid[~rows] = False
-        corr = _mean(row_corr(centered_ranks(feature, valid), centered_ranks(values, valid), valid))
+        corr = _mean(row_corr(centered_ranks(feature_c, valid), centered_ranks(values_c, valid), valid))
         if math.isfinite(corr) and abs(corr) > abs(best):
             best_name, best = name, corr
     return {"nearest_factor": best_name, "nearest_factor_corr": _round(best, 3)}
