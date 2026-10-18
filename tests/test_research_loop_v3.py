@@ -96,6 +96,29 @@ def test_a_planted_signal_passes_and_a_known_factor_adds_nothing():
     assert abs(random["dev"]["z"]) < 3 and abs(random["holdout"]["z"]) < 3
 
 
+def test_null_draws_rank_as_many_coins_as_the_observed_day():
+    # Half the coins list late. A plain column permutation would hand many early receivers a donor
+    # with no history yet and shrink the null's cross-section (23% of 2020-23 cells on the real panel).
+    panel = _panel(days=900, coins=40)
+    late = panel.coins[::2]
+    for frame in (panel.universe, panel.fwd7):
+        frame.loc[frame.index[:500], late] = False if frame is panel.universe else np.nan
+    ctx = ev.EvalContext(panel)
+    own = np.tile(np.arange(len(panel.coins), dtype=float), (len(panel.dates), 1))
+    feature = np.where(panel.universe.to_numpy() | ~np.isin(panel.coins, late)[None, :], own, np.nan)
+    needed = ctx.slot & np.isfinite(ctx.compact(feature))
+    draw = ev.permuted_feature(ctx, feature, needed, np.random.default_rng(5))
+    filled = needed & np.isfinite(draw)
+    assert filled.sum() / needed.sum() > 0.99
+    assert not (draw[filled] == ctx.compact(own)[filled]).any()  # never the coin's own values
+    assert not np.isfinite(draw[~needed]).any()
+    # once every coin is listed, each coin carries a single donor's trajectory (coin-level persistence)
+    later = np.zeros_like(filled)
+    later[500:] = True
+    for coin in range(len(panel.coins)):
+        assert len(np.unique(draw[(ctx.idx == coin) & filled & later])) == 1
+
+
 def test_gate_requires_new_information_net_of_costs():
     cfg = loop.ResearchLoopV3Config()
     dev = {"status": "ok", "coverage": 0.9, "z": 2.5}
