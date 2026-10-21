@@ -30,6 +30,12 @@ def read(path):
 
 def save(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        old = path.read_bytes()
+        history = path.parent / "handoff_history" / f"{path.stem}_{hashlib.sha256(old).hexdigest()}.json"
+        if not history.exists():
+            history.parent.mkdir(parents=True, exist_ok=True)
+            history.write_bytes(old)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
 
@@ -39,6 +45,38 @@ def digest(path):
 
 def pct(value):
     return "缺失" if value is None else f"{value * 100:+.2f}%"
+
+
+def preserve_curated_document(path, initial_text):
+    """Human additions, including later research rounds, are never replaced."""
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(initial_text, encoding="utf-8")
+    return True
+
+
+def latest_context():
+    round4 = ROOT / "reports/alastar_selection_timing_20261021/RESEARCH_NOTES.md"
+    round5 = ROOT / "reports/alastar_images_20261021/RESEARCH_NOTES.md"
+    v2 = DATA / "prospective_paper_protocol_v2.json"
+    return {"latest_round": 5 if round5.exists() else 4 if round4.exists() else 3,
+            "v1_as_primary": "withdrawn_after_same_coin_control" if round4.exists() else "historical_candidate",
+            "v2": "thin_fresh_call_1h_hypothesis_not_confirmed" if v2.exists() else None,
+            "image_hypothesis": "separate_exploratory_family_not_pooled_with_v2" if round5.exists() else None,
+            "execution_enabled": False}
+
+
+def current_decision(family, context):
+    if context["latest_round"] < 4:
+        return FAMILIES[family][2]
+    if family == "fresh_view":
+        return "仅保留首次喊单1小时的薄弱线索；第四轮43条池与本轮47事件池不同，不能混算"
+    if family in ("broad_directional", "until_opposite_update"):
+        return "停止作为前瞻主方案；第四轮未证实优于同币时点与机械反转规则"
+    if family == "broad_plus_images":
+        return "原4图首段池仅作历史探索；第五轮图片族独立保存，不混入v2"
+    return FAMILIES[family][2]
 
 
 def main():
@@ -61,6 +99,7 @@ def main():
     assert set(result["pools"]) == set(FAMILIES)
     assert protocol["resolved_events_sha256"] == digest(DATA / "resolved_response_events.json")
     concentration = {(r["scenario"], r["phase"]): r for r in diagnostics["concentration"]}
+    context = latest_context()
     ledger = []
     for scenario, phases in grouped.items():
         row = phases["all"]
@@ -73,7 +112,8 @@ def main():
             "round_trip_cost_bps": 20, "stress_cost_bps": [40, 100],
             "phase_results": phases,
             "concentration": {phase: concentration.get((scenario, phase)) for phase in phases},
-            "research_decision": FAMILIES[family][2],
+            "research_decision_at_round3": FAMILIES[family][2],
+            "research_decision": current_decision(family, context),
             "truly_unseen_validation": False, "execution_enabled": False,
         })
     source_paths = [
@@ -95,9 +135,17 @@ def main():
         "scripts/analyze_alastar_response_results.py",
         "scripts/archive_alastar_research.py",
     ]
+    later_sources = ["reports/alastar_selection_timing_20261021/RESEARCH_NOTES.md",
+                     "reports/alastar_selection_timing_20261021/response_candidate_vs_null.csv",
+                     "reports/alastar_selection_timing_20261021/familywise_timing.csv",
+                     "reports/alastar_images_20261021/RESEARCH_NOTES.md",
+                     "reports/alastar_images_20261021/image_metrics.csv",
+                     "reports/alastar_images_20261021/image_familywise.csv",
+                     "data/research/alastar_response_20261021/prospective_paper_protocol_v2.json"]
+    source_paths.extend(p for p in later_sources if (ROOT/p).exists())
     sources = [{"path": p, "sha256": digest(ROOT / p)} for p in source_paths]
     save(DATA / "strategy_experiment_ledger.json", {
-        "schema_version": 1, "archived_at_utc": now,
+        "schema_version": 2, "archived_at_utc": now, "current_research_context": context,
         "scope": "Alastar public-channel historical study; not private bots or author account returns",
         "taxonomy_summary": taxonomy, "experiment_count": 108, "phase_summary_count": 324,
         "metric_units": "fraction of trade notional unless named portfolio; 0.01 means 1%",
@@ -211,20 +259,33 @@ def main():
         "- [研究总入口](ALASTAR_RESEARCH_INDEX.md)", "",
         "结果独立复算回执均为ok、0项差异；相关30项测试通过。13,488条入选记录含情景／阶段重复，不能当成13,488次独立交易。108组探索互相关联，区间未做多重比较校正。", "",
     ]
-    (ROOT / "docs/ALASTAR_STRATEGY_EXPERIMENTS.md").write_text("\n".join(lines), encoding="utf-8")
+    # Keep the original generated account as a historical artifact. The curated
+    # navigation/experiment document may contain new user research and survives
+    # every subsequent run byte-for-byte.
+    historical = "第三轮历史记录；当前优先级以研究总入口及第四／第五轮结果为准。\n\n" + "\n".join(lines)
+    REPORT.mkdir(parents=True, exist_ok=True)
+    (REPORT / "ROUND3_STRATEGY_EXPERIMENTS.md").write_text(historical, encoding="utf-8")
+    preserve_curated_document(ROOT / "docs/ALASTAR_STRATEGY_EXPERIMENTS.md", historical)
+    v2_path = DATA / "prospective_paper_protocol_v2.json"
+    current_forward_path = v2_path if v2_path.exists() else forward_path
+    current_forward = read(current_forward_path)
     save(DATA / "research_handoff.json", {
         "archived_at_utc": now, "status": "historical_research_archived_forward_protocol_inactive",
+        "current_research_context": context,
         "entry_document": "docs/ALASTAR_RESEARCH_INDEX.md",
         "experiments_document": "docs/ALASTAR_STRATEGY_EXPERIMENTS.md",
         "experiment_ledger": "data/research/alastar_response_20261021/strategy_experiment_ledger.json",
         "experiment_ledger_sha256": digest(DATA / "strategy_experiment_ledger.json"),
-        "forward_protocol": "data/research/alastar_response_20261021/prospective_paper_protocol_v1.json",
-        "forward_protocol_sha256": digest(forward_path), "experiment_count": len(ledger),
+        "forward_protocol": current_forward_path.relative_to(ROOT).as_posix(),
+        "forward_protocol_sha256": digest(current_forward_path),
+        "historical_v1_protocol": {"path": forward_path.relative_to(ROOT).as_posix(), "sha256": digest(forward_path)},
+        "experiment_count": len(ledger),
         "phase_summary_count": len(result["summary"]), "new_market_requests": 0,
         "new_strategy_execution": False, "live_orders_enabled": False,
     })
     print(json.dumps({"experiments": len(ledger), "phase_summaries": len(result["summary"]),
-                      "protocol_status": forward["status"], "handoff": str(DATA / "research_handoff.json")}))
+                      "protocol_status": current_forward["status"], "latest_round": context["latest_round"],
+                      "curated_document_preserved": True, "handoff": str(DATA / "research_handoff.json")}))
 
 
 if __name__ == "__main__":

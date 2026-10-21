@@ -180,7 +180,10 @@ def summarise_selection(rows: list[dict]) -> list[dict]:
     return out
 
 
-def familywise(signals: list[dict], panels: dict[str, SymbolPanel]) -> list[dict]:
+KINDS = ("ALL_DIRECTIONAL", "fresh_call", "followup_view", "context_opinion")
+
+
+def familywise(signals: list[dict], panels: dict[str, SymbolPanel], kinds: tuple = KINDS) -> list[dict]:
     """Westfall-Young single-step max-z over all kind x side x horizon cells (no dedup, events as posted).
 
     Each pseudo replicate moves every signal to ONE random hour on its own coin (same
@@ -213,7 +216,7 @@ def familywise(signals: list[dict], panels: dict[str, SymbolPanel]) -> list[dict
         usable.append((s, pos))
         pseudo_pos.append(idx[rng.integers(0, len(idx), size=FW_DRAWS)])
     cells = []
-    for kind in ("ALL_DIRECTIONAL", "fresh_call", "followup_view", "context_opinion"):
+    for kind in kinds:
         for side in ("all", "long", "short"):
             members = [i for i, (s, _) in enumerate(usable) if (kind == "ALL_DIRECTIONAL" or s["kind"] == kind)
                        and (side == "all" or s["side"] == (1 if side == "long" else -1))]
