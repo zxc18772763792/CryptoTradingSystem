@@ -50,7 +50,9 @@ $py = "F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe"
 
 本轮没有修改新闻运行配置、开启自动交易或建立新的定时任务。
 
-前瞻模拟的新版时刻规则见`prospective_paper_protocol_v1.json`：
+第三轮曾提出的前瞻时刻规则见`prospective_paper_protocol_v1.json`：
 下一5分钟开盘不早于`max(发布+15分钟, 实际首次收件+60秒, 标签冻结+60秒)`。
 该协议仅写入本地，状态为`documented_not_running`，尚未接通模拟成交登记器。
 旧报告的小时开盘规则继续作为历史研究保留；不能将两种成交口径混算。
+
+10/22更新：第四轮已撤回三天主候选；当前独立v2只研究文字首次喊单持有1小时，具体时刻、采集健康、代码漂移及模拟停止门槛见[本地v2登记器](ALASTAR_PAPER_V2.md)。原v1／v2协议没有被重写，当前模拟仍未激活。
