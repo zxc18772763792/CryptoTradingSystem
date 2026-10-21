@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from loguru import logger
 
-from core.research import exchange_notices, retirement, signal_evidence
+from core.research import event_risk_shadow, exchange_notices, retirement, signal_evidence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR = PROJECT_ROOT / "data" / "research" / "announcement_short"
@@ -212,8 +212,19 @@ async def tick(client, *, state_dir: Optional[Path] = None) -> Dict[str, Any]:
               for kind in KINDS}
     for kind, state in states.items():
         retirement.register(state, KINDS[kind]["rule"], now.isoformat())
+        if event_risk_shadow.STATE_KEY not in state:
+            event_risk_shadow.register(state, now, state.get("trades", {}).keys())
+            _save(base / KINDS[kind]["state_path"].name, state)
+        # Own 90s worker owns these files. Monitor before polling announcements:
+        # an unavailable notice feed must not suspend already-open risk shadows.
+        try:
+            await event_risk_shadow.apply_to_tracker(client, state, risk_shadow_sources(state), _now(), clock=_now)
+        except Exception as exc:
+            logger.debug(f"announcement risk shadow unavailable: {exc}")
+        _save(base / KINDS[kind]["state_path"].name, state)
 
     articles = await _poll(client)
+    now = _now()  # risk observation / notice I/O may have taken time
     fresh = [a for a in articles if a.get("code") and a["code"] not in poll["seen"]]
     perps: Dict[str, Any] = {}
     if any(int(a.get("releaseDate") or 0) >= started_ms and notice_events(a.get("title", "")) for a in fresh):
@@ -228,22 +239,41 @@ async def tick(client, *, state_dir: Optional[Path] = None) -> Dict[str, Any]:
         for kind, token in notice_events(article.get("title", "")):
             key = f"{token}|{article['code']}"
             if key not in states[kind]["trades"]:
-                states[kind]["trades"][key] = await _open_trade(client, kind, token, article, perps, now)
+                states[kind]["trades"][key] = await _open_trade(client, kind, token, article, perps, _now())
                 logger.info(f"announcement short: {kind} {token} -> {states[kind]['trades'][key]['status']}")
 
     for kind, state in states.items():
+        now = _now()
         for trade in state["trades"].values():
             if trade.get("status") == "open" and now.timestamp() * 1000 >= int(trade["exit_due_ms"]) + 2 * MIN_MS:
                 try:
                     await _settle(client, trade, now)
                 except Exception as exc:  # noqa: BLE001 - retried next pass
                     logger.debug(f"announcement short: settle {trade.get('token')} failed: {exc}")
+        # Newly discovered signals can enter now, using new executable quotes.
+        # Existing positions were already monitored at the start of this pass.
+        if any(key not in state[event_risk_shadow.STATE_KEY]["trades"]
+               and key not in state[event_risk_shadow.STATE_KEY]["excluded_source_ids"]
+               for key in state["trades"]):
+            try:
+                await event_risk_shadow.apply_to_tracker(client, state, risk_shadow_sources(state), _now(), clock=_now)
+            except Exception as exc:
+                logger.debug(f"announcement new risk shadow unavailable: {exc}")
         state["updated_at"] = now.isoformat()
         _save(base / KINDS[kind]["state_path"].name, state)
-    poll["last_poll_at"] = now.isoformat()
+    poll["last_poll_at"] = _now().isoformat()
     poll["seen"] = dict(list(poll["seen"].items())[-2000:])
     _save(base / "poll.json", poll)
     return {kind: summary(states[kind], kind) for kind in KINDS}
+
+
+def risk_shadow_sources(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [{"source_id": key, "symbol": t.get("symbol"),
+             "source_entry_ms": int(t.get("entry_ms") or 0),
+             "source_exit_due_ms": int(t.get("exit_due_ms") or 0),
+             "source_status": t.get("status"), "discovered_at": t.get("detected_at"),
+             "eligible": bool(t.get("symbol")) and not t.get("late") and bool(t.get("entry_ms")),
+             "hedge_symbols": []} for key, t in state.get("trades", {}).items()]
 
 
 def summary(state: Dict[str, Any], kind: str) -> Dict[str, Any]:
@@ -264,6 +294,7 @@ def summary(state: Dict[str, Any], kind: str) -> Dict[str, Any]:
         "started_at": state.get("started_at"),
         "updated_at": state.get("updated_at"),
         "trades_total": len(trades),
+        "event_risk_shadow": event_risk_shadow.summary(state.get(event_risk_shadow.STATE_KEY)),
         "no_perp": sum(t.get("status") == "no_perp" for t in trades),
         "late": sum(bool(t.get("late")) and bool(t.get("symbol")) for t in trades),
         "forward_open": sum(t.get("status") == "open" for t in counted),

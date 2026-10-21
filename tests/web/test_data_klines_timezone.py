@@ -163,6 +163,23 @@ class TestJavaScriptCompatibility:
 
 
 class TestKlineFallbackWriters:
+    def test_parquet_writer_does_not_certify_unverified_historical_read(self,data_module):
+        frame=pd.DataFrame({'open':[1.],'high':[2.],'low':[.5],'close':[1.5],'volume':[4.]},
+                           index=pd.date_range('2026-01-01',periods=1))
+        frame.attrs['cts_timestamp_status']='unverified_naive'
+        with pytest.raises(ValueError,match='timezone audit'):
+            asyncio.run(data_module._save_df_to_parquet('binance','BTC/USDT','1h',frame))
+
+    def test_parquet_writer_caller_redeclares_normalized_naive_utc_explicitly(self,data_module,monkeypatch):
+        frame=pd.DataFrame({'open':[1.],'high':[2.],'low':[.5],'close':[1.5],'volume':[4.]},
+                           index=pd.date_range('2026-01-01',periods=1,tz='UTC'))
+        captured=[]
+        async def save(klines,*args,**kwargs):captured.extend(klines)
+        monkeypatch.setattr(data_module.data_storage,'save_klines_to_parquet',save)
+        asyncio.run(data_module._save_df_to_parquet('binance','BTC/USDT','1h',frame))
+        assert len(captured)==1
+        assert captured[0].timestamp.isoformat()=='2026-01-01T00:00:00+00:00'
+
     def test_public_trade_resample_uses_utc_timestamps(self, data_module):
         trades = [
             {"timestamp": 1779343200000, "price": 100.0, "amount": 1.0},

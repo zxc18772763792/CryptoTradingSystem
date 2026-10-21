@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
-from core.research import exchange_notices, retirement
+from core.research import event_risk_shadow, exchange_notices, retirement
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "listing_short" / "tracker.json"
@@ -94,6 +94,9 @@ def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], now_m
     fund = sum(float(f["fundingRate"]) for f in funding if entry_ms <= int(f["fundingTime"]) <= until)
     out.update(
         exit_price=exit_px, exit_at=exit_ms, funding=round(fund, 6),
+        mark_price=mark,
+        mark_price_at=datetime.fromtimestamp((exit_ms if exit_ms is not None else (last or bars[ENTRY_BAR])[0]+day)/1000, timezone.utc).isoformat(),
+        funding_until=datetime.fromtimestamp(until/1000, timezone.utc).isoformat(),
         # linear USDT-perp short P&L, realized or marked (was entry / mark - 1 until 2026-09-28)
         return_pct=round(((entry - mark) / entry + fund - ROUND_TRIP_COST) * 100, 3),
         max_adverse_pct=round((max([b[2] for b in bars[ENTRY_BAR + 1 : EXIT_BAR + 1] if b[0] + day <= until] or [entry]) / entry - 1) * 100, 2),
@@ -174,6 +177,10 @@ async def tick(client, *, llm_extract=None, history: Optional[Dict[str, List[Dic
     state = load_state(state_path)
     started = datetime.fromisoformat(state["started_at"])
     now = _now()
+    if event_risk_shadow.STATE_KEY not in state:
+        event_risk_shadow.register(state, now, [key for key, t in state.get("trades", {}).items()
+                                               if t.get("status") in {"open", "closed", "stopped", "delisted"}])
+        save_state(state, state_path)
     since = (started - timedelta(days=BACKFILL_DAYS)).timestamp() * 1000
     perps = {p["symbol"]: p for p in await _new_perps(client, since)}
     for symbol, trade in state["trades"].items():  # keep updating open trades whose perp left the listing
@@ -226,10 +233,24 @@ async def tick(client, *, llm_extract=None, history: Optional[Dict[str, List[Dic
         if (tok.get("announcement") or {}).get("release_ms") and trade.get("entry_at"):
             # Only facts published before the D2 entry are fair inputs for the filter question.
             tok["available_before_entry"] = int(tok["announcement"]["release_ms"]) <= int(trade["entry_at"])
+    try:
+        await event_risk_shadow.apply_to_tracker(client, state, risk_shadow_sources(state), now, clock=_now)
+    except Exception as exc:
+        logger.debug(f"listing risk shadow unavailable: {exc}")
     state["updated_at"] = now.isoformat()
     retirement.register(state, "listing_short", now.isoformat())
     save_state(state, state_path)
     return summary(state)
+
+
+def risk_shadow_sources(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    day_ms = 86_400_000
+    return [{"source_id": key, "symbol": t.get("symbol"),
+             "source_entry_ms": int(t.get("entry_at") or ((int(t["onboard_ms"]) // day_ms + ENTRY_BAR + 1) * day_ms)),
+             "source_exit_due_ms": (int(t["onboard_ms"]) // day_ms + EXIT_BAR + 1) * day_ms,
+             "source_status": t.get("status"), "discovered_at": t.get("discovered_at"),
+             "eligible": bool(t.get("symbol")) and not t.get("backfilled"), "hedge_symbols": []}
+            for key, t in state.get("trades", {}).items() if t.get("onboard_ms") is not None]
 
 
 def summary(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -244,6 +265,7 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "updated_at": state.get("updated_at"),
         "trades_total": len(trades),
         "forward_trades": len(live),
+        "event_risk_shadow": event_risk_shadow.summary(state.get(event_risk_shadow.STATE_KEY)),
         "forward_completed": len(done),
         "forward_open": sum(t.get("status") == "open" for t in live),
         "forward_mean_return_pct": round(sum(returns) / len(returns), 2) if returns else None,

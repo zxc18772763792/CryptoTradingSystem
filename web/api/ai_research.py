@@ -6444,7 +6444,8 @@ async def get_research_trackers():
     from core.research import tracker_registry
 
     rows = await asyncio.to_thread(tracker_registry.tracker_rows)
-    return {"generated_at": datetime.now(timezone.utc).isoformat(), "trackers": rows}
+    diagnostics = await asyncio.to_thread(tracker_registry.diagnostics, rows)
+    return {"generated_at": datetime.now(timezone.utc).isoformat(), "trackers": rows, "diagnostics": diagnostics}
 
 
 @router.get("/announcement-short")
@@ -6493,6 +6494,14 @@ async def get_coinglass_composite_tracker(variant: str = "main"):
               "main": brief(record.get("main") or {}), "shadow": brief(record.get("shadow") or {})}
              for day, record in sorted(state.get("books", {}).items(), reverse=True)[:30]]
     return {"summary": tracker.summary(state, variant), "books": books, "store": await asyncio.to_thread(store.load_status)}
+
+
+@router.get("/coinglass-attribution")
+async def get_coinglass_attribution():
+    """Same-signal-date 2x2 attribution of existing frozen paper books; read only."""
+    from core.research.coinglass_attribution import load_attribution
+
+    return await asyncio.to_thread(load_attribution)
 
 
 @router.get("/supply-factor")

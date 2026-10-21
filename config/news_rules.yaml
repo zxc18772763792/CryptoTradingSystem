@@ -17,6 +17,7 @@
       bybit_announcements,
       coinglass_newsflash,
       coinglass_articles,
+      telegram_alastar,
       coinglass_economic_data,
       coinglass_financial_events,
       coinglass_central_bank,
@@ -31,11 +32,18 @@
   # NEWS_ENABLE_CHAINCATCHER_FLASH / NEWS_ENABLE_BINANCE_ANNOUNCEMENTS / NEWS_ENABLE_OKX_ANNOUNCEMENTS
   # NEWS_ENABLE_BYBIT_ANNOUNCEMENTS / NEWS_ENABLE_CRYPTOCOMPARE_NEWS / NEWS_PULL_SYNC_LLM
   # NEWS_ENABLE_OPENNEWS
+  # NEWS_ENABLE_TELEGRAM_ALASTAR (public channel preview, no Telegram account or API key)
   # NEWS_ENABLE_COINGLASS_NEWSFLASH / NEWS_ENABLE_COINGLASS_ARTICLES / NEWS_ENABLE_COINGLASS_ECONOMIC_DATA
   # NEWS_ENABLE_COINGLASS_FINANCIAL_EVENTS / NEWS_ENABLE_COINGLASS_CENTRAL_BANK
   # CRYPTOCOMPARE_API_KEY optional; without key collector still runs with stricter rate limit.
   # OPENNEWS_TOKEN is required when NEWS_ENABLE_OPENNEWS=true; opennews is added dynamically when both are present.
   chaincatcher_flash_timeout_sec: 20
+  telegram_alastar_channels: [alastartrades]
+  telegram_alastar_timeout_sec: 20
+  telegram_alastar_max_records: 40
+  telegram_alastar_retry_count: 1
+  # Immutable first receipt / revision archive for research; never issues trades.
+  telegram_alastar_observation_archive: true
   chaincatcher_flash_max_records: 80
   chaincatcher_flash_min_interval_sec: 15
   okx_announcements_timeout_sec: 20

@@ -4,7 +4,9 @@
 import asyncio
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import os
+from uuid import uuid4
 import aiohttp
 import time
 
@@ -14,6 +16,40 @@ from loguru import logger
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from core.data.data_storage import prepare_utc_kline_frame, _heal_local_existing_against_utc
+from core.data.parquet_lock import parquet_partition_lock
+
+
+def gate_rows_to_frame(rows) -> pd.DataFrame:
+    """Gate timestamps are Unix seconds, independent of the machine timezone."""
+    records = [{"timestamp": datetime.fromtimestamp(int(item[0]), tz=timezone.utc),
+                "open": float(item[5]), "high": float(item[3]), "low": float(item[4]),
+                "close": float(item[2]), "volume": float(item[1])} for item in rows]
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records).set_index("timestamp").sort_index()
+
+
+def write_download_frame(file_path: Path, frame: pd.DataFrame) -> None:
+    """Write explicit UTC data under the shared lock, preserving old rows."""
+    if frame.empty:
+        return
+    incoming = prepare_utc_kline_frame(frame, origin="writer:gate_download")
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with parquet_partition_lock(file_path):
+        combined = incoming
+        existing = None
+        if file_path.exists():
+            existing = _heal_local_existing_against_utc(pd.read_parquet(file_path), incoming)
+            combined = pd.concat([existing, incoming])
+        combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+        combined.attrs = {**(existing.attrs if existing is not None else {}), **incoming.attrs}
+        temporary = file_path.with_name(f"{file_path.name}.{uuid4().hex}.tmp")
+        try:
+            pq.write_table(pa.Table.from_pandas(combined), str(temporary), compression="zstd")
+            os.replace(temporary, file_path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 async def fetch_json(session, url, params=None, headers=None):
@@ -112,21 +148,7 @@ async def main():
 
                     if data:
                         # Gate.io返回格式: [timestamp, volume, close, high, low, open]
-                        klines = []
-                        for item in data:
-                            klines.append({
-                                "timestamp": datetime.fromtimestamp(int(item[0])),
-                                "open": float(item[5]),
-                                "high": float(item[3]),
-                                "low": float(item[4]),
-                                "close": float(item[2]),
-                                "volume": float(item[1]),
-                            })
-
-                        # 按时间排序
-                        df = pd.DataFrame(klines)
-                        df["timestamp"] = pd.to_datetime(df["timestamp"])
-                        df = df.set_index("timestamp").sort_index()
+                        df = gate_rows_to_frame(data)
 
                         all_data[pair][interval_name] = df
 
@@ -154,8 +176,7 @@ async def main():
                 file_path.parent.mkdir(parents=True, exist_ok=True)
 
                 # 保存
-                table = pa.Table.from_pandas(df)
-                pq.write_table(table, str(file_path), compression='zstd')
+                write_download_frame(file_path, df)
 
                 logger.info(f"  ✓ 保存 {pair} {timeframe}: {len(df)} 条")
                 saved_count += 1

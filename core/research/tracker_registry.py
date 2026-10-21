@@ -59,7 +59,8 @@ def _xs_liq_filter() -> Dict[str, Any]:
     shadow = summary.get("liq_filter") or {}
     return {"retirement": shadow.get("retirement"), "started_at": summary.get("started_at"),
             "updated_at": summary.get("updated_at"), "forward_completed": shadow.get("completed"),
-            "forward_open": shadow.get("forward_open")}
+            "forward_open": shadow.get("forward_open"), "actual_mean_pct": shadow.get("mean_net_pct"),
+            "paired_evaluation": summary.get("paired_evaluation") or shadow.get("paired_evaluation")}
 
 
 def _announcement(kind: str) -> Callable[[], Dict[str, Any]]:
@@ -118,12 +119,15 @@ TRACKERS: List[Dict[str, Any]] = [
 
 
 def _open_marks(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Counted open positions with their current short-side mark, where the tracker keeps one."""
+    """Recorded price marks, with explicit leg scope and quote time; never live quotes."""
     tid = spec["id"]
     if tid in {"unlock_short", "unlock_short_t7"}:
         from core.research import unlock_short_tracker as m
         trades = m.load_state(m.VARIANTS["t30" if tid == "unlock_short" else "t7"]["state_path"]).get("trades", {}).values()
-        return [{"label": t.get("token"), "mark_pct": t.get("mark_return_pct")} for t in trades
+        return [{"label": t.get("token"), "mark_pct": m.linear_open_mark(t),
+                 "price_return_pct": m.linear_open_mark(t), "funding_pct": None, "cost_pct": None,
+                 "strategy_net_pct": None, "scope": "short_price_only", "scope_label": "空头价格毛收益，未含资金费/成本/对冲",
+                 "price_at": t.get("mark_price_at"), "price_basis": "最近完整日收盘", "is_partial": True} for t in trades
                 if t.get("status") == "open" and not t.get("late")]
     if tid.startswith(("upbit_", "bithumb_", "korea_")):
         from core.research import upbit_caution_tracker as m
@@ -131,14 +135,49 @@ def _open_marks(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "bithumb_caution": "bithumb_caution", "bithumb_caution_hedged": "bithumb_caution_hedged",
                     "korea_caution_hedged": "korea_caution_hedged"}[tid]
         trades = m.load_state(m.STRATEGIES[strategy]["state_path"]).get("trades", {}).values()
-        return [{"label": t.get("ticker"), "mark_pct": t.get("return_pct")} for t in trades
-                if t.get("status") in {"open", "waiting_entry"} and t.get("symbol") and not t.get("backfilled") and not t.get("late")]
+        out = []
+        for t in trades:
+            if t.get("status") != "open" or not t.get("symbol") or t.get("backfilled") or t.get("late"):
+                continue
+            funding = float(t["funding"]) * 100 if t.get("funding") is not None else None
+            net = t.get("return_pct")
+            cost = m.ROUND_TRIP_COST * 100
+            # This is the short leg's recorded net mark. A missing hedge stays
+            # unavailable, rather than silently being substituted by the short leg.
+            out.append({"label": t.get("ticker"), "mark_pct": net,
+                        "price_return_pct": round(float(net) - funding + cost, 4) if net is not None and funding is not None else None,
+                        "funding_pct": funding, "cost_pct": cost,
+                        "strategy_net_pct": None if "hedged" in tid else net,
+                        "scope": "short_net_only", "scope_label": "空头腿净收益" + ("，对冲腿浮盈未结算" if "hedged" in tid else ""),
+                        "price_at": t.get("mark_price_at"), "funding_until": t.get("funding_until") or t.get("updated_at"),
+                        "price_basis": "最近完整日收盘；资金费截至本次更新", "is_partial": "hedged" in tid})
+        return out
     if tid == "listing_short":
         from core.research import listing_short_tracker as m
         trades = m.load_state().get("trades", {}).values()
-        return [{"label": t.get("base") or t.get("symbol"), "mark_pct": t.get("return_pct")} for t in trades
+        return [{"label": t.get("base") or t.get("symbol"), "mark_pct": t.get("return_pct"),
+                 "scope": "short_net_only", "scope_label": "空头腿净收益", "is_partial": False,
+                 "price_at": t.get("mark_price_at"), "funding_until": t.get("funding_until"),
+                 "price_basis": "最近完整日收盘；资金费截至本次更新"} for t in trades
                 if t.get("status") == "open" and not t.get("backfilled")]
     return []
+
+
+def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """A percentage always names its numerator, denominator and time unit."""
+    tid = spec["id"]
+    paired = tid == "xs_reversal_liq_filter"
+    gross = tid.startswith("xs_reversal")
+    two_legs = tid.startswith(("unlock_", "coinglass_")) or "hedged" in tid or tid == "supply_factor"
+    multiplier = 1 if gross or not two_legs else 2
+    return {"metric_kind": "paired_increment" if paired else "net_return",
+            "metric_label": "同日配对增益" if paired else "净收益",
+            "metric_unit_label": "百分点/天" if paired else f"%/{spec['unit']}",
+            "return_basis": "total_gross_notional" if gross else "single_leg_notional",
+            "basis_label": "多空总名义金额" if gross else ("单腿名义金额（多空各一份）" if two_legs else "空头入场名义金额"),
+            "gross_notional_multiplier": multiplier,
+            "cost_scope": "固定交易成本；未计借币可得性及借币成本" if tid == "supply_factor" else "跟踪器设定交易成本及已记录资金费",
+            "is_paper": True}
 
 
 def _first(summary: Dict[str, Any], *keys: str) -> Optional[Any]:
@@ -151,6 +190,7 @@ def _first(summary: Dict[str, Any], *keys: str) -> Optional[Any]:
 
 def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
     row: Dict[str, Any] = {k: spec[k] for k in ("id", "name", "group", "unit", "rule")}
+    row.update(measurement(spec))
     rule = retirement.RULES.get(spec["rule_key"]) or {}
     row["backtest_mean_pct"] = rule.get("backtest_mean_pct")
     row["min_n"] = rule.get("min_n")
@@ -179,6 +219,10 @@ def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
         late=_first(summary, "forward_late", "late", "late_trades"),
         started_at=summary.get("started_at"),
         updated_at=summary.get("updated_at"),
+        actual_mean_pct=summary.get("actual_mean_pct"),
+        paired_evaluation=summary.get("paired_evaluation"),
+        risk_shadow=summary.get("risk_shadow") or summary.get("event_risk_shadow"),
+        gross_mean_pct=round(float(mean) / row["gross_notional_multiplier"], 4) if mean is not None else None,
     )
     try:
         row["open_marks"] = _open_marks(spec)
@@ -189,3 +233,19 @@ def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
 
 def tracker_rows() -> List[Dict[str, Any]]:
     return [tracker_row(spec) for spec in TRACKERS]
+
+
+def diagnostics(rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Bounded, read-only comparisons; unavailable analysis cannot blank the ledger."""
+    rows = rows if rows is not None else tracker_rows()
+    out: Dict[str, Any] = {
+        "reversal": next((r.get("paired_evaluation") for r in rows if r["id"] == "xs_reversal"), None),
+        "event_risk": [{"id": r["id"], "name": r["name"], **r["risk_shadow"]}
+                       for r in rows if r.get("risk_shadow")],
+    }
+    try:
+        from core.research.coinglass_attribution import load_attribution
+        out["coinglass"] = load_attribution()
+    except Exception as exc:  # each section remains usable if a source is unavailable
+        out["coinglass"] = {"status": "unavailable", "error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    return out

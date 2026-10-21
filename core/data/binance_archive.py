@@ -14,6 +14,8 @@ from loguru import logger
 
 from config.settings import settings
 from core.data.path_utils import canonical_symbol_dir, normalize_symbol
+from core.data.data_storage import prepare_utc_kline_frame
+from core.data.kline_file_writer import write_utc_kline_file
 
 _BASE_URL = "https://data.binance.vision/data/spot/daily/klines"
 
@@ -101,8 +103,10 @@ def _parse_zip_payload(payload: bytes) -> pd.DataFrame:
     ]
 
     out = raw[["open_time", "open", "high", "low", "close", "volume"]].copy()
-    open_time = pd.to_numeric(out["open_time"], errors="coerce")
-    open_time = open_time.fillna(0).astype("int64")
+    open_time = pd.to_numeric(out["open_time"], errors="raise")
+    if open_time.isna().any():
+        raise ValueError("Invalid archive timestamp; refusing to invent epoch zero")
+    open_time = open_time.astype("int64")
     ts_unit = "us" if int(open_time.iloc[0]) > 10**14 else "ms"
     out["timestamp"] = pd.to_datetime(open_time, unit=ts_unit, utc=True).dt.tz_localize(None)
     out["open"] = out["open"].astype(float)
@@ -111,8 +115,7 @@ def _parse_zip_payload(payload: bytes) -> pd.DataFrame:
     out["close"] = out["close"].astype(float)
     out["volume"] = out["volume"].astype(float)
     out = out.drop(columns=["open_time"]).set_index("timestamp").sort_index()
-    out = out[~out.index.duplicated(keep="last")]
-    return out
+    return prepare_utc_kline_frame(out, origin="writer:binance_official_archive", timestamp_timezone="UTC")
 
 
 def download_binance_1s_daily_archive(
@@ -156,7 +159,7 @@ def download_binance_1s_daily_archive(
                 day += timedelta(days=1)
                 continue
 
-            df.to_parquet(out_file)
+            write_utc_kline_file(out_file, df, origin="writer:binance_official_archive")
             stats.downloaded_days += 1
             stats.total_rows += int(len(df))
             logger.info(f"Downloaded 1s archive {symbol} {day.isoformat()} rows={len(df)}")

@@ -28,6 +28,7 @@ DEFAULT_INTERVALS = {
     "coinglass_articles": 180,
     "cryptocompare_news": 90,
     "opennews": 45,
+    "telegram_alastar": 60,
     "jin10": 120,
     "coinglass_economic_data": 300,
     "coinglass_financial_events": 600,
@@ -45,6 +46,7 @@ HIGH_PRIORITY = {
     "coinglass_newsflash",
 }
 MID_PRIORITY = {
+    "telegram_alastar",
     "cryptopanic",
     "cryptocompare_news",
     "jin10",
@@ -629,6 +631,15 @@ async def pull_source_once(
         asyncio.create_task(on_news_inserted(inserted))
 
     source_errors = (bundle.get("source_stats") or {}).get(source, {}).get("errors") or []
+    if (
+        source == "telegram_alastar"
+        and not items
+        and (bundle.get("source_stats") or {}).get(source, {}).get("enabled")
+        and not source_errors
+    ):
+        # Quiet public channels can have no recent posts for days. Record a
+        # successful poll without inventing a newer publication cursor.
+        await news_db.set_source_state(source, mark_success=True)
     if source_errors:
         threshold = max(2, _env_int("NEWS_SOURCE_BREAKER_ERRORS", 3))
         cooldown = max(30, _env_int("NEWS_SOURCE_BREAKER_COOLDOWN_SEC", 180))
