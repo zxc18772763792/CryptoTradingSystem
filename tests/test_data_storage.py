@@ -375,3 +375,86 @@ def test_cache_file_uses_json_and_quarantines_unsafe_payload(tmp_path: Path):
     assert loaded is None
     assert not unsafe_path.exists()
     assert list(storage.cache_path.glob("legacy.unsafe_*.cache"))
+
+
+def _timezone_test_bars():
+    return [Kline(exchange="binance",symbol="ETH/USDT",timeframe="1h",
+                  timestamp=datetime(2026,1,1,hour,tzinfo=timezone.utc),
+                  open=100.+hour,high=101.+hour,low=99.+hour,close=100.5+hour,volume=10.+hour)
+            for hour in range(5)]
+
+
+def _frame_for_timezone_bars(bars):
+    return pd.DataFrame([{'open':bar.open,'high':bar.high,'low':bar.low,'close':bar.close,'volume':bar.volume}
+                         for bar in bars],index=pd.DatetimeIndex([bar.timestamp.replace(tzinfo=None) for bar in bars],name='timestamp'))
+
+
+def test_writer_metadata_roundtrip_and_complete_utc_overlap_upgrade(tmp_path):
+    storage=DataStorage();storage.storage_path=tmp_path/'historical'
+    bars=_timezone_test_bars()
+    target=canonical_symbol_dir(storage.storage_path,'binance','ETH/USDT')/'1h_parts/2026-01-01.parquet'
+    target.parent.mkdir(parents=True)
+    original=_frame_for_timezone_bars(bars)
+    original.to_parquet(target)
+    assert not pd.read_parquet(target).attrs
+    asyncio.run(storage.save_klines_to_parquet(bars,'binance','ETH/USDT','1h'))
+    loaded=pd.read_parquet(target)
+    pd.testing.assert_frame_equal(loaded,original,check_freq=False)
+    assert loaded.attrs['cts_timestamp_timezone']=='UTC'
+    assert loaded.attrs['cts_timestamp_schema']==1
+    assert loaded.attrs['cts_timestamp_origin']=='writer'
+
+
+@pytest.mark.parametrize('problem',['partial','duplicates','nat','corrupt'])
+def test_failed_legacy_merge_preserves_all_source_bytes(tmp_path,problem):
+    storage=DataStorage();storage.storage_path=tmp_path/'historical'
+    bars=_timezone_test_bars()
+    target=canonical_symbol_dir(storage.storage_path,'binance','ETH/USDT')/'1h_parts/2026-01-01.parquet'
+    target.parent.mkdir(parents=True)
+    original=_frame_for_timezone_bars(bars)
+    if problem=='duplicates': original=pd.concat([original,original.iloc[[0]]])
+    if problem=='nat': original.index=pd.DatetimeIndex([pd.NaT]+list(original.index[1:]))
+    if problem=='corrupt': target.write_bytes(b'not parquet: preserve evidence')
+    else: original.to_parquet(target)
+    before=target.read_bytes()
+    with pytest.raises(Exception):
+        asyncio.run(storage.save_klines_to_parquet(bars[-1:],'binance','ETH/USDT','1h'))
+    assert target.read_bytes()==before
+    assert not list(target.parent.glob('*.tmp'))
+    assert not list(target.parent.glob('*.corrupt_*'))
+
+
+def test_naive_new_klines_require_explicit_utc_caller_declaration(tmp_path):
+    storage=DataStorage();storage.storage_path=tmp_path/'historical'
+    bars=_timezone_test_bars()
+    for bar in bars: bar.timestamp=bar.timestamp.replace(tzinfo=None)
+    with pytest.raises(ValueError,match='timezone-aware'):
+        asyncio.run(storage.save_klines_to_parquet(bars,'binance','ETH/USDT','1h'))
+    assert not storage.storage_path.exists()
+    asyncio.run(storage.save_klines_to_parquet(bars,'binance','ETH/USDT','1h',timestamp_timezone='UTC'))
+    target=canonical_symbol_dir(storage.storage_path,'binance','ETH/USDT')/'1h_parts/2026-01-01.parquet'
+    assert pd.read_parquet(target).attrs['cts_timestamp_timezone']=='UTC'
+
+
+def test_aware_non_utc_writer_partitions_by_actual_utc_date(tmp_path):
+    storage=DataStorage();storage.storage_path=tmp_path/'historical'
+    bars=_timezone_test_bars()[:1]
+    bars[0].timestamp=datetime(2026,1,1,2,tzinfo=timezone(timedelta(hours=8)))
+    asyncio.run(storage.save_klines_to_parquet(bars,'binance','ETH/USDT','1h'))
+    parts=canonical_symbol_dir(storage.storage_path,'binance','ETH/USDT')/'1h_parts'
+    assert (parts/'2025-12-31.parquet').exists()
+    assert not (parts/'2026-01-01.parquet').exists()
+    assert pd.read_parquet(parts/'2025-12-31.parquet').index[0]==pd.Timestamp('2025-12-31 18:00')
+
+
+def test_combined_compatibility_read_remains_unverified_when_any_source_is_unknown(tmp_path):
+    storage=DataStorage();storage.storage_path=tmp_path/'historical'
+    symbol_dir=canonical_symbol_dir(storage.storage_path,'binance','ETH/USDT')
+    symbol_dir.mkdir(parents=True)
+    old=_frame_for_timezone_bars(_timezone_test_bars()[:3])
+    old.to_parquet(symbol_dir/'1h.parquet')
+    asyncio.run(storage.save_klines_to_parquet(_timezone_test_bars()[3:],'binance','ETH/USDT','1h'))
+    loaded=asyncio.run(storage.load_klines_from_parquet('binance','ETH/USDT','1h'))
+    assert len(loaded)==5
+    assert loaded.attrs['cts_timestamp_status']=='unverified_naive'
+    assert 'cts_timestamp_timezone' not in loaded.attrs

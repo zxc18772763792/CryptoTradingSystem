@@ -2222,24 +2222,27 @@ const verdictColor={confirmed:'var(--positive)',on_track:'var(--positive)',watch
 if(!rows.length){tb.innerHTML='<tr><td colspan="10">暂无跟踪器</td></tr>';return;}
 tb.innerHTML=rows.map(r=>{
 if(r.error)return `<tr><td>${esc(r.name)}</td><td colspan="9">读取失败：${esc(r.error)}</td></tr>`;
-const ci=Array.isArray(r.ci90_pct)?` <span class="u-hint">[${pct(r.ci90_pct[0])}, ${pct(r.ci90_pct[1])}]${r.ci_clusters!=null?` · ${Number(r.ci_clusters)} 组`:''}</span>`:(r.ci_clusters===1&&Number(r.n)>=2?' <span class="u-hint">同属 1 组，暂无区间</span>':'');
+const paired=r.metric_kind==='paired_increment';
+const metric=(v)=>paired?pct(v).replace('%',' 个百分点'):pct(v);
+const ci=Array.isArray(r.ci90_pct)?` <span class="u-hint">[${metric(r.ci90_pct[0])}, ${metric(r.ci90_pct[1])}]${r.ci_clusters!=null?` · ${Number(r.ci_clusters)} 组`:''}</span>`:(r.ci_clusters===1&&Number(r.n)>=2?' <span class="u-hint">同属 1 组，暂无区间</span>':'');
 const unit=r.unit||'笔';
 const extra=[r.open?`持仓 ${Number(r.open)}`:'',r.waiting?`待入场 ${Number(r.waiting)}`:'',r.late?`晚到 ${Number(r.late)}`:''].filter(Boolean).join(' · ');
-const marks=(r.open_marks||[]).map(m=>`<span style="${color(m.mark_pct)}">${esc(m.label)} ${pct(m.mark_pct,1)}</span>`).join('，');
-const hedgeNote=(r.id||'').includes('hedged')&&marks?' <span class="u-hint">(做空腿)</span>':'';
+const marks=(r.open_marks||[]).map(m=>`<div><span style="${color(m.mark_pct)}">${esc(m.label)} ${pct(m.mark_pct,2)}</span><div class="u-hint">${esc(m.scope_label||'空头腿')} · ${esc(m.price_basis||'账本标价')} · ${esc(m.price_at?fmtDateTime(m.price_at):'价格时间未记录')}</div>${m.price_return_pct!=null&&m.funding_pct!=null?`<div class="u-hint">价格 ${pct(m.price_return_pct)} · 资金费 ${pct(m.funding_pct)} · 成本 ${pct(m.cost_pct)}</div>`:''}${m.is_partial?'<div class="u-hint">组合净浮盈暂无完整数据</div>':''}</div>`).join('');
 const win=r.win_rate===null||r.win_rate===undefined?'--':`${(Number(r.win_rate)*100).toFixed(0)}%`;
-return `<tr><td><strong>${esc(r.name)}</strong><div class="u-hint">${esc(r.group||'')}</div></td>`+
+const actual=paired?`<div class="u-hint">影子自身 ${pct(r.actual_mean_pct,3)}/天 · 同期原版 ${pct(r.paired_evaluation?.baseline?.mean_pct,3)}/天</div>`:'';
+return `<tr><td><strong>${esc(r.name)}</strong><div class="u-hint">${esc(r.group||'')} · ${esc(r.basis_label||'收益分母未记录')}</div></td>`+
 `<td style="max-width:320px;white-space:normal;">${esc(r.rule||'')}</td>`+
 `<td style="color:${verdictColor[r.verdict]||'var(--text-sub)'};" title="${esc(r.verdict_reason||'')}">${esc(r.verdict_label||r.verdict||'--')}</td>`+
 `<td>${Number(r.n||0)} / ${r.min_n??'--'} ${esc(unit)}${extra?`<div class="u-hint">${esc(extra)}</div>`:''}</td>`+
-`<td style="${color(r.mean_pct)}">${pct(r.mean_pct)}${ci}</td>`+
+`<td style="${color(r.mean_pct)}">${esc(r.metric_label||'净收益')} ${metric(r.mean_pct)} / ${esc(unit)}${ci}${actual}</td>`+
 `<td>${win}</td>`+
-`<td style="${color(r.total_pct)}">${pct(r.total_pct)}</td>`+
-`<td>${pct(r.backtest_mean_pct)} / ${esc(unit)}</td>`+
-`<td style="white-space:normal;">${marks?marks+hedgeNote:'--'}</td>`+
+`<td style="${color(r.gross_mean_pct)}">${metric(r.gross_mean_pct)} / ${esc(unit)}${paired?'<div class="u-hint">配对增益</div>':''}</td>`+
+`<td title="${esc(r.cost_scope||'')}">${metric(r.backtest_mean_pct)} / ${esc(unit)}</td>`+
+`<td style="white-space:normal;">${marks||'--'}</td>`+
 `<td>${esc(fmtDateTime(r.updated_at))}</td></tr>`;}).join('');
 const meta=document.getElementById('research-trackers-meta');
-if(meta){const done=rows.reduce((a,r)=>a+Number(r.n||0),0);const open=rows.reduce((a,r)=>a+Number(r.open||0),0);meta.textContent=`共 ${rows.length} 个跟踪器 · 已完成前向 ${done} 个样本 · 持仓 ${open} · 累计 = 前向均值 × 样本数（各跟踪器单位不同：笔 / 天 / 月）· 生成于 ${fmtDateTime(d.generated_at)}`;}
+if(meta)meta.textContent=`共 ${rows.length} 个跟踪器 · 各行样本单位、周期不同；影子和对冲版共享事件，样本数不相加 · 总名义敞口均值已统一分母，但不作跨周期排名 · 在持标价不是实时报价；区间为原登记描述口径 · 生成于 ${fmtDateTime(d.generated_at)}`;
+window.ResearchTrackerDiagnostics?.render(document.getElementById('research-tracker-diagnostics'),d.diagnostics);
 }
 async function loadResearchTrackers(){
 try{renderResearchTrackers(await api('/ai/research-trackers',{timeoutMs:15000}));}

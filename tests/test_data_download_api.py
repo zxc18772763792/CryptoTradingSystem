@@ -53,7 +53,7 @@ def test_kline_writer_delegates_incremental_updates_to_partition_storage(monkeyp
     )
     asyncio.run(data_api._save_df_to_parquet("binance", "ETH/USDT", "1m", frame))
     assert len(received) == 1
-    assert received[0].timestamp.tzinfo is None
+    assert received[0].timestamp.isoformat() == "2026-01-01T00:00:00+00:00"
     assert received[0].close == 100.5
 
 

@@ -4,15 +4,14 @@
 import asyncio
 import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import aiohttp
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from loguru import logger
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
+from scripts.download_data import write_download_frame
 
 
 async def fetch_json(session, url, params=None, timeout=30):
@@ -72,7 +71,7 @@ async def download_high_freq_data():
                         klines = []
                         for item in data:
                             klines.append({
-                                "timestamp": datetime.fromtimestamp(int(item[0])),
+                                "timestamp": datetime.fromtimestamp(int(item[0]), tz=timezone.utc),
                                 "open": float(item[5]),
                                 "high": float(item[3]),
                                 "low": float(item[4]),
@@ -105,8 +104,7 @@ async def download_high_freq_data():
                 file_path = data_path / "gate" / pair / f"{timeframe}.parquet"
                 file_path.parent.mkdir(parents=True, exist_ok=True)
 
-                table = pa.Table.from_pandas(df)
-                pq.write_table(table, str(file_path), compression='zstd')
+                write_download_frame(file_path, df)
 
                 logger.info(f"  ✓ 保存 {pair} {timeframe}: {len(df)} 条")
 
@@ -128,7 +126,7 @@ async def get_realtime_tick(session, symbol="BTC_USDT"):
         for trade in data:
             trades.append({
                 "id": trade["id"],
-                "timestamp": datetime.fromtimestamp(trade["create_time_ms"] / 1000),
+                "timestamp": datetime.fromtimestamp(trade["create_time_ms"] / 1000, tz=timezone.utc),
                 "price": float(trade["price"]),
                 "amount": float(trade["amount"]),
                 "side": "buy" if trade["side"] == "sell" else "sell",  # 注意：API返回的是taker方向
@@ -166,7 +164,7 @@ async def stream_realtime_trades(symbol="BTC_USDT", duration_seconds=60):
                 if data:
                     for trade in data:
                         trade_data = {
-                            "timestamp": datetime.fromtimestamp(trade["create_time_ms"] / 1000),
+                            "timestamp": datetime.fromtimestamp(trade["create_time_ms"] / 1000, tz=timezone.utc),
                             "price": float(trade["price"]),
                             "amount": float(trade["amount"]),
                             "side": "buy" if trade["side"] == "sell" else "sell",

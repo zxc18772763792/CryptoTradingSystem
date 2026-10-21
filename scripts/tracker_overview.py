@@ -83,14 +83,17 @@ def render(rows: List[Dict[str, Any]], now: datetime) -> str:
         if r.get("error"):
             out.append(f"| {r['group']} | {r['name']} | — | — | — | — | — | — | — | 读取失败：{r['error']} |")
             continue
-        unit = UNITS.get(r["unit"], r["unit"])
+        unit = "百分点/天" if r.get("metric_kind") == "paired_increment" else UNITS.get(r["unit"], r["unit"])
         mean = "—" if r.get("mean_pct") is None else f"{float(r['mean_pct']):+.2f}{unit}"
+        if r.get("metric_kind") == "paired_increment":
+            mean += "（影子减同期原版）"
         out.append(f"| {r['group']} | {r['name']} | {_day(r.get('started_at'))} | {r.get('n', 0)} / {r.get('min_n')} {r['unit']} | "
                    f"{mean} | {_ci(r.get('ci90_pct'))} | {_share(r.get('win_rate'))} | {_count(r.get('open'))} | "
                    f"{_count(r.get('waiting'))} | {r.get('verdict_label') or '—'} |")
     out += [
         "",
-        "- 平均和区间按各自的单位：每笔交易、每天、每月或每期（一份 7 天组合）的净收益，已扣手续费和资金费。",
+        "- 平均和区间按各自单位；反转过滤影子显示同日增益（百分点/天），不是自身收益。",
+        "- 反转以多空总名义金额计；七日组合、解锁和事件对冲以单腿名义金额计，折算总名义金额需除以二。供给因子未计借币可得性和借币成本。",
         "- 胜率：事件类是赚钱交易的占比；横截面反转是正收益天数的占比；合成组合是正收益期数的占比。",
         "- 区间从第 2 个样本起计算（同一条公告或同一天的几笔算一组），但样本不到门槛一半时只积累、不做判定。",
         "",
@@ -106,10 +109,11 @@ def render(rows: List[Dict[str, Any]], now: datetime) -> str:
     marks = [(r["name"], m) for r in rows for m in (r.get("open_marks") or [])]
     out += ["", "## 三、在持仓位（浮动收益，空头方向）", ""]
     if marks:
-        out += ["| 跟踪器 | 币 | 浮动收益 |", "|---|---|---:|"]
-        out += [f"| {name} | {m.get('label') or '—'} | {_pct(m.get('mark_pct'))} |" for name, m in marks]
+        out += ["| 跟踪器 | 币 | 记录浮盈 | 范围 / 价格时间 |", "|---|---|---:|---|"]
+        out += [f"| {name} | {m.get('label') or '—'} | {_pct(m.get('mark_pct'))} | "
+                f"{m.get('scope_label') or '空头腿'}；{m.get('price_basis') or '账本标价'}；{m.get('price_at') or '价格时间未记录'} |" for name, m in marks]
         out.append("")
-        out.append("因子类跟踪器（横截面反转、合成组合、供给因子）按组合持仓，不逐笔记浮动收益，结算后才有结果。")
+        out.append("以上是账本最近完整日标价，不是实时成交报价；缺少对冲腿的浮盈不当作组合净值。因子类结算后才有结果。")
     else:
         out.append("没有逐笔记浮动收益的在持仓位。")
     out += [

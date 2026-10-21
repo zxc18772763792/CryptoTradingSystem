@@ -121,6 +121,8 @@ SOURCE_IMPORTANCE = {
     "cryptopanic": 35,
     "cryptocompare_news": 34,
     "opennews": 42,
+    # User-selected commentary feed: eligible for analysis, below exchange sources.
+    "telegram_alastar": 35,
     "rss": 24,
     "newsapi": 18,
     "gdelt": 12,

@@ -37,6 +37,7 @@ from core.news.collectors.okx_announcements import OKXAnnouncementsCollector
 from core.news.collectors.opennews import OpenNewsCollector
 from core.news.collectors.quality import junk_reason
 from core.news.collectors.rss import RSSNewsCollector
+from core.news.collectors.telegram import TelegramPublicChannelCollector
 from core.news.storage import db as news_db
 
 
@@ -171,6 +172,7 @@ class MultiSourceNewsCollector:
             "coinglass_economic_data",
             "coinglass_financial_events",
             "coinglass_central_bank",
+            "telegram_alastar",
         ]
         self.sources: List[str] = [str(x).strip().lower() for x in raw_sources if str(x).strip()]
         if (
@@ -197,7 +199,9 @@ class MultiSourceNewsCollector:
         specs: List[_CollectorSpec] = []
         errors: List[str] = []
         selected = {str(x).strip().lower() for x in (source_names or self.sources) if str(x).strip()}
-        explicitly_only_opennews = source_names is not None and selected == {"opennews"}
+        explicitly_only_optional = source_names is not None and selected in (
+            {"opennews"}, {"telegram_alastar"},
+        )
         if not selected:
             selected = set(self.sources)
         coinglass_ready = bool(coinglass_enabled())
@@ -216,6 +220,12 @@ class MultiSourceNewsCollector:
             if name == "rss":
                 if _env_bool("NEWS_ENABLE_RSS", True):
                     specs.append(_CollectorSpec(name=name, collector=RSSNewsCollector(self.cfg)))
+                continue
+            if name == "telegram_alastar":
+                if _env_bool("NEWS_ENABLE_TELEGRAM_ALASTAR", True):
+                    specs.append(_CollectorSpec(name=name, collector=TelegramPublicChannelCollector(self.cfg)))
+                elif source_names is not None:
+                    errors.append("telegram_alastar disabled: NEWS_ENABLE_TELEGRAM_ALASTAR is false")
                 continue
             if name == "newsapi":
                 if not _env_bool("NEWS_ENABLE_NEWSAPI", True):
@@ -304,7 +314,7 @@ class MultiSourceNewsCollector:
                 continue
             errors.append(f"unsupported collector source: {name}")
 
-        if not specs and not explicitly_only_opennews:
+        if not specs and not explicitly_only_optional:
             specs.append(_CollectorSpec(name="jin10", collector=Jin10Collector(self.cfg)))
             specs.append(_CollectorSpec(name="rss", collector=RSSNewsCollector(self.cfg)))
             specs.append(_CollectorSpec(name="gdelt", collector=GDELTCollector(self.cfg)))

@@ -1342,6 +1342,9 @@ async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd
     if df.empty:
         return
 
+    if df.attrs.get("cts_timestamp_status") == "unverified_naive":
+        raise ValueError("Unverified historical timestamps require a timezone audit before writing")
+
     normalized = _normalize_kline_frame_for_compare(df)
     required_columns = {"open", "high", "low", "close"}
     if normalized.empty or not required_columns.issubset(normalized.columns):
@@ -1352,7 +1355,7 @@ async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd
             exchange=exchange,
             symbol=symbol,
             timeframe=timeframe,
-            timestamp=pd.Timestamp(timestamp).to_pydatetime(),
+            timestamp=pd.Timestamp(timestamp).tz_localize("UTC").to_pydatetime(),
             open=float(open_price),
             high=float(high_price),
             low=float(low_price),

@@ -26,6 +26,7 @@ from core.research import (
     coinglass_daily_store,
     coinglass_snapshot_archive,
     delist_risk,
+    event_risk_monitor,
     exchange_notices,
     listing_short_tracker,
     supply_factor_tracker,
@@ -255,6 +256,9 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             await _verdict_alert("xs_reversal", _status["xs_reversal"])
             await _verdict_alert("xs_reversal_liq_filter", _status["xs_reversal"].get("liq_filter") or {})
 
+        async def risk_shadows():
+            _status["event_risk_shadows"] = await event_risk_monitor.poll(client)
+
         async def coinglass_snapshot():
             _status["coinglass_snapshot"] = await coinglass_snapshot_archive.tick()
 
@@ -284,6 +288,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
 
         # first: a slow notices/tracker job must not push the 00:00 formation past its window
         await _run_job("xs_reversal", XS_REVERSAL_INTERVAL_SEC, now, force, xs_reversal)
+        await _run_job("event_risk_shadows", XS_REVERSAL_INTERVAL_SEC, now, force, risk_shadows)
         await _run_job("notices", NOTICE_INTERVAL_SEC, now, force, notices)
         await _run_job("tracker", TRACKER_INTERVAL_SEC, now, force, listing)
         await _run_job("unlock", UNLOCK_INTERVAL_SEC, now, force, unlock)

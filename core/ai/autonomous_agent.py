@@ -925,6 +925,14 @@ class AutonomousTradingAgent:
             return self._override[name]
         return getattr(settings, name, fallback)
 
+    def _model_hard_timeout_sec(self) -> float:
+        """Hard cap on one model round across all fallbacks; 0/unset keeps the built-in default."""
+        try:
+            configured = float(self._get("AI_AUTONOMOUS_AGENT_HARD_TIMEOUT_SEC", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            configured = 0.0
+        return min(300.0, configured) if configured > 0 else float(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC)
+
     @staticmethod
     def _position_owned_by_strategy(position: Any, strategy_name: Optional[str]) -> bool:
         target_strategy = str(strategy_name or "").strip()
@@ -1508,7 +1516,7 @@ class AutonomousTradingAgent:
             "last_failure_label": last_failure_issue.get("label") if self._model_feedback_last_failure_kind else None,
             "alert_sent_at": _utc_iso_from_unix(self._model_feedback_alert_sent_at),
             "alert_after_sec": _MODEL_FEEDBACK_OUTAGE_ALERT_SEC,
-            "hard_timeout_sec": _MODEL_FEEDBACK_HARD_TIMEOUT_SEC,
+            "hard_timeout_sec": self._model_hard_timeout_sec(),
         }
 
     def _reset_model_feedback_outage(self) -> None:
@@ -1940,7 +1948,7 @@ class AutonomousTradingAgent:
                 # Share a single budget and reserve time for every fallback.
                 # Compatibility retries on one endpoint share its deadline too.
                 deadline = time.monotonic() + min(
-                    timeout.total, max(0.001, _MODEL_FEEDBACK_HARD_TIMEOUT_SEC - 1.0)
+                    timeout.total, max(0.001, self._model_hard_timeout_sec() - 1.0)
                 )
                 for idx, target in enumerate(targets):
                     target_base_url = str(target.get("base_url") or "").rstrip("/")
@@ -6286,7 +6294,7 @@ class AutonomousTradingAgent:
                             system_prompt=system_prompt,
                             user_prompt=user_prompt,
                         ),
-                        timeout=float(_MODEL_FEEDBACK_HARD_TIMEOUT_SEC),
+                        timeout=self._model_hard_timeout_sec(),
                     )
                     raw_decision_source = "provider"
                     if self._last_answered_model is None:

@@ -42,6 +42,7 @@ import pandas as pd
 from loguru import logger
 
 from core.research import retirement
+from core.research.paired_evaluation import evaluate_reversal_pairs
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR = PROJECT_ROOT / "data" / "research" / "xs_reversal"
@@ -151,23 +152,39 @@ async def _form(client, state: Dict[str, Any], day: datetime, now: datetime) -> 
         record["status"] = "too_few_coins"
         return record
     longs, shorts = legs
+    signal_ready_at = _now().isoformat()
     marks: Dict[str, float] = {}
+    marks_observed_at = None
     try:
         tick = await client.get(f"{FAPI}/ticker/price")
         if tick.status_code == 200:
             marks = {r["symbol"]: float(r["price"]) for r in tick.json()}
+            marks_observed_at = _now().isoformat()
     except Exception:  # noqa: BLE001 - diagnostic only
         pass
     # after the marks: the shadow may wait on the relay, and its entries are the same 23:00 closes
     record["liq_filter"] = await _liq_filter_legs(signal, perps, day)
+    shadow_ready_at = _now().isoformat()
+    # New records retain the actual observation/decision timing. formed_at is
+    # historically the tick's start; preserve it and the frozen late/entry rules.
+    record["formation_audit"] = {
+        "version": 1, "signal_price_at": day.isoformat(), "tick_started_at": now.isoformat(),
+        "signal_ready_at": signal_ready_at, "price_snapshot_observed_at": marks_observed_at,
+        "shadow_ready_at": shadow_ready_at, "price_quote_kind": "binance_last_trade_ticker_without_exchange_timestamp",
+        "quote_is_executable": False,
+    }
     record.update(
         status="open",
-        longs={s: {"entry": float(closes[s].iloc[-1]), "mark_at_formation": marks.get(s), "signal": round(float(signal[s]), 6)} for s in longs},
-        shorts={s: {"entry": float(closes[s].iloc[-1]), "mark_at_formation": marks.get(s), "signal": round(float(signal[s]), 6)} for s in shorts},
+        longs={s: {"entry": float(closes[s].iloc[-1]), "mark_at_formation": marks.get(s), "mark_observed_at": marks_observed_at,
+                   "signal": round(float(signal[s]), 6)} for s in longs},
+        shorts={s: {"entry": float(closes[s].iloc[-1]), "mark_at_formation": marks.get(s), "mark_observed_at": marks_observed_at,
+                    "signal": round(float(signal[s]), 6)} for s in shorts},
     )
     shadow = record["liq_filter"]
     if shadow.get("status") == "open":
-        shadow["longs"] = {s: {"entry": float(closes[s].iloc[-1]), "signal": round(float(signal[s]), 6)} for s in shadow["longs"]}
+        shadow.update(date=day.date().isoformat(), entry_bar_ms=entry_bar_ms)
+        shadow["longs"] = {s: {"entry": float(closes[s].iloc[-1]), "mark_at_formation": marks.get(s),
+                               "mark_observed_at": marks_observed_at, "signal": round(float(signal[s]), 6)} for s in shadow["longs"]}
     return record
 
 
@@ -369,6 +386,7 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
     returns = [float(d["net_per_position_pct"]) for d in counted]
     rule = state.get("retirement_rule") or retirement.RULES["xs_reversal"]
     last = max(days) if days else None
+    paired = evaluate_reversal_pairs(days, round_trip_cost_pct=ROUND_TRIP_COST * 100)
     return {
         "started_at": state.get("started_at"),
         "updated_at": state.get("updated_at"),
@@ -385,11 +403,12 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "last_day_legs": {"longs": sorted(days[last].get("longs") or {}), "shorts": sorted(days[last].get("shorts") or {})} if last else None,
         "backtest_reference": BACKTEST_REFERENCE,
         "retirement": retirement.verdict(returns, rule),
-        "liq_filter": _liq_filter_summary(state, counted),
+        "liq_filter": _liq_filter_summary(state, counted, paired),
+        "paired_evaluation": paired,
     }
 
 
-def _liq_filter_summary(state: Dict[str, Any], counted: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _liq_filter_summary(state: Dict[str, Any], counted: List[Dict[str, Any]], paired: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The shadow, judged on its daily difference from the main portfolio (both closed, not late)."""
     shadow = [d["liq_filter"] for d in counted if (d.get("liq_filter") or {}).get("status") == "closed"]
     diffs = [float(x["diff_pct"]) for x in shadow]
@@ -402,4 +421,5 @@ def _liq_filter_summary(state: Dict[str, Any], counted: List[Dict[str, Any]]) ->
         "no_data_days": sum((d.get("liq_filter") or {}).get("status") == "no_data" for d in counted),
         "forward_open": sum((d.get("liq_filter") or {}).get("status") == "open" for d in (state.get("days") or {}).values()),
         "retirement": retirement.verdict(diffs, rule),
+        "paired_evaluation": paired if paired is not None else evaluate_reversal_pairs(state.get("days") or {}, round_trip_cost_pct=ROUND_TRIP_COST * 100),
     }

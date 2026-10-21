@@ -42,7 +42,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.data.data_storage import data_storage  # noqa: E402
+from core.data.data_storage import (  # noqa: E402
+    data_storage,
+    prepare_utc_kline_frame,
+    _heal_local_existing_against_utc,
+)
 from core.data.parquet_lock import parquet_partition_lock  # noqa: E402
 from core.data.path_utils import (  # noqa: E402
     candidate_symbol_dirs,
@@ -554,22 +558,20 @@ async def save_klines_compact(key: SeriesKey, klines: Sequence[Kline]) -> str:
         for item in klines
     ]
     incoming = pd.DataFrame(rows)
-    incoming["timestamp"] = pd.to_datetime(incoming["timestamp"], errors="coerce", utc=True)
-    incoming = incoming.dropna(subset=["timestamp"]).set_index("timestamp")
-    incoming.index = incoming.index.tz_localize(None)
-    incoming = incoming[~incoming.index.duplicated(keep="last")].sort_index()
+    incoming = prepare_utc_kline_frame(incoming.set_index("timestamp"), origin="writer:binance_compact")
     target = canonical_symbol_dir(Path(data_storage.storage_path), key.namespace, key.symbol) / f"{key.timeframe}.parquet"
 
     def _merge_write() -> str:
         target.parent.mkdir(parents=True, exist_ok=True)
         with parquet_partition_lock(target, timeout_seconds=60):
             combined = incoming
+            existing = None
             if target.exists():
                 existing = pd.read_parquet(target)
-                existing.index = pd.to_datetime(existing.index, errors="coerce", utc=True).tz_localize(None)
-                existing = existing[~existing.index.isna()]
+                existing = _heal_local_existing_against_utc(existing, incoming)
                 combined = pd.concat([existing, incoming])
             combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+            combined.attrs = {**(existing.attrs if existing is not None else {}), **incoming.attrs}
             temp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
             try:
                 pq.write_table(

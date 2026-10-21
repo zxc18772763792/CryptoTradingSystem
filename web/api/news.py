@@ -210,6 +210,7 @@ def _news_source_flags() -> Dict[str, bool]:
     return {
         "jin10": jin10_enabled,
         "rss": rss_enabled,
+        "telegram_alastar": _enabled("NEWS_ENABLE_TELEGRAM_ALASTAR", True),
         "gdelt": gdelt_enabled,
         "newsapi": newsapi_enabled,
         "cryptopanic": cryptopanic_enabled,

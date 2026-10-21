@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,7 +31,7 @@ import numpy as np
 import pandas as pd
 from loguru import logger
 
-from core.research import retirement
+from core.research import event_risk_shadow, retirement
 from core.research.unlock_events import LLAMA_DATASETS, cliff_events, entry_price, entry_ticker, unlocked_series
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -68,8 +69,34 @@ def _now() -> pd.Timestamp:
 
 def load_state(path: Path = STATE_PATH) -> Dict[str, Any]:
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
+        # Older open marks used entry/last-1. Normalize the read view once; realized
+        # returns and the source file remain untouched until its normal tracker pass.
+        for trade in state.get("trades", {}).values():
+            if trade.get("status") == "open":
+                mark = linear_open_mark(trade)
+                if mark is not None:
+                    trade.update(mark_return_pct=mark, mark_formula_version=2)
+        return state
     return {"started_at": datetime.now(timezone.utc).isoformat(), "trades": {}}
+
+
+def linear_open_mark(trade: Dict[str, Any]) -> Optional[float]:
+    """Short price P&L only; gracefully normalize an unversioned inverse mark."""
+    value = trade.get("mark_return_pct")
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+        if not math.isfinite(value):
+            return None
+        if trade.get("mark_formula_version") == 2:
+            return value
+        if value <= -100:
+            return None  # an inverse-price mark can never reach -100%
+        return round(100 * (1 - 1 / (1 + value / 100)), 2)
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        return None
 
 
 def save_state(state: Dict[str, Any], path: Path = STATE_PATH) -> None:
@@ -201,6 +228,10 @@ async def tick(client, state_path: Optional[Path] = None, variant: str = "t30") 
     state = load_state(state_path)
     now = _now()
     today = now.normalize()
+    if event_risk_shadow.STATE_KEY not in state:
+        event_risk_shadow.register(state, now, [key for key, t in state.get("trades", {}).items()
+                                               if t.get("status") != "scheduled"])
+        save_state(state, state_path)
     universe = await build_universe(client)
     cliffs: Dict[str, List[Dict[str, Any]]] = {}
     for ticker, token in universe.items():
@@ -226,6 +257,17 @@ async def tick(client, state_path: Optional[Path] = None, variant: str = "t30") 
                 "late": bool(entry_day < today), "discovered_at": now.isoformat(), "status": "scheduled",
             }
 
+    # The independent risk experiment can be observed between six-hour schedule
+    # updates. Freeze a pre-entry hedge list; never look forward to the baseline's
+    # later basket selection to manufacture a historical shadow entry.
+    for trade in state["trades"].values():
+        if trade.get("status") == "scheduled" and "risk_hedge_symbols" not in trade:
+            unlock = pd.Timestamp(trade["unlock_date"], tz="UTC")
+            members = [t for t, evs in cliffs.items() if t != trade["token"] and t in universe
+                       and not any(abs((unlock-e["date"]).days) <= BASKET_EXCLUDE_DAYS for e in evs)]
+            trade.update(risk_hedge_symbols=[universe[t]["symbol"] for t in members],
+                         risk_hedge_frozen_at=now.isoformat())
+
     # 2) enter / manage / close
     for key, trade in state["trades"].items():
         if trade["status"] in {"closed", "stopped", "schedule_changed", "entry_failed"}:
@@ -235,9 +277,24 @@ async def tick(client, state_path: Optional[Path] = None, variant: str = "t30") 
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"unlock tracker: update failed for {key}: {exc}")
     state["updated_at"] = now.isoformat()
+    try:
+        await event_risk_shadow.apply_to_tracker(client, state, risk_shadow_sources(state), now, clock=_now)
+    except Exception as exc:  # optional paper experiment must not change baseline results
+        logger.debug(f"unlock risk shadow unavailable: {exc}")
     retirement.register(state, spec["rule"], now.isoformat())
     save_state(state, state_path)
     return summary(state, variant)
+
+
+def risk_shadow_sources(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [{"source_id": key, "symbol": t.get("symbol"),
+             "source_entry_ms": int((pd.Timestamp(t["entry_day"], tz="UTC") + DAY).timestamp()*1000),
+             "source_exit_due_ms": int((pd.Timestamp(t["exit_day"], tz="UTC") + DAY).timestamp()*1000),
+             "discovered_at": t.get("discovered_at"), "source_status": t.get("status"),
+             "eligible": bool(t.get("symbol")) and not t.get("late"), "hedged": True,
+             "hedge_symbols": t.get("risk_hedge_symbols") or [],
+             "hedge_frozen_at": t.get("risk_hedge_frozen_at")}
+            for key, t in state.get("trades", {}).items() if t.get("entry_day") and t.get("exit_day")]
 
 
 async def _update_trade(client, trade, universe, cliffs, now) -> None:
@@ -272,7 +329,9 @@ async def _update_trade(client, trade, universe, cliffs, now) -> None:
         return await _close(client, trade, exit_day, "closed", bars)
     last = closed_close(bars, now.normalize() - DAY, now)
     if last:
-        trade["mark_return_pct"] = round((entry / last - 1) * 100, 2)  # unhedged, pre-funding, for display only
+        trade.update(mark_return_pct=round((1 - last / entry) * 100, 2), mark_formula_version=2,
+                     mark_price=last, mark_price_at=now.normalize().isoformat(),
+                     mark_scope="short_price_only")  # previous completed daily close, not a live executable quote
 
 
 async def _close(client, trade, day, status, bars, stop_price: Optional[float] = None) -> None:
@@ -310,6 +369,7 @@ def summary(state: Dict[str, Any], variant: str = "t30") -> Dict[str, Any]:
         "forward_mean_hedged_pct": round(float(np.mean(hedged)), 2) if hedged else None,
         "forward_win_rate": round(float(np.mean([h > 0 for h in hedged])), 3) if hedged else None,
         "variant": variant,
+        "event_risk_shadow": event_risk_shadow.summary(state.get(event_risk_shadow.STATE_KEY)),
         "backtest_reference": spec["reference"],
         "evaluation_ready": len(hedged) >= retirement.RULES[spec["rule"]]["min_n"],
         # unlocks entered on the same day share the basket period: one cluster per entry day

@@ -6604,9 +6604,10 @@ ${confirmHint}`,
       <h3 style="margin:0;">${esc(cfg.title)}</h3>
       <div style="margin-top:6px;color:var(--text-sub);">前向：待入场 ${Number(s.forward_scheduled || 0)} · 持有 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)}（排期变更 ${Number(s.forward_schedule_changed || 0)}）· 对冲后均值 ${pct(s.forward_mean_hedged_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : `样本不足 ${cfg.minN} 笔，暂不评估`}</div>
       ${trackerVerdictLine(s)}
+      ${window.ResearchTrackerDiagnostics?.risk(s.event_risk_shadow) || ''}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${esc(cfg.rule)}纸面记录，不下单；启动时已过入场日的标为"迟到"，不计入前向统计。</div>
       ${trades.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>代币</th><th>解锁日</th><th>规模</th><th>类型</th><th>入场日</th><th>状态</th><th>对冲后</th><th>仅空头</th><th></th></tr></thead><tbody>
-        ${trades.map((t) => `<tr><td>${esc(t.token)}</td><td>${esc(t.unlock_date)}</td><td>${Number(t.size_pct).toFixed(1)}%</td><td>${t.insider ? '团队/投资人' : '生态/其他'}</td><td>${esc(t.entry_day)}</td><td>${esc(statusNames[t.status] || t.status)}</td><td style="color:${Number(t.hedged_return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.hedged_return_pct)}</td><td>${pct(t.short_return_pct ?? t.mark_return_pct)}</td><td>${t.late ? '迟到' : ''}</td></tr>`).join('')}
+        ${trades.map((t) => `<tr><td>${esc(t.token)}</td><td>${esc(t.unlock_date)}</td><td>${Number(t.size_pct).toFixed(1)}%</td><td>${t.insider ? '团队/投资人' : '生态/其他'}</td><td>${esc(t.entry_day)}</td><td>${esc(statusNames[t.status] || t.status)}</td><td style="color:${Number(t.hedged_return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.hedged_return_pct)}</td><td title="${esc(t.status === 'open' ? `最近完整日收盘；价格时间 ${t.mark_price_at || '未记录'}；不含资金费/成本/对冲` : '已结算空头净收益')}">${pct(t.short_return_pct ?? t.mark_return_pct)}${t.status === 'open' ? '<div class="u-hint">空头价格毛收益</div>' : ''}</td><td>${t.late ? '迟到' : ''}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器每 6 小时检查未来 60 天的大额解锁。</div>'}`;
   }
 
@@ -6716,7 +6717,8 @@ ${confirmHint}`,
       <h3 style="margin:0;">${esc(cfg.title)}</h3>
       <div style="margin-top:6px;color:var(--text-sub);">前向：待入场 ${Number(s.forward_waiting || 0)} · 持有 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)} · 均值 ${pct(s.forward_mean_return_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · 回填 ${Number(s.backfilled || 0)} · 无永续 ${Number(s.no_perp || 0)} · 晚到 ${Number(s.forward_late || 0)}</div>
       ${trackerVerdictLine(s)}
-      <div class="u-note" style="margin-top:4px;">当时证据：入场盘口 ${Number(s.evidence_coverage?.book_at_entry || 0)}/${Number(s.evidence_coverage?.completed || 0)} · 5 分钟路径 ${Number(s.evidence_coverage?.path || 0)} · 同期市场对照 ${Number(s.evidence_coverage?.market_control || 0)}（扣除市场后均值 ${pct(s.forward_hedged_mean_return_pct)}）。晚到 = 入场收盘后才发现公告，不计入前向统计。</div>
+      ${window.ResearchTrackerDiagnostics?.risk(s.event_risk_shadow) || ''}
+      <div class="u-note" style="margin-top:4px;">当时证据：入场盘口 ${Number(s.evidence_coverage?.book_at_entry || 0)}/${Number(s.evidence_coverage?.completed || 0)} · 5 分钟路径 ${Number(s.evidence_coverage?.path || 0)} · 同期市场对照 ${Number(s.evidence_coverage?.market_control || 0)}（扣大盘诊断均值 ${pct(s.forward_hedged_mean_return_pct)}，未扣篮子成本与资金费）。收益按${cfg.hedged ? '单腿名义金额，多空各一份' : '空头入场名义金额'}计。晚到 = 入场收盘后才发现公告，不计入前向统计。</div>
       ${s.forward_bithumb_only_completed === undefined ? '' : `<div class="u-note" style="margin-top:4px;">仅 Bithumb（Upbit 7 天内未同时警示，独立证据）：完成 ${Number(s.forward_bithumb_only_completed || 0)} 笔 · 均值 ${pct(s.forward_bithumb_only_mean_return_pct)}</div>`}
       ${s.forward_upbit_completed === undefined ? '' : `<div class="u-note" style="margin-top:4px;">按先警示的交易所：Upbit ${Number(s.forward_upbit_completed || 0)} 笔 · 均值 ${pct(s.forward_upbit_mean_return_pct)}；Bithumb ${Number(s.forward_bithumb_completed || 0)} 笔 · 均值 ${pct(s.forward_bithumb_mean_return_pct)}；两所都警示 ${Number(s.forward_joint_completed || 0)} 笔 · 均值 ${pct(s.forward_joint_mean_return_pct)}。不对冲（只做空）均值 ${pct(s.forward_unhedged_mean_return_pct)}，仅供参考。</div>`}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${esc(cfg.note)}</div>
@@ -6766,7 +6768,8 @@ ${confirmHint}`,
       <h3 style="margin:0;">日线横截面反转（纸面）</h3>
       <div style="margin-top:6px;color:var(--text-sub);">每天 00:00 UTC 按 1h 均线偏离排序：做多跌得最深的 10%、做空涨得最多的 10%，持有 24 小时。前向完成 ${Number(s.forward_completed || 0)} 天 · 每仓净值均值 ${pct(s.forward_mean_net_pct, 3)} · 正收益天数 ${s.forward_positive_days == null ? '--' : `${(Number(s.forward_positive_days) * 100).toFixed(0)}%`} · 晚到 ${Number(s.late || 0)} · 错过 ${Number(s.missed || 0)} · 币池 ${Number(s.universe_size || 0)}</div>
       ${trackerVerdictLine(s)}
-      ${s.liq_filter ? `<div class="u-note" style="margin-top:4px;">影子 · 剔除爆仓异常：完成 ${Number(s.liq_filter.completed || 0)} 天 · 平均每天比原版 ${pct(s.liq_filter.mean_diff_pct, 3)} · 每天约剔除 ${s.liq_filter.flagged_per_day ?? '--'} 个 · 判定：${esc(s.liq_filter.retirement?.label || '--')}（${esc(s.liq_filter.retirement?.reason || '')}）。只在多头候选里剔除当天爆仓异常前 20% 的币，空头不变；回放 596 天平均每天多 +0.031%，区间含 0，要靠前向确认。</div>` : ''}
+      ${s.liq_filter ? `<div class="u-note" style="margin-top:4px;">影子 · 剔除爆仓异常：完成 ${Number(s.liq_filter.completed || 0)} 天 · 自身净收益 ${pct(s.liq_filter.mean_net_pct, 3)}/天 · 相对同日原版增益 ${pct(s.liq_filter.mean_diff_pct, 3).replace('%', ' 个百分点')}/天 · 每天约剔除 ${s.liq_filter.flagged_per_day ?? '--'} 个 · 判定：${esc(s.liq_filter.retirement?.label || '--')}（${esc(s.liq_filter.retirement?.reason || '')}）。只在多头候选里剔除当天爆仓异常前 20% 的币，空头不变；回放 596 天平均每天多 +0.031 个百分点，区间含 0，要靠前向确认。</div>` : ''}
+      ${window.ResearchTrackerDiagnostics?.paired(s.paired_evaluation) || ''}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。日波动约 1.5%，回测均值仅 +0.057%/天，180 天远远测不出这么小的优势（以 80% 把握确认需要约 12 年）。它只能发现两种情况：明显在亏（约 −0.2%/天以下会提前判退役），或远好于回测（约 +0.3%/天以上才有把握确认）。注意：即使真实优势和回测一样，满 180 天时也有约 30% 的概率因均值≤0 被判退役。</div>
       ${days.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>日期</th><th>状态</th><th>币数/每边</th><th>多头腿</th><th>空头腿</th><th>每仓净值</th><th></th></tr></thead><tbody>
         ${days.slice(0, 20).map((d) => `<tr><td>${esc(d.day)}</td><td>${esc(statusNames[d.status] || d.status || '--')}</td><td>${d.coins ?? '--'} / ${d.per_side || '--'}</td><td>${pct(d.long_leg_pct)}</td><td>${pct(d.short_leg_pct)}</td><td style="color:${Number(d.net_per_position_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(d.net_per_position_pct, 3)}</td><td>${d.late ? '晚到' : ''}${d.missing_positions ? ` 缺 ${Number(d.missing_positions)}` : ''}</td></tr>`).join('')}
@@ -6794,7 +6797,7 @@ ${confirmHint}`,
     const poll = payload?.poll || {};
     panel.innerHTML = `
       <h3 style="margin:0;">币安公告后短线做空 · 纸面跟踪</h3>
-      ${kinds.map((k) => { const s = payload?.[k]?.summary || {}; return `<div style="margin-top:6px;color:var(--text-sub);">${esc(names[k])}：完成 ${Number(s.forward_completed || 0)} · 持有 ${Number(s.forward_open || 0)} · 均值 ${pct(s.forward_mean_return_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · 扣大盘 ${pct(s.forward_hedged_mean_return_pct)} · 晚到 ${Number(s.late || 0)} · 中位发现延迟 ${s.median_latency_sec == null ? '--' : `${Number(s.median_latency_sec).toFixed(0)}s`} · 卖 1 万美元实测冲击 ${pct(s.median_sell_10k_impact_pct, 3)}（假设 0.2%）</div>${trackerVerdictLine(s)}`; }).join('')}
+      ${kinds.map((k) => { const s = payload?.[k]?.summary || {}; return `<div style="margin-top:6px;color:var(--text-sub);">${esc(names[k])}：完成 ${Number(s.forward_completed || 0)} · 持有 ${Number(s.forward_open || 0)} · 均值 ${pct(s.forward_mean_return_pct)} · 胜率 ${s.forward_win_rate == null ? '--' : `${(Number(s.forward_win_rate) * 100).toFixed(0)}%`} · 扣大盘诊断（未扣篮子成本） ${pct(s.forward_hedged_mean_return_pct)} · 晚到 ${Number(s.late || 0)} · 中位发现延迟 ${s.median_latency_sec == null ? '--' : `${Number(s.median_latency_sec).toFixed(0)}s`} · 卖 1 万美元实测冲击 ${pct(s.median_sell_10k_impact_pct, 3)}（假设 0.2%）</div>${trackerVerdictLine(s)}${window.ResearchTrackerDiagnostics?.risk(s.event_risk_shadow) || ''}`; }).join('')}
       <div class="u-note" style="margin-top:4px;">每 90 秒检查币安公告栏目（监控标签、下架）。首次发现即按当时最新成交价纸面做空永续，发现延迟计入结果；发布后超过 15 分钟才发现记为"晚到"不计入。收益扣 0.3%（手续费 0.1% + 假设滑点 0.2%）并计资金费；记录入场盘口与卖出 1 万美元的实测冲击，用来检验滑点假设。回测为 120 个组合中挑出，以前向结果为准。最近检查：${esc(poll.last_poll_at ? fmtTs(new Date(poll.last_poll_at)) : '--')}。纸面记录，不下单。</div>
       ${rows.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>类型</th><th>代币</th><th>公告时间</th><th>发现延迟</th><th>状态</th><th>收益（空头）</th><th>扣大盘</th></tr></thead><tbody>
         ${rows.map((t) => `<tr><td>${t.kind === 'binance_monitor' ? '监控标签' : '下架'}</td><td>${esc(t.symbol || t.token)}</td><td>${esc(t.published_at ? fmtTs(new Date(t.published_at)) : '--')}</td><td>${t.latency_sec == null ? '--' : `${Number(t.latency_sec).toFixed(0)}s`}${t.late ? ' 晚到' : ''}</td><td>${esc(statusNames[t.status] || t.status || '--')}</td><td style="color:${Number(t.return_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(t.return_pct)}</td><td>${pct(t.evidence?.market_control?.hedged_return_pct)}</td></tr>`).join('')}
@@ -6840,7 +6843,7 @@ ${confirmHint}`,
       : '每天约 790 次 Coinglass 请求';
     panel.innerHTML = `
       <h3 style="margin:0;">Coinglass 七日合成组合${wide ? ' · 等权扩池' : ''}（纸面）</h3>
-      <div style="margin-top:6px;color:var(--text-sub);">${intro}完成 ${Number(s.main?.completed || 0)} 期 · 每期净值均值 ${pct(s.main?.mean_net_pct, 3)} · 正收益占比 ${s.main?.positive_share == null ? '--' : `${(Number(s.main.positive_share) * 100).toFixed(0)}%`} · 持有中 ${Number(s.main?.open || 0)} 期 · 错过 ${Number(s.missed || 0)} 天</div>
+      <div style="margin-top:6px;color:var(--text-sub);">${intro}完成 ${Number(s.main?.completed || 0)} 期 · 单腿名义金额净收益 ${pct(s.main?.mean_net_pct, 3)}/期 · 多空总名义金额 ${pct(s.main?.mean_net_pct == null ? null : Number(s.main.mean_net_pct)/2, 3)}/期 · 正收益占比 ${s.main?.positive_share == null ? '--' : `${(Number(s.main.positive_share) * 100).toFixed(0)}%`} · 持有中 ${Number(s.main?.open || 0)} 期 · 错过 ${Number(s.missed || 0)} 天</div>
       ${trackerVerdictLine(s)}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${powerNote}影子（${shadowName}）：完成 ${Number(s.shadow?.completed || 0)} 期 · 均值 ${pct(s.shadow?.mean_net_pct, 3)}，只记录不判定。数据：${esc(store.day || '--')} 的日线${store.completed_at ? `已于 ${esc(fmtTs(new Date(store.completed_at)))} 更新完` : '更新中'}（${dataNote}）。纸面记录，不下单。</div>
       ${latest ? `<div class="u-note" style="margin-top:4px;">最新一期（${esc(latest.day)}）多头：${names(latest.longs)}；空头：${names(latest.shorts)}</div>` : ''}
@@ -6856,6 +6859,15 @@ ${confirmHint}`,
     try {
       renderCoinglassCompositeTracker(await aiApi('/coinglass-composite?variant=wide', { timeoutMs: 12000 }), 'wide');
     } catch (err) { /* optional panel */ }
+    try {
+      const attribution = await aiApi('/coinglass-attribution', { timeoutMs: 15000 });
+      const panel = document.getElementById('ai-coinglass-composite-tracker');
+      if (panel && window.ResearchTrackerDiagnostics) {
+        let section = panel.querySelector('.coinglass-attribution');
+        if (!section) { section = document.createElement('div'); section.className = 'coinglass-attribution'; panel.appendChild(section); }
+        section.innerHTML = window.ResearchTrackerDiagnostics.composite(attribution);
+      }
+    } catch (err) { /* attribution source unavailable; baseline cards remain usable */ }
   }
 
   async function refreshXsReversalTracker() {

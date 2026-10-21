@@ -1954,6 +1954,7 @@ def test_agent_model_feedback_guard_hard_timeout_alerts_and_ends_round(monkeypat
     monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
     monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "live")
     monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+    monkeypatch.setattr(module.settings, "AI_AUTONOMOUS_AGENT_HARD_TIMEOUT_SEC", 0.0, raising=False)
     monkeypatch.setattr(module, "_MODEL_FEEDBACK_HARD_TIMEOUT_SEC", 0.01)
     monkeypatch.setattr(module, "_MODEL_FEEDBACK_OUTAGE_ALERT_SEC", 0.0)
     send_mock = AsyncMock(return_value={"feishu": True})
@@ -1978,6 +1979,42 @@ def test_agent_model_feedback_guard_hard_timeout_alerts_and_ends_round(monkeypat
     assert "model_feedback_guard_timeout" in result["decision"]["reason"]
     assert send_mock.await_count == 1
     assert agent.get_status()["model_feedback_guard"]["last_failure_kind"] == "timeout"
+
+
+def test_agent_hard_timeout_setting_lets_a_slow_backup_finish(monkeypatch, tmp_path: Path):
+    import core.ai.autonomous_agent as module
+
+    agent = module.AutonomousTradingAgent(cache_root=tmp_path)
+    monkeypatch.setattr(module.settings, "AI_AUTONOMOUS_AGENT_HARD_TIMEOUT_SEC", 0.0, raising=False)
+    monkeypatch.setattr(module, "_MODEL_FEEDBACK_HARD_TIMEOUT_SEC", 0.01)
+    assert agent._model_hard_timeout_sec() == 0.01  # unset keeps the built-in cap
+    monkeypatch.setattr(module.settings, "AI_AUTONOMOUS_AGENT_HARD_TIMEOUT_SEC", 1.0, raising=False)
+    assert agent._model_hard_timeout_sec() == 1.0
+    assert agent.get_status()["model_feedback_guard"]["hard_timeout_sec"] == 1.0
+    monkeypatch.setattr(module.settings, "AI_AUTONOMOUS_AGENT_HARD_TIMEOUT_SEC", 9999, raising=False)
+    assert agent._model_hard_timeout_sec() == 300.0
+
+    class _Agg:
+        def to_dict(self):
+            return {"direction": "SHORT", "confidence": 0.74}
+
+    monkeypatch.setattr(module.settings, "AI_AUTONOMOUS_AGENT_HARD_TIMEOUT_SEC", 1.0, raising=False)
+    monkeypatch.setattr(module.data_storage, "load_klines_from_parquet", AsyncMock(return_value=_sample_df()))
+    monkeypatch.setattr(module, "signal_aggregator", SimpleNamespace(aggregate=AsyncMock(return_value=_Agg())))
+    monkeypatch.setattr(module.position_manager, "get_position", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.execution_engine, "get_trading_mode", lambda: "paper")
+    monkeypatch.setattr(module.execution_engine, "submit_signal", AsyncMock(return_value=True))
+
+    async def _slow_call_provider(**kwargs):
+        await asyncio.sleep(0.05)  # longer than the built-in cap patched above, shorter than the setting
+        return {"action": "hold", "confidence": 0.5, "strength": 0.5, "leverage": 1, "reason": "slow_but_answered"}
+
+    monkeypatch.setattr(agent, "_call_provider", _slow_call_provider)
+    asyncio.run(agent.update_runtime_config(enabled=True, mode="execute", cooldown_sec=0))
+    result = asyncio.run(agent.run_once(trigger="test", force=True))
+
+    assert "model_feedback_guard_timeout" not in result["decision"]["reason"]
+    assert "slow_but_answered" in str(result["decision"]), result["decision"]
 
 
 # ── Overlay persistence ───────────────────────────────────────────────────────

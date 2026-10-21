@@ -17,6 +17,7 @@ from config.settings import settings
 from core.data.parquet_lock import parquet_partition_lock
 from core.exchanges.exchange_manager import exchange_manager
 from core.data.path_utils import canonical_symbol_dir, canonical_symbol_dirname
+from core.data.data_storage import prepare_utc_kline_frame, _heal_local_existing_against_utc
 
 
 PARQUET_WRITE_LOCK_TIMEOUT_SECONDS = float(
@@ -310,6 +311,8 @@ class SecondLevelBackfillManager:
         if df.empty:
             return 0
 
+        df = prepare_utc_kline_frame(df, origin="writer:second_level_backfill")
+
         parts_dir = self._parts_dir(exchange, symbol)
         parts_dir.mkdir(parents=True, exist_ok=True)
         count = 0
@@ -324,11 +327,15 @@ class SecondLevelBackfillManager:
                 write_df = day_df.sort_index()
                 if fp.exists():
                     old = pd.read_parquet(fp)
-                    old.index = pd.to_datetime(old.index)
+                    stored_attrs = dict(old.attrs)
+                    old = _heal_local_existing_against_utc(old, write_df)
                     before = len(old)
                     merged = pd.concat([old, write_df])
                     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-                    if not merged.equals(old):
+                    merged.attrs = {**old.attrs, **write_df.attrs}
+                    if any(merged.index.strftime("%Y-%m-%d") != fp.stem):
+                        raise ValueError("Stored rows violate UTC partition date; explicit repair required")
+                    if not merged.equals(old) or merged.attrs != stored_attrs:
                         self._atomic_write_parquet(merged, fp)
                     count += max(0, len(merged) - before)
                 else:

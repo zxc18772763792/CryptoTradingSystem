@@ -77,7 +77,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from loguru import logger
 
-from core.research import retirement, signal_evidence
+from core.research import event_risk_shadow, retirement, signal_evidence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "upbit_caution" / "tracker.json"
@@ -222,7 +222,10 @@ def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], day0_
     until = exit_ms if exit_ms is not None else now_ms
     fund = sum(float(f["fundingRate"]) for f in funding if entry_ms <= int(f["fundingTime"]) <= until)
     out.update(exit_price=exit_px, exit_at=exit_ms, funding=round(fund, 6),
-               return_pct=round(((entry - mark) / entry - ROUND_TRIP_COST + fund) * 100, 3))
+               return_pct=round(((entry - mark) / entry - ROUND_TRIP_COST + fund) * 100, 3),
+               mark_price=mark,
+               mark_price_at=datetime.fromtimestamp((exit_ms if exit_ms is not None else last[0]+DAY_MS)/1000, timezone.utc).isoformat(),
+               funding_until=datetime.fromtimestamp(until/1000, timezone.utc).isoformat())
     return out
 
 
@@ -308,6 +311,14 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
     started = datetime.fromisoformat(state["started_at"])
     now = _now()
     now_ms = now.timestamp() * 1000
+    # Freeze and persist before observing any new risk-shadow entry. Old entered
+    # trades stay baseline-only; pre-existing future waiting signals may enter.
+    if event_risk_shadow.STATE_KEY not in state:
+        entered = [key for key, trade in state.get("trades", {}).items()
+                   if int(trade.get("day0_ms") or 0) + DAY_MS <= now_ms
+                   or trade.get("status") in {"open", "closed", "stopped", "delisted"}]
+        event_risk_shadow.register(state, now, entered)
+        save_state(state, state_path)
     info = await client.get(f"{FAPI}/exchangeInfo")
     info.raise_for_status()
     # Only live contracts: a settled perp still appears in exchangeInfo with frozen, flat klines.
@@ -403,10 +414,28 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
             except Exception as exc:  # noqa: BLE001 - labelling is optional; retry next pass
                 logger.debug(f"upbit caution tracker: reason for {key} failed: {exc}")
 
+    try:
+        await event_risk_shadow.apply_to_tracker(client, state, risk_shadow_sources(state, strategy),
+                                                now, clock=_now)
+    except Exception as exc:  # noqa: BLE001 - independent experiment never changes baseline behavior
+        logger.debug(f"Korean event risk shadow failed: {exc}")
     state["updated_at"] = now.isoformat()
     retirement.register(state, spec["rule"], now.isoformat())
     save_state(state, state_path)
     return summary(state, strategy)
+
+
+def risk_shadow_sources(state: Dict[str, Any], strategy: str = "caution") -> List[Dict[str, Any]]:
+    """Read-only adapter; source IDs/entry timestamps preserve paired comparisons."""
+    hedged = bool(STRATEGIES[strategy].get("hedged"))
+    return [{"source_id": key, "symbol": trade.get("symbol"),
+             "source_entry_ms": int(trade.get("day0_ms") or 0) + DAY_MS,
+             "source_exit_due_ms": int(trade.get("day0_ms") or 0) + (HOLD_DAYS + 1) * DAY_MS,
+             "discovered_at": trade.get("discovered_at"), "source_status": trade.get("status"),
+             "eligible": bool(trade.get("symbol")) and not trade.get("backfilled") and not trade.get("late"),
+             "hedged": hedged,
+             "hedge_symbols": ((trade.get("evidence") or {}).get("market_basket") or {}).get("symbols") if hedged else []}
+            for key, trade in state.get("trades", {}).items()]
 
 
 async def _record_trade_evidence(client, trade: Dict[str, Any], perps: Dict[str, int], now: datetime) -> None:
@@ -523,6 +552,7 @@ def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
         },
         "strategy": strategy,
         "backtest_reference": spec["reference"],
+        "event_risk_shadow": event_risk_shadow.summary(state.get(event_risk_shadow.STATE_KEY)),
         "evaluation_ready": len(returns) >= retirement.RULES[spec["rule"]]["min_n"],
         # coins named in one notice or designated the same UTC day share an entry close: one cluster
         "retirement": retirement.verdict(returns, state.get("retirement_rule") or retirement.RULES[spec["rule"]],

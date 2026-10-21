@@ -706,18 +706,18 @@
                         <h3>研究纸面跟踪器 · 前向表现</h3>
                         <div class="u-hint" style="margin-bottom:6px;">这些是研究用的纸面账本：按事先冻结的规则记录"如果当时照做会怎样"，不下单、不进策略运行器，所以不在上表。只统计规则时点内的前向交易（回填、晚到不计）；判定按首笔交易前登记的退役规则。</div>
                         <div class="table-container strategy-scroll">
-                            <table class="data-table">
+                            <table class="data-table research-trackers-table" style="min-width:1320px;">
                                 <thead>
                                     <tr>
                                         <th>跟踪器</th>
                                         <th>规则</th>
                                         <th>判定</th>
                                         <th>前向样本</th>
-                                        <th>前向均值（90% 区间）</th>
+                                        <th>前向结果（90% 区间）</th>
                                         <th>胜率</th>
-                                        <th>累计</th>
+                                        <th>总名义敞口均值</th>
                                         <th>回测参照</th>
-                                        <th>持仓（浮动）</th>
+                                        <th>在持标价（非实时报价）</th>
                                         <th>更新</th>
                                     </tr>
                                 </thead>
@@ -725,6 +725,7 @@
                             </table>
                         </div>
                         <div id="research-trackers-meta" class="u-hint" style="margin-top:6px;"></div>
+                        <div id="research-tracker-diagnostics" style="margin-top:12px;"></div>
                     </div>
 
                     <div class="card wide">
@@ -3580,6 +3581,7 @@
     </div>
 
     <script defer charset="utf-8" src="{{ static_asset_url('js/altcoin_radar.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/research_tracker_diagnostics.js') }}"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/app.js') }}&bt_modes=20260911_attribution"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/research_workbench.js') }}"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research.js') }}"></script>

@@ -33,6 +33,49 @@ PARQUET_WRITE_LOCK_TIMEOUT_SECONDS = float(
     os.getenv("PARQUET_WRITE_LOCK_TIMEOUT_SECONDS", "30")
 )
 
+# Shared with the explicit historical audit/repair tool. Naive pandas indexes
+# alone do not establish a timezone; only a verified source may set this marker.
+CTS_TIMESTAMP_TIMEZONE = "cts_timestamp_timezone"
+CTS_TIMESTAMP_SCHEMA = "cts_timestamp_schema"
+CTS_TIMESTAMP_ORIGIN = "cts_timestamp_origin"
+
+
+def _has_utc_timestamp_metadata(frame: pd.DataFrame) -> bool:
+    return (frame.attrs.get(CTS_TIMESTAMP_TIMEZONE) == "UTC"
+            and frame.attrs.get(CTS_TIMESTAMP_SCHEMA) == 1)
+
+
+def prepare_utc_kline_frame(frame: pd.DataFrame, *, origin: str = "writer",
+                            timestamp_timezone: Optional[str] = None) -> pd.DataFrame:
+    """Validate a writer's timestamps and explicitly mark its UTC-naive output.
+
+    Connectors must supply aware datetimes. A caller that already proved a naive
+    frame is UTC may declare ``timestamp_timezone='UTC'``; local wall clock is
+    never guessed from its date or the host timezone. This function does not
+    certify an old unmarked file merely because it is being read or merged.
+    """
+    if frame is None:
+        raise ValueError("UTC writer requires a dataframe")
+    out = frame.copy()
+    stamps = [pd.Timestamp(value) for value in out.index]
+    if any(pd.isna(stamp) for stamp in stamps):
+        raise ValueError("Kline writer received an invalid timestamp")
+    declared_utc = timestamp_timezone == "UTC" or _has_utc_timestamp_metadata(out)
+    if any(stamp.tzinfo is None for stamp in stamps) and not declared_utc:
+        raise ValueError("Kline writer requires timezone-aware timestamps or an explicit UTC declaration; naive local time is ambiguous")
+    if timestamp_timezone not in (None, "UTC"):
+        raise ValueError("Local timestamps must be explicitly localized and converted to UTC before writing")
+    index = pd.to_datetime(stamps, utc=True).tz_localize(None)
+    if index.has_duplicates:
+        raise ValueError("Kline writer received duplicate timestamps; audit the source before merging")
+    now_utc = pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
+    if len(index) and index.max() > now_utc + pd.Timedelta(minutes=2):
+        raise ValueError("Kline writer received future UTC timestamps; audit the source instead of guessing a timezone offset")
+    out.index = pd.DatetimeIndex(index, name=frame.index.name)
+    out.attrs.update({CTS_TIMESTAMP_TIMEZONE: "UTC", CTS_TIMESTAMP_SCHEMA: 1,
+                      CTS_TIMESTAMP_ORIGIN: origin, "cts_timestamp_status": "verified_utc"})
+    return out.sort_index()
+
 
 def _quarantine_corrupted_parquet(file_path: Path, error: Exception) -> None:
     text = str(error or "").lower()
@@ -143,9 +186,8 @@ def _parquet_max_timestamp(file_path: Path) -> Optional[datetime]:
     latest = max(maxima)
     if latest.tzinfo is not None:
         latest = latest.tz_convert("UTC").tz_localize(None)
-    now_utc = pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
-    if latest > now_utc + pd.Timedelta(minutes=2):
-        latest -= _LOCAL_OFFSET
+    # A future maximum is not evidence for a particular timezone. In particular,
+    # already repaired/marked UTC data must never be shifted a second time.
     return latest.to_pydatetime()
 
 
@@ -157,10 +199,10 @@ def _normalize_parquet_frame_index(df: pd.DataFrame) -> pd.DataFrame:
     # UTC, tz-aware is converted), avoiding the "cannot be converted to
     # datetime64 unless utc=True" crash when live UTC bars meet parquet bars.
     idx = pd.to_datetime(normalized.index, errors="coerce", utc=True).tz_localize(None)
-    # Legacy partitions were written in Asia/Shanghai wall-clock (UTC+8). Such
-    # an index runs ~8h ahead of real UTC; shift it back so downstream
-    # consumers (which assume UTC-naive) align with live data. Genuine UTC data
-    # is never in the future, so it is left untouched.
+    # Preserve compatibility reads of unmarked naive history, while exposing that
+    # its timezone was not verified. Never infer -8h from a future maximum: old
+    # CST history may be entirely in the past, and files can contain mixed eras.
+    aware_index = isinstance(normalized.index, pd.DatetimeIndex) and normalized.index.tz is not None
     now_utc = pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
     valid = idx[~idx.isna()]
     if len(valid) and valid.max() > now_utc + pd.Timedelta(minutes=2):
@@ -169,14 +211,13 @@ def _normalize_parquet_frame_index(df: pd.DataFrame) -> pd.DataFrame:
                 f"Parquet index runs ahead of UTC (max={valid.max()} > "
                 f"now={now_utc}); a non-UTC kline writer is still active"
             )
-        logger.warning(
-            f"Parquet index ahead of UTC (max={valid.max()} > now={now_utc}); "
-            f"applying -8h legacy local->UTC correction. Fix the writer / run "
-            f"scripts/migrate_parquet_klines_to_utc.py to remove this fallback."
-        )
-        idx = idx - pd.Timedelta(hours=8)
+        logger.warning(f"Parquet index ahead of UTC (max={valid.max()} > now={now_utc}); leaving stored timestamps unchanged pending an explicit timezone audit")
     normalized.index = idx
     normalized = normalized[~normalized.index.isna()]
+    if aware_index:
+        normalized.attrs.update({CTS_TIMESTAMP_TIMEZONE: "UTC", CTS_TIMESTAMP_SCHEMA: 1,
+                                 CTS_TIMESTAMP_ORIGIN: normalized.attrs.get(CTS_TIMESTAMP_ORIGIN, "timezone_aware_index")})
+    normalized.attrs["cts_timestamp_status"] = "verified_utc" if _has_utc_timestamp_metadata(normalized) else "unverified_naive"
     return normalized.sort_index()
 
 
@@ -261,56 +302,58 @@ def _quarantine_unsafe_cache_file(cache_file: Path, reason: Union[Exception, str
         logger.warning(f"Failed to quarantine unsafe cache file {cache_file}: {exc}")
 
 
-_LOCAL_OFFSET = pd.Timedelta(hours=8)  # Asia/Shanghai, no DST
-
-
 def _heal_local_existing_against_utc(
     existing_df: pd.DataFrame, incoming_df: pd.DataFrame
 ) -> pd.DataFrame:
-    """Shift a legacy local-stamped (UTC+8) partition onto UTC.
+    """Validate a merge boundary without silently migrating unknown history.
 
-    Incoming klines come from the connectors / fixed writer and are
-    authoritative UTC. A legacy partition written by the old maintain
-    script carries the *same* OHLC values but timestamps labelled +8h.
-    If shifting the existing index back 8h makes its OHLC line up exactly
-    with the authoritative incoming bars (and the unshifted index does
-    not), the partition is provably local and is migrated in place.
-
-    Deterministic and self-validating: it acts only on exact OHLC
-    equality across multiple bars, which cannot occur by chance, so it
-    never corrupts a genuinely-UTC partition.
+    The historical name is retained for callers. Partial OHLC matches, flat
+    prices, and date age cannot certify a whole file or justify an index shift.
+    Unmarked naive history is writable only when authoritative UTC incoming
+    bars cover every existing row and its OHLCV agrees in full. Other cases
+    require the explicit, backed-up audit/repair workflow.
     """
-    if existing_df is None or existing_df.empty or incoming_df is None or incoming_df.empty:
+    if existing_df is None or existing_df.empty:
         return existing_df
-    cols = ["open", "high", "low", "close"]
-    if not all(c in existing_df.columns and c in incoming_df.columns for c in cols):
-        return existing_df
-
-    def _match_count(idx_shift: pd.Timedelta) -> int:
-        probe = existing_df.copy()
-        probe.index = probe.index + idx_shift
-        join = probe[cols].join(incoming_df[cols], how="inner", lsuffix="_a", rsuffix="_b")
-        if join.empty:
-            return 0
-        same = (
-            (join["open_a"] == join["open_b"])
-            & (join["high_a"] == join["high_b"])
-            & (join["low_a"] == join["low_b"])
-            & (join["close_a"] == join["close_b"])
-        )
-        return int(same.sum())
-
-    shifted_matches = _match_count(-_LOCAL_OFFSET)
-    asis_matches = _match_count(pd.Timedelta(0))
-    if shifted_matches >= 3 and shifted_matches > asis_matches:
-        healed = existing_df.copy()
-        healed.index = healed.index - _LOCAL_OFFSET
-        logger.warning(
-            f"Healed legacy local-time partition to UTC: shifted -8h "
-            f"({shifted_matches} OHLC-anchored bars matched vs {asis_matches} as-is)"
-        )
-        return healed
-    return existing_df
+    if pd.to_datetime(existing_df.index, errors="coerce", utc=True).isna().any():
+        raise ValueError("Invalid stored kline timestamps require an explicit audit; refusing to discard rows")
+    existing = _normalize_parquet_frame_index(existing_df)
+    if incoming_df is None or incoming_df.empty:
+        if _has_utc_timestamp_metadata(existing):
+            return existing
+        raise ValueError("Unverified parquet timezone: empty incoming bars cannot certify stored history; run an explicit timezone audit/repair before merging")
+    incoming = _normalize_parquet_frame_index(incoming_df)
+    if existing.index.has_duplicates or incoming.index.has_duplicates:
+        raise ValueError("Duplicate kline timestamps require an explicit timezone/data audit; refusing to discard rows")
+    if not _has_utc_timestamp_metadata(incoming):
+        raise ValueError("Incoming bars must have verified UTC provenance before merging")
+    if _has_utc_timestamp_metadata(existing):
+        return existing
+    cols = ["open", "high", "low", "close", "volume"]
+    complete = (all(c in existing.columns and c in incoming.columns for c in cols)
+                and existing.index.isin(incoming.index).all())
+    if complete:
+        authoritative = incoming.loc[existing.index, cols]
+        complete = bool((existing[cols].to_numpy() == authoritative.to_numpy()).all())
+        # Constant/repeating candles are not sufficient evidence for UTC labels.
+        complete = complete and len(existing[["open", "high", "low", "close"]].drop_duplicates()) >= 3
+    if complete:
+        # Even a changing series can repeat every eight hours. When the UTC
+        # source covers a competing local-clock interpretation in full, that
+        # second complete match makes the timezone evidence ambiguous. This is
+        # a rejection check only: writers never choose or apply an offset.
+        for hours in (-8, 8):
+            shifted_index = existing.index + pd.Timedelta(hours=hours)
+            if shifted_index.isin(incoming.index).all():
+                competing = incoming.loc[shifted_index, cols]
+                if bool((existing[cols].to_numpy() == competing.to_numpy()).all()):
+                    raise ValueError("Unverified parquet timezone: complete UTC and eight-hour-shifted OHLCV matches are ambiguous; run an explicit timezone audit/repair before merging")
+    if not complete:
+        raise ValueError("Unverified parquet timezone: incoming UTC bars do not uniquely verify every existing OHLCV row; run an explicit timezone audit/repair before merging")
+    verified = existing.copy()
+    verified.attrs.update({CTS_TIMESTAMP_TIMEZONE: "UTC", CTS_TIMESTAMP_SCHEMA: 1,
+                           CTS_TIMESTAMP_ORIGIN: "verified_complete_utc_overlap", "cts_timestamp_status": "verified_utc"})
+    return verified
 
 
 class DataStorage:
@@ -401,6 +444,8 @@ class DataStorage:
         exchange: str,
         symbol: str,
         timeframe: str,
+        *,
+        timestamp_timezone: Optional[str] = None,
     ) -> str:
         """淇濆瓨K绾挎暟鎹埌Parquet鏂囦欢"""
         if not klines:
@@ -418,8 +463,7 @@ class DataStorage:
             for k in klines
         ]
         df = pd.DataFrame(data)
-        df["timestamp"] = pd.to_datetime(df["timestamp"])
-        df = _normalize_parquet_frame_index(df.set_index("timestamp"))
+        df = prepare_utc_kline_frame(df.set_index("timestamp"), timestamp_timezone=timestamp_timezone)
 
         symbol_dir = canonical_symbol_dir(self.storage_path, exchange, symbol)
         parts_dir = symbol_dir / f"{timeframe}_parts"
@@ -437,20 +481,27 @@ class DataStorage:
                     incoming_df = _normalize_parquet_frame_index(day_df)
                     merged_df = incoming_df
                     existing_df: Optional[pd.DataFrame] = None
+                    existing_was_verified = False
                     if part_path.exists():
                         try:
                             existing_df = pd.read_parquet(part_path)
-                            existing_df = _normalize_parquet_frame_index(existing_df)
+                            existing_was_verified = _has_utc_timestamp_metadata(existing_df)
                             existing_df = _heal_local_existing_against_utc(
                                 existing_df, incoming_df
                             )
                             merged_df = pd.concat([existing_df, incoming_df])
                         except Exception as e:
                             logger.warning(f"Failed to merge partition file {part_path}: {e}")
-                            _quarantine_corrupted_parquet(part_path, e)
+                            # Never replace unknown/corrupt history with only the
+                            # latest batch after a failed merge validation.
+                            raise
                     merged_df = merged_df[~merged_df.index.duplicated(keep="last")]
                     merged_df = merged_df.sort_index()
-                    if existing_df is not None and merged_df.equals(existing_df):
+                    merged_df.attrs = {**(existing_df.attrs if existing_df is not None else {}), **incoming_df.attrs}
+                    if any(merged_df.index.strftime("%Y-%m-%d") != part_path.stem):
+                        raise ValueError("Stored rows violate UTC partition date; explicit repair required")
+                    if (existing_df is not None and merged_df.equals(existing_df)
+                            and existing_was_verified):
                         continue
                     table = pa.Table.from_pandas(merged_df)
                     # The lock protects the full read-modify-write transaction;
@@ -550,6 +601,16 @@ class DataStorage:
 
             df = pd.concat(frames).sort_index()
             df = df[~df.index.duplicated(keep="last")]
+            # Compatibility reads must not launder an unverified monolith into
+            # a certified UTC frame merely by concatenating it with new parts.
+            if all(_has_utc_timestamp_metadata(frame) for frame in frames):
+                df.attrs.update({CTS_TIMESTAMP_TIMEZONE: "UTC", CTS_TIMESTAMP_SCHEMA: 1,
+                                 CTS_TIMESTAMP_ORIGIN: df.attrs.get(CTS_TIMESTAMP_ORIGIN, "combined_verified_utc"),
+                                 "cts_timestamp_status": "verified_utc"})
+            else:
+                df.attrs.pop(CTS_TIMESTAMP_TIMEZONE, None)
+                df.attrs.pop(CTS_TIMESTAMP_SCHEMA, None)
+                df.attrs["cts_timestamp_status"] = "unverified_naive"
 
             if start_time:
                 df = df[df.index >= start_time]

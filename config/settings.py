@@ -223,6 +223,9 @@ class Settings(BaseSettings):
     AI_AUTONOMOUS_AGENT_STOP_LOSS_PCT: float = 0.02
     AI_AUTONOMOUS_AGENT_TAKE_PROFIT_PCT: float = 0.04
     AI_AUTONOMOUS_AGENT_TIMEOUT_MS: int = 30000
+    # Hard cap on one model round, shared by every fallback target. 0 keeps the built-in 45s;
+    # raise it together with TIMEOUT_MS when a slow backup relay must be able to finish.
+    AI_AUTONOMOUS_AGENT_HARD_TIMEOUT_SEC: float = 0.0
     AI_AUTONOMOUS_AGENT_MAX_TOKENS: int = 420
     AI_AUTONOMOUS_AGENT_TEMPERATURE: float = 0.15
     AI_AUTONOMOUS_AGENT_COOLDOWN_SEC: int = 180

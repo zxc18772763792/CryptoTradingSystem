@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import importlib.util
+import asyncio
 import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+import pandas as pd
+
+from core.data.parquet_lock import parquet_partition_lock, ParquetPartitionLockTimeout
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -173,3 +177,61 @@ def test_source_available_start_keeps_requested_when_exchange_history_is_older(
 
     assert effective == requested
     assert available == exchange_first
+
+
+def _compact_test_bars():
+    key=MODULE.SeriesKey('binance_futures','futures','BTC/USDT','1h')
+    start=int(datetime(2026,1,1,tzinfo=timezone.utc).timestamp()*1000)
+    rows=[[start+i*3600000,str(100+i),str(101+i),str(99+i),str(100.5+i),'10']for i in range(5)]
+    return key,MODULE.rows_to_klines(key,rows)
+
+
+def test_compact_writer_records_utc_metadata_and_keeps_historical_rows(tmp_path,monkeypatch):
+    monkeypatch.setattr(MODULE.data_storage,'storage_path',tmp_path)
+    key,bars=_compact_test_bars()
+    target=Path(asyncio.run(MODULE.save_klines_compact(key,bars[:3])))
+    first=pd.read_parquet(target)
+    assert first.attrs['cts_timestamp_timezone']=='UTC'
+    assert first.attrs['cts_timestamp_schema']==1
+    assert first.attrs['cts_timestamp_origin']=='writer:binance_compact'
+    asyncio.run(MODULE.save_klines_compact(key,bars[3:]))
+    combined=pd.read_parquet(target)
+    assert len(combined)==5
+    assert combined.index.min()==pd.Timestamp('2026-01-01 00:00')
+    assert combined.index.max()==pd.Timestamp('2026-01-01 04:00')
+
+
+def test_compact_writer_refuses_partial_overlap_with_unmarked_history(tmp_path,monkeypatch):
+    monkeypatch.setattr(MODULE.data_storage,'storage_path',tmp_path)
+    key,bars=_compact_test_bars()
+    target=tmp_path/'binance_futures/BTC_USDT/1h.parquet'
+    target.parent.mkdir(parents=True)
+    frame=pd.DataFrame([{'open':bar.open,'high':bar.high,'low':bar.low,'close':bar.close,'volume':bar.volume}for bar in bars],
+                       index=pd.DatetimeIndex([bar.timestamp.replace(tzinfo=None)for bar in bars],name='timestamp'))
+    frame.to_parquet(target)
+    before=target.read_bytes()
+    with pytest.raises(ValueError,match='timezone audit'):
+        asyncio.run(MODULE.save_klines_compact(key,bars[-1:]))
+    assert target.read_bytes()==before
+    assert not list(target.parent.glob('*.tmp'))
+
+
+def test_compact_writer_rejects_naive_or_duplicate_incoming_timestamps(tmp_path,monkeypatch):
+    monkeypatch.setattr(MODULE.data_storage,'storage_path',tmp_path)
+    key,bars=_compact_test_bars()
+    with pytest.raises(ValueError,match='duplicate timestamps'):
+        asyncio.run(MODULE.save_klines_compact(key,[bars[0],bars[0]]))
+    bars[0].timestamp=bars[0].timestamp.replace(tzinfo=None)
+    with pytest.raises(ValueError,match='timezone-aware'):
+        asyncio.run(MODULE.save_klines_compact(key,[bars[0]]))
+
+
+def test_compact_writer_uses_the_same_persistent_lock_as_repairs(tmp_path,monkeypatch):
+    monkeypatch.setattr(MODULE.data_storage,'storage_path',tmp_path)
+    key,bars=_compact_test_bars()
+    target=tmp_path/'binance_futures/BTC_USDT/1h.parquet'
+    monkeypatch.setattr(MODULE,'parquet_partition_lock',lambda path,**kwargs:parquet_partition_lock(path,timeout_seconds=.05,poll_seconds=.01))
+    with parquet_partition_lock(target):
+        with pytest.raises(ParquetPartitionLockTimeout):
+            asyncio.run(MODULE.save_klines_compact(key,bars))
+    assert not target.exists()
