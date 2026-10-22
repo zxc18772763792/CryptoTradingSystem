@@ -483,6 +483,9 @@ async def process_llm_batch(cfg: Dict[str, Any], limit: int = 8) -> Dict[str, An
 # Event queue for non-blocking news processing
 _llm_event_queue: Optional[asyncio.Queue] = None
 _event_processor_task: Optional[asyncio.Task] = None
+# False in a --pull-only worker: inserted items are already queued in the database
+# for the dedicated LLM worker, so this process must not start its own processor.
+_in_process_llm = True
 
 
 def _ensure_event_queue() -> asyncio.Queue:
@@ -627,7 +630,7 @@ async def pull_source_once(
     queue_stats = await news_db.enqueue_llm_tasks(inserted, min_importance=_min_importance())
 
     # Trigger non-blocking LLM processing for inserted items
-    if inserted:
+    if inserted and _in_process_llm:
         asyncio.create_task(on_news_inserted(inserted))
 
     source_errors = (bundle.get("source_stats") or {}).get(source, {}).get("errors") or []
@@ -690,6 +693,8 @@ async def worker_loop(cfg: Dict[str, Any], *, once: bool = False, pull_enabled: 
         llm_enabled: Enable LLM event extraction
         sources: Filter to specific sources
     """
+    global _in_process_llm
+    _in_process_llm = llm_enabled
     collector = MultiSourceNewsCollector(cfg)
     enabled_sources = [name for name in collector.sources if not sources or name in sources]
     next_due = {source: 0.0 for source in enabled_sources}

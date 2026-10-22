@@ -3,6 +3,9 @@
 This collector reads one preview page per channel, not private chats or complete
 history. Public posts are third-party commentary; edits are annotated when
 visible, but the existing news store does not synchronize already stored edits.
+Picture-only posts (no caption) never enter the news store, but they do reach
+the first-receipt research archive, which marks them as media-only. One
+channel's failure does not stop the others; only an all-channel failure raises.
 """
 from __future__ import annotations
 
@@ -106,10 +109,13 @@ class TelegramPublicChannelCollector(BaseNewsCollector):
         super().__init__(cfg)
         self.max_text_chars = clamp_int(defaults.get("telegram_alastar_max_text_chars"), 16000, 64, 20000)
         self.observation_archive_enabled = defaults.get("telegram_alastar_observation_archive") is True
+        archived = defaults.get("telegram_observation_archive_channels", ["alastartrades"])
+        self.archive_channels = [c for c in _public_channels(archived) if c in self.channels]
         if self.min_interval_sec <= 0:
             self.min_interval_sec = 15.0
 
-    def _from_html(self, html: str, channel: Optional[str] = None, *, preserve_full_text: bool = False) -> List[Dict[str, Any]]:
+    def _from_html(self, html: str, channel: Optional[str] = None, *, preserve_full_text: bool = False,
+                   include_media_only: bool = False) -> List[Dict[str, Any]]:
         if len(html) > self.MAX_HTML_BYTES or len(html.encode("utf-8")) > self.MAX_HTML_BYTES:
             raise RuntimeError("Telegram public preview exceeds the HTML size limit")
         if BeautifulSoup is None:
@@ -160,7 +166,9 @@ class TelegramPublicChannelCollector(BaseNewsCollector):
                 if text:
                     parts.append(text)
             full_text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(parts)).strip()
-            if not full_text:
+            photos = own_message.select(".tgme_widget_message_photo_wrap")
+            media_only = not full_text
+            if media_only and not (include_media_only and photos):
                 continue
             content = full_text if preserve_full_text else full_text[:self.max_text_chars]
             # Include the opening body, rather than just '#Q update', because
@@ -193,7 +201,9 @@ class TelegramPublicChannelCollector(BaseNewsCollector):
                         "source_kind": "third_party_commentary",
                         "is_third_party_commentary": True,
                         "telegram_edited": edited,
-                        "has_photo": bool(own_message.select_one(".tgme_widget_message_photo_wrap")),
+                        "has_photo": bool(photos),
+                        "photo_count": len(photos),
+                        "media_only": media_only,
                         "original_text": content,
                         "text_truncated": len(full_text) > len(content),
                         "symbols": symbols,
@@ -220,36 +230,51 @@ class TelegramPublicChannelCollector(BaseNewsCollector):
         limit = clamp_int(max_records, self.max_records, 1, 500)
         since = datetime.now(timezone.utc) - timedelta(minutes=clamp_int(since_minutes, 240, 1, 525600))
         items: List[Dict[str, Any]] = []
+        self.last_channel_errors: Dict[str, str] = {}
         for channel in self.channels:
-            endpoint = f"https://t.me/s/{channel}"
-            response = self._request(endpoint)
-            final_url = urlsplit(str(getattr(response, "url", endpoint) or endpoint))
-            if final_url.scheme != "https" or final_url.netloc.lower() != "t.me" or final_url.path.rstrip("/").lower() != f"/s/{channel}":
-                raise RuntimeError("Telegram public preview redirected away from its public channel")
-            body = response.text or ""
-            received_at = datetime.now(timezone.utc)
-            page_items = self._from_html(body, channel=channel)
-            if self.observation_archive_enabled and channel == "alastartrades":
-                # Preserve first receipt and observed revisions before news age /
-                # URL de-duplication can discard them. This only queues research
-                # review; it never creates an executable order or calls an AI API.
-                try:
-                    from core.news.alastar_observation import observe_records
-                    raw = getattr(response, "content", None)
-                    observe_records(
-                        self._from_html(body, channel=channel, preserve_full_text=True),
-                        mode="live_public_preview", observed_at=received_at,
-                        evidence={"url": endpoint, "collector": self.provider_name},
-                        raw_preview=raw if isinstance(raw, bytes) else body.encode("utf-8"),
-                    )
-                except Exception:
-                    # Research archive failure must be visible without making
-                    # normal news ingestion depend on disk/research availability.
-                    logger.exception("Alastar research observation archive failed")
-                    for item in page_items:
-                        item["payload"]["observation_archive_status"] = "failed"
+            try:
+                page_items = self._pull_channel(channel)
+            except Exception as exc:
+                # One channel's outage or markup change must not drop the others.
+                self.last_channel_errors[channel] = f"{type(exc).__name__}: {exc}"
+                logger.warning("Telegram channel %s failed: %s", channel, exc)
+                continue
             for item in page_items:
                 if datetime.fromisoformat(item["published_at"]) >= since:
                     items.append(item)
+        if self.last_channel_errors and len(self.last_channel_errors) == len(self.channels):
+            raise RuntimeError("All Telegram channels failed: " + "; ".join(
+                f"{channel}: {error}" for channel, error in self.last_channel_errors.items()))
         items.sort(key=lambda item: (item["published_at"], item["payload"]["message_id"]), reverse=True)
         return items[:limit]
+
+    def _pull_channel(self, channel: str) -> List[Dict[str, Any]]:
+        endpoint = f"https://t.me/s/{channel}"
+        response = self._request(endpoint)
+        final_url = urlsplit(str(getattr(response, "url", endpoint) or endpoint))
+        if final_url.scheme != "https" or final_url.netloc.lower() != "t.me" or final_url.path.rstrip("/").lower() != f"/s/{channel}":
+            raise RuntimeError("Telegram public preview redirected away from its public channel")
+        body = response.text or ""
+        received_at = datetime.now(timezone.utc)
+        page_items = self._from_html(body, channel=channel)
+        if self.observation_archive_enabled and channel in self.archive_channels:
+            # Preserve first receipt and observed revisions before news age /
+            # URL de-duplication can discard them. This only queues research
+            # review; it never creates an executable order or calls an AI API.
+            try:
+                from core.news.alastar_observation import archive_dir, observe_records
+                raw = getattr(response, "content", None)
+                observe_records(
+                    self._from_html(body, channel=channel, preserve_full_text=True, include_media_only=True),
+                    output=archive_dir(channel), mode="live_public_preview", observed_at=received_at,
+                    evidence={"url": endpoint, "collector": self.provider_name},
+                    raw_preview=raw if isinstance(raw, bytes) else body.encode("utf-8"),
+                    channel=channel,
+                )
+            except Exception:
+                # Research archive failure must be visible without making
+                # normal news ingestion depend on disk/research availability.
+                logger.exception("Telegram research observation archive failed for %s", channel)
+                for item in page_items:
+                    item["payload"]["observation_archive_status"] = "failed"
+        return page_items

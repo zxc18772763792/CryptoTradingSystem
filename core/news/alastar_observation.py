@@ -1,7 +1,9 @@
-"""Read-only Alastar observation archive, independent of the strategy engine.
+"""Read-only first-receipt archive for public Telegram channels (Alastar first).
 
 Immutable run records are authoritative; state and the human review queue are
 replaceable projections. This is neither a scheduler nor an execution signal.
+One archive directory holds exactly one channel; ``archive_dir`` maps a channel
+to its directory and keeps Alastar's original location.
 """
 from __future__ import annotations
 
@@ -12,6 +14,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any, Iterator
 import uuid
@@ -21,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CHANNEL = "alastartrades"
 ENDPOINT = "https://t.me/s/alastartrades"
 DEFAULT_OUTPUT = ROOT / "data/research/alastar_observation"
+OTHER_CHANNELS_ROOT = ROOT / "data/research/telegram_observation"
+_CHANNEL_NAME = re.compile(r"[a-z][a-z0-9_]{3,31}\Z")
 MAX_DELAY_SECONDS = 600
 MAX_RECORDS = 5000
 MAX_INPUT_BYTES = 20 * 1024 * 1024
@@ -87,7 +92,20 @@ def _archive_lock(output: Path) -> Iterator[None]:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
-def _normalise(record: dict[str, Any]) -> dict[str, Any]:
+def _channel(channel: str) -> str:
+    channel = str(channel or "").strip().removeprefix("@").lower()
+    if not _CHANNEL_NAME.fullmatch(channel):
+        raise ValueError("Archive channel must be a public Telegram username")
+    return channel
+
+
+def archive_dir(channel: str = CHANNEL) -> Path:
+    """Alastar keeps its original directory; every other channel gets its own."""
+    channel = _channel(channel)
+    return DEFAULT_OUTPUT if channel == CHANNEL else OTHER_CHANNELS_ROOT / channel
+
+
+def _normalise(record: dict[str, Any], channel: str = CHANNEL) -> dict[str, Any]:
     if not isinstance(record, dict):
         raise ValueError("Each observation record must be an object")
     payload = record.get("payload") or {}
@@ -97,15 +115,21 @@ def _normalise(record: dict[str, Any]) -> dict[str, Any]:
     if not str(message_id or "").isdigit() or not 1 <= int(message_id) <= 10**15 - 1:
         raise ValueError("A positive Telegram message_id is required")
     message_id = int(message_id)
-    key = f"telegram:{CHANNEL}:{message_id}"
-    if str(payload.get("channel", CHANNEL)).lower() != CHANNEL or record.get("source_id", key) != key:
-        raise ValueError("Message is outside the Alastar channel allowlist")
-    canonical_url = f"https://t.me/{CHANNEL}/{message_id}"
+    channel = _channel(channel)
+    key = f"telegram:{channel}:{message_id}"
+    if str(payload.get("channel", channel)).lower() != channel or record.get("source_id", key) != key:
+        raise ValueError("Message is outside this archive's channel")
+    canonical_url = f"https://t.me/{channel}/{message_id}"
     if record.get("url", canonical_url) != canonical_url:
-        raise ValueError("Message URL does not match its Alastar identity")
+        raise ValueError("Message URL does not match its channel identity")
+    # A picture-only post has no caption; keep its first receipt (for image
+    # research) but never let it look like a text snapshot.
+    media_only = payload.get("media_only", False)
+    if not isinstance(media_only, bool) or (media_only and not payload.get("has_photo")):
+        raise ValueError("media_only must be a boolean on a post with a photo")
     text = payload.get("original_text", record.get("content"))
-    if not isinstance(text, str) or not text.strip():
-        raise ValueError("Nonempty original message text is required")
+    if not isinstance(text, str) or (text.strip() == "") != media_only:
+        raise ValueError("Nonempty original message text is required unless the post is media-only")
     edited = payload.get("telegram_edited", False)
     truncated = payload.get("text_truncated", False)
     if not isinstance(edited, bool) or not isinstance(truncated, bool):
@@ -116,12 +140,14 @@ def _normalise(record: dict[str, Any]) -> dict[str, Any]:
     except (ValueError, TypeError, OverflowError):
         publication = None
     version = {"text": text, "published_at_raw": raw_publication, "telegram_edited": edited, "text_truncated": truncated}
+    if media_only:  # only then, so every existing text revision keeps its hash
+        version["media_only"] = True
     return {
         "message_key": key, "message_id": message_id, "url": canonical_url,
         "text": text, "text_sha256": _digest(text.encode("utf-8")),
         "revision_sha256": _digest(_json_bytes(version)),
         "published_at_raw": raw_publication, "published_at_utc": publication,
-        "telegram_edited": edited, "text_truncated": truncated,
+        "telegram_edited": edited, "text_truncated": truncated, "media_only": media_only,
         # Preserve the exact JSON values as supplied, including content distinct
         # from original_text. Do not silently shorten or reformat message text.
         "raw_message": record,
@@ -138,6 +164,8 @@ def _eligibility(item: dict[str, Any], observed: datetime, mode: str, is_first: 
         reasons.append("visible_edit")
     if item["text_truncated"]:
         reasons.append("truncated_source_text")
+    if item.get("media_only"):
+        reasons.append("media_only_no_text")
     if item["published_at_utc"] is None:
         reasons.append("invalid_or_timezone_missing_publication")
     else:
@@ -149,9 +177,11 @@ def _eligibility(item: dict[str, Any], observed: datetime, mode: str, is_first: 
     return reasons
 
 
-def _apply_run(state: dict[str, Any], run: dict[str, Any]) -> None:
+def _apply_run(state: dict[str, Any], run: dict[str, Any], channel: str = CHANNEL) -> None:
+    if run.get("channel", CHANNEL) != channel:
+        raise RuntimeError("Archive run belongs to another channel; preserve files for manual review")
     for revision in run["new_revisions"]:
-        checked = _normalise(revision["raw_message"])
+        checked = _normalise(revision["raw_message"], channel)
         if any(revision[field] != checked[field] for field in ("message_key", "text", "text_sha256", "revision_sha256")):
             raise RuntimeError("Archive revision content/hash is invalid; preserve files for manual review")
         key = revision["message_key"]
@@ -167,7 +197,7 @@ def _apply_run(state: dict[str, Any], run: dict[str, Any]) -> None:
         item["latest_observation_mode"] = run["mode"]
 
 
-def _load_runs(output: Path, *, verify_full: bool = False) -> tuple[int, dict[str, Any], str | None]:
+def _load_runs(output: Path, *, verify_full: bool = False, channel: str = CHANNEL) -> tuple[int, dict[str, Any], str | None]:
     """Tail-checked checkpoint + only uncheckpointed runs; full replay on recovery.
 
     Sequential filenames make the crash-recovery lookup independent of the
@@ -183,7 +213,7 @@ def _load_runs(output: Path, *, verify_full: bool = False) -> tuple[int, dict[st
             stored_hash = candidate.pop("checkpoint_sha256")
             if (stored_hash == _digest(_json_bytes(candidate)) and candidate["schema_version"] == 1
                     and isinstance(candidate["run_count"], int) and candidate["run_count"] >= 1
-                    and isinstance(candidate["messages"], dict)
+                    and isinstance(candidate["messages"], dict) and candidate.get("channel") == channel
                     and candidate["last_run_file"] == f"runs/{candidate['run_count']:012d}.json"):
                 checkpoint = candidate
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
@@ -226,13 +256,14 @@ def _load_runs(output: Path, *, verify_full: bool = False) -> tuple[int, dict[st
             if _digest((output / relative).read_bytes()) != preview["sha256"]:
                 raise RuntimeError("Archive preview evidence hash is invalid")
             checked_evidence.add(preview["sha256"])
-        _apply_run(state, run)
+        _apply_run(state, run, channel)
         sequence += 1
         previous_hash = _digest(raw)
     return sequence, state, previous_hash
 
 
-def _projections(output: Path, run_count: int, messages: dict[str, Any], last_hash: str | None) -> dict[str, Any]:
+def _projections(output: Path, run_count: int, messages: dict[str, Any], last_hash: str | None,
+                 channel: str = CHANNEL) -> dict[str, Any]:
     queue = []
     excluded: Counter[str] = Counter()
     for key, item in sorted(messages.items()):
@@ -255,7 +286,7 @@ def _projections(output: Path, run_count: int, messages: dict[str, Any], last_ha
                 "published_at_utc": first["published_at_utc"], "first_observed_at_utc": first["observed_at_utc"],
                 "review_status": "human_review_required", "execution_authorized": False,
             })
-    summary = {"schema_version": 1, "channel": CHANNEL, "run_count": run_count, "message_count": len(messages),
+    summary = {"schema_version": 1, "channel": channel, "run_count": run_count, "message_count": len(messages),
                "revision_count": sum(len(item["revisions"]) for item in messages.values()),
                "candidate_review_count": len(queue), "exclusion_reason_counts": dict(excluded),
                "last_run_sha256": last_hash, "last_run_file": f"runs/{run_count:012d}.json" if run_count else None}
@@ -270,12 +301,13 @@ def _projections(output: Path, run_count: int, messages: dict[str, Any], last_ha
     return summary
 
 
-def verify_archive(output: Path | str = DEFAULT_OUTPUT) -> dict[str, Any]:
+def verify_archive(output: Path | str = DEFAULT_OUTPUT, *, channel: str = CHANNEL) -> dict[str, Any]:
     """Fully verify all committed runs and rebuild projections, without a fetch."""
     output = Path(output).resolve()
     with _archive_lock(output):
-        count, state, last_hash = _load_runs(output, verify_full=True)
-        return {**_projections(output, count, state, last_hash), "verified_full_chain": True}
+        channel = _channel(channel)
+        count, state, last_hash = _load_runs(output, verify_full=True, channel=channel)
+        return {**_projections(output, count, state, last_hash, channel), "verified_full_chain": True}
 
 
 def _quantile(values: list[float], q: float) -> float | None:
@@ -303,7 +335,8 @@ def _poll_wait(gaps: list[float]) -> dict[str, Any]:
             "share_received_within_seconds": {str(x): sum(min(g, x) for g in gaps) / total for x in LATENCY_MARKS}}
 
 
-def receipt_latency(output: Path | str = DEFAULT_OUTPUT, *, now: datetime | str | None = None) -> dict[str, Any]:
+def receipt_latency(output: Path | str = DEFAULT_OUTPUT, *, now: datetime | str | None = None,
+                    channel: str = CHANNEL) -> dict[str, Any]:
     """On-demand latency evidence from committed live runs; no fetch, runs are never edited.
 
     Reports (1) publication-to-first-receipt delay of every message first seen
@@ -315,7 +348,7 @@ def receipt_latency(output: Path | str = DEFAULT_OUTPUT, *, now: datetime | str 
     output = Path(output).resolve()
     current = _utc(now or datetime.now(timezone.utc))
     with _archive_lock(output):
-        run_count, state, last_hash = _load_runs(output, verify_full=True)
+        run_count, state, last_hash = _load_runs(output, verify_full=True, channel=channel)
         live_times = []
         for path in sorted((output / "runs").glob("*.json")):
             run = json.loads(path.read_bytes())
@@ -333,7 +366,7 @@ def receipt_latency(output: Path | str = DEFAULT_OUTPUT, *, now: datetime | str 
         gaps = [(b - a).total_seconds() for a, b in zip(live_times, live_times[1:])]
         delays = [s["delay_seconds"] for s in samples]
         report = {
-            "schema_version": 1, "channel": CHANNEL, "computed_at_utc": current.isoformat(),
+            "schema_version": 1, "channel": channel, "computed_at_utc": current.isoformat(),
             "run_count": run_count, "last_run_sha256": last_hash, "live_run_count": len(live_times),
             "first_live_run_at_utc": live_times[0].isoformat() if live_times else None,
             "last_live_run_at_utc": live_times[-1].isoformat() if live_times else None,
@@ -358,7 +391,7 @@ def receipt_latency(output: Path | str = DEFAULT_OUTPUT, *, now: datetime | str 
 def observe_records(
     records: list[dict[str, Any]], output: Path | str = DEFAULT_OUTPUT, *, mode: str = "historical_import",
     observed_at: datetime | str | None = None, evidence: dict[str, Any] | None = None,
-    raw_preview: bytes | None = None,
+    raw_preview: bytes | None = None, channel: str = CHANNEL,
 ) -> dict[str, Any]:
     """Commit one bounded observation. Timestamp injection is only for offline tests.
 
@@ -376,10 +409,11 @@ def observe_records(
     if raw_preview is not None and len(raw_preview) > 2 * 1024 * 1024:
         raise ValueError("Public preview exceeds the 2 MiB evidence bound")
     observed = _utc(observed_at or datetime.now(timezone.utc))
-    normalised = [_normalise(record) for record in records]
+    channel = _channel(channel)
+    normalised = [_normalise(record, channel) for record in records]
     output = Path(output).resolve()
     with _archive_lock(output):
-        run_count, state, previous_hash = _load_runs(output)
+        run_count, state, previous_hash = _load_runs(output, channel=channel)
         observations = []
         revisions = []
         pending: dict[str, set[str]] = {}
@@ -400,7 +434,7 @@ def observe_records(
             observations.append({"message_key": key, "revision_sha256": digest, "status": status,
                                  "source_collected_at": item["raw_message"].get("collected_at")})
         sequence = run_count + 1
-        run = {"schema_version": 1, "sequence": sequence, "run_id": uuid.uuid4().hex,
+        run = {"schema_version": 1, "channel": channel, "sequence": sequence, "run_id": uuid.uuid4().hex,
                "previous_run_sha256": previous_hash, "mode": mode, "observed_at_utc": observed.isoformat(),
                "evidence": evidence or {}, "max_publication_delay_seconds": MAX_DELAY_SECONDS,
                "public_preview_history_reconstruction": False, "observations": observations, "new_revisions": revisions}
@@ -421,8 +455,8 @@ def observe_records(
         _atomic_bytes(path, raw_run)
         # A crash here leaves a valid committed run. The next invocation repairs
         # only the uncheckpointed run(s); it never edits an older run.
-        _apply_run(state, run)
-        summary = _projections(output, sequence, state, _digest(raw_run))
+        _apply_run(state, run, channel)
+        summary = _projections(output, sequence, state, _digest(raw_run), channel)
         return {**summary, "run_file": path.relative_to(output).as_posix(),
                 "observed_at_utc": observed.isoformat(), "mode": mode,
                 "run_observation_count": len(observations), "new_revision_count": len(revisions)}

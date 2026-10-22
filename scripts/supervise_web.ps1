@@ -156,7 +156,7 @@ function Invoke-WebRestart {
 }
 
 function Start-MissingWorker {
-    param([string]$Label, [string]$Module)
+    param([string]$Label, [string]$Module, [string[]]$ExtraArgs = @())
     $running = @(Get-MatchingPythonProcesses -CommandToken $Module)
     if ($running.Count -gt 1) {
         $keep = $running | Sort-Object CreationDate | Select-Object -First 1
@@ -184,7 +184,7 @@ function Start-MissingWorker {
     $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $stdout = Join-Path $logDir ("{0}_{1}.out.log" -f ($Label -replace "[^a-zA-Z0-9]", "_"), $stamp)
     $stderr = Join-Path $logDir ("{0}_{1}.err.log" -f ($Label -replace "[^a-zA-Z0-9]", "_"), $stamp)
-    $proc = Start-Process -FilePath $PythonExecutable -ArgumentList @("`"$(Join-Path $ProjectRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", $Module) `
+    $proc = Start-Process -FilePath $PythonExecutable -ArgumentList (@("`"$(Join-Path $ProjectRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", $Module) + $ExtraArgs) `
         -WorkingDirectory $ProjectRoot -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
     Write-SupervisorLog "Restarted $Label PID=$($proc.Id)."
     Write-SupervisorState "running" $Label "restarted pid=$($proc.Id)"
@@ -266,7 +266,10 @@ try {
                 }
             }
             if ($StartNewsWorker.IsPresent) {
-                if (-not (Start-MissingWorker "news_worker" "core.news.service.worker")) { break }
+                # With a dedicated LLM worker, the news worker only pulls: an inline LLM batch
+                # would otherwise block every source poll until the batch finishes.
+                $newsArgs = if ($StartNewsLlmWorker.IsPresent) { @("--pull-only") } else { @() }
+                if (-not (Start-MissingWorker "news_worker" "core.news.service.worker" $newsArgs)) { break }
             }
             if ($StartNewsLlmWorker.IsPresent) {
                 if (-not (Start-MissingWorker "news_llm_worker" "core.news.service.llm_worker")) { break }

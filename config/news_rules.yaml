@@ -44,6 +44,8 @@
   telegram_alastar_retry_count: 1
   # Immutable first receipt / revision archive for research; never issues trades.
   telegram_alastar_observation_archive: true
+  # Channels (subset of telegram_alastar_channels) whose first receipts are archived; each gets its own directory.
+  telegram_observation_archive_channels: [alastartrades]
   chaincatcher_flash_max_records: 80
   chaincatcher_flash_min_interval_sec: 15
   okx_announcements_timeout_sec: 20

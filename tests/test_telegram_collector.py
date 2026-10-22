@@ -233,3 +233,57 @@ def test_promotional_recap_is_flagged_without_dropping_symbol_tags(collector):
     assert recap["payload"]["is_promotional_recap"] is True
     assert recap["symbols"] == ["AIOTUSDT", "DUSDT"]
     assert view["payload"]["is_promotional_recap"] is False
+
+
+def test_picture_only_post_skips_news_but_reaches_the_archive_as_media_only(collector):
+    body = _message("", photo=True, message_id=460) + _message(message_id=461)
+    news = collector._from_html(body)
+    assert [item["payload"]["message_id"] for item in news] == [461]
+    archived = collector._from_html(body, preserve_full_text=True, include_media_only=True)
+    media = next(item for item in archived if item["payload"]["message_id"] == 460)
+    assert media["content"] == "" and media["payload"]["media_only"] is True
+    assert media["payload"]["has_photo"] is True and media["payload"]["photo_count"] == 1
+    assert next(i for i in archived if i["payload"]["message_id"] == 461)["payload"]["media_only"] is False
+    # A caption-less post without any picture is still not a record at all.
+    assert collector._from_html(_message("", message_id=462), include_media_only=True) == []
+
+
+def test_one_failing_channel_does_not_drop_the_others(monkeypatch):
+    collector = TelegramPublicChannelCollector({"defaults": {"telegram_alastar_channels": ["alastartrades", "otherchan"]}})
+    now = datetime.now(timezone.utc).isoformat()
+
+    def fake_request(endpoint, *args, **kwargs):
+        if endpoint.endswith("/otherchan"):
+            raise requests.ConnectionError("blocked")
+        return _response(_message(date=now))
+
+    monkeypatch.setattr(collector, "_request", fake_request)
+    items = collector.pull_latest()
+    assert [item["payload"]["channel"] for item in items] == ["alastartrades"]
+    assert set(collector.last_channel_errors) == {"otherchan"}
+
+    monkeypatch.setattr(collector, "_request", lambda *a, **k: (_ for _ in ()).throw(requests.ConnectionError("down")))
+    with pytest.raises(RuntimeError, match="All Telegram channels failed"):
+        collector.pull_latest()
+    collector.close()
+
+
+def test_each_configured_channel_is_archived_in_its_own_directory(monkeypatch, tmp_path):
+    from core.news import alastar_observation
+
+    collector = TelegramPublicChannelCollector({"defaults": {
+        "telegram_alastar_channels": ["alastartrades", "otherchan"],
+        "telegram_observation_archive_channels": ["alastartrades", "otherchan", "notcollected"],
+        "telegram_alastar_observation_archive": True}})
+    assert collector.archive_channels == ["alastartrades", "otherchan"]  # only channels actually pulled
+    now = datetime.now(timezone.utc).isoformat()
+    bodies = {"alastartrades": _message(date=now), "otherchan": _message(date=now, channel="OtherChan")}
+    monkeypatch.setattr(collector, "_request", lambda endpoint, *a, **k: _response(
+        bodies[endpoint.rsplit("/", 1)[1]], url=endpoint))
+    calls = []
+    monkeypatch.setattr(alastar_observation, "observe_records", lambda records, **kwargs: calls.append(kwargs))
+    collector.pull_latest()
+    assert [(c["channel"], c["output"]) for c in calls] == [
+        ("alastartrades", alastar_observation.DEFAULT_OUTPUT),
+        ("otherchan", alastar_observation.OTHER_CHANNELS_ROOT / "otherchan")]
+    collector.close()
