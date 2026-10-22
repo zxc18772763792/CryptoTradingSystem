@@ -220,6 +220,7 @@ def verify_series(records, cache):
         evidence, before, after = record["evidence"], record.get("before"), record.get("after")
         if before is not None:
             rows = evidence["source_rows"]
+            covered_positions = set()
             require([row["position"] for row in rows] == list(range(len(before))), "Series input position mapping incomplete")
             for row in rows:
                 pos = row["position"]
@@ -235,6 +236,7 @@ def verify_series(records, cache):
             for hour in evidence["source_hour_witnesses"]:
                 if hour["status"] != "unique":
                     continue
+                covered_positions.update(hour["positions"])
                 bars = before.iloc[hour["positions"]][OHLCV].sort_index()
                 stored_hour = pd.Timestamp(hour["stored_hour"])
                 require(bars.index.equals(pd.date_range(stored_hour, periods=60 // minutes,
@@ -243,6 +245,19 @@ def verify_series(records, cache):
                 key = stored_hour + pd.Timedelta(hours=hour["shift_hours"])
                 require(key in reference.index and reference_equal(values, reference.loc[key, OHLCV]),
                         "Series hourly aggregation does not match official UTC reference")
+            native_witnesses = evidence.get("native_row_witnesses") or []
+            if native_witnesses:
+                native, _ = load_reference({"provenance": evidence["native_provenance"]}, cache)
+                positions = [w["position"] for w in native_witnesses]
+                require(len(positions) == len(set(positions)), "Duplicate native witness position")
+                direct = repair.verify_candidates(before.iloc[positions], native)
+                for saved, fresh in zip(native_witnesses, direct["rows"]):
+                    require(saved["status"] == fresh["status"] == "unique"
+                        and saved["shift_hours"] == fresh["shift_hours"]
+                        and saved["utc"] == fresh["utc"], "Native OHLCV witness mismatch")
+                covered_positions.update(positions)
+            require(all(not row["certified"] or row["position"] in covered_positions for row in rows),
+                    "Certified input lacks a full hourly or direct native OHLCV witness")
         require(after is not None, "Cannot check series exact row lineage after unjournaled writer change")
         origins = evidence["output_row_origins"]
         require(len(origins) == len(after), "Output origin map does not cover every output row")

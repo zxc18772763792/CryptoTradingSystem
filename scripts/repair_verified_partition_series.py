@@ -47,7 +47,7 @@ def _frame(frame: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _read(path: Path, minutes: int, reference: pd.DataFrame) -> dict:
+def _read(path: Path, minutes: int, reference: pd.DataFrame, native_reference=None) -> dict:
     before = sha256(path)
     original = pd.read_parquet(path)
     source = _frame(original)
@@ -87,14 +87,26 @@ def _read(path: Path, minutes: int, reference: pd.DataFrame) -> dict:
                 if witness["status"] == "unique":
                     rows[pos]["planned"] = (source.index[pos]
                         + pd.Timedelta(hours=witness["shift_hours"])).isoformat()
+    native_witnesses = []
+    if native_reference is not None:
+        positions = [row["position"] for row in rows if not row["certified"]]
+        if positions:
+            direct = verify_candidates(source.iloc[positions], native_reference)
+            for pos, witness in zip(positions, direct["rows"]):
+                if witness["status"] != "unique":
+                    continue
+                native_witnesses.append({**witness, "position": pos})
+                rows[pos].update(status="native_ohlcv_unique", shift_hours=witness["shift_hours"],
+                                 planned=witness["utc"], certified=True)
     if original.attrs.get("cts_timestamp_timezone") == "UTC" and any(
             row["shift_hours"] == -8 for row in rows):
         raise RepairConflict(f"UTC marker contradicts official hourly witnesses: {path}")
     return {"path": path, "pre_hash": before, "original": original,
-            "source": source, "rows": rows, "hours": hours}
+            "source": source, "rows": rows, "hours": hours, "native_witnesses": native_witnesses}
 
 
-def build_series_plans(directory, reference, provenance, through="2026-05-19") -> list[dict]:
+def build_series_plans(directory, reference, provenance, through="2026-05-19", *,
+                       native_reference=None, native_provenance=None) -> list[dict]:
     """Return engine-ready plans, including all existing destination neighbors.
 
     Source files dated <=through are read first. Destination-file closure then
@@ -112,6 +124,13 @@ def build_series_plans(directory, reference, provenance, through="2026-05-19") -
     ref = _frame(reference).sort_index()
     if not ref.index.is_unique:
         raise RepairConflict("Official reference has duplicate hours")
+    native = None
+    if native_reference is not None:
+        if not native_provenance:
+            raise RepairConflict("Native fallback requires independent official provenance")
+        native = _frame(native_reference).sort_index()
+        if not native.index.is_unique:
+            raise RepairConflict("Official native reference has duplicate timestamps")
     paths = []
     for path in sorted(directory.glob("*.parquet")):
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.stem):
@@ -124,7 +143,7 @@ def build_series_plans(directory, reference, provenance, through="2026-05-19") -
     pending = set(paths)
     while pending:
         for path in sorted(pending):
-            sources[path] = _read(path, INTERVAL_MINUTES[interval], ref)
+            sources[path] = _read(path, INTERVAL_MINUTES[interval], ref, native)
         pending = set()
         for item in sources.values():
             for row in item["rows"]:
@@ -240,6 +259,8 @@ def build_series_plans(directory, reference, provenance, through="2026-05-19") -
             "source_path": str(path) if source else None,
             "source_rows": source["rows"] if source else [],
             "source_hour_witnesses": source["hours"] if source else [],
+            "native_row_witnesses": source["native_witnesses"] if source else [],
+            "native_provenance": native_provenance,
             "source_deferred_hours": [hour for hour in deferred_hours if hour["path"] == str(path)],
             "output_row_origins": origins,
             "unknown_output_rows": sum(not all(sources[Path(p["path"])]["rows"][p["position"]]["certified"]
