@@ -298,3 +298,44 @@ def test_receipt_latency_reports_first_live_delays_poll_wait_and_outages(tmp_pat
     saved = json.loads((tmp_path / "receipt_latency.json").read_text(encoding="utf-8"))
     assert saved["last_run_sha256"] == state(tmp_path)["last_run_sha256"]
     assert state(tmp_path)["run_count"] == 5  # read-only over the immutable runs
+
+
+def test_media_only_post_is_archived_but_never_a_text_candidate(tmp_path):
+    record = message(470, text="", has_photo=True, media_only=True)
+    result = live(tmp_path, [record])
+    assert result["candidate_review_count"] == 0
+    first = state(tmp_path)["messages"][record["source_id"]]["first"]
+    assert first["media_only"] is True and first["text"] == ""
+    assert "media_only_no_text" in first["exclusion_reasons"]
+    assert verify_archive(tmp_path)["verified_full_chain"] is True
+    with pytest.raises(ValueError):
+        live(tmp_path, [message(471, text="")])  # empty text without the media-only flag
+    with pytest.raises(ValueError):
+        live(tmp_path, [message(472, text="", media_only=True)])  # media-only claim without a photo
+
+
+def test_text_revision_hash_is_unchanged_by_the_media_only_field(tmp_path):
+    import hashlib
+    from core.news.alastar_observation import _json_bytes, _normalise
+    record = message(473)
+    version = {"text": record["content"], "published_at_raw": record["published_at"],
+               "telegram_edited": False, "text_truncated": False}
+    assert _normalise(record)["revision_sha256"] == hashlib.sha256(_json_bytes(version)).hexdigest()
+
+
+def test_other_channel_archive_is_separate_and_cannot_mix_channels(tmp_path):
+    from core.news.alastar_observation import OTHER_CHANNELS_ROOT, archive_dir, receipt_latency
+    assert archive_dir("@OtherChan") == OTHER_CHANNELS_ROOT / "otherchan"
+    other = {"source_id": "telegram:otherchan:5", "url": "https://t.me/otherchan/5", "content": "hello",
+             "published_at": "2026-10-21T01:00:00Z",
+             "payload": {"message_id": 5, "channel": "otherchan", "original_text": "hello"}}
+    out = tmp_path / "other"
+    observe_records([other], out, mode="live_public_preview", observed_at="2026-10-21T01:01:00Z",
+                    raw_preview=b"<html>other</html>", channel="otherchan")
+    assert json.loads((out / "runs" / "000000000001.json").read_text(encoding="utf-8"))["channel"] == "otherchan"
+    assert verify_archive(out, channel="otherchan")["channel"] == "otherchan"
+    assert receipt_latency(out, channel="otherchan", now="2026-10-21T01:02:00Z")["live_first_receipts"]["count"] == 1
+    with pytest.raises(RuntimeError):
+        verify_archive(out)  # read as the Alastar archive
+    with pytest.raises(ValueError):
+        observe_records([message(1)], out, channel="otherchan")  # an Alastar message into another channel's archive

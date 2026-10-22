@@ -75,3 +75,24 @@ def test_curated_user_research_is_preserved_and_machine_handoff_is_versioned(tmp
     snapshots = list((tmp_path/"handoff_history").glob("*.json"))
     assert len(snapshots) == 1 and snapshots[0].read_bytes() == old
     assert json.loads(target.read_bytes())["round"] == 5
+
+
+def test_clock_gate_uses_the_tightest_of_several_reads_and_keeps_all(tmp_path):
+    start = datetime(2020,1,1,tzinfo=timezone.utc)
+    plan = [(3.0, 1.9), (.05, 0.), (.08, 0.), (.06, 0.), (.07, 0.)]  # (round trip, true offset): slow first read
+    state = {"i": 0}
+
+    def fetch(*_):
+        rtt, offset = plan[state["i"]]
+        requested = start + timedelta(seconds=10*state["i"])
+        received = requested + timedelta(seconds=rtt)
+        name = f"clock{state['i']}.json"
+        (tmp_path/name).write_text(json.dumps({"requested_at_utc": requested.isoformat(),
+                                               "received_at_utc": received.isoformat()}), encoding="utf-8")
+        state["i"] += 1
+        return {"serverTime": int((requested.timestamp()+rtt/2+offset)*1000)}, {"file": name}
+
+    result = fake_provider(tmp_path, fetch).clock_check()
+    assert result["ok"] is True and result["round_trip_seconds"] == pytest.approx(.05)
+    assert len(result["reads"]) == cli.CLOCK_SAMPLES == 5
+    assert max(abs(v) for v in result["reads"][0]["offset_interval_seconds"]) > 2  # the slow read alone would fail

@@ -22,6 +22,8 @@ FILL_WINDOW_SECONDS = 30  # operational capture guard, fixed before any paper fi
 IMPLEMENTATION_RULES = {"version": "v2-recorder-20261022", "fill_capture_seconds": 30,
                         "recent_live_observations": 4, "maximum_poll_gap_seconds": 600,
                         "clock_max_abs_offset_seconds": 2, "clock_max_round_trip_seconds": 10,
+                        # 10/22, before any activation: gate on the tightest of several public time reads.
+                        "clock_samples": 5,
                         "collateral": "realised free isolated collateral; unrealised gains not reused",
                         "activation": "explicit paper-only registration before publication",
                         "primary": "price-only20bps on both sides; actual funding reported separately"}

@@ -38,7 +38,7 @@ def capture_public_preview(output: Path | str = DEFAULT_OUTPUT) -> dict[str, Any
     # The body is already capped at 2 MiB; retain every extracted text character
     # rather than the news collector's normal 16k/20k display limit.
     collector.max_text_chars = collector.MAX_HTML_BYTES
-    records = collector._from_html(raw.decode("utf-8", errors="strict"), channel=CHANNEL)
+    records = collector._from_html(raw.decode("utf-8", errors="strict"), channel=CHANNEL, include_media_only=True)
     return observe_records(records, output, mode="live_public_preview", observed_at=observed_at,
                            evidence={"kind": "fresh_https_public_preview", "url": ENDPOINT}, raw_preview=raw)
 

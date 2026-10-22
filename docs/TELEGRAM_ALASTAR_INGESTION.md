@@ -29,6 +29,15 @@
 <http://127.0.0.1:8000/api/news/raw/history?source=telegram_alastar&limit=50>。
 新文章会进入现有资讯页；默认 24 小时视图不会显示更早的文章。
 
+2026-10-22 补充：
+- 纯图片帖（无文字说明）仍不进新闻库，但会进入首次收件研究归档：`media_only=true`、文字为空，
+  排除原因`media_only_no_text`，不会进入文字候选队列，只为图片研究保留真实首次收件时刻。已有文字消息的版本哈希不变。
+- `telegram_observation_archive_channels`（默认`[alastartrades]`）列出要归档的频道，须是`telegram_alastar_channels`的子集；
+  Alastar 继续写`data/research/alastar_observation/`，其他频道各写`data/research/telegram_observation/<频道>/`，档案不能混用频道。
+- 多频道时某个频道请求失败或页面结构变化，只记日志并跳过该频道；所有频道都失败才报源错误。
+- 守护任务同时启动独立 LLM worker 时，新闻 worker 以`--pull-only`运行：新文章只写入数据库任务队列，
+  由 LLM worker 处理，模型变慢也不会拖住各来源的轮询（10/21 曾因此把 Telegram 轮询拖到约7分钟）。
+
 范围是公开预览的当前一页，不保证完整历史、断线期间全部消息、已删除文章、旧文章的修改
 同步，也不包含图片内文字、视频、私密频道或 Pumpglass 付费告警。公开页访问失败会显示源错误，
 频道暂未发新文章时仍记录成功检查；不会把旧文章的日期改成采集时间。

@@ -545,12 +545,15 @@ $shouldStartPmWorker = $StartPmWorker
 
 if ($shouldStartWorker) {
     $workerPid = Get-WorkerPid
+    # A dedicated LLM worker owns extraction; the news worker then only pulls, so a slow
+    # LLM batch can never stall source polling (see scripts/supervise_web.ps1).
+    $workerExtraArgs = if ($shouldStartLlmWorker) { @("--pull-only") } else { @() }
     if ($workerPid) {
         Write-Host "News worker already running (PID=$workerPid)."
     } else {
         $workerProc = Start-Process `
             -FilePath $pythonExe `
-            -ArgumentList @("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "core.news.service.worker") `
+            -ArgumentList (@("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "core.news.service.worker") + $workerExtraArgs) `
             -WorkingDirectory $PSScriptRoot `
             -PassThru
         Write-Host "Started news worker PID=$($workerProc.Id)"

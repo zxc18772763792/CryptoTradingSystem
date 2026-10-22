@@ -14,6 +14,7 @@ from core.research.alastar_forward_paper import (
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAPER = ROOT / "data/research/alastar_paper_v2"
 PROTOCOL = ROOT / "data/research/alastar_response_20261021/prospective_paper_protocol_v2.json"
+CLOCK_SAMPLES = IMPLEMENTATION_RULES["clock_samples"]
 
 
 class OfficialEvidence:
@@ -53,18 +54,29 @@ class OfficialEvidence:
             _atomic_bytes(path, raw)
         return rows, {"file": filename, "sha256": sha(raw)}
 
-    def clock_check(self):
-        payload, evidence = self._fetch("https://fapi.binance.com/fapi/v1/time", {})
-        record = json.loads((self.output / evidence["file"]).read_bytes())
-        requested, received = _utc(record["requested_at_utc"]), _utc(record["received_at_utc"])
-        midpoint = requested + (received-requested)/2
-        offset = payload["serverTime"]/1000 - midpoint.timestamp()
-        result = {"offset_seconds": offset, "round_trip_seconds": (received-requested).total_seconds(),
-                  "offset_interval_seconds": [payload["serverTime"]/1000-received.timestamp(),
-                                              payload["serverTime"]/1000-requested.timestamp()],
-                  "checked_at_utc": received.isoformat(), "evidence": evidence}
+    def clock_check(self, samples=CLOCK_SAMPLES):
+        """Several public time reads; the gate uses the one with the tightest round trip.
+
+        A single read's interval includes connection setup (one 0.29s read on 10/21
+        set the interval width), so the narrowest of a few reads bounds the offset
+        best. Every read is kept as evidence; none is dropped from the record.
+        """
+        reads = []
+        for _ in range(max(1, int(samples))):
+            payload, evidence = self._fetch("https://fapi.binance.com/fapi/v1/time", {})
+            record = json.loads((self.output / evidence["file"]).read_bytes())
+            requested, received = _utc(record["requested_at_utc"]), _utc(record["received_at_utc"])
+            midpoint = requested + (received-requested)/2
+            reads.append({"offset_seconds": payload["serverTime"]/1000 - midpoint.timestamp(),
+                          "round_trip_seconds": (received-requested).total_seconds(),
+                          "offset_interval_seconds": [payload["serverTime"]/1000-received.timestamp(),
+                                                      payload["serverTime"]/1000-requested.timestamp()],
+                          "checked_at_utc": received.isoformat(), "evidence": evidence})
+        result = dict(min(reads, key=lambda r: r["round_trip_seconds"]))
         result["ok"] = (max(abs(v) for v in result["offset_interval_seconds"]) <= IMPLEMENTATION_RULES["clock_max_abs_offset_seconds"]
                         and result["round_trip_seconds"] <= IMPLEMENTATION_RULES["clock_max_round_trip_seconds"])
+        result["reads"] = reads
+        result["selection"] = "minimum round trip of all reads"
         return result
 
     def klines(self, symbol, start, end):
@@ -127,7 +139,7 @@ def snapshot(output, value):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("status", "activate", "freeze", "tick", "audit-null"))
+    parser.add_argument("action", choices=("status", "clock", "activate", "freeze", "tick", "audit-null"))
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_PAPER)
     parser.add_argument("--archive-dir", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--protocol", type=Path, default=PROTOCOL)
@@ -171,6 +183,9 @@ def main():
         provider = OfficialEvidence(args.output_dir)
         clock = provider.clock_check()
         _atomic_bytes(args.output_dir / "clock_check.json", _json_bytes(clock))
+        if args.action == "clock":  # bounded public time reads only; never activates
+            print(json.dumps(clock, ensure_ascii=False, indent=2, allow_nan=False))
+            return
         if args.action != "audit-null" and not clock["ok"]:
             raise RuntimeError("Clock/round-trip check failed; paper activation and fills stopped")
         if args.action == "activate":

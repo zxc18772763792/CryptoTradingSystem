@@ -149,3 +149,31 @@ def test_agent_health_uses_recent_model_failure_without_account_details():
     assert _agent_model_runtime_issue(status) is None
     status["running"] = False
     assert _agent_model_runtime_issue(status) is None
+
+
+@pytest.mark.parametrize(("llm_enabled", "expected_calls"), [(False, 0), (True, 1)])
+def test_pull_only_worker_leaves_inserted_items_to_the_llm_worker(monkeypatch, llm_enabled, expected_calls):
+    from core.news.service import worker
+    inserted = [{"id": 1, "title": "t"}]
+    monkeypatch.setattr(worker.news_db, "get_source_state", AsyncMock(return_value=None))
+    monkeypatch.setattr(worker.news_db, "save_news_raw", AsyncMock(return_value={"inserted": inserted}))
+    enqueue = AsyncMock(return_value={"queued_count": 1})
+    monkeypatch.setattr(worker.news_db, "enqueue_llm_tasks", enqueue)
+    monkeypatch.setattr(worker.news_db, "set_source_state", AsyncMock())
+    collector = SimpleNamespace(sources=["gdelt"], pull_latest_incremental=AsyncMock(
+        return_value={"items": [{"title": "t"}], "source_stats": {"gdelt": {"errors": []}}}))
+    monkeypatch.setattr(worker, "MultiSourceNewsCollector", lambda _: collector)
+    events = AsyncMock()
+    monkeypatch.setattr(worker, "on_news_inserted", events)
+    monkeypatch.setattr(worker, "_ensure_event_processor", AsyncMock())
+    monkeypatch.setattr(worker, "process_llm_batch", AsyncMock(return_value={}))
+    monkeypatch.setattr(worker, "load_service_config", lambda: {})
+    monkeypatch.setattr(worker, "_in_process_llm", True)
+
+    async def run():
+        await worker.worker_loop({}, once=True, pull_enabled=True, llm_enabled=llm_enabled)
+        await asyncio.sleep(0)  # let a scheduled on_news_inserted task run
+
+    asyncio.run(run())
+    assert enqueue.await_count == 1  # the database queue is filled either way
+    assert events.await_count == expected_calls
