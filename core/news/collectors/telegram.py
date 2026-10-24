@@ -6,6 +6,10 @@ visible, but the existing news store does not synchronize already stored edits.
 Picture-only posts (no caption) never enter the news store, but they do reach
 the first-receipt research archive, which marks them as media-only. One
 channel's failure does not stop the others; only an all-channel failure raises.
+
+A channel listed in ``telegram_archive_only_channels`` is polled and archived like
+the others but creates no news item: automated alert feeds (CryptoQuant Alert) are
+research inputs, not headlines for the news pipeline or its AI extraction.
 """
 from __future__ import annotations
 
@@ -112,6 +116,12 @@ class TelegramPublicChannelCollector(BaseNewsCollector):
         self.observation_archive_enabled = defaults.get("telegram_alastar_observation_archive") is True
         archived = defaults.get("telegram_observation_archive_channels", ["alastartrades"])
         self.archive_channels = [c for c in _public_channels(archived) if c in self.channels]
+        only = defaults.get("telegram_archive_only_channels") or []
+        self.archive_only_channels = _public_channels(only) if only else []
+        if any(c not in self.channels or c not in self.archive_channels for c in self.archive_only_channels) or (
+                self.archive_only_channels and not self.observation_archive_enabled):
+            # An archive-only channel that is not archived would be read and silently thrown away.
+            raise ValueError("telegram_archive_only_channels must be allowlisted and archived (observation archive enabled)")
         if self.min_interval_sec <= 0:
             self.min_interval_sec = 15.0
 
@@ -239,6 +249,8 @@ class TelegramPublicChannelCollector(BaseNewsCollector):
                 # One channel's outage or markup change must not drop the others.
                 self.last_channel_errors[channel] = f"{type(exc).__name__}: {exc}"
                 logger.warning("Telegram channel %s failed: %s", channel, exc)
+                continue
+            if channel in self.archive_only_channels:
                 continue
             for item in page_items:
                 if datetime.fromisoformat(item["published_at"]) >= since:

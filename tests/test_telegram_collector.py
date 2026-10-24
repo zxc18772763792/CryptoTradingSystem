@@ -307,3 +307,40 @@ def test_each_configured_channel_is_archived_in_its_own_directory(monkeypatch, t
         ("alastartrades", alastar_observation.DEFAULT_OUTPUT),
         ("otherchan", alastar_observation.OTHER_CHANNELS_ROOT / "otherchan")]
     collector.close()
+
+
+def test_archive_only_channel_is_archived_but_creates_no_news_item(monkeypatch):
+    from core.news import alastar_observation
+
+    collector = TelegramPublicChannelCollector({"defaults": {
+        "telegram_alastar_channels": ["alastartrades", "cryptoquant_alert"],
+        "telegram_observation_archive_channels": ["alastartrades", "cryptoquant_alert"],
+        "telegram_archive_only_channels": ["cryptoquant_alert"],
+        "telegram_alastar_observation_archive": True}})
+    assert collector.archive_only_channels == ["cryptoquant_alert"]
+    now = datetime.now(timezone.utc).isoformat()
+    alert = "\U0001F433 1,178.89 #BTC ($98,297,722)<br>aggregated inflows to #Okx<br><br>View Chart | @cryptoquant_alert"
+    bodies = {"alastartrades": _message(date=now), "cryptoquant_alert": _message(alert, channel="cryptoquant_alert", message_id=6208, date=now)}
+    monkeypatch.setattr(collector, "_request", lambda endpoint, *a, **k: _response(bodies[endpoint.rsplit("/", 1)[1]], url=endpoint))
+    calls = []
+    monkeypatch.setattr(alastar_observation, "observe_records", lambda records, **kwargs: calls.append((records, kwargs)))
+    items = collector.pull_latest()
+    assert [item["payload"]["channel"] for item in items] == ["alastartrades"]  # no news item for the alert feed
+    archived = {kwargs["channel"]: records for records, kwargs in calls}
+    assert set(archived) == {"alastartrades", "cryptoquant_alert"}
+    assert archived["cryptoquant_alert"][0]["payload"]["original_text"] == (
+        "\U0001F433 1,178.89 #BTC ($98,297,722)\naggregated inflows to #Okx\n\nView Chart | @cryptoquant_alert")
+    collector.close()
+
+
+@pytest.mark.parametrize("defaults", [
+    {"telegram_alastar_channels": ["alastartrades"], "telegram_archive_only_channels": ["cryptoquant_alert"],
+     "telegram_observation_archive_channels": ["alastartrades"], "telegram_alastar_observation_archive": True},
+    {"telegram_alastar_channels": ["alastartrades", "cryptoquant_alert"], "telegram_archive_only_channels": ["cryptoquant_alert"],
+     "telegram_observation_archive_channels": ["alastartrades"], "telegram_alastar_observation_archive": True},
+    {"telegram_alastar_channels": ["alastartrades", "cryptoquant_alert"], "telegram_archive_only_channels": ["cryptoquant_alert"],
+     "telegram_observation_archive_channels": ["alastartrades", "cryptoquant_alert"], "telegram_alastar_observation_archive": False},
+])
+def test_archive_only_channel_that_would_not_be_archived_is_a_configuration_error(defaults):
+    with pytest.raises(ValueError, match="archive-only|archive_only|archived"):
+        TelegramPublicChannelCollector({"defaults": defaults})

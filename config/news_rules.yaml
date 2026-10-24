@@ -38,14 +38,16 @@
   # CRYPTOCOMPARE_API_KEY optional; without key collector still runs with stricter rate limit.
   # OPENNEWS_TOKEN is required when NEWS_ENABLE_OPENNEWS=true; opennews is added dynamically when both are present.
   chaincatcher_flash_timeout_sec: 20
-  telegram_alastar_channels: [alastartrades]
+  telegram_alastar_channels: [alastartrades, cryptoquant_alert]
   telegram_alastar_timeout_sec: 20
   telegram_alastar_max_records: 40
   telegram_alastar_retry_count: 1
   # Immutable first receipt / revision archive for research; never issues trades.
   telegram_alastar_observation_archive: true
   # Channels (subset of telegram_alastar_channels) whose first receipts are archived; each gets its own directory.
-  telegram_observation_archive_channels: [alastartrades]
+  telegram_observation_archive_channels: [alastartrades, cryptoquant_alert]
+  # Archived for the CryptoQuant Alert shadow ledger only; no news item, no AI extraction.
+  telegram_archive_only_channels: [cryptoquant_alert]
   chaincatcher_flash_max_records: 80
   chaincatcher_flash_min_interval_sec: 15
   okx_announcements_timeout_sec: 20

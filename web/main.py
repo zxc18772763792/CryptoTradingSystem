@@ -2206,6 +2206,12 @@ async def _alastar_signal_intake_worker(stop_event: asyncio.Event) -> None:
     await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("alastar_signal_intake", success=ok))
 
 
+async def _cryptoquant_alert_shadow_worker(stop_event: asyncio.Event) -> None:
+    from core.research.cryptoquant_alert_shadow import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("cryptoquant_alert_shadow", success=ok))
+
+
 async def _telegram_forward_worker(stop_event: asyncio.Event) -> None:
     from core.research.telegram_forward_runner import worker
 
@@ -2259,6 +2265,11 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         },
         "alastar_signal_intake": {
             "factory": lambda stop_event: _alastar_signal_intake_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "cryptoquant_alert_shadow": {
+            # Idles until the shadow protocol is explicitly activated; records only, never orders.
+            "factory": lambda stop_event: _cryptoquant_alert_shadow_worker(stop_event),
             "restart_on_failure": True,
         },
         "cusum_monitor": {

@@ -47,7 +47,8 @@ def test_default_configuration_enables_alastar_collection(monkeypatch):
     specs, errors = manager._build_collectors(source_names=[SOURCE])
     try:
         assert SOURCE in manager.sources
-        assert cfg["defaults"]["telegram_alastar_channels"] == ["alastartrades"]
+        assert cfg["defaults"]["telegram_alastar_channels"] == ["alastartrades", "cryptoquant_alert"]
+        assert cfg["defaults"]["telegram_archive_only_channels"] == ["cryptoquant_alert"]  # alert feed: archive, no news item
         assert [spec.name for spec in specs] == [SOURCE]
         assert errors == []
         assert worker._source_interval(SOURCE) == 60
