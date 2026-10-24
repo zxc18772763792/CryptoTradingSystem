@@ -23,12 +23,10 @@
         })(typeof globalThis !== "undefined" ? globalThis : window);
     </script>
     <!--
-      Third-party libraries pinned to a specific immutable version with SRI
-      integrity hashes. To rotate a version:
-          curl -sL <url> | openssl dgst -sha384 -binary | openssl base64 -A
-      then update both `src` and `integrity`.
+      Serve the pinned Plotly bundle locally so charts work without CDN access.
+      When upgrading, replace the vendor bundle and update its filename and SRI.
     -->
-    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"
+    <script defer src="{{ static_asset_url('vendor/plotly-2.35.2.min.js') }}"
             integrity="sha384-cCVCZkAjYNxaYKbM8lsArLznDF/SvMFr1jcZrvOpSTCa0W40ZAdLzHCEulnUa5i7"
             crossorigin="anonymous"></script>
 </head>
