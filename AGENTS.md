@@ -169,3 +169,12 @@ Available through the bundled Codex runtime — check before reporting it missin
 There is no root `package.json` or local `node_modules`. The smoke test imports
 `@playwright/test` while the bundled runtime exposes `playwright`; treat that runner
 import mismatch as a project configuration issue, not an environment absence.
+
+## 11. Telegram user-session handoff
+
+For Telegram research/access work, read [docs/TELEGRAM_AGENT_HANDOFF.md](docs/TELEGRAM_AGENT_HANDOFF.md)
+first. A verified independent, Windows-DPAPI-encrypted Telethon session already
+exists locally. Reuse the session; do not rerun desktop bootstrap, print credentials,
+or treat the notification Bot Token as user access. Check current collector locks
+before using the same session concurrently. Historical text and forward observations
+have different availability times; preserve the frozen research protocol.
