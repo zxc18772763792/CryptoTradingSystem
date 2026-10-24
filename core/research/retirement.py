@@ -41,6 +41,11 @@ RULES: Dict[str, Dict[str, Any]] = {
     # summary supplies the verdict; do not apply the generic 90% rule below.
     "alastar_fresh_call_1h_v2": {"min_n": 66, "unit": "trade", "backtest_mean_pct": None,
                                "decision_engine": "alastar_protocol_v2", "futility_n": 40, "primary_alpha": .05},
+    # Telegram forward books: protocol-owned (telegram-three-source-paper-v1), descriptive screen only.
+    "telegram_cryptoquant_24h": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,
+                                 "decision_engine": "telegram_forward_protocol", "diagnostic_only": True},
+    "telegram_binance_chat_sentiment": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,
+                                        "decision_engine": "telegram_forward_protocol", "diagnostic_only": True},
     # 15.8 came from an entry/exit - 1 P&L bug; corrected 2026-09-28 before any forward trade
     "listing_short": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 1.5},
     "unlock_short": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 9.5},

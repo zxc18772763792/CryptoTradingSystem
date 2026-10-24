@@ -1503,3 +1503,12 @@ def test_core_symbol_majority_or_dead_feed_still_fail_readiness(monkeypatch):
     assert ready is False
     ready, checks = _ready_with_market(monkeypatch, _status(0, 20), ())
     assert ready is True and checks["market_data"]["status"] == "ok" and "stale_symbols" not in checks["market_data"]
+
+
+def test_telegram_forward_worker_is_opt_in(monkeypatch):
+    monkeypatch.setattr(web_main, "_TELEGRAM_FORWARD_WORKER_ENABLED", False)
+    assert "telegram_forward" not in web_main._build_runtime_task_factories(FastAPI())
+    monkeypatch.setattr(web_main, "_TELEGRAM_FORWARD_WORKER_ENABLED", True)
+    factories = web_main._build_runtime_task_factories(FastAPI())
+    assert factories["telegram_forward"]["restart_on_failure"] is True
+    assert callable(factories["telegram_forward"]["factory"])

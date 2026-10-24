@@ -168,6 +168,7 @@ _LISTENER_WATCHDOG_ENABLED = _env_bool("LISTENER_WATCHDOG_ENABLED", True)
 # (core/research/announcement_short_tracker.py). It needs ~90 s polling, which the
 # 5-minute research scheduler cannot give, so it runs as its own runtime task.
 _ANNOUNCEMENT_SHORT_ENABLED = _env_bool("ANNOUNCEMENT_SHORT_TRACKER_ENABLED", True)
+_TELEGRAM_FORWARD_WORKER_ENABLED = _env_bool("TELEGRAM_FORWARD_WORKER_ENABLED", False)
 _EQUITY_SNAPSHOT_ENABLED = _env_bool("EQUITY_SNAPSHOT_WORKER_ENABLED", True)
 _EQUITY_SNAPSHOT_INTERVAL_SEC = max(60, int(_env_float("EQUITY_SNAPSHOT_INTERVAL_SEC", 300.0)))
 # Readiness used to fail on ANY stale WS symbol: thin coins (MOVE/USDT, USUAL/USDT ticking
@@ -2205,6 +2206,12 @@ async def _alastar_signal_intake_worker(stop_event: asyncio.Event) -> None:
     await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("alastar_signal_intake", success=ok))
 
 
+async def _telegram_forward_worker(stop_event: asyncio.Event) -> None:
+    from core.research.telegram_forward_runner import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("telegram_forward", success=ok))
+
+
 async def _equity_snapshot_worker(stop_event: asyncio.Event) -> None:
     """Record paper equity on a timer so the dashboard curve has history while nobody has the page
     open (snapshots used to come only from dashboard balance reads: 271 rows in a month). Paper
@@ -2263,6 +2270,12 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             "restart_on_failure": True,
         },
     }
+    if _TELEGRAM_FORWARD_WORKER_ENABLED:
+        # Child-process cycle of the frozen Telegram forward paper protocol (CryptoQuant + Binance chat).
+        factories["telegram_forward"] = {
+            "factory": lambda stop_event: _telegram_forward_worker(stop_event),
+            "restart_on_failure": True,
+        }
     if _COINGLASS_WORKER_ENABLED:
         factories["coinglass"] = {
             "factory": lambda stop_event: _coinglass_worker(stop_event),
