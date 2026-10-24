@@ -45,7 +45,8 @@ def _unseen_ids_before(widgets: List[Any], channel: str) -> Dict[int, List[int]]
     gaps: Dict[int, List[int]] = {}
     ordered = sorted(spans)
     for previous, current in zip(ordered, ordered[1:]):
-        gaps[current] = list(range(previous + spans[previous], current))[:100]
+        start = previous + spans[previous]
+        gaps[current] = list(range(start, min(current, start + 100)))
     return gaps
 
 
@@ -71,11 +72,11 @@ def _publication_time(value: Any) -> Optional[datetime]:
         return None
     try:
         timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            return None
+        return timestamp.astimezone(timezone.utc)
     except (ValueError, OverflowError):
         return None
-    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-        return None
-    return timestamp.astimezone(timezone.utc)
 
 
 def _symbols(text: str) -> List[str]:

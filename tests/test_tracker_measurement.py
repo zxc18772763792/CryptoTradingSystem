@@ -24,6 +24,43 @@ def ledger_summary(mean=4., n=2):
             'forward_open': 1, 'updated_at': '2026-10-20T05:00:00+00:00'}
 
 
+def test_alastar_uses_frozen_protocol_verdict_and_keeps_excess_separate(monkeypatch):
+    monkeypatch.setattr(registry, '_open_marks', lambda spec: [])
+    source = {'retirement': {'n': 0, 'min_n': 66, 'mean_pct': None, 'ci90_pct': None,
+                            'verdict': 'collecting', 'label': '积累新样本'},
+              'actual_mean_pct': 1.2, 'runner_active': True, 'pending_review': 2,
+              'tracker_status_label': '待语义复核', 'completed_without_primary': 1}
+    row = registry.tracker_row(spec_for('alastar_fresh_call_1h_v2', lambda: source))
+    assert row['metric_kind'] == 'excess_return' and row['metric_unit_label'] == '百分点/笔'
+    assert row['n'] == 0 and row['min_n'] == 66 and row['ci90_pct'] is None
+    assert row['mean_pct'] is None and row['actual_mean_pct'] == 1.2
+    assert row['pending_review'] == 2 and row['runner_active']
+    assert row['backtest_mean_pct'] is None and row['completed_without_primary'] == 1
+
+
+def test_alastar_horizons_preserve_matched_units_and_never_aggregate_five_outcomes():
+    source={'retirement':{'n':1,'min_n':66,'mean_pct':None,'verdict':'collecting'},
+            'horizon_comparison':[{'hours':h,'common_n':1,'completed_n':1,'excess_pp':h/100} for h in (1,4,24,72,168)]}
+    row=registry.tracker_row(spec_for('alastar_horizons_v3',lambda:source))
+    assert row['metric_kind']=='horizon_comparison' and row['n']==1
+    assert row['mean_pct'] is None and row['gross_mean_pct'] is None
+    assert len(row['horizon_comparison'])==5 and row['open_marks']==[]
+
+
+def test_intake_health_does_not_become_a_research_sample(monkeypatch):
+    from core.research import alastar_signal_intake
+    health = {'enabled': True, 'enabled_at_utc': '2026-10-23T11:55:13Z', 'runner_active': True, 'last_error': None,
+              'counts': {'label_frozen': 20, 'non_signal': 30}, 'items': {'detail': 'not a table field'}}
+    monkeypatch.setattr(alastar_signal_intake, 'detail', lambda: health)
+    source = {'retirement': {'n': 0, 'min_n': 66, 'mean_pct': None, 'verdict': 'collecting'}}
+    row = registry.tracker_row(spec_for('alastar_fresh_call_1h_v2', lambda: source))
+    assert row['signal_intake']['runner_active'] is True
+    assert row['signal_intake']['enabled_at_utc'] == health['enabled_at_utc']
+    assert row['signal_intake']['counts']['label_frozen'] == 20
+    assert 'items' not in row['signal_intake']
+    assert row['n'] == 0 and row['mean_pct'] is None
+
+
 @pytest.mark.parametrize(('inverse', 'linear'), [(60., 37.5), (59.63, 37.36), (0., 0.), (-50., -100.), (-80., -400.), ('60', 37.5)])
 def test_legacy_inverse_marks_convert_to_linear_short_price_pnl(inverse, linear):
     record = {'mark_return_pct': inverse}

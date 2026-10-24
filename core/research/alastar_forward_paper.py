@@ -163,6 +163,8 @@ class PaperJournal:
         self.protocol_sha = sha(self.protocol_raw)
         provider_path = Path(__file__).resolve().parents[2]/"scripts/observe_alastar_paper.py"
         self.implementation_sources = {"core": sha(Path(__file__).read_bytes()), "provider_cli": sha(provider_path.read_bytes())}
+        tracker_path = Path(__file__).with_name("alastar_paper_tracker.py")
+        if tracker_path.exists(): self.implementation_sources["tracker"] = sha(tracker_path.read_bytes())
         self.implementation_sha = sha(_json_bytes({"sources": self.implementation_sources, "rules": IMPLEMENTATION_RULES}))
 
     def health(self):
@@ -267,12 +269,17 @@ class PaperJournal:
     def status(self):
         with _archive_lock(self.output):
             records, events = self._state()
+            runtime_path = self.output/"tracker_runtime.json"
+            runtime = json.loads(runtime_path.read_bytes()) if runtime_path.exists() else {}
+            runner_at = runtime.get("last_tick_at_utc")
+            runner_active = bool(runtime.get("continuous_runner") and not runtime.get("last_pass_error")
+                                 and runner_at and 0 <= (now_utc()-_utc(runner_at)).total_seconds() <= 30)
             counts = {}
             for e in events.values():
                 counts[e["status"]] = counts.get(e["status"], 0) + 1
             return {"protocol": self.protocol["protocol_id"], "journal_records": len(records),
                     "counts": counts, "events": list(events.values()),
-                    "continuous_runner": False, "live_orders": False,
+                    "continuous_runner": runner_active, "runner_last_tick_at_utc": runner_at, "live_orders": False,
                     "activation_registered_at_utc": records[0]["recorded_at_utc"] if records and records[0]["kind"] == "activation" else None,
                     "implementation_rules": IMPLEMENTATION_RULES,
                     "primary_measured_trades": sum(e.get("settlement", {}).get("primary_excess_price_only") is not None for e in events.values()),
@@ -363,7 +370,7 @@ class PaperJournal:
                            "protocol_snapshot": self.protocol if not records else None}
                 return self._append("freeze", payload)
 
-    def tick(self, provider):
+    def tick(self, provider, *, settlement_enabled=True):
         """One bounded capture/settlement pass; provider supplies official evidence."""
         with _archive_lock(self.output):
             records, events = self._state()
@@ -408,7 +415,7 @@ class PaperJournal:
             _, events = self._state()
             for key, e in events.items():
                 exit_at = _utc(e["planned_exit_at"])
-                if e["status"] != "open" or now_utc() < exit_at + STEP:
+                if not settlement_enabled or e["status"] != "open" or now_utc() < exit_at + STEP:
                     continue
                 entry_at = _utc(e["planned_entry_at"])
                 try:
@@ -456,7 +463,7 @@ class PaperJournal:
             # collateral tied up. Retry its comparison separately, never as0.
             _, events = self._state()
             for key, e in events.items():
-                if (e["status"] != "completed" or e["settlement"]["primary_null"]["status"] != "unavailable"
+                if (not settlement_enabled or e["status"] != "completed" or e["settlement"]["primary_null"]["status"] != "unavailable"
                         or any(r["kind"] == "settlement" and r["payload"]["event_id"] == key for r in actions)):
                     continue
                 try:

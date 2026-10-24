@@ -35,6 +35,12 @@ from typing import Any, Dict, Optional, Sequence
 Z90 = 1.645
 DECAY_FRACTION = 0.25
 RULES: Dict[str, Dict[str, Any]] = {
+    "alastar_horizons_v3": {"min_n": 66, "unit": "matched_cohort", "backtest_mean_pct": None,
+                           "decision_engine": "alastar_horizons_v3", "diagnostic_only": True},
+    # Alastar owns its frozen 40/66-trade protocol and 95% one-sided test. Its
+    # summary supplies the verdict; do not apply the generic 90% rule below.
+    "alastar_fresh_call_1h_v2": {"min_n": 66, "unit": "trade", "backtest_mean_pct": None,
+                               "decision_engine": "alastar_protocol_v2", "futility_n": 40, "primary_alpha": .05},
     # 15.8 came from an entry/exit - 1 P&L bug; corrected 2026-09-28 before any forward trade
     "listing_short": {"min_n": 30, "unit": "trade", "backtest_mean_pct": 1.5},
     "unlock_short": {"min_n": 20, "unit": "trade", "backtest_mean_pct": 9.5},

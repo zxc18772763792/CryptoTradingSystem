@@ -23,6 +23,8 @@ BEIJING = timezone(timedelta(hours=8))
 UNITS = {"笔": "%/笔", "天": "%/天", "月": "%/月", "期": "%/期"}
 # where the evidence behind each tracker is written up
 EVIDENCE = {
+    "alastar_horizons_v3": "docs/ALASTAR_HORIZON_V3.md",
+    "alastar_fresh_call_1h_v2": "docs/ALASTAR_PAPER_V2.md",
     "unlock_short": "docs/UNLOCK_EVENT_STUDY_2026-09-27.md",
     "unlock_short_t7": "docs/UNLOCK_EVENT_STUDY_2026-09-27.md",
     "supply_factor": "docs/LLM_TRADING_RESEARCH_ROUND5_2026-09-27.md",
@@ -71,7 +73,7 @@ def render(rows: List[Dict[str, Any]], now: datetime) -> str:
     out = [
         f"# 研究跟踪器一览（{now.astimezone(BEIJING):%Y-%m-%d %H:%M} 北京时间）",
         "",
-        "全部是纸面记录，不下单。每个跟踪器的退役规则都在第一笔结果之前登记并冻结（`core/research/retirement.py`）。",
+        "全部是纸面记录，不下单。各自按冻结协议判断；Alastar 使用v2的40笔停止／66笔复核门槛，不套用通用90%区间规则。",
         "本文由 `python scripts/tracker_overview.py` 生成，数字和策略页的跟踪器表一致。",
         "",
         "## 一、结果",
@@ -83,10 +85,12 @@ def render(rows: List[Dict[str, Any]], now: datetime) -> str:
         if r.get("error"):
             out.append(f"| {r['group']} | {r['name']} | — | — | — | — | — | — | — | 读取失败：{r['error']} |")
             continue
-        unit = "百分点/天" if r.get("metric_kind") == "paired_increment" else UNITS.get(r["unit"], r["unit"])
+        unit = r.get("metric_unit_label") or UNITS.get(r["unit"], r["unit"])
         mean = "—" if r.get("mean_pct") is None else f"{float(r['mean_pct']):+.2f}{unit}"
         if r.get("metric_kind") == "paired_increment":
             mean += "（影子减同期原版）"
+        elif r.get("metric_kind") == "excess_return":
+            mean += "（减同币入场前零分布）"
         out.append(f"| {r['group']} | {r['name']} | {_day(r.get('started_at'))} | {r.get('n', 0)} / {r.get('min_n')} {r['unit']} | "
                    f"{mean} | {_ci(r.get('ci90_pct'))} | {_share(r.get('win_rate'))} | {_count(r.get('open'))} | "
                    f"{_count(r.get('waiting'))} | {r.get('verdict_label') or '—'} |")
@@ -95,7 +99,7 @@ def render(rows: List[Dict[str, Any]], now: datetime) -> str:
         "- 平均和区间按各自单位；反转过滤影子显示同日增益（百分点/天），不是自身收益。",
         "- 反转以多空总名义金额计；七日组合、解锁和事件对冲以单腿名义金额计，折算总名义金额需除以二。供给因子未计借币可得性和借币成本。",
         "- 胜率：事件类是赚钱交易的占比；横截面反转是正收益天数的占比；合成组合是正收益期数的占比。",
-        "- 区间从第 2 个样本起计算（同一条公告或同一天的几笔算一组），但样本不到门槛一半时只积累、不做判定。",
+        "- 通用描述区间从第2个样本起计算（公告／日期分组）；Alastar 不显示该90%区间，按独立v2协议复核。",
         "",
         "## 二、策略和依据",
         "",
@@ -120,9 +124,10 @@ def render(rows: List[Dict[str, Any]], now: datetime) -> str:
         "",
         "## 四、怎么读",
         "",
-        f"- **判定规则（全部跟踪器相同）：** 样本不到门槛一半时只积累；之后如果 90% 区间上沿低于 0，提前判退役；"
+        f"- **通用判定规则（Alastar除外）：** 样本不到门槛一半时只积累；之后如果 90% 区间上沿低于 0，提前判退役；"
         f"到门槛后，均值不为正、或区间上沿低于回测参照的 {int(retirement.DECAY_FRACTION * 100)}%（优势衰减）判退役，"
         "区间下沿高于 0 判确认，其余为\"均值为正但不显著\"。退役只是标记和提醒，记录继续。",
+        "- **Alastar：** 第40笔超额均值≤0停止新观察，对照缺失先等待；第66笔暂停集中复核，最多24个月。当前运行状态和待语义复核数见策略页。",
         "- **因子类每天都有结果，但单位优势很小，检验力有限：**",
         "  - 横截面反转回测只有 +0.057%/天，180 天只能发现明显亏损或远好于回测；",
         "  - 七日合成组合跑满 52 周约两成概率确认；",

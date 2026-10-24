@@ -1,4 +1,4 @@
-"""Archive existing Alastar research and an inactive forward-paper protocol.
+"""Archive existing Alastar research and versioned paper-protocol references.
 
 Reads local evidence only. Does not rerun market research, alter execution,
 fetch messages, call an AI provider, or start a worker/scheduler.
@@ -60,10 +60,16 @@ def latest_context():
     round4 = ROOT / "reports/alastar_selection_timing_20261021/RESEARCH_NOTES.md"
     round5 = ROOT / "reports/alastar_images_20261021/RESEARCH_NOTES.md"
     v2 = DATA / "prospective_paper_protocol_v2.json"
-    return {"latest_round": 5 if round5.exists() else 4 if round4.exists() else 3,
+    round6 = ROOT / "reports/alastar_horizons_20261022/RESEARCH_NOTES.md"
+    v3 = ROOT / "data/research/alastar_horizons_20261022/prospective_horizon_protocol_v3.json"
+    activation = ROOT / "data/research/alastar_horizons_v3/journal/000000000001.json"
+    return {"latest_round": 6 if round6.exists() else 5 if round5.exists() else 4 if round4.exists() else 3,
             "v1_as_primary": "withdrawn_after_same_coin_control" if round4.exists() else "historical_candidate",
             "v2": "thin_fresh_call_1h_hypothesis_not_confirmed" if v2.exists() else None,
             "image_hypothesis": "separate_exploratory_family_not_pooled_with_v2" if round5.exists() else None,
+            "v3": "independent_paired1_4_24_72_168h_research_no_winner" if v3.exists() else None,
+            "v3_activation_record_present": activation.exists(),
+            "activation_presence_is_not_current_worker_health": True,
             "execution_enabled": False}
 
 
@@ -71,6 +77,8 @@ def current_decision(family, context):
     if context["latest_round"] < 4:
         return FAMILIES[family][2]
     if family == "fresh_view":
+        if context.get("v3"):
+            return "第六轮后启动独立1/4/24/72/168小时配对观察，未指定优胜周期；旧1小时v2保留，历史样本不可混算"
         return "仅保留首次喊单1小时的薄弱线索；第四轮43条池与本轮47事件池不同，不能混算"
     if family in ("broad_directional", "until_opposite_update"):
         return "停止作为前瞻主方案；第四轮未证实优于同币时点与机械反转规则"
@@ -141,7 +149,10 @@ def main():
                      "reports/alastar_images_20261021/RESEARCH_NOTES.md",
                      "reports/alastar_images_20261021/image_metrics.csv",
                      "reports/alastar_images_20261021/image_familywise.csv",
-                     "data/research/alastar_response_20261021/prospective_paper_protocol_v2.json"]
+                     "data/research/alastar_response_20261021/prospective_paper_protocol_v2.json",
+                     "reports/alastar_horizons_20261022/RESEARCH_NOTES.md",
+                     "reports/alastar_horizons_20261022/HORIZON_COMPARISON.csv",
+                     "data/research/alastar_horizons_20261022/prospective_horizon_protocol_v3.json"]
     source_paths.extend(p for p in later_sources if (ROOT/p).exists())
     sources = [{"path": p, "sha256": digest(ROOT / p)} for p in source_paths]
     save(DATA / "strategy_experiment_ledger.json", {
@@ -267,10 +278,11 @@ def main():
     (REPORT / "ROUND3_STRATEGY_EXPERIMENTS.md").write_text(historical, encoding="utf-8")
     preserve_curated_document(ROOT / "docs/ALASTAR_STRATEGY_EXPERIMENTS.md", historical)
     v2_path = DATA / "prospective_paper_protocol_v2.json"
-    current_forward_path = v2_path if v2_path.exists() else forward_path
+    v3_path = ROOT / "data/research/alastar_horizons_20261022/prospective_horizon_protocol_v3.json"
+    current_forward_path = v3_path if v3_path.exists() else v2_path if v2_path.exists() else forward_path
     current_forward = read(current_forward_path)
     save(DATA / "research_handoff.json", {
-        "archived_at_utc": now, "status": "historical_research_archived_forward_protocol_inactive",
+        "archived_at_utc": now, "status": "paper_research_registered_activation_evidence_present" if context["v3_activation_record_present"] else "historical_research_archived_forward_protocol_inactive",
         "current_research_context": context,
         "entry_document": "docs/ALASTAR_RESEARCH_INDEX.md",
         "experiments_document": "docs/ALASTAR_STRATEGY_EXPERIMENTS.md",
@@ -279,12 +291,14 @@ def main():
         "forward_protocol": current_forward_path.relative_to(ROOT).as_posix(),
         "forward_protocol_sha256": digest(current_forward_path),
         "historical_v1_protocol": {"path": forward_path.relative_to(ROOT).as_posix(), "sha256": digest(forward_path)},
+        "historical_v2_protocol": {"path": v2_path.relative_to(ROOT).as_posix(), "sha256": digest(v2_path)} if v2_path.exists() else None,
+        "latest_horizon_research": "reports/alastar_horizons_20261022/RESEARCH_NOTES.md" if context["latest_round"]>=6 else None,
         "experiment_count": len(ledger),
         "phase_summary_count": len(result["summary"]), "new_market_requests": 0,
         "new_strategy_execution": False, "live_orders_enabled": False,
     })
     print(json.dumps({"experiments": len(ledger), "phase_summaries": len(result["summary"]),
-                      "protocol_status": current_forward["status"], "latest_round": context["latest_round"],
+                      "protocol_status": current_forward.get("status", "state_in_activation_journal"), "latest_round": context["latest_round"],
                       "curated_document_preserved": True, "handoff": str(DATA / "research_handoff.json")}))
 
 

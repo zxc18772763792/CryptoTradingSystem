@@ -74,7 +74,8 @@ def test_photo_caption_excludes_reply_text_and_preserves_visible_text(collector)
     assert item["payload"]["telegram_edited"] is False
 
 
-@pytest.mark.parametrize("date", [None, "", "invalid", "2026-10-13T06:37:26", "2026-02-30T06:37:26Z"])
+@pytest.mark.parametrize("date", [None, "", "invalid", "2026-10-13T06:37:26", "2026-02-30T06:37:26Z",
+                                 "9999-12-31T23:59:59-01:00", "0001-01-01T00:00:00+01:00"])
 def test_missing_or_invalid_publication_is_skipped_instead_of_dated_now(collector, date):
     assert collector._from_html(_message(date=date)) == []
 
@@ -224,6 +225,25 @@ def test_unseen_ids_between_visible_posts_are_recorded_but_album_ids_are_not(col
     assert items[17]["payload"]["unseen_message_ids_before"] is None
     assert items[19]["payload"]["unseen_message_ids_before"] == []  # 17,18 = album
     assert items[23]["payload"]["unseen_message_ids_before"] == [20, 21, 22]
+
+
+def test_large_id_gaps_keep_diagnostic_memory_bounded():
+    import tracemalloc
+    from core.news.collectors.common import BeautifulSoup
+    from core.news.collectors.telegram import _unseen_ids_before
+
+    # A deleted/private stretch must not allocate every absent ID just to keep
+    # the first 100 diagnostic IDs. Construct widgets before measuring memory.
+    soup = BeautifulSoup(_message(message_id=1) + _message(message_id=1_000_000), "html.parser")
+    widgets = soup.select(".tgme_widget_message[data-post]")
+    tracemalloc.start()
+    try:
+        gaps = _unseen_ids_before(widgets, "alastartrades")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert gaps[1_000_000] == list(range(2, 102))
+    assert peak < 1024 * 1024
 
 
 def test_promotional_recap_is_flagged_without_dropping_symbol_tags(collector):

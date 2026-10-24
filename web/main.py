@@ -2187,6 +2187,24 @@ async def _announcement_short_worker(stop_event: asyncio.Event) -> None:
             await asyncio.sleep(1)
 
 
+async def _alastar_paper_worker(stop_event: asyncio.Event) -> None:
+    from core.research.alastar_paper_tracker import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("alastar_paper_tracker", success=ok))
+
+
+async def _alastar_horizon_worker(stop_event: asyncio.Event) -> None:
+    from core.research.alastar_horizon_tracker import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("alastar_horizon_tracker", success=ok))
+
+
+async def _alastar_signal_intake_worker(stop_event: asyncio.Event) -> None:
+    from core.research.alastar_signal_intake import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("alastar_signal_intake", success=ok))
+
+
 async def _equity_snapshot_worker(stop_event: asyncio.Event) -> None:
     """Record paper equity on a timer so the dashboard curve has history while nobody has the page
     open (snapshots used to come only from dashboard balance reads: 271 rows in a month). Paper
@@ -2222,6 +2240,18 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         },
         "ai_research_scheduler": {
             "factory": lambda stop_event: _ai_research_scheduler_worker(app, stop_event),
+            "restart_on_failure": True,
+        },
+        "alastar_paper_tracker": {
+            "factory": lambda stop_event: _alastar_paper_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "alastar_horizon_tracker": {
+            "factory": lambda stop_event: _alastar_horizon_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "alastar_signal_intake": {
+            "factory": lambda stop_event: _alastar_signal_intake_worker(stop_event),
             "restart_on_failure": True,
         },
         "cusum_monitor": {
