@@ -14,7 +14,6 @@
             <div class="brand-lockup">
                 <span class="header-kicker">CRYPTO TRADING SYSTEM / RESEARCH</span>
                 <h1>新闻中心</h1>
-                <p class="header-subtitle">实时新闻流 | 未结构化原文 | 结构化事件</p>
             </div>
             <div class="status-bar">
                 <span id="news-health-badge" class="status-badge">加载中...</span>
@@ -28,7 +27,7 @@
         <main>
             <div class="grid news-layout">
                 <div class="card news-card news-card-summary">
-                    <h3>新闻统计（可切换颗粒度）</h3>
+                    <h3>新闻概览</h3>
                     <div class="inline-actions" style="margin-bottom: 8px;">
                         <label class="u-hint">统计颗粒度</label>
                         <select id="news-summary-granularity" style="width: 140px;">
@@ -132,7 +131,7 @@
                 </div>
 
                 <div class="card news-card news-card-chart">
-                    <h3>结构化事件统计分析（多时间颗粒度）</h3>
+                    <h3>事件趋势</h3>
                     <div class="inline-actions" style="margin-bottom: 8px;">
                         <label class="u-hint">颗粒度</label>
                         <select id="news-bucket-granularity" style="width: 120px;">
@@ -149,7 +148,7 @@
                 </div>
 
                 <div class="card news-card news-card-raw">
-                    <h3>未结构化新闻（原始消息）</h3>
+                    <h3>新闻原文</h3>
                     <div class="inline-actions" style="margin-bottom: 8px;">
                         <span id="news-unstructured-count" class="u-hint">0 条</span>
                     </div>
@@ -157,7 +156,7 @@
                 </div>
 
                 <div class="card news-card news-card-structured">
-                    <h3>已结构化事件（可用于策略）</h3>
+                    <h3>已结构化事件</h3>
                     <div class="inline-actions" style="margin-bottom: 8px;">
                         <span id="news-structured-count" class="u-hint">0 条</span>
                     </div>
@@ -169,5 +168,6 @@
 
     <div id="notification" class="notification"></div>
     <script charset="utf-8" src="{{ static_asset_url('js/news_tab_runtime.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/ui_presentation.js') }}"></script>
 </body>
 </html>

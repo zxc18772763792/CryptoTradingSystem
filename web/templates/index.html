@@ -38,7 +38,6 @@
             <div class="brand-lockup">
                 <span class="header-kicker">CRYPTO TRADING SYSTEM</span>
                 <h1>加密交易系统控制台</h1>
-                <p class="header-subtitle">统一看板 | 模拟盘执行 | 风控熔断 | 多策略协同</p>
             </div>
             <div class="status-bar">
                 <span id="system-status" class="status-badge">加载中...</span>
@@ -108,7 +107,7 @@
                         <h3>风险监控</h3>
                         <div id="risk-panel" class="list">加载中...</div>
                         <div class="inline-actions" style="margin-top:10px;">
-                            <button class="btn btn-danger btn-sm" id="risk-reset-btn">解除熔断</button>
+                            <button class="btn btn-danger btn-sm" id="risk-reset-btn" style="display:none;">解除熔断</button>
                         </div>
                     </div>
 
@@ -138,7 +137,7 @@
                     </div>
 
                     <div class="card wide">
-                        <h3>资产净值曲线</h3>
+                        <h3>资产净值</h3>
                         <div id="equity-chart" style="height: 340px;"></div>
                         <div class="u-hint">拖动平移、滚轮缩放、双击复位；上方按钮切换 1 天 / 7 天 / 30 天 / 全部，下方滑块可框选任意时段。</div>
                         <h4 style="margin-top:20px;">净值来源 · 按策略归因</h4>
@@ -147,12 +146,12 @@
 
                     <!-- 第三行：持仓分布 + 资产明细 + 运行策略 -->
                     <div class="card">
-                        <h3>币种持仓分布</h3>
+                        <h3>持仓分布</h3>
                         <div id="holdings-pie" style="height: 260px;"></div>
                     </div>
 
                     <div class="card">
-                        <h3>交易所资产明细</h3>
+                        <h3>交易所资产</h3>
                         <div id="exchanges-list" class="list">加载中...</div>
                     </div>
 
@@ -191,7 +190,7 @@
 
                     <!-- 第五行：盈亏热力图 -->
                     <div class="card wide">
-                        <h3>盈亏热力图（按币种/时间）</h3>
+                        <h3>盈亏热力图</h3>
                         <div class="inline-actions">
                             <label>回看天数</label>
                             <select id="pnl-heatmap-days">
@@ -446,7 +445,7 @@
                     </div>
 
                     <div class="card trading-card trading-open-orders-card">
-                        <h3>当前委托（未成交）</h3>
+                        <h3>当前委托</h3>
                         <div class="inline-actions">
                             <button class="btn btn-primary btn-sm" id="btn-refresh-open-orders">刷新当前委托</button>
                         </div>
@@ -512,7 +511,7 @@
                     </div>
 
                     <div class="card trading-card trading-live-review-card trading-span-2">
-                        <h3>实盘复盘记录（策略信号 / 交易次数）</h3>
+                        <h3>实盘复盘</h3>
                         <div class="inline-actions" style="margin-bottom: 8px;">
                             <label style="min-width: 72px;">回看窗口</label>
                             <select id="live-review-hours" style="max-width: 140px;">
@@ -559,7 +558,7 @@
                 <div class="grid strategies-layout">
                     <div class="card wide">
                         <h3>策略控制台</h3>
-                        <div class="strategy-console-guide">AI研究注册的纸盘/影子候选也会显示在下方策略列表；收益、回撤和运行状态会与仪表盘保持同一口径。要创建新候选，请先到 AI研究页完成“生成提案 → 运行研究 → 注册”。</div>
+                        <div class="strategy-console-guide">在此管理已注册策略；新候选可从 AI研究页生成并验证。</div>
                         <div id="strategy-console-cards" class="strategy-console-cards">
                             <div class="strategy-console-stat">
                                 <div class="label">策略总览</div>
@@ -703,8 +702,8 @@
                     </div>
 
                     <div class="card wide">
-                        <h3>研究纸面跟踪器 · 前向表现</h3>
-                        <div class="u-hint" style="margin-bottom:6px;">这些是研究用的纸面账本：按事先冻结的规则记录"如果当时照做会怎样"，不下单、不进策略运行器，所以不在上表。只统计规则时点内的前向交易（回填、晚到不计）；判定按首笔交易前登记的退役规则。</div>
+                        <h3>纸面跟踪器</h3>
+                        <div class="u-hint" style="margin-bottom:6px;">仅记录纸面结果，不下单。按冻结规则统计前向样本，排除回填与晚到数据。</div>
                         <div class="table-container strategy-scroll">
                             <table class="data-table research-trackers-table" style="min-width:1320px;">
                                 <thead>
@@ -741,9 +740,7 @@
                     <div class="card wide data-command-center">
                         <div class="card-head">
                             <div>
-                                <div class="eyebrow">DATA COMMAND CENTER</div>
-                                <h3>数据板</h3>
-                                <p class="form-help">先看数据是否可用，再加载行情、补齐历史或进入回放。</p>
+                                <h3>数据概览</h3>
                             </div>
                             <div class="inline-actions">
                                 <span id="data-board-source-status" class="status-badge">状态读取中...</span>
@@ -819,7 +816,7 @@
                     </div>
 
                     <div class="card wide">
-                        <h3>K线 + 成交量（支持缩放/拖动/画线）</h3>
+                        <h3>K线与成交量</h3>
                         <div id="candlestick-chart" style="height: 520px;"></div>
                     </div>
 
@@ -1004,7 +1001,7 @@
                     <!-- ========== 左侧：配置面板 ========== -->
                     <aside class="research-sidebar">
                         <div class="card research-sticky research-control-card">
-                            <h3>📊 研究配置</h3>
+                            <h3>研究配置</h3>
                             
                             <!-- 数据源配置 -->
                             <div class="research-config-section">
@@ -1125,7 +1122,7 @@
                                     <div class="research-top-grid">
                                         <!-- 研究工作台 -->
                                         <div class="card research-actions-panel">
-                                            <h3>🧪 研究工作台</h3>
+                                            <h3>研究工作台</h3>
                                             
                                             <!-- 快捷操作区 -->
                                             <div class="research-quick-actions">
@@ -1197,7 +1194,7 @@
 
                                         <!-- 状态面板 -->
                                         <div class="card research-status-board">
-                                            <h3>📡 研究状态</h3>
+                                            <h3>研究状态</h3>
                                             <div class="research-status-grid">
                                                 <div class="research-status-item" id="research-config-snapshot">
                                                     <span class="status-label">配置</span>
@@ -1224,7 +1221,7 @@
 
                                     <!-- 研究总览 - 卡片式 -->
                                     <div class="card research-overview-board" id="research-overview-board">
-                                        <h3>📋 研究总览</h3>
+                                        <h3>研究总览</h3>
                                         <div id="research-overview-summary-list" class="research-overview-cards">
                                             <div class="research-overview-card" data-overview-card="market_state">
                                                 <div class="overview-card-icon">📊</div>
@@ -1278,7 +1275,7 @@
                                 <div class="research-rail-stack">
                                     <!-- 研究建议（突出显示） -->
                                     <div class="card research-conclusion-card">
-                                        <h3>💡 研究建议</h3>
+                                        <h3>研究建议</h3>
                                         <div id="research-conclusion-summary" class="research-metrics-grid">运行「研究总览」后显示建议</div>
                                         <div id="research-conclusion-bullets" class="research-conclusion-bullets">
                                             <div class="research-conclusion-empty">暂无结论，请先运行研究总览</div>
@@ -1310,7 +1307,7 @@
                             <!-- 市场状态 + 情绪信号（并排） -->
                             <div class="research-grid-2 research-market-row" id="research-market-section">
                                 <div class="card research-market-state-card">
-                                    <h3>📊 市场状态</h3>
+                                    <h3>市场状态</h3>
                                     <div id="analytics-overview-summary" class="research-metrics-grid">点击「市场状态」加载分析数据</div>
                                     <div id="analytics-module-grid" class="strategies-grid research-strip-grid" style="margin-top: 12px;"></div>
                                 </div>
@@ -1329,7 +1326,7 @@
                             <!-- 因子实验室 -->
                             <div class="card research-factor-lab" id="research-factor-section">
                                 <div class="research-lab-header">
-                                    <h3>📈 因子与风格实验室</h3>
+                                    <h3>因子与风格</h3>
                                     <div class="inline-actions">
                                         <button class="btn btn-sm" id="btn-workbench-factors-secondary">🔄 刷新</button>
                                         <button class="btn btn-sm" id="btn-factor-export-json">📤 JSON</button>
@@ -1439,7 +1436,7 @@
                             <!-- 多币种 + 链上（并排） -->
                             <div class="card research-multi-lab" id="research-cross-asset-section">
                                 <div class="research-lab-header">
-                                    <h3>🔄 多币种与链上研究</h3>
+                                    <h3>多币种与链上</h3>
                                     <div class="inline-actions">
                                         <button class="btn btn-sm" id="btn-workbench-cross-asset-secondary">🔄 多币种</button>
                                         <button class="btn btn-sm" id="btn-workbench-fama-secondary">📊 Fama</button>
@@ -1510,9 +1507,8 @@
                                 </div>
 
                                 <div class="card research-output-card">
-                                    <h3>🔧 调试输出</h3>
                                     <details id="research-debug-drawer">
-                                        <summary id="research-debug-summary">展开查看详细日志（默认收起）</summary>
+                                        <summary id="research-debug-summary">诊断与日志</summary>
                                         <pre id="research-output" class="output-box">结构化结果与诊断信息</pre>
                                     </details>
                                 </div>
@@ -1525,7 +1521,7 @@
             <div id="news" class="tab-content">
                 <div class="grid news-layout">
                     <div class="card news-card news-card-summary">
-                        <h3>新闻统计（可切换颗粒度）</h3>
+                        <h3>新闻概览</h3>
                         <div class="inline-actions" style="margin-bottom: 8px;">
     <label class="u-hint">统计颗粒度</label>
     <select id="news-summary-granularity" style="width: 140px;">
@@ -1627,7 +1623,7 @@
                     </div>
 
                     <div class="card news-card news-card-chart">
-                        <h3>结构化事件统计分析（多时间颗粒度）</h3>
+                        <h3>事件趋势</h3>
                         <div class="inline-actions" style="margin-bottom: 8px;">
                             <label class="u-hint">颗粒度</label>
                             <select id="news-bucket-granularity" style="width: 120px;">
@@ -1644,7 +1640,7 @@
                     </div>
 
                     <div class="card news-card news-card-raw">
-                        <h3>新闻流（未结构化）</h3>
+                        <h3>新闻原文</h3>
                         <div class="inline-actions" style="margin-bottom: 8px;">
                             <span id="news-unstructured-count" class="u-hint">0 条</span>
                         </div>
@@ -1677,9 +1673,8 @@
                 <section class="ai-iteration-cockpit card" id="ai-iteration-cockpit" aria-live="polite">
                     <div class="ai-iteration-cockpit-head">
                         <div>
-                            <div class="ai-iteration-kicker">自主多轮迭代研究</div>
-                            <h2>让 AI 根据每轮验证结果继续改进假设</h2>
-                            <p>自动补数、提出假设、验证与复盘。候选需经新增行情观察后才能入选，不自动注册或下单。</p>
+                            <h2>自主迭代研究</h2>
+                            <p>自动验证与复盘；候选经新增行情观察后入选，不自动注册或下单。</p>
                         </div>
                         <div class="ai-iteration-actions">
                             <button class="btn btn-primary btn-sm" id="ai-iteration-start-btn">启动自主迭代</button>
@@ -1713,7 +1708,7 @@
                         <div class="ai-workspace-section-head">
                             <div>
                                 <div class="ai-workspace-section-kicker">AI策略研究与增强</div>
-                                <div class="ai-workspace-section-title">从研究目标到提案、候选、验证与注册建议</div>
+                                <div class="ai-workspace-section-title">研究工作区</div>
                             </div>
                             <div class="ai-workspace-section-note">实时盯盘与下单在「AI自治代理」页。</div>
                         </div>
@@ -2382,9 +2377,8 @@
                     <div>
                         <div class="altcoin-radar-kicker">ALTCOIN RADAR</div>
                         <h2>山寨候选雷达</h2>
-                        <p>先用榜单筛出异动候选，再在检视器里确认资金、叙事、链上与失效条件。</p>
+                        <p>筛选异动，查看资金与风险。</p>
                     </div>
-                    <div class="altcoin-radar-page-note">预警与研究入口集中在候选行和右侧检视器。</div>
                 </div>
                 <div class="altcoin-radar-workspace">
                     <aside class="research-sidebar">
@@ -2405,12 +2399,9 @@
                                 <section class="research-config-section altcoin-radar-mode-section">
                                     <div class="research-config-title">雷达模式</div>
                                     <div class="altcoin-radar-mode-btns" id="altcoin-radar-mode-btns">
-                                        <button class="altcoin-mode-btn active" data-mode="combined" title="综合 Perp + Narrative 两类信号">Combined 综合</button>
-                                        <button class="altcoin-mode-btn" data-mode="perp" title="更偏合约/资金/点火/拥挤信号">Perp 合约</button>
-                                        <button class="altcoin-mode-btn" data-mode="narrative" title="更偏叙事/Meme/板块轮动/Watchlist 信号">Narrative 叙事</button>
-                                    </div>
-                                    <div class="research-control-notes">
-                                        `Combined` 看综合候选；`Perp` 看合约点火/延续/拥挤；`Narrative` 看叙事热度、Meme 轮动和 Watchlist。
+                                        <button class="altcoin-mode-btn active" data-mode="combined" title="综合合约与叙事信号">综合</button>
+                                        <button class="altcoin-mode-btn" data-mode="perp" title="合约、资金与拥挤度信号">合约</button>
+                                        <button class="altcoin-mode-btn" data-mode="narrative" title="叙事热度与板块轮动">叙事</button>
                                     </div>
                                 </section>
 
@@ -2567,8 +2558,7 @@
                         <div class="card altcoin-radar-table-card altcoin-radar-headline-card" id="pump-watchlist-card">
                             <div class="research-lab-header">
                                 <div>
-                                    <h3>本周起飞候选 · 周度模型</h3>
-                                    <div class="research-control-notes">横截面拉盘前兆模型每周挑出最可能起飞的 15 个币——这是全雷达唯一经过走查 + 对抗验证的信号，且越靠尾部越准（+300% 时约 3.4×）。这是"本周该盯哪些"的观察名单。</div>
+                                    <h3>周度候选</h3>
                                 </div>
                                 <div class="inline-actions">
                                     <span id="pump-watchlist-note" class="altcoin-radar-inline-note">加载中...</span>
@@ -2576,7 +2566,8 @@
                                 </div>
                             </div>
                             <div class="altcoin-radar-warning-list">
-                                <div class="altcoin-radar-warning">诚实边际：周度信号（非实时 / 非日内择时）· 真实提升 ~1.9× 事件级（非 2.7× 行级）· 精度约 20%（多数不涨，靠尾部赔率）· 集中在妖币潮，静默期更薄 · 赢家是微盘、容量约 $1–2M/周 · 用法：现货小仓、无杠杆、分批止盈。这是观察名单，不是买入信号。</div>
+                                <div class="altcoin-radar-warning">周度观察，非实时择时。历史精度约 20%，多数候选不会上涨；微盘币流动性有限，不构成买入信号。</div>
+                                <details class="ui-disclosure"><summary>模型边界与历史统计</summary><div class="ui-disclosure-body u-hint">事件级提升约 1.9×，不采用行级 2.7×；收益依赖少数尾部事件，静默期更薄。历史赢家集中于微盘币，估计容量约 $1–2M/周。</div></details>
                             </div>
                             <div class="table-container altcoin-radar-table-scroll">
                                 <table class="altcoin-radar-table">
@@ -2584,7 +2575,7 @@
                                         <tr>
                                             <th>#</th>
                                             <th>币种</th>
-                                            <th title="模型输出的横截面起飞概率分（0–1），仅用于同周排序，不是收益承诺">起飞分</th>
+                                            <th title="模型输出的横截面概率分（0–1），仅用于同周排序，不是收益承诺">模型分</th>
                                             <th>主驱动</th>
                                             <th>市值</th>
                                             <th>OI/市值</th>
@@ -2708,8 +2699,8 @@
                         <div class="card altcoin-radar-table-card">
                             <div class="research-lab-header">
                                 <div>
-                                    <h3>现在在动的 · 实时扫描（仅描述当下，非预测）</h3>
-                                    <div class="research-control-notes">辅助上下文：这一榜按量价/异动/控盘打分，只告诉你此刻哪些币在动——日内“点火/起飞”择时经回测证伪，不作为起飞预测；真正的起飞候选看上方周度模型。点击任一行看拆解。</div>
+                                    <h3>实时异动</h3>
+                                    <div class="research-control-notes">量价异动排名，不代表上涨预测。点击候选查看依据。</div>
                                 </div>
                                 <div class="inline-actions">
                                     <span id="altcoin-radar-table-note" class="altcoin-radar-inline-note">等待扫描结果...</span>
@@ -2887,7 +2878,7 @@
                         <div class="card research-sticky research-control-card arbitrage-control-card">
                             <h3>套利研究配置</h3>
                             <div class="research-control-notes">
-                                先选模板，再决定走“自定义回测验证”还是“策略库注册运行”。可回测策略会把完整参数直接带到回测页，实时套利则明确标注仅适合盘口/链上验证。
+                                选择模板后可带入回测或注册策略。实时套利需先完成盘口或链上验证。
                             </div>
 
                             <div class="research-config-section">
@@ -3590,5 +3581,6 @@
     <script defer charset="utf-8" src="{{ static_asset_url('js/ai_research_agent.js') }}&recovery=20260911"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/news_tab_runtime.js') }}"></script>
     <script defer charset="utf-8" src="{{ static_asset_url('js/dashboard_unstructured_news.js') }}"></script>
+    <script defer charset="utf-8" src="{{ static_asset_url('js/ui_presentation.js') }}"></script>
 </body>
 </html>
