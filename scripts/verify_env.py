@@ -48,6 +48,7 @@ OPTIONAL: Tuple[Tuple[str, str], ...] = (
     ("polars", "fast dataframe paths unavailable"),
     ("asyncpg", "PostgreSQL backend unavailable"),
     ("pyarrow", "Parquet read/write unavailable"),
+    ("Scweet", "X account news collector (NEWS_ENABLE_X_ACCOUNTS) cannot start"),
 )
 
 

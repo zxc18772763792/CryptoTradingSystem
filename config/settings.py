@@ -161,6 +161,12 @@ class Settings(BaseSettings):
     # startup; its own name so an inherited NO_PROXY cannot shadow it. See core/utils/proxy_env.py.
     PROXY_BYPASS_HOSTS: Optional[str] = None
 
+    # X (Twitter) account news source, core/news/collectors/x_accounts.py. Off unless enabled. The token is the
+    # auth_token cookie of a dedicated X account: keep it in .env.local only, never in the repository.
+    NEWS_ENABLE_X_ACCOUNTS: bool = False
+    X_AUTH_TOKEN: str = ""
+    X_PROXY: str = ""
+
     # Trading
     TRADING_MODE: str = "paper"  # paper/live
     ALLOW_PERSISTED_LIVE_MODE_START: bool = False

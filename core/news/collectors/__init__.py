@@ -9,6 +9,7 @@ __all__ = [
     "NewsAPICollector",
     "OpenNewsCollector",
     "TelegramPublicChannelCollector",
+    "XAccountsCollector",
     "CryptoPanicCollector",
     "Jin10Collector",
     "RSSNewsCollector",
@@ -26,6 +27,10 @@ def __getattr__(name: str) -> Any:
         from core.news.collectors.telegram import TelegramPublicChannelCollector
 
         return TelegramPublicChannelCollector
+    if name == "XAccountsCollector":
+        from core.news.collectors.x_accounts import XAccountsCollector
+
+        return XAccountsCollector
     if name == "GDELTCollector":
         from core.news.collectors.gdelt import GDELTCollector
 
