@@ -26,6 +26,7 @@ from config.env_utils import llm_api_enabled
 from config.settings import settings
 from core.data.coinglass_client import coinglass_enabled
 from core.news.collectors.manager import MultiSourceNewsCollector
+from core.news.collectors.x_accounts import x_accounts_enabled, x_auth_token
 from core.news.eventizer.llm_glm5 import (
     _openai_endpoint_targets as _news_llm_endpoint_targets,
     _summary_source_label as _news_llm_summary_source_label,
@@ -211,6 +212,8 @@ def _news_source_flags() -> Dict[str, bool]:
         "jin10": jin10_enabled,
         "rss": rss_enabled,
         "telegram_alastar": _enabled("NEWS_ENABLE_TELEGRAM_ALASTAR", True),
+        # Off unless switched on, and the collector skips this source without a token (manager.py).
+        "x_accounts": bool(x_auth_token()) and x_accounts_enabled(),
         "gdelt": gdelt_enabled,
         "newsapi": newsapi_enabled,
         "cryptopanic": cryptopanic_enabled,

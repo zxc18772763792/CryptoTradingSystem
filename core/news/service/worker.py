@@ -29,6 +29,9 @@ DEFAULT_INTERVALS = {
     "cryptocompare_news": 90,
     "opennews": 45,
     "telegram_alastar": 60,
+    # One logged-in X session with a daily request budget (Scweet default 300). A handle costs about two
+    # requests per poll (user lookup + timeline), so hourly polls fit ~6 handles.
+    "x_accounts": 3600,
     "jin10": 120,
     "coinglass_economic_data": 300,
     "coinglass_financial_events": 600,
@@ -47,6 +50,7 @@ HIGH_PRIORITY = {
 }
 MID_PRIORITY = {
     "telegram_alastar",
+    "x_accounts",
     "cryptopanic",
     "cryptocompare_news",
     "jin10",

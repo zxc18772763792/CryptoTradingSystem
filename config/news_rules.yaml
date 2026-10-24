@@ -18,6 +18,7 @@
       coinglass_newsflash,
       coinglass_articles,
       telegram_alastar,
+      x_accounts,
       coinglass_economic_data,
       coinglass_financial_events,
       coinglass_central_bank,
@@ -33,6 +34,7 @@
   # NEWS_ENABLE_BYBIT_ANNOUNCEMENTS / NEWS_ENABLE_CRYPTOCOMPARE_NEWS / NEWS_PULL_SYNC_LLM
   # NEWS_ENABLE_OPENNEWS
   # NEWS_ENABLE_TELEGRAM_ALASTAR (public channel preview, no Telegram account or API key)
+  # NEWS_ENABLE_X_ACCOUNTS (off by default; needs X_AUTH_TOKEN of a dedicated X account and x_accounts_handles below)
   # NEWS_ENABLE_COINGLASS_NEWSFLASH / NEWS_ENABLE_COINGLASS_ARTICLES / NEWS_ENABLE_COINGLASS_ECONOMIC_DATA
   # NEWS_ENABLE_COINGLASS_FINANCIAL_EVENTS / NEWS_ENABLE_COINGLASS_CENTRAL_BANK
   # CRYPTOCOMPARE_API_KEY optional; without key collector still runs with stricter rate limit.
@@ -48,6 +50,14 @@
   telegram_observation_archive_channels: [alastartrades, cryptoquant_alert]
   # Archived for the CryptoQuant Alert shadow ledger only; no news item, no AI extraction.
   telegram_archive_only_channels: [cryptoquant_alert]
+  # X accounts to read (1-20 handles, no URLs); empty keeps the source disabled. A handle costs about two X
+  # requests per poll, so handles x 2 x polls per day must stay under x_accounts_daily_requests_limit.
+  x_accounts_handles: []
+  x_accounts_timeout_sec: 30
+  x_accounts_max_records: 80
+  x_accounts_tweets_per_account: 20
+  x_accounts_daily_requests_limit: 300
+  x_accounts_min_interval_sec: 6
   chaincatcher_flash_max_records: 80
   chaincatcher_flash_min_interval_sec: 15
   okx_announcements_timeout_sec: 20

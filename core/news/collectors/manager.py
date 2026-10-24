@@ -38,6 +38,7 @@ from core.news.collectors.opennews import OpenNewsCollector
 from core.news.collectors.quality import junk_reason
 from core.news.collectors.rss import RSSNewsCollector
 from core.news.collectors.telegram import TelegramPublicChannelCollector
+from core.news.collectors.x_accounts import XAccountsCollector, x_accounts_enabled, x_auth_token
 from core.news.storage import db as news_db
 
 
@@ -173,6 +174,7 @@ class MultiSourceNewsCollector:
             "coinglass_financial_events",
             "coinglass_central_bank",
             "telegram_alastar",
+            "x_accounts",
         ]
         self.sources: List[str] = [str(x).strip().lower() for x in raw_sources if str(x).strip()]
         if (
@@ -200,7 +202,7 @@ class MultiSourceNewsCollector:
         errors: List[str] = []
         selected = {str(x).strip().lower() for x in (source_names or self.sources) if str(x).strip()}
         explicitly_only_optional = source_names is not None and selected in (
-            {"opennews"}, {"telegram_alastar"},
+            {"opennews"}, {"telegram_alastar"}, {"x_accounts"},
         )
         if not selected:
             selected = set(self.sources)
@@ -226,6 +228,21 @@ class MultiSourceNewsCollector:
                     specs.append(_CollectorSpec(name=name, collector=TelegramPublicChannelCollector(self.cfg)))
                 elif source_names is not None:
                     errors.append("telegram_alastar disabled: NEWS_ENABLE_TELEGRAM_ALASTAR is false")
+                continue
+            if name == "x_accounts":
+                # Off by default: it reads X through a logged-in session cookie (see x_accounts.py).
+                if not x_accounts_enabled():
+                    if source_names is not None:
+                        errors.append("x_accounts disabled: NEWS_ENABLE_X_ACCOUNTS is not true")
+                    continue
+                if not x_auth_token():
+                    errors.append("x_accounts disabled: X_AUTH_TOKEN missing")
+                    continue
+                try:
+                    specs.append(_CollectorSpec(name=name, collector=XAccountsCollector(self.cfg)))
+                except ValueError as exc:
+                    # A bad allowlist must not take the other sources down with it.
+                    errors.append(f"x_accounts disabled: {exc}")
                 continue
             if name == "newsapi":
                 if not _env_bool("NEWS_ENABLE_NEWSAPI", True):

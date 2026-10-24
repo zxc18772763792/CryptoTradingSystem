@@ -123,6 +123,7 @@ SOURCE_IMPORTANCE = {
     "opennews": 42,
     # User-selected commentary feed: eligible for analysis, below exchange sources.
     "telegram_alastar": 35,
+    "x_accounts": 30,
     "rss": 24,
     "newsapi": 18,
     "gdelt": 12,
