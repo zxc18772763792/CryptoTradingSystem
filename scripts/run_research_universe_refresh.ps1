@@ -194,6 +194,7 @@ $process = Start-Process `
     -FilePath $pythonExe `
     -ArgumentList $args `
     -WorkingDirectory $projectRoot `
+    -WindowStyle Hidden `
     -RedirectStandardOutput $stdoutPath `
     -RedirectStandardError $stderrPath `
     -Wait `

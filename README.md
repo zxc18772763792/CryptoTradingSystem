@@ -28,6 +28,8 @@ The current repository is organized for local development first: source code and
 
 See [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md) for a more detailed guide.
 
+Local operations: [startup and shutdown](STARTUP.md), [maintenance handoff, 2026-10-24](docs/MAINTENANCE_HANDOFF_2026-10-24.md), and [Telegram agent handoff](docs/TELEGRAM_AGENT_HANDOFF.md).
+
 ## Quick Start
 
 ### 1. Prepare the project-local Python environment

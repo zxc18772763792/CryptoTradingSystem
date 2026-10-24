@@ -2,6 +2,8 @@
 
 项目使用仓库外层的固定本地环境，不会扫描或修改用户目录下的 Conda、Python 环境。
 
+2026-10-24 的最新维护、停机核验与重启后接续说明见 [重启维护交接](docs/MAINTENANCE_HANDOFF_2026-10-24.md)。登录自启配置仍保留，恢复前先用 `web.bat status` 确认是否已启动。
+
 ## 第一次准备
 
 在 `F:\9_Crypto\crypto_trading_system` 执行：
@@ -47,6 +49,8 @@ Telegram 前向观察的健康在「策略」页的研究跟踪器表（状态�
 ```
 
 这条命令会启动 Web 服务、新闻 worker 和新闻 LLM worker，并打开 Chrome。默认模式为 paper，地址是 <http://127.0.0.1:8000>。
+
+Web、新闻采集、新闻解读和守护程序是独立后台进程，定时补数也可能另有进程；多个进程不代表重复启动。后台组件默认隐藏窗口，新闻 worker 的标准输出和错误写入 `logs/news_worker_*.out.log`、`logs/news_worker_*.err.log`，新闻解读对应 `news_llm_worker_*`。手动执行 `web.bat` 的启动终端会显示状态；桌面常驻多个黑色窗口不是预期行为。若升级前已启动旧进程，需通过 `web.bat stop -IncludeWorkers` 后重新启动才能应用窗口设置，直接关闭旧窗口会终止其中的任务。
 
 常用命令：
 

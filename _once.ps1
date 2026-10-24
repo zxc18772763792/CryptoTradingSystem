@@ -532,6 +532,7 @@ $proc = Start-Process `
     -FilePath $pythonExe `
     -ArgumentList @("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "uvicorn", "web.main:app", "--host", $BindHost, "--port", "$Port") `
     -WorkingDirectory $PSScriptRoot `
+    -WindowStyle Hidden `
     -RedirectStandardOutput $webStdoutPath `
     -RedirectStandardError $webStderrPath `
     -PassThru
@@ -555,6 +556,9 @@ if ($shouldStartWorker) {
             -FilePath $pythonExe `
             -ArgumentList (@("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "core.news.service.worker") + $workerExtraArgs) `
             -WorkingDirectory $PSScriptRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $PSScriptRoot "logs\news_worker_$startupStamp.out.log") `
+            -RedirectStandardError (Join-Path $PSScriptRoot "logs\news_worker_$startupStamp.err.log") `
             -PassThru
         Write-Host "Started news worker PID=$($workerProc.Id)"
     }
@@ -569,6 +573,9 @@ if ($shouldStartLlmWorker) {
             -FilePath $pythonExe `
             -ArgumentList @("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "core.news.service.llm_worker") `
             -WorkingDirectory $PSScriptRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $PSScriptRoot "logs\news_llm_worker_$startupStamp.out.log") `
+            -RedirectStandardError (Join-Path $PSScriptRoot "logs\news_llm_worker_$startupStamp.err.log") `
             -PassThru
         Write-Host "Started news LLM worker PID=$($llmProc.Id)"
     }
@@ -583,6 +590,9 @@ if ($shouldStartPmWorker) {
             -FilePath $pythonExe `
             -ArgumentList @("`"$(Join-Path $PSScriptRoot scripts\managed_entry.py)`"", "--instance-port", "$Port", "--module", "prediction_markets.polymarket.worker") `
             -WorkingDirectory $PSScriptRoot `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $PSScriptRoot "logs\pm_worker_$startupStamp.out.log") `
+            -RedirectStandardError (Join-Path $PSScriptRoot "logs\pm_worker_$startupStamp.err.log") `
             -PassThru
         Write-Host "Started Polymarket worker PID=$($pmProc.Id)"
     }

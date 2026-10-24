@@ -73,11 +73,13 @@
 & 'F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe' scripts\report_telegram_forward.py
 ```
 
-**2026-10-24 起改由 Web 运行任务接管：** 设置 `TELEGRAM_FORWARD_WORKER_ENABLED=true`（`.env.local`）并重启 Web 后，`core/research/telegram_forward_runner.py` 每5分钟用子进程执行同一条 `cycle`（最近2分钟已成功则跳过；锁忙或服务端冷却只记为跳过，连续3次锁忙才报异常）。状态写在 `runtime/telegram_forward_runner.json`，两个跟踪器（`telegram_cryptoquant_24h`、`telegram_binance_chat_sentiment`）已登记到策略页的研究跟踪器表。该 runner 与 `scripts/telegram_forward_research.py` 的实现哈希无关，不会触发“实现变化”保护。启用后应暂停下面这条聊天心跳，避免两边争用同一会话。
+**2026-10-24 起改由 Web 运行任务接管：** 设置 `TELEGRAM_FORWARD_WORKER_ENABLED=true`（`.env.local`）并重启 Web 后，`core/research/telegram_forward_runner.py` 每5分钟用子进程执行同一条 `cycle`（最近2分钟已成功则跳过；锁忙或服务端冷却只记为跳过，连续3次锁忙才报异常）。状态写在 `runtime/telegram_forward_runner.json`，两个跟踪器（`telegram_cryptoquant_24h`、`telegram_binance_chat_sentiment`）已登记到策略页的研究跟踪器表。该 runner 与 `scripts/telegram_forward_research.py` 的实现哈希无关，不会触发“实现变化”保护。Codex 聊天心跳已删除，仅由项目内任务调度。
 
-（旧方式）Codex 本聊天心跳自动化 **`telegram` / Telegram 三来源前向观察** 曾每5分钟运行检查。若最近2分钟已成功采集则跳过重复采集；只有新冻结信号、成熟证据实质变化、达到人工复核门槛或故障需要处理时通知。最初15分钟安排已在续采验证后更新为5分钟：约20分钟的主群差量曾返回过大，相关来源按不完整处理并重启完整覆盖窗口；2026-10-24 03:16 UTC重试三来源均完整，策略阈值及实现指纹未改变。此自动化依赖当前 Codex 主机与网络可用，不能当作24小时独立服务器或秒级消息推送承诺。管理它时优先使用 `automation_update`，不要另建重复任务。
+Codex 本聊天心跳自动化 **`telegram` 已于2026-10-24按用户要求删除（DELETED）**，现由 Web 运行任务负责调度。后续 agent 不应重建聊天心跳或并行手动采集；维护前先核对 `runtime/telegram_forward_runner.json` 和进程、锁。
 
-一轮 cycle 负责周期增量采集、有限的差量/编辑/删除处理、脱敏、分类、冻结候选、读取公开行情、结算成熟纸面事件及更新汇总。它是5分钟级周期前向观察，未接入 Web/交易引擎进程，不改现有策略资金分配；无需重启 Web 服务。
+旧聊天心跳曾每5分钟运行检查，成功采集2分钟内跳过重复执行。最初15分钟安排已在续采验证后更新为5分钟：约20分钟的主群差量曾返回过大，相关来源按不完整处理并重启完整覆盖窗口；2026-10-24 03:16 UTC重试三来源均完整，策略阈值及实现指纹未改变。这是历史记录，旧自动化已删除，不再另建聊天调度任务。
+
+一轮 cycle 负责周期增量采集、有限的差量/编辑/删除处理、脱敏、分类、冻结候选、读取公开行情、结算成熟纸面事件及更新汇总。它是5分钟级周期前向观察，由 Web 运行任务启动独立子进程执行，不改现有策略资金分配。启用或停用 Web 调度开关后需重启 Web；日常周期由任务自行执行。当前 runner 使用 `scripts/telegram_forward_cycle.py` 对公开资金费数据分页，冻结的研究 CLI 与策略规则保持原样。
 
 ### 应先读取哪些文件
 
