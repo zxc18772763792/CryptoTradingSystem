@@ -1,0 +1,29 @@
+signs from H1: {'upside_score': 1.0, 'layout_score': 1.0, 'alert_score': -1.0, 'anomaly_score': -1.0, 'accumulation_score': 1.0, 'control_score': 1.0, 'ignition_score': 1.0, 'continuation_score': -1.0, 'risk_penalty': -1.0, 'narrative_heat_score': 1.0}
+
+=== weekly portfolios (mean over 7 offsets), per-week returns ===
+[H1 in-sample     ] accumulation_score (long high)             weeks=40  LS gross -0.0123 LS net -0.0207(t-1.1)  long-only net -0.0057  long-ex-universe -0.0079(t-0.9)  uni +0.0022  hit 0.53
+[H2 OUT-OF-SAMPLE ] accumulation_score (long high)             weeks=41  LS gross +0.0100 LS net -0.0025(t+0.2)  long-only net -0.0003  long-ex-universe -0.0020(t+0.9)  uni +0.0016  hit 0.46
+[H1 in-sample     ] -continuation_score                        weeks=40  LS gross -0.0081 LS net -0.0189(t-0.5)  long-only net -0.0015  long-ex-universe -0.0037(t+0.1)  uni +0.0022  hit 0.47
+[H2 OUT-OF-SAMPLE ] -continuation_score                        weeks=41  LS gross +0.0130 LS net -0.0025(t-0.5)  long-only net -0.0023  long-ex-universe -0.0039(t-1.2)  uni +0.0016  hit 0.44
+[H1 in-sample     ] accumulation - continuation                weeks=40  LS gross -0.0107 LS net -0.0218(t-1.0)  long-only net -0.0044  long-ex-universe -0.0066(t-1.3)  uni +0.0022  hit 0.50
+[H2 OUT-OF-SAMPLE ] accumulation - continuation                weeks=41  LS gross +0.0135 LS net -0.0029(t-0.2)  long-only net -0.0003  long-ex-universe -0.0019(t-0.3)  uni +0.0016  hit 0.49
+[H1 in-sample     ] H1-sign composite of 10 radar scores       weeks=40  LS gross -0.0019 LS net -0.0110(t-0.8)  long-only net -0.0059  long-ex-universe -0.0081(t-1.5)  uni +0.0022  hit 0.50
+[H2 OUT-OF-SAMPLE ] H1-sign composite of 10 radar scores       weeks=41  LS gross +0.0047 LS net -0.0076(t-0.4)  long-only net -0.0003  long-ex-universe -0.0020(t-0.1)  uni +0.0016  hit 0.41
+[H1 in-sample     ] radar PRIORITY (what the board ranks by)   weeks=40  LS gross +0.0068 LS net +0.0013(t-0.1)  long-only net +0.0026  long-ex-universe +0.0004(t+0.4)  uni +0.0022  hit 0.55
+[H2 OUT-OF-SAMPLE ] radar PRIORITY (what the board ranks by)   weeks=41  LS gross +0.0058 LS net -0.0023(t+0.3)  long-only net +0.0015  long-ex-universe -0.0002(t-0.1)  uni +0.0016  hit 0.56
+
+=== robustness (H2 out-of-sample) ===
+sig_acc: LS net/week obs +0.0030 null -0.0025±0.0096 p=0.315 | long-ex-universe obs +0.0051 null -0.0012±0.0061 p=0.180
+   LS contributors top5 {'POWER/USDT': 0.13, 'ZEC/USDT': 0.09, 'BEAT/USDT': 0.08, 'BSB/USDT': 0.07, 'DASH/USDT': 0.06} total +0.25 ex-top3 -0.04 | worst3 {'BULLA/USDT': -0.08, 'LAB/USDT': -0.18, 'SIREN/USDT': -0.19}
+   liquidity top-75: LS gross +0.0177 net -0.0009 long-only net -0.0036 long-ex-uni -0.0022
+   liquidity top-50: LS gross +0.0323 net +0.0104 long-only net -0.0018 long-ex-uni +0.0036
+   cost/leg 0.0016: LS net/week ≈ -0.0025
+   cost/leg 0.0030: LS net/week ≈ -0.0053
+   cost/leg 0.0050: LS net/week ≈ -0.0093
+sig_acc_cont: LS net/week obs -0.0027 null -0.0042±0.0098 p=0.415 | long-ex-universe obs -0.0015 null -0.0014±0.0060 p=0.470
+   LS contributors top5 {'BEAT/USDT': 0.09, 'FHE/USDT': 0.06, 'GUA/USDT': 0.06, 'BLESS/USDT': 0.05, 'TAC/USDT': 0.05} total +0.02 ex-top3 -0.19 | worst3 {'RIVER/USDT': -0.1, 'BTW/USDT': -0.1, 'SIREN/USDT': -0.18}
+   liquidity top-75: LS gross +0.0276 net +0.0042 long-only net -0.0033 long-ex-uni -0.0018
+   liquidity top-50: LS gross +0.0442 net +0.0169 long-only net -0.0005 long-ex-uni +0.0049
+   cost/leg 0.0016: LS net/week ≈ -0.0029
+   cost/leg 0.0030: LS net/week ≈ -0.0057
+   cost/leg 0.0050: LS net/week ≈ -0.0097

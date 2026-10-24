@@ -1,0 +1,40 @@
+identical risk_penalty vs liquidity_trap_score: False
+
+component mean 7d IC: B (discovery) | A (out-of-sample)
+  layout_score           B +0.0282 (t +2.0) | A -0.0046 (t -0.4)  sign_B=+1  consistent=False
+  alert_score            B -0.0180 (t -1.5) | A -0.0424 (t -5.4)  sign_B=-1  consistent=True
+  anomaly_score          B -0.0180 (t -1.2) | A -0.0353 (t -4.9)  sign_B=-1  consistent=True
+  accumulation_score     B +0.0635 (t +2.9) | A +0.0300 (t +1.8)  sign_B=+1  consistent=True
+  control_score          B +0.0352 (t +2.1) | A +0.0246 (t +1.8)  sign_B=+1  consistent=True
+  ignition_score         B +0.0049 (t +0.4) | A -0.0197 (t -2.1)  sign_B=+1  consistent=False
+  continuation_score     B -0.0425 (t -2.7) | A -0.0472 (t -4.3)  sign_B=-1  consistent=True
+  upside_score           B +0.0040 (t +0.3) | A -0.0315 (t -2.7)  sign_B=+1  consistent=False
+  risk_penalty           B +0.0622 (t +2.9) | A +0.0672 (t +3.8)  sign_B=+1  consistent=True
+  narrative_heat_score   B +0.0263 (t +1.5) | A -0.0016 (t -0.1)  sign_B=+1  consistent=False
+  priority_proxy         B +0.0264 (t +2.3) | A -0.0067 (t -0.6)  sign_B=+1  consistent=False
+
+composite IC B (in-sample): mean +0.0698  NW t +3.68  pos 0.65  n=306
+
+composite IC A (OUT-OF-SAMPLE): mean +0.0397  NW t +2.23  pos 0.61  n=255
+
+[A OUT-OF-SAMPLE] portfolio by comp: weeks/offset=37, mean across 7 offsets (per week):
+   ls_gross=-0.0033  ls_net=-0.0117  long_net=+0.0206  ex_net=+0.0010  uni=+0.0196 | LS net t(offset0)=-0.73  hit=0.43
+
+[A OUT-OF-SAMPLE] portfolio by pp: weeks/offset=37, mean across 7 offsets (per week):
+   ls_gross=-0.0145  ls_net=-0.0197  long_net=+0.0149  ex_net=-0.0047  uni=+0.0196 | LS net t(offset0)=-1.46  hit=0.46
+
+[A OUT-OF-SAMPLE] portfolio by rp: weeks/offset=37, mean across 7 offsets (per week):
+   ls_gross=+0.0300  ls_net=+0.0183  long_net=+0.0281  ex_net=+0.0085  uni=+0.0196 | LS net t(offset0)=+1.29  hit=0.59
+   permutation null LS net/week: mean -0.0031 sd 0.0113; observed -0.0107; p(one-sided)=0.757
+
+[B in-sample] portfolio by comp: weeks/offset=44, mean across 7 offsets (per week):
+   ls_gross=-0.0032  ls_net=-0.0093  long_net=-0.0087  ex_net=-0.0018  uni=-0.0069 | LS net t(offset0)=-0.77  hit=0.48
+
+[B in-sample] portfolio by pp: weeks/offset=44, mean across 7 offsets (per week):
+   ls_gross=-0.0014  ls_net=-0.0051  long_net=-0.0057  ex_net=+0.0012  uni=-0.0069 | LS net t(offset0)=-0.62  hit=0.41
+
+[B in-sample] portfolio by rp: weeks/offset=44, mean across 7 offsets (per week):
+   ls_gross=+0.0168  ls_net=+0.0093  long_net=+0.0013  ex_net=+0.0082  uni=-0.0069 | LS net t(offset0)=+1.35  hit=0.52
+   permutation null LS net/week: mean -0.0025 sd 0.0077; observed -0.0059; p(one-sided)=0.663
+
+A composite LS: top contributors {'ONE/USDT': 0.152, 'LSK/USDT': 0.103, 'NIL/USDT': 0.083, 'LYN/USDT': 0.072, 'TRUTH/USDT': 0.069} total -0.279 ex-top3 -0.618 weeks 37
