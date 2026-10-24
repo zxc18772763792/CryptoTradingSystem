@@ -77,6 +77,18 @@ def test_curated_user_research_is_preserved_and_machine_handoff_is_versioned(tmp
     assert json.loads(target.read_bytes())["round"] == 5
 
 
+def test_archiver_recognises_horizon_round_without_reviving_three_day_primary(tmp_path,monkeypatch):
+    monkeypatch.setattr(archive,'ROOT',tmp_path)
+    monkeypatch.setattr(archive,'DATA',tmp_path/'data/research/alastar_response_20261021')
+    for name in ('reports/alastar_selection_timing_20261021/RESEARCH_NOTES.md','reports/alastar_horizons_20261022/RESEARCH_NOTES.md',
+                 'data/research/alastar_horizons_20261022/prospective_horizon_protocol_v3.json'):
+        p=tmp_path/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_text('{}')
+    context=archive.latest_context()
+    assert context['latest_round']==6 and context['v3'] and not context['v3_activation_record_present']
+    assert '未指定优胜周期' in archive.current_decision('fresh_view',context)
+    assert '停止作为前瞻主方案' in archive.current_decision('broad_directional',context)
+
+
 def test_clock_gate_uses_the_tightest_of_several_reads_and_keeps_all(tmp_path):
     start = datetime(2020,1,1,tzinfo=timezone.utc)
     plan = [(3.0, 1.9), (.05, 0.), (.08, 0.), (.06, 0.), (.07, 0.)]  # (round trip, true offset): slow first read

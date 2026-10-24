@@ -6465,6 +6465,30 @@ async def get_research_trackers():
     return {"generated_at": datetime.now(timezone.utc).isoformat(), "trackers": rows, "diagnostics": diagnostics}
 
 
+@router.get("/alastar-paper")
+async def get_alastar_paper_tracker():
+    """Read-only Alastar v2 journal, receipt coverage and interpretation queue."""
+    from core.research.alastar_paper_tracker import detail
+
+    return await asyncio.to_thread(detail)
+
+
+@router.get("/alastar-signal-intake")
+async def get_alastar_signal_intake():
+    """Automatic text interpretations and delivery receipts; paper only."""
+    from core.research.alastar_signal_intake import detail
+
+    return await asyncio.to_thread(detail)
+
+
+@router.get("/alastar-horizons")
+async def get_alastar_horizon_tracker():
+    """Independent paired horizon journal; same signal, one entry and five exits."""
+    from core.research.alastar_horizon_tracker import detail
+
+    return await asyncio.to_thread(detail)
+
+
 @router.get("/announcement-short")
 async def get_announcement_short_tracker():
     """Forward paper tracker: short minutes after Binance monitoring-tag / delisting notices (research only)."""

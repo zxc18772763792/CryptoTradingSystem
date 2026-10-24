@@ -374,3 +374,110 @@ def test_open_positions_reserve_the_40_and66_sample_boundaries():
     events.update({str(i): {"event_id": str(i), "status": "completed", "entry": {"entry_at": activation.isoformat()},
                            "settlement": {"primary_excess_price_only": .01}} for i in range(39,65)})
     assert paper.review_gate(events, activation, activation+timedelta(days=2)) == "await66trade_confirmatory_review"
+
+
+@pytest.fixture
+def tracker_setup(setup, monkeypatch):
+    from core.research import alastar_paper_tracker as tracker
+    journal, label, clock = setup
+    monkeypatch.setattr(tracker, "now_utc", lambda: clock[0])
+    return tracker, journal, label, clock
+
+
+def test_tracker_idle_pass_tracks_receipt_without_automatic_semantic_guess(tracker_setup):
+    tracker, journal, _, clock = tracker_setup
+    def forbidden():
+        raise AssertionError("Idle tracker must not request market data")
+    runtime = tracker.Tracker(journal, forbidden, managed=True).tick()
+    assert runtime["continuous_runner"] is True
+    view = tracker.summary(journal)
+    assert view["runner_active"] and view["pending_review"] == 1
+    assert view["retirement"]["n"] == 0 and view["retirement"]["mean_pct"] is None
+    assert journal.status()["journal_records"] == 1
+    clock[0] += timedelta(minutes=31)
+    runtime = tracker.Tracker(journal, forbidden, managed=True).tick()
+    assert runtime["observations"]["telegram:alastartrades:1"]["status"] == "expired_without_interpretation"
+    assert tracker.summary(journal)["forward_late"] == 1
+    assert journal.status()["counts"] == {}
+
+
+def test_inactive_tracker_never_self_activates_or_adopts_existing_receipts(tracker_setup):
+    tracker, journal, _, _ = tracker_setup
+    inactive = paper.PaperJournal(journal.output.parent/"inactive", journal.archive, journal.protocol_path)
+    runtime = tracker.Tracker(inactive, lambda: pytest.fail("No network before activation")).tick()
+    assert runtime["activated"] is False and runtime["observations"] == {}
+    assert inactive.status()["activation_registered_at_utc"] is None
+
+
+def test_tracker_inbox_freezes_only_once_and_ignores_already_processed_files(tracker_setup):
+    tracker, journal, label, _ = tracker_setup
+    inbox = journal.output/"labels_inbox"; inbox.mkdir()
+    # Many duplicate file names must not starve the next distinct label.
+    for n in range(15):
+        (inbox/f"{n:03}.json").write_text(json.dumps(label), encoding="utf-8")
+    (inbox/"999.json").write_text("{bad json", encoding="utf-8")
+    runner = tracker.Tracker(journal)
+    first = runner.tick()
+    assert len(first["processed_labels"]) == 2
+    assert sorted(r["status"] for r in first["processed_labels"].values()) == ["frozen", "rejected"]
+    assert journal.status()["counts"] == {"planned": 1}
+    runner.tick()
+    assert journal.status()["journal_records"] == 2
+    assert len(list((journal.output/"evidence").glob("label_*.json"))) == 2
+
+
+@pytest.mark.parametrize("clock_ok", [True, False])
+def test_tracker_requires_fresh_clock_for_entry_and_never_backfills(tracker_setup, clock_ok):
+    tracker, journal, label, clock = tracker_setup
+    journal.freeze(label)
+    class ClockProvider(Provider):
+        def clock_check(self):
+            return {"ok": clock_ok}
+    provider = ClockProvider()
+    runner = tracker.Tracker(journal, lambda: provider, managed=True)
+    clock[0] = dt("2026-10-21T01:05:01Z")
+    runner.tick()
+    assert journal.status()["counts"] == ({"open": 1} if clock_ok else {"planned": 1})
+    assert provider.calls == int(clock_ok)
+    clock[0] = dt("2026-10-21T01:05:31Z")
+    runner.tick()
+    if not clock_ok:
+        assert journal.status()["counts"] == {"skipped": 1}
+        assert tracker.summary(journal)["forward_late"] == 1
+
+
+def test_tracker_settlement_retry_is_throttled_and_actual_return_is_separate(tracker_setup):
+    tracker, journal, label, clock = tracker_setup
+    journal.freeze(label)
+    provider = Provider()
+    clock[0] = dt("2026-10-21T01:05:01Z")
+    journal.tick(provider)
+    clock[0] = dt("2026-10-21T02:11:00Z")
+    provider.fail = True
+    runner = tracker.Tracker(journal, lambda: provider, managed=True)
+    runner.tick(); attempts = provider.calls
+    clock[0] += timedelta(seconds=5)
+    runner.tick()
+    assert provider.calls == attempts
+    provider.fail = False
+    clock[0] += timedelta(seconds=60)
+    runner.tick()
+    view = tracker.summary(journal)
+    assert view["retirement"]["n"] == 1 and view["retirement"]["mean_pct"] == pytest.approx(10.)
+    assert view["retirement"]["ci90_pct"] is None and view["retirement"]["min_n"] == 66
+    assert view["actual_mean_pct"] == pytest.approx(8.8)
+    assert view["completed_without_primary"] == 0
+
+
+def test_tracker_manual_stale_and_error_states_cannot_claim_healthy_continuous_runner(tracker_setup):
+    tracker, journal, _, clock = tracker_setup
+    tracker.Tracker(journal).tick()
+    assert tracker.summary(journal)["runner_active"] is False
+    runtime = tracker.Tracker(journal, managed=True).tick()
+    clock[0] += timedelta(seconds=31)
+    assert tracker.summary(journal)["runner_active"] is False
+    runtime["last_pass_error"] = "RuntimeError"
+    tracker.Tracker(journal)._save(runtime)
+    assert tracker.summary(journal)["tracker_status_label"] == "运行异常"
+    assert tracker.summary(journal)["runner_active"] is False
+    assert journal.status()["continuous_runner"] is False

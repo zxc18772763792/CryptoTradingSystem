@@ -49,6 +49,16 @@ def test_model_env_fields_include_news_llm_backup_chain():
     assert "NEWS_LLM_BACKUP_MODEL" in web_main._MODEL_ENV_FIELDS
 
 
+def test_alastar_paper_tracker_has_a_supervised_runtime_worker():
+    factories = web_main._build_runtime_task_factories(FastAPI())
+    assert factories['alastar_paper_tracker']['restart_on_failure'] is True
+    assert callable(factories['alastar_paper_tracker']['factory'])
+    assert factories['alastar_horizon_tracker']['restart_on_failure'] is True
+    assert callable(factories['alastar_horizon_tracker']['factory'])
+    assert factories['alastar_signal_intake']['restart_on_failure'] is True
+    assert callable(factories['alastar_signal_intake']['factory'])
+
+
 def test_market_ws_guard_recover_window_has_conservative_default():
     assert web_main._MARKET_WS_RECOVER_HEALTHY_SEC == 300.0
 

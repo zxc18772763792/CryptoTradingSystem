@@ -19,6 +19,16 @@ def _listing() -> Dict[str, Any]:
     return m.summary(m.load_state())
 
 
+def _alastar() -> Dict[str, Any]:
+    from core.research.alastar_paper_tracker import summary
+    return summary()
+
+
+def _alastar_horizons() -> Dict[str, Any]:
+    from core.research.alastar_horizon_tracker import summary
+    return summary()
+
+
 def _unlock(variant: str) -> Callable[[], Dict[str, Any]]:
     def load() -> Dict[str, Any]:
         from core.research import unlock_short_tracker as m
@@ -72,6 +82,13 @@ def _announcement(kind: str) -> Callable[[], Dict[str, Any]]:
 
 # id, name, group, unit, rule (one line), retirement rule key, summary loader
 TRACKERS: List[Dict[str, Any]] = [
+    {"id": "alastar_horizons_v3", "name": "Alastar 文字 · 多周期观察（v3）", "group": "Telegram信号", "unit": "组",
+     "rule_key": "alastar_horizons_v3", "rule": "同一首次喊单、同一入场，预先冻结1/4/24/72/168小时退出；所有周期成熟后配对比较。独立于旧1h账本，不按历史最高值指定周期。持仓路径仅为近似1倍模型，尚未验证杠杆／标记价强平下的存活能力。",
+     "load": _alastar_horizons},
+    {"id": "alastar_fresh_call_1h_v2", "name": "Alastar 文字 · 1h基准（v2）", "group": "Telegram信号", "unit": "笔",
+     "rule_key": "alastar_fresh_call_1h_v2",
+     "rule": "文字首次方向，收件及冻结后≥60秒下一5分钟开盘，固定1小时；同币前30天作对照。新帖先语义复核，晚到不回填。持仓路径仅为近似1倍模型，尚未验证杠杆／标记价强平下的存活能力。",
+     "load": _alastar},
     {"id": "unlock_short", "name": "大额解锁前做空 · t−30", "group": "解锁", "unit": "笔", "rule_key": "unlock_short",
      "rule": "≥10% 悬崖解锁前 30 天做空永续、前 1 天平仓，篮子对冲，+40% 止损", "load": _unlock("t30")},
     {"id": "unlock_short_t7", "name": "解锁前最后一周做空 · t−7", "group": "解锁", "unit": "笔", "rule_key": "unlock_short_t7",
@@ -166,6 +183,15 @@ def _open_marks(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
 def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
     """A percentage always names its numerator, denominator and time unit."""
     tid = spec["id"]
+    if tid == "alastar_horizons_v3":
+        return {"metric_kind": "horizon_comparison", "metric_label": "共同成熟周期对照", "metric_unit_label": "百分点/组",
+                "return_basis": "single_signal_notional", "basis_label": "相同信号与入场；5个周期不算5个独立样本",
+                "gross_notional_multiplier": 1, "cost_scope": "价格双方均扣20bps；资金费收益另列。观察队列不代表账户组合收益", "is_paper": True}
+    if tid == "alastar_fresh_call_1h_v2":
+        return {"metric_kind": "excess_return", "metric_label": "相对同币零分布超额", "metric_unit_label": "百分点/笔",
+                "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金；超额非账户收益",
+                "gross_notional_multiplier": 1, "cost_scope": "主统计双方均扣20bps、均忽略资金费；实际含资金费收益另列",
+                "is_paper": True}
     paired = tid == "xs_reversal_liq_filter"
     gross = tid.startswith("xs_reversal")
     two_legs = tid.startswith(("unlock_", "coinglass_")) or "hedged" in tid or tid == "supply_factor"
@@ -186,6 +212,16 @@ def _first(summary: Dict[str, Any], *keys: str) -> Optional[Any]:
         if value is not None:
             return value
     return None
+
+
+def _signal_intake_status() -> Dict[str, Any]:
+    """Shared adapter health is operational data, never a research sample."""
+    try:
+        from core.research.alastar_signal_intake import detail
+        state = detail()
+        return {key: state.get(key) for key in ('enabled', 'enabled_at_utc', 'runner_active', 'last_error', 'last_tick_at_utc', 'counts')}
+    except Exception as exc:
+        return {"runner_active": False, "last_error": type(exc).__name__}
 
 
 def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
@@ -222,8 +258,15 @@ def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
         actual_mean_pct=summary.get("actual_mean_pct"),
         paired_evaluation=summary.get("paired_evaluation"),
         risk_shadow=summary.get("risk_shadow") or summary.get("event_risk_shadow"),
+        tracker_status_label=summary.get("tracker_status_label"),
+        pending_review=summary.get("pending_review"),
+        runner_active=summary.get("runner_active"),
+        completed_without_primary=summary.get("completed_without_primary"),
+        horizon_comparison=summary.get("horizon_comparison"),
         gross_mean_pct=round(float(mean) / row["gross_notional_multiplier"], 4) if mean is not None else None,
     )
+    if spec["id"] in ("alastar_fresh_call_1h_v2", "alastar_horizons_v3"):
+        row["signal_intake"] = _signal_intake_status()
     try:
         row["open_marks"] = _open_marks(spec)
     except Exception:  # noqa: BLE001 - marks are a convenience

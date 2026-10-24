@@ -49,3 +49,48 @@ test('risk budgets are a prospective trigger, unavailable evidence stays unknown
   assert.match(html,/&lt;img&gt;/); assert.match(html,/&lt;script&gt;/);
   assert.doesNotMatch(html,/<img>|<script>|undefined|NaN/);
 });
+
+test('Alastar exposes receipt review and excess points separately from funded returns',()=>{
+  const {ctx,elements}=context();
+  ctx.renderResearchTrackers({trackers:[{name:'Alastar',unit:'笔',metric_kind:'excess_return',metric_label:'相对同币零分布超额',mean_pct:.8,actual_mean_pct:1.2,n:1,min_n:66,pending_review:2,completed_without_primary:1,tracker_status_label:'待语义复核 <b>'}]});
+  const html=elements['research-trackers-tbody'].innerHTML;
+  assert.match(html,/相对同币零分布超额 \+0\.80 个百分点/);
+  assert.match(html,/实际含资金费净收益 \+1\.200%\/笔/);
+  assert.match(html,/待复核 2/); assert.match(html,/对照待补 1/);
+  assert.match(html,/待语义复核 &lt;b&gt;/);
+  assert.doesNotMatch(html,/<b>|undefined|NaN/);
+});
+
+test('automatic interpretation health and delivery counts do not become completed trades',()=>{
+  const {ctx,elements}=context();
+  ctx.renderResearchTrackers({trackers:[{name:'Alastar',unit:'笔',n:0,min_n:66,mean_pct:null,signal_intake:{enabled:true,runner_active:true,counts:{label_frozen:18,already_frozen:2,non_signal:30,retry_pending:1}}}]});
+  const html=elements['research-trackers-tbody'].innerHTML;
+  assert.match(html,/自动语义解析运行中/);
+  assert.match(html,/已冻结解释 20 · 非信号 30 · 待重试 1/);
+  assert.match(html,/0 \/ 66 笔/);
+  assert.doesNotMatch(html,/undefined|NaN/);
+});
+
+test('Alastar empty monitor explains prior receipts and actual enable time without inventing trades',()=>{
+  const {ctx,elements}=context();
+  const render=counts=>ctx.renderResearchTrackers({trackers:[{name:'Alastar',unit:'笔',n:0,min_n:66,mean_pct:null,signal_intake:{enabled:true,runner_active:true,enabled_at_utc:'2026-10-23T11:55:13Z',counts}}]});
+  render({predates_auto_intake:2});
+  let html=elements['research-trackers-tbody'].innerHTML;
+  assert.match(html,/启用前帖子 2（未回填）/);
+  assert.match(html,/启用于 2026-10-23T11:55:13Z/);
+  assert.match(html,/启用后尚无新帖/);
+  assert.match(html,/0 \/ 66 笔/);
+  assert.doesNotMatch(html,/undefined|NaN/);
+  render({predates_auto_intake:2,processing:1});
+  html=elements['research-trackers-tbody'].innerHTML;
+  assert.doesNotMatch(html,/启用后尚无新帖/);
+});
+
+test('Alastar multi horizon displays common maturity and missing results without picking a winner',()=>{
+  const {ctx,elements}=context();
+  ctx.renderResearchTrackers({trackers:[{name:'Alastar v3',unit:'组',n:0,min_n:66,metric_kind:'horizon_comparison',horizon_comparison:[{hours:1,completed_n:1,common_n:0,mean_net_pct:null,excess_pp:null,gain_vs_1h_pp:null},{hours:168,completed_n:0,common_n:0,mean_net_pct:null,excess_pp:null,gain_vs_1h_pp:null}]}]});
+  const html=elements['research-trackers-tbody'].innerHTML;
+  assert.match(html,/168h/); assert.match(html,/1 \/ 0/);
+  assert.match(html,/共同样本/); assert.match(html,/不作周期优胜判定/);
+  assert.doesNotMatch(html,/NaN|undefined|\+0\.00%/);
+});
