@@ -102,9 +102,10 @@ def main() -> int:
         return 1
 
     if not missing_optional:
-        print("\nEnvironment OK: all required and optional dependencies present.")
+        print("\nStartup imports OK: all required and optional modules present.")
     else:
         print("\nEnvironment OK for startup (optional gaps listed above).")
+    print("Version contract (separate check): python scripts/check_dependency_contract.py --include-dev")
     return 0
 
 
