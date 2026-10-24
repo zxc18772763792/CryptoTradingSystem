@@ -55,4 +55,4 @@ $py = "F:\9_Crypto\.conda\miniforge3\envs\crypto_trading\python.exe"
 该协议仅写入本地，状态为`documented_not_running`，尚未接通模拟成交登记器。
 旧报告的小时开盘规则继续作为历史研究保留；不能将两种成交口径混算。
 
-10/22更新：第四轮已撤回三天主候选；当前独立v2只研究文字首次喊单持有1小时，具体时刻、采集健康、代码漂移及模拟停止门槛见[本地v2登记器](ALASTAR_PAPER_V2.md)。原v1／v2协议没有被重写，当前模拟仍未激活。
+10/22更新：第四轮已撤回三天主候选；独立v2文字首次喊单1小时于13:09激活，原账本保留。随后按用户要求完成第六轮周期研究，并于14:24另激活[独立多周期v3](ALASTAR_HORIZON_V3.md)，比较1/4/24/72/168小时。当前0条新锚点，原v1／v2协议没有被重写，三天v1未运行。持续任务不自动生成语义解释，合格标签经冻结后才观察未来开盘，不回填旧消息。第六轮代码为`scripts/research_alastar_horizons.py`、`scripts/observe_alastar_horizons.py`，完整复现与失败记录见[第六轮报告](../reports/alastar_horizons_20261022/RESEARCH_NOTES.md)。
