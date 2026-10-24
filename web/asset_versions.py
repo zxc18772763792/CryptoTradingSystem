@@ -5,6 +5,7 @@ from typing import Final
 
 
 ASSET_VERSIONS: Final[dict[str, int]] = {
+    "vendor/plotly-2.35.2.min.js": 1,
     "css/style.css": 142,
     "css/ai_agent.css": 2,
     "js/app.js": 161,
