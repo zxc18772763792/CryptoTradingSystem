@@ -80,12 +80,14 @@ def test_market_order_without_a_live_price_falls_back_to_the_request_price(manag
     assert meta["paper_request_vs_live_bps"] is None
 
 
-def test_implausible_live_price_keeps_the_request_price(manager, monkeypatch):
-    _patch_live(monkeypatch, _live(3300.0))  # e.g. a 1000x contract or the wrong symbol
+@pytest.mark.parametrize('fresh_price', [6.60, 3300.0])
+def test_disagreement_rejects_instead_of_inventing_a_fill(manager, monkeypatch, fresh_price):
+    _patch_live(monkeypatch, _live(fresh_price))
     order = _submit(manager, price=3.30, slippage_bps=0)
 
-    assert order.price == pytest.approx(3.30)
-    assert manager.get_order_metadata(order.id)["paper_fill_source"] == "request_live_implausible"
+    assert order.status == OrderStatus.REJECTED
+    assert order.filled == 0
+    assert manager.get_order_metadata(order.id)["paper_fill_source"] == "rejected_price_conflict"
 
 
 def test_market_order_without_a_request_price_uses_the_live_price(manager, monkeypatch):

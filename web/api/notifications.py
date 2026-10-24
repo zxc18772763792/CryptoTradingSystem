@@ -42,7 +42,7 @@ class RuleUpdateRequest(BaseModel):
 class EvaluateRequest(BaseModel):
     symbols: List[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
     exchange: str = "gate"
-    total_usd: Optional[float] = None
+    total_usd: Optional[float] = Field(default=None, allow_inf_nan=False)
 
 
 async def _load_prices(exchange: str, symbols: List[str]) -> Dict[str, float]:
@@ -72,7 +72,10 @@ async def _build_context(total_usd: Optional[float], prices: Dict[str, float]) -
     rules = await notification_manager.list_rules()
     altcoin_context = await build_altcoin_notification_context(rules)
     return {
-        "total_usd": float(total_usd or ((risk_report.get("equity") or {}).get("current", 0.0) or 0.0)),
+        "total_usd": float(
+            total_usd if total_usd is not None
+            else ((risk_report.get("equity") or {}).get("current", 0.0) or 0.0)
+        ),
         "prices": prices,
         "risk_report": risk_report,
         "position_count": position_manager.get_position_count(),
@@ -91,14 +94,17 @@ async def get_channels():
 
 @router.post("/test", dependencies=[Depends(require_sensitive_ops_permissions("manage_notifications"))])
 async def test_notification(request: NotificationTestRequest):
-    before_events = len(notification_manager.get_events(limit=1000))
+    # Keep the objects alive while sending: the manager evicts old events once
+    # its rolling buffer fills, so a length-based cursor drops new events.
+    before_events = notification_manager.get_events(limit=1000)
+    before_event_ids = {id(event) for event in before_events}
     result = await notification_manager.send_message(
         title=request.title,
         message=request.message,
         channels=request.channels,
     )
     all_events = notification_manager.get_events(limit=1000)
-    new_events = all_events[before_events:]
+    new_events = [event for event in all_events if id(event) not in before_event_ids]
     return {
         "success": any(result.values()),
         "result": result,

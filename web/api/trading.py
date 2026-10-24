@@ -20,7 +20,7 @@ import httpx
 import pandas as pd
 from fastapi import HTTPException
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import case, func, select
 
 from config.database import (
@@ -1285,13 +1285,14 @@ async def _fetch_options_snapshot(symbol: str) -> Dict[str, Any]:
 
 
 class OrderRequest(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
     exchange: str
     symbol: str
     side: str  # buy/sell
     order_type: str  # market/limit
-    amount: float
-    price: Optional[float] = None
-    leverage: float = 1.0
+    amount: float = Field(gt=0)
+    price: Optional[float] = Field(default=None, gt=0)
+    leverage: float = Field(default=1.0, ge=1.0)
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     trailing_stop_pct: Optional[float] = None

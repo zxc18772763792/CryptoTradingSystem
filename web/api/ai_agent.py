@@ -42,7 +42,7 @@ async def get_ai_autonomous_agent_risk_config(request: Request):
     return await ai_research_module.get_ai_autonomous_agent_risk_config(request)
 
 
-@router.post("/autonomous-agent/risk-config", dependencies=[Depends(require_sensitive_ops_permissions("manage_ai_agent"))])
+@router.post("/autonomous-agent/risk-config", dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change"))])
 async def update_ai_autonomous_agent_risk_config(
     request: Request,
     payload: AIAutonomousAgentRiskConfigUpdateRequest,

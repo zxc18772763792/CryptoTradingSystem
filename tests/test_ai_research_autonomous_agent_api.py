@@ -1500,7 +1500,10 @@ def test_update_autonomous_agent_risk_config_endpoint(monkeypatch):
     from web.api import ai_research as ai_module
     from core.risk.risk_manager import risk_manager
 
-    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    from core.ops.service.auth import OpsAuthContext
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()), state=SimpleNamespace(
+        ops_auth=OpsAuthContext(actor="test-risk-owner", role="RISK_OWNER", token_present=False,
+                                api_key_present=True, client_ip="testclient")))
     captured = {}
 
     def _fake_update_parameters(payload):

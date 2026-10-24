@@ -408,11 +408,17 @@ class AccountManager:
 
         return self._mutate(apply)
 
-    def update_account(self, account_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
+    def update_account(
+        self, account_id: str, updates: Dict[str, Any], *,
+        authorize: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Dict[str, Any]:
         def apply(accounts: Dict[str, TradingAccount]) -> Dict[str, Any]:
             item = accounts.get(account_id)
             if not item:
                 raise ValueError("账户不存在")
+            # Authorize against the latest on-disk state under the mutation lock.
+            if authorize is not None:
+                authorize(asdict(item))
             if "name" in updates:
                 item.name = str(updates["name"] or item.name)
             if "exchange" in updates:
@@ -432,12 +438,17 @@ class AccountManager:
 
         return self._mutate(apply)
 
-    def delete_account(self, account_id: str) -> bool:
+    def delete_account(
+        self, account_id: str, *,
+        authorize: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> bool:
         if account_id == "main":
             raise ValueError("主账户不可删除")
         def apply(accounts: Dict[str, TradingAccount]) -> bool:
             if account_id not in accounts:
                 return False
+            if authorize is not None:
+                authorize(asdict(accounts[account_id]))
             del accounts[account_id]
             return True
 

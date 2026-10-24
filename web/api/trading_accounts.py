@@ -11,9 +11,30 @@ from web.api.auth import require_request_permissions, require_sensitive_ops_perm
 router = APIRouter()
 
 
+def _public_account(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Explicit output contract: credential metadata is write-only."""
+    fields = ("account_id", "name", "exchange", "mode", "parent_account_id",
+              "enabled", "created_at", "updated_at")
+    public = {key: item[key] for key in fields if key in item}
+    metadata = item.get("metadata") or {}
+    safe = {key: metadata[key] for key in ("isolated", "sandbox")
+            if type(metadata.get(key)) is bool}
+    for key in ("default_type", "market_type"):
+        if metadata.get(key) in ("spot", "margin", "swap", "future", "delivery"):
+            safe[key] = metadata[key]
+    public["metadata"] = safe
+    return public
+
+
+def _authorize_live_mutation(request: Request, current: Dict[str, Any], updates=None) -> None:
+    modes = (current.get("mode"), (updates or {}).get("mode"))
+    if any(str(mode or "").strip().lower() == "live" for mode in modes):
+        require_request_permissions(request, "approve_live")
+
+
 @router.get("/accounts", dependencies=[Depends(require_sensitive_ops_permissions("read_trading_state"))])
 async def list_accounts():
-    return {"accounts": trading_api.account_manager.list_accounts()}
+    return {"accounts": [_public_account(item) for item in trading_api.account_manager.list_accounts()]}
 
 
 @router.post("/accounts", dependencies=[Depends(require_sensitive_ops_permissions("manage_accounts"))])
@@ -30,7 +51,7 @@ async def create_account(request: Request, req: trading_api.AccountCreateRequest
             enabled=req.enabled,
             metadata=req.metadata,
         )
-        return {"success": True, "account": item}
+        return {"success": True, "account": _public_account(item)}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -41,16 +62,23 @@ async def update_account(request: Request, account_id: str, req: trading_api.Acc
     if str(payload.get("mode") or "").strip().lower() == "live":
         require_request_permissions(request, "approve_live")
     try:
-        item = trading_api.account_manager.update_account(account_id, payload)
-        return {"success": True, "account": item}
+        item = trading_api.account_manager.update_account(
+            account_id, payload,
+            authorize=lambda current: _authorize_live_mutation(request, current, payload),
+        )
+        return {"success": True, "account": _public_account(item)}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.delete("/accounts/{account_id}", dependencies=[Depends(require_sensitive_ops_permissions("manage_accounts"))])
-async def delete_account(account_id: str):
+async def delete_account(request: Request, account_id: str):
     try:
-        ok = trading_api.account_manager.delete_account(account_id)
+        ok = trading_api.account_manager.delete_account(
+            account_id, authorize=lambda current: _authorize_live_mutation(request, current),
+        )
         if not ok:
             raise HTTPException(status_code=404, detail="Account not found")
         return {"success": True, "account_id": account_id}
@@ -70,7 +98,7 @@ async def account_summary():
     for item in trading_api.account_manager.list_accounts():
         aid = item["account_id"]
         agg[aid] = {
-            "account": item,
+            "account": _public_account(item),
             "positions": 0,
             "position_value": 0.0,
             "unrealized_pnl": 0.0,

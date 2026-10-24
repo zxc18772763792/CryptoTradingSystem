@@ -29,7 +29,7 @@ from core.trading.binance_rest import (
 from core.utils.asset_valuation import STABLE_COINS, build_currency_usd_quotes
 
 # A live tick further than this from the caller's price is more likely a symbol/scale mismatch
-# (e.g. a 1000x contract) than a real move; the paper fill then keeps the request price.
+# (e.g. a 1000x contract) or a real jump. Neither justifies a fill at the caller's old price.
 _PAPER_LIVE_PRICE_MAX_DEVIATION = 0.15
 
 
@@ -309,10 +309,15 @@ class OrderManager:
 
     async def create_order(self, request: OrderRequest) -> Optional[Order]:
         self._last_error = ""
-        self._evict_terminal_orders()
-        if self._resolve_request_mode(request) == "paper":
-            return await self._create_paper_order(request)
-        return await self._create_real_order(request)
+        try:
+            self._validate_request(request)
+            self._evict_terminal_orders()
+            if self._resolve_request_mode(request) == "paper":
+                return await self._create_paper_order(request)
+            return await self._create_real_order(request)
+        except (TypeError, ValueError, OverflowError) as exc:
+            self._last_error = str(exc)
+            return None
 
     def get_last_error(self) -> str:
         return str(self._last_error or "")
@@ -488,7 +493,26 @@ class OrderManager:
             return None
         return price_read if price_read.ok else None
 
+    @staticmethod
+    def _validate_request(request: OrderRequest) -> None:
+        for name in ("amount", "price", "stop_loss", "take_profit", "trailing_stop_pct",
+                     "trailing_stop_distance", "trigger_price"):
+            value = getattr(request, name)
+            if value is None and name != "amount":
+                continue
+            number = float(value)
+            if not math.isfinite(number) or number < 0 or (name == "amount" and number == 0):
+                raise ValueError(f"{name} must be a valid finite {'positive' if name == 'amount' else 'nonnegative'} number")
+        leverage = float((request.params or {}).get("leverage", 1.0))
+        if not math.isfinite(leverage) or leverage < 1:
+            raise ValueError("leverage must be finite and at least 1")
+        if request.price is not None and float(request.price) > 0:
+            notional = float(request.amount) * float(request.price)
+            if not math.isfinite(notional) or notional <= 0:
+                raise ValueError("order notional must be a valid finite positive number")
+
     async def _create_paper_order(self, request: OrderRequest) -> Order:
+        self._validate_request(request)
         order_id = self._next_paper_order_id()
         requested_price = float(request.price or 0.0)
         fill_price = requested_price
@@ -504,12 +528,14 @@ class OrderManager:
             if live_price > 0 and requested_price > 0 and (
                 abs(live_price / requested_price - 1.0) > _PAPER_LIVE_PRICE_MAX_DEVIATION
             ):
-                fill_source = "request_live_implausible"
-                logger.warning(
-                    f"[PAPER] live price {live_price} for {request.symbol} is more than "
-                    f"{_PAPER_LIVE_PRICE_MAX_DEVIATION:.0%} from the request price {requested_price}; "
-                    f"filling at the request price"
+                self._last_error = "paper_market_price_conflict: fresh and requested prices disagree"
+                rejected = await self.record_rejected_order(
+                    request, reason=self._last_error, price=requested_price,
                 )
+                self._order_meta[rejected.id].update(
+                    paper=True, paper_fill_source="rejected_price_conflict", paper_live_price=live_price,
+                )
+                return rejected
             elif live_price > 0:
                 fill_price = live_price
                 fill_source = "live"
@@ -548,6 +574,8 @@ class OrderManager:
 
         amount = float(request.amount or 0.0)
         notional_usd = abs(amount * float(fill_price or 0.0))
+        if not math.isfinite(notional_usd) or notional_usd <= 0 or not math.isfinite(fill_price) or fill_price <= 0:
+            raise ValueError("paper fill price and notional must be valid finite positive numbers")
         fee_usd = notional_usd * fee_rate if notional_usd > 0 else 0.0
         slippage_cost_usd = abs(float(fill_price or 0.0) - reference_price) * abs(amount)
         params = dict(request.params or {})
@@ -641,6 +669,7 @@ class OrderManager:
         return order
 
     async def _create_real_order(self, request: OrderRequest) -> Optional[Order]:
+        self._validate_request(request)
         exchange = await self._ensure_exchange_connector(request.exchange, account_id=request.account_id)
         if not exchange:
             self._last_error = (
@@ -717,6 +746,8 @@ class OrderManager:
                         f"{request.symbol}: {e}"
                     )
             order_value = abs(float(request.amount or 0.0) * valuation_price)
+            if not math.isfinite(order_value) or order_value <= 0:
+                raise ValueError("live order notional must be a valid finite positive number")
             governance_check = await self._evaluate_order_governance(
                 request,
                 order_value=order_value,
@@ -973,6 +1004,8 @@ class OrderManager:
         if key is None or self._operation_mode_conflicts(key, trading_mode):
             logger.error("Refused unknown, ambiguous or mode-conflicting order cancellation")
             return False
+        if self._orders[key].status != OrderStatus.OPEN:
+            return False
         if self._resolve_operation_mode(order_id=key, trading_mode=trading_mode) == "paper":
             return await self._cancel_paper_order(key)
         order = self._orders[key]
@@ -990,7 +1023,7 @@ class OrderManager:
             return False
 
     async def _cancel_paper_order(self, order_id: str) -> bool:
-        if order_id in self._orders:
+        if order_id in self._orders and self._orders[order_id].status == OrderStatus.OPEN:
             self._orders[order_id].status = OrderStatus.CANCELED
             logger.info(f"[PAPER] Order cancelled: {order_id}")
             await self._notify_callbacks(self._orders[order_id], "canceled")
