@@ -2254,7 +2254,7 @@ if(meta)meta.textContent=`共 ${rows.length} 个跟踪器 · 各行样本单位�
 window.ResearchTrackerDiagnostics?.render(document.getElementById('research-tracker-diagnostics'),d.diagnostics);
 }
 async function loadResearchTrackers(){
-try{renderResearchTrackers(await api('/ai/research-trackers',{timeoutMs:15000}));}
+try{renderResearchTrackers(await api('/ai/research-trackers',{timeoutMs:45000}));}
 catch(e){const tb=document.getElementById('research-trackers-tbody');if(tb)tb.innerHTML=`<tr><td colspan="10">研究跟踪器加载失败：${esc(e.message||'')}</td></tr>`;}
 }
 async function loadStrategiesTabData(){
