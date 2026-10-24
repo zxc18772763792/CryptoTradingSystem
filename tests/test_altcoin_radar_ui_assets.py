@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 from jinja2 import Environment
@@ -40,8 +41,7 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "async function loadAltcoinRadarTabBridge" in app_js
     assert "'altcoin-radar':()=>loadAltcoinRadarTabBridge(false)" in app_js
     assert "window.bindAltcoinRadarPage==='function'" in app_js
-    assert "扫描范围" in template_source
-    assert "研究清单（使用下方多选）" in template_source
+    assert "altcoin-radar-universe-scope" in template_source
     assert "Watchlist 收藏列表" in template_source
 
     assert "window.__loadAltcoinRadarTabData = loadAltcoinRadarTabData" in radar_js
@@ -49,8 +49,10 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "async function loadAltcoinRadarTabData(force = false)" in radar_js
     assert "const universePromise = loadUniverseOptions(force).catch((error) => {" in radar_js
     assert "await universePromise;" in radar_js
-    assert "await watchlistPromise;" in radar_js
     assert "await scanRadar(force);" in radar_js
+    # The scan must not wait for the watchlist endpoint (it took 2-8s on a cold start).
+    assert "await watchlistPromise" not in radar_js
+    assert "loadWatchlist().catch((error) => {" in radar_js
     assert "async function openResearchWorkbench(symbol)" in radar_js
     assert 'data-row-action="research-proposal"' in radar_js
     assert "生成研究提案" in radar_js
@@ -61,13 +63,13 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "include_major=false" in radar_js
     assert "value=\"priority\" selected" in template_source
     assert "'BTC/USDT'," not in radar_js.split("const PRESET_BY_KIND", 1)[0]
-    assert "timeoutMs: 60000" in radar_js
+    # Cold scans take 16-60s and a forced one ~57s: the old flat 60s limit tripped on both.
+    assert "const SCAN_TIMEOUT_MS = 120000;" in radar_js
+    assert "const FORCE_SCAN_TIMEOUT_MS = 180000;" in radar_js
+    assert "timeoutMs: refresh ? FORCE_SCAN_TIMEOUT_MS : SCAN_TIMEOUT_MS," in radar_js
     assert "async function openAiResearchProposal(response, symbol)" in radar_js
     assert "activateTab('ai-research')" in radar_js
     assert "window.AI?.refreshWorkbench" in radar_js
-    assert "altcoin-radar-operating-mode-banner" in radar_js
-    assert "/ai/operating-mode" in radar_js
-    assert "Operating Mode" in radar_js
     assert "async function createPresetAlert(kind, symbol)" in radar_js
     assert "async function recyclePresetAlert(kind, symbol)" in radar_js
     assert "async function recycleAllAlerts(symbol)" in radar_js
@@ -79,9 +81,12 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "async function mutateWatchlist(action, symbol)" in radar_js
     assert "const updated = normalizeSymbols(resp?.symbols || []);" in radar_js
     assert "const activeKinds = alertKindsForRow(row);" in radar_js
-    assert "button.textContent = activeKinds.has(kind) ? `回收${label}` : `建${label}`;" in radar_js
-    assert "btn-altcoin-radar-alert-anomaly" in radar_js
-    assert "btn-altcoin-radar-alert-narrative" in template_source
+    # One alert-type dropdown + one toggle button replace the four per-preset buttons.
+    assert 'id="altcoin-radar-alert-kind"' in template_source
+    assert 'value="narrative"' in template_source
+    assert "btn-altcoin-radar-alert-toggle" in template_source
+    assert "btn-altcoin-radar-alert-toggle" in radar_js
+    assert "toggleBtn.textContent = activeKinds.has(kind) ? `回收${label}` : `建${label}`;" in radar_js
     assert "btn-altcoin-radar-alert-recycle" in template_source
     assert "btn-altcoin-radar-watchlist-add" in template_source
     assert "btn-altcoin-radar-watchlist-remove" in template_source
@@ -89,15 +94,14 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "altcoin-radar-watchlist-input" in template_source
     assert "altcoin-radar-watchlist-list" in template_source
     assert "altcoin-radar-universe-summary" in template_source
-    assert "altcoin-radar-custom-universe-group" in template_source
     assert "altcoin-radar-watchlist-summary" in template_source
-    assert "altcoin-radar-ignition-summary" in template_source
     assert "altcoin-radar-action-list" in template_source
     assert "altcoin-radar-action-tags" in template_source
+    assert "altcoin-radar-invalidate-list" in template_source
+    assert "altcoin-radar-event-timeline" in template_source
     assert "altcoin-radar-table-scroll" in template_source
-    assert "altcoin-radar-theme-summary" in template_source
-    assert "altcoin-radar-related-list" in radar_js
-    assert "altcoin-radar-universe" in radar_js
+    assert "altcoin-radar-health-chips" in template_source
+    assert "altcoin-radar-warning-list" in template_source
     assert "function normalizeWatchlistSymbolInput(symbol)" in radar_js
     assert "function dedupeRowsBySymbol(rows)" in radar_js
     assert "applyClientFilters(dedupeRowsBySymbol(rows))" in radar_js
@@ -124,11 +128,11 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert "function formatDerivativesStatus(detailPayload, selected)" in radar_js
     assert "const actionPlan = detailPayload?.action_plan || {}" in radar_js
     assert "'altcoin-radar-action-list'" in radar_js
-    assert "['Derivatives 来源', String(derivativesContext.source_name || '--')]" in radar_js
-    assert "['Market Source', marketSourceLabel(selected)]" in radar_js
-    assert "['Market As Of', selectedFreshness.as_of ? fmtDateTime(selectedFreshness.as_of) : '--']" in radar_js
-    assert "['Long/Short', shortNumber(metrics.long_short_ratio)]" in radar_js
-    assert "['Derivatives 错误', derivativesError || '--']" in radar_js
+    assert "['行情源', marketSourceLabel(selected)]" in radar_js
+    assert "['行情时间', selectedFreshness.as_of ? fmtDateTime(selectedFreshness.as_of) : '--']" in radar_js
+    assert "['衍生品', formatDerivativesStatus(detailPayload, selected)]" in radar_js
+    # "no data" must not render as a real-looking zero.
+    assert "if (value === null || value === undefined || value === '') return fallback;" in radar_js
 
     assert ".altcoin-radar-workspace" in style_css
     assert ".altcoin-radar-table" in style_css
@@ -137,6 +141,79 @@ def test_altcoin_radar_assets_are_wired_into_index_template():
     assert ".altcoin-radar-watchlist-list" in style_css
     assert ".altcoin-radar-watchlist-chip.is-active" in style_css
     assert ".altcoin-radar-table-scroll" in style_css
+    assert ".altcoin-radar-health" in style_css
+    assert ".altcoin-radar-table--rank" in style_css
+    assert ".altcoin-radar-table--pump" in style_css
+
+
+def test_altcoin_radar_page_drops_the_removed_controls_and_cards():
+    template_source = _read("web/templates/index.html")
+    radar_block = template_source.split('id="altcoin-radar"', 1)[1].split('id="arbitrage"', 1)[0]
+    radar_js = _read("web/static/js/altcoin_radar.js")
+    style_css = _read("web/static/css/style.css")
+
+    # Controls that were broken or pointless: perp mode returned 0 rows without derivatives
+    # data, OKX/Gate have no local K-lines, 15m/1h cold scans outlive any request timeout.
+    for removed in (
+        "altcoin-radar-mode-btns",
+        "altcoin-mode-btn",
+        "altcoin-radar-exchange",
+        "altcoin-radar-timeframe",
+        "altcoin-radar-only-alerted",
+        "altcoin-radar-exclude-retired",
+        "altcoin-radar-universe\"",
+        "kol-consensus",
+        "lsr-crowding",
+        "altcoin-radar-summary-strip",
+        "altcoin-radar-meta-list",
+        "altcoin-radar-output",
+        "altcoin-perp-",
+        "altcoin-narrative-",
+        "altcoin-radar-proxy-components",
+        "altcoin-radar-chain-components",
+        "altcoin-radar-key-metrics",
+        "altcoin-radar-related-list",
+        "altcoin-radar-theme-peers",
+        "altcoin-radar-ignition-summary",
+        "altcoin-radar-page-head",
+    ):
+        assert removed not in radar_block, removed
+    assert 'value="okx"' not in radar_block and 'value="gate"' not in radar_block
+    assert 'value="15m"' not in radar_block and 'value="1h"' not in radar_block
+
+    for removed in (
+        "loadKolConsensus",
+        "loadLsrCrowding",
+        "refreshOperatingModeBanner",
+        "renderOperatingModeBanner",
+        "RADAR_MODES",
+        "altcoin-radar-mode-btns",
+        "setOutput(",
+        "altcoin-radar-output",
+        "'Long/Short'",
+    ):
+        assert removed not in radar_js, removed
+    # The scan is pinned to the only configuration that has data behind it.
+    assert "exchange: 'binance'," in radar_js
+    assert "timeframe: '4h'," in radar_js
+
+    # The weekly table lost its constant columns (惯犯 was 15/15 "是", 30 日解锁 0/15 filled).
+    pump_block = radar_block.split('id="pump-watchlist-card"', 1)[1].split("</thead>", 1)[0]
+    assert "惯犯" not in pump_block
+    assert "30日解锁" not in pump_block
+    assert "30日波动" not in pump_block
+    assert len(re.findall(r"<th[\s>]", pump_block)) == 9
+
+    rank_block = radar_block.split("altcoin-radar-table--rank", 1)[1].split("</thead>", 1)[0]
+    assert len(re.findall(r"<th[\s>]", rank_block)) == 6
+
+    # CSS: the three-column control matrix overflowed the 340px rail above 1500px.
+    assert "minmax(260px, 0.72fr) minmax(520px, 1.45fr)" not in style_css
+    slim_css = style_css.split("ALTCOIN RADAR - SLIM PAGE", 1)[1]
+    matrix_rule = slim_css.split(".altcoin-radar-control-matrix {", 1)[1].split("}", 1)[0]
+    assert "grid-template-columns: minmax(0, 1fr);" in matrix_rule
+    for dead_class in (".altcoin-mode-btn", ".altcoin-radar-mode-btns", ".altcoin-signal-src", ".altcoin-radar-summary-metric"):
+        assert dead_class not in style_css, dead_class
 
 
 def test_news_template_uses_versioned_css_asset():
