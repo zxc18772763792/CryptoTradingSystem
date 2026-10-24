@@ -29,6 +29,16 @@ def _alastar_horizons() -> Dict[str, Any]:
     return summary()
 
 
+def _telegram_cryptoquant() -> Dict[str, Any]:
+    from core.research.telegram_forward_tracker import cryptoquant
+    return cryptoquant()
+
+
+def _telegram_binance_chat() -> Dict[str, Any]:
+    from core.research.telegram_forward_tracker import binance_chat
+    return binance_chat()
+
+
 def _unlock(variant: str) -> Callable[[], Dict[str, Any]]:
     def load() -> Dict[str, Any]:
         from core.research import unlock_short_tracker as m
@@ -89,6 +99,14 @@ TRACKERS: List[Dict[str, Any]] = [
      "rule_key": "alastar_fresh_call_1h_v2",
      "rule": "文字首次方向，收件及冻结后≥60秒下一5分钟开盘，固定1小时；同币前30天作对照。新帖先语义复核，晚到不回填。持仓路径仅为近似1倍模型，尚未验证杠杆／标记价强平下的存活能力。",
      "load": _alastar},
+    {"id": "telegram_cryptoquant_24h", "name": "CryptoQuant 频道 · 顺势24h", "group": "Telegram信号", "unit": "笔",
+     "rule_key": "telegram_cryptoquant_24h",
+     "rule": "cryptoquant_official 频道新帖语义复核后冻结方向，下一5分钟边界入场BTC，固定持有24小时；扣20bps往返成本及实际资金费，另记40bps压力成本与同入场做多对照。采集中断的窗口不补、不当作中性。仅纸面。",
+     "load": _telegram_cryptoquant},
+    {"id": "telegram_binance_chat_sentiment", "name": "币安中文群情绪 · 4本账本", "group": "Telegram信号", "unit": "笔",
+     "rule_key": "telegram_binance_chat_sentiment",
+     "rule": "BinanceChinese 群按小时／6小时聚合去重后的作者方向（每窗口≥5个账号、不平衡≥0.4），顺势与反向各一本，持有6小时。四本共用同一条聊天流且互为镜像，不是四个独立样本；表中为小时顺势主账本，其余见账本明细。探索性前向方案，不宣称历史验证。仅纸面。",
+     "load": _telegram_binance_chat},
     {"id": "unlock_short", "name": "大额解锁前做空 · t−30", "group": "解锁", "unit": "笔", "rule_key": "unlock_short",
      "rule": "≥10% 悬崖解锁前 30 天做空永续、前 1 天平仓，篮子对冲，+40% 止损", "load": _unlock("t30")},
     {"id": "unlock_short_t7", "name": "解锁前最后一周做空 · t−7", "group": "解锁", "unit": "笔", "rule_key": "unlock_short_t7",
@@ -192,6 +210,11 @@ def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
                 "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金；超额非账户收益",
                 "gross_notional_multiplier": 1, "cost_scope": "主统计双方均扣20bps、均忽略资金费；实际含资金费收益另列",
                 "is_paper": True}
+    if tid in ("telegram_cryptoquant_24h", "telegram_binance_chat_sentiment"):
+        return {"metric_kind": "net_return", "metric_label": "净收益", "metric_unit_label": "%/笔",
+                "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金；非账户收益",
+                "gross_notional_multiplier": 1,
+                "cost_scope": "往返20bps及实际资金费；另记40bps压力成本。无成熟样本时为空，不是0%", "is_paper": True}
     paired = tid == "xs_reversal_liq_filter"
     gross = tid.startswith("xs_reversal")
     two_legs = tid.startswith(("unlock_", "coinglass_")) or "hedged" in tid or tid == "supply_factor"
@@ -263,6 +286,7 @@ def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
         runner_active=summary.get("runner_active"),
         completed_without_primary=summary.get("completed_without_primary"),
         horizon_comparison=summary.get("horizon_comparison"),
+        ledgers=summary.get("ledgers"),
         gross_mean_pct=round(float(mean) / row["gross_notional_multiplier"], 4) if mean is not None else None,
     )
     if spec["id"] in ("alastar_fresh_call_1h_v2", "alastar_horizons_v3"):
