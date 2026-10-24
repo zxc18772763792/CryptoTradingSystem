@@ -2371,183 +2371,86 @@
             </div>
 
             <div id="altcoin-radar" class="tab-content">
-                <div class="altcoin-radar-page-head">
-                    <div>
-                        <div class="altcoin-radar-kicker">ALTCOIN RADAR</div>
-                        <h2>山寨候选雷达</h2>
-                        <p>筛选异动，查看资金与风险。</p>
-                    </div>
+                <div class="altcoin-radar-health">
+                    <div id="altcoin-radar-status-note" class="altcoin-radar-status-note" data-tone="neutral">等待首次扫描</div>
+                    <div id="altcoin-radar-health-chips" class="altcoin-radar-health-chips"></div>
+                    <details class="altcoin-radar-health-detail">
+                        <summary>数据说明</summary>
+                        <div id="altcoin-radar-warning-list" class="altcoin-radar-warning-list">
+                            <div class="altcoin-radar-warning">暂无警告</div>
+                        </div>
+                    </details>
                 </div>
                 <div class="altcoin-radar-workspace">
                     <aside class="research-sidebar">
                         <div class="card research-sticky research-control-card altcoin-radar-control-card">
-                            <div class="altcoin-radar-control-head">
-                                <div>
-                                    <h3>山寨雷达配置</h3>
-                                    <div class="research-control-notes altcoin-radar-control-intro">
-                                        这页负责“预警 + 选币”而不是直接下单。先确认交易所、周期和币池，再看榜单右侧解释，决定是建预警还是带入研究工坊继续验证。
-                                    </div>
-                                </div>
-                                <div id="altcoin-radar-status-note" class="altcoin-radar-status-note" data-tone="neutral">
-                                    等待首次扫描
-                                </div>
-                            </div>
-
+                            <h3>山寨候选雷达</h3>
                             <div class="altcoin-radar-control-matrix">
-                                <section class="research-config-section altcoin-radar-mode-section">
-                                    <div class="research-config-title">雷达模式</div>
-                                    <div class="altcoin-radar-mode-btns" id="altcoin-radar-mode-btns">
-                                        <button class="altcoin-mode-btn active" data-mode="combined" title="综合合约与叙事信号">综合</button>
-                                        <button class="altcoin-mode-btn" data-mode="perp" title="合约、资金与拥挤度信号">合约</button>
-                                        <button class="altcoin-mode-btn" data-mode="narrative" title="叙事热度与板块轮动">叙事</button>
-                                    </div>
-                                </section>
-
-                                <section class="research-config-section altcoin-radar-param-section">
-                                    <div class="research-config-title">扫描参数</div>
+                                <section class="research-config-section">
                                     <div class="form-row altcoin-radar-param-grid">
                                         <div class="form-group">
-                                            <label>交易所</label>
-                                            <select id="altcoin-radar-exchange">
-                                                <option value="binance" selected>Binance</option>
-                                                <option value="okx">OKX</option>
-                                                <option value="gate">Gate.io</option>
-                                            </select>
-                                        </div>
-                                        <div class="form-group">
-                                            <label>周期视图</label>
-                                            <select id="altcoin-radar-timeframe">
-                                                <option value="15m">15分钟点火</option>
-                                                <option value="1h">1小时延续</option>
-                                                <option value="4h" selected>4小时确认</option>
-                                            </select>
-                                        </div>
-                                        <div class="form-group">
-                                            <label>排序模式</label>
+                                            <label for="altcoin-radar-sort">排序</label>
                                             <select id="altcoin-radar-sort">
                                                 <option value="priority" selected>综合优先</option>
-                                                <option value="upside">潜在上行（目标）</option>
-                                                <option value="layout">布局优先</option>
                                                 <option value="alert">异动优先</option>
-                                                <option value="control">高控盘优先</option>
-                                                <option value="anomaly">异动因子</option>
-                                                <option value="heat">综合热度</option>
-                                                <option value="ignition">点火优先</option>
-                                                <option value="continuation">延续优先</option>
-                                                <option value="rank_jump">跃升优先</option>
-                                                <option value="crowding">拥挤度优先</option>
-                                                <option value="narrative">叙事热度优先</option>
-                                                <option value="meme_rotation">轮动优先</option>
                                             </select>
                                         </div>
                                         <div class="form-group">
-                                            <label>前端过滤</label>
+                                            <label for="altcoin-radar-filter">过滤</label>
                                             <select id="altcoin-radar-filter">
-                                                <option value="all" selected>全部候选</option>
-                                                <option value="layout">仅布局吸筹</option>
+                                                <option value="all" selected>全部（不含 Alpha 新币）</option>
                                                 <option value="anomaly">仅异动启动</option>
-                                                <option value="control">仅高控盘</option>
-                                                <option value="alerted">仅已建预警</option>
-                                                <option value="fresh">仅数据新鲜</option>
-                                                <option value="perp_ignition">仅点火候选</option>
-                                                <option value="rank_jump">仅跃升候选</option>
-                                                <option value="narrative_ignition">仅叙事点火</option>
-                                                <option value="watchlist">仅Watchlist</option>
-                                                <option value="alpha">仅 Binance Alpha</option>
+                                                <option value="watchlist">仅 Watchlist</option>
+                                                <option value="alpha">仅 Binance Alpha 新币</option>
                                             </select>
                                         </div>
                                         <div class="form-group">
-                                            <label>扫描范围</label>
+                                            <label for="altcoin-radar-universe-scope">币池</label>
                                             <select id="altcoin-radar-universe-scope">
-                                                <option value="research" selected>研究清单（使用下方多选）</option>
-                                                <option value="expanded">扩展扫描（自动补齐 ~400）</option>
-                                                <option value="alpha">Binance Alpha 目录（最多约400）</option>
+                                                <option value="research" selected>研究池 + Alpha</option>
                                                 <option value="watchlist">Watchlist 收藏列表</option>
                                             </select>
                                         </div>
                                     </div>
-                                </section>
-
-                                <section class="research-config-section altcoin-radar-run-section">
-                                    <div class="research-config-title">扫描状态</div>
-                                    <div class="altcoin-radar-switch-row">
-                                        <label class="research-checkbox-label">
-                                            <input type="checkbox" id="altcoin-radar-only-alerted">
-                                            <span>仅看已建预警</span>
-                                        </label>
-                                        <label class="research-checkbox-label">
-                                            <input type="checkbox" id="altcoin-radar-exclude-retired" checked>
-                                            <span>排除停更 / 退市币种</span>
-                                        </label>
-                                    </div>
                                     <div class="inline-actions altcoin-radar-scan-actions">
                                         <button class="btn btn-primary btn-sm" id="btn-altcoin-radar-refresh">刷新雷达</button>
-                                        <button class="btn btn-primary btn-sm" id="btn-altcoin-radar-force-refresh">强制刷新</button>
-                                    </div>
-                                    <div id="altcoin-radar-cache-hint" class="research-control-notes">
-                                        默认缓存：15m 30s / 1h 60s / 4h 300s；强制刷新会绕过缓存重新计算。
+                                        <button class="btn btn-primary btn-sm" id="btn-altcoin-radar-force-refresh" title="绕过缓存重新计算，约需 1 分钟">强制刷新</button>
                                     </div>
                                     <div id="altcoin-radar-universe-summary" class="research-control-notes altcoin-radar-universe-summary">
-                                        当前模式：研究清单（使用下方多选）
+                                        固定币安 4h；已排除停更 / 退市币种。
                                     </div>
                                 </section>
                             </div>
 
                             <details class="altcoin-radar-advanced-drawer">
                                 <summary>
-                                    <span>币池与 Watchlist 管理</span>
-                                    <small>展开后维护研究清单、收藏列表和手动加入</small>
+                                    <span>Watchlist 管理</span>
+                                    <small>收藏、移出、手动加入</small>
                                 </summary>
-                                <div class="altcoin-radar-library-grid">
-                                    <section class="research-config-section altcoin-radar-universe-group" id="altcoin-radar-custom-universe-group">
-                                        <div class="research-config-title">研究清单成分 <span class="u-subnote">(按住Ctrl多选，默认最多 60 个)</span></div>
-                                        <div class="research-control-notes" id="altcoin-radar-custom-universe-note">
-                                            仅在 `扫描范围 = 研究清单（使用下方多选）` 时生效；Alpha 目录会自动同步并保留本地快照。
-                                        </div>
+                                <section class="research-config-section altcoin-radar-watchlist-panel">
+                                    <div class="research-control-notes" id="altcoin-radar-watchlist-summary">
+                                        用于维护叙事 / Meme / 板块观察收藏。点击下方标签会在右侧加载该币详情。
+                                    </div>
+                                    <div class="inline-actions altcoin-radar-watchlist-actions">
+                                        <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-add">加入 Watchlist</button>
+                                        <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-remove">移出 Watchlist</button>
+                                    </div>
+                                    <div class="form-row altcoin-radar-watchlist-form">
                                         <div class="form-group">
-                                            <select id="altcoin-radar-universe" multiple size="12">
-                                                <option value="LINK/USDT" selected>LINK/USDT</option>
-                                                <option value="AAVE/USDT" selected>AAVE/USDT</option>
-                                                <option value="AVAX/USDT" selected>AVAX/USDT</option>
-                                                <option value="DOT/USDT" selected>DOT/USDT</option>
-                                                <option value="ATOM/USDT" selected>ATOM/USDT</option>
-                                                <option value="FIL/USDT" selected>FIL/USDT</option>
-                                                <option value="TAO/USDT" selected>TAO/USDT</option>
-                                                <option value="FET/USDT" selected>FET/USDT</option>
-                                                <option value="GALA/USDT" selected>GALA/USDT</option>
-                                                <option value="UNI/USDT" selected>UNI/USDT</option>
-                                                <option value="NEAR/USDT" selected>NEAR/USDT</option>
-                                                <option value="ARB/USDT" selected>ARB/USDT</option>
-                                            </select>
+                                            <label for="altcoin-radar-watchlist-input">手动加入 Watchlist</label>
+                                            <input type="text" id="altcoin-radar-watchlist-input" placeholder="输入 ORDI/USDT 或 ORDI">
                                         </div>
-                                    </section>
-
-                                    <section class="research-config-section altcoin-radar-universe-group altcoin-radar-watchlist-panel">
-                                        <div class="research-config-title">Watchlist 收藏列表</div>
-                                        <div class="research-control-notes" id="altcoin-radar-watchlist-summary">
-                                            用于维护叙事 / Meme / 板块观察收藏。点击下方标签会在右侧加载该币详情；只有切到 `Watchlist 收藏列表` 模式时，它才会作为本次扫描来源。
+                                        <div class="form-group" style="align-self:flex-end;">
+                                            <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-add-manual">手动加入</button>
                                         </div>
-                                        <div class="inline-actions altcoin-radar-watchlist-actions">
-                                            <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-add">加入 Watchlist</button>
-                                            <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-remove">移出 Watchlist</button>
-                                        </div>
-                                        <div class="form-row altcoin-radar-watchlist-form">
-                                            <div class="form-group">
-                                                <label>手动加入 Watchlist</label>
-                                                <input type="text" id="altcoin-radar-watchlist-input" placeholder="输入 ORDI/USDT 或 ORDI">
-                                            </div>
-                                            <div class="form-group" style="align-self:flex-end;">
-                                                <button class="btn btn-sm" id="btn-altcoin-radar-watchlist-add-manual">手动加入</button>
-                                            </div>
-                                        </div>
-                                        <div id="altcoin-radar-watchlist-note" class="research-control-notes">
-                                            当前未选中候选
-                                        </div>
-                                        <div id="altcoin-radar-watchlist-list" class="altcoin-radar-watchlist-list">
-                                            <div class="altcoin-radar-watchlist-empty">加载中...</div>
-                                        </div>
-                                    </section>
-                                </div>
+                                    </div>
+                                    <div id="altcoin-radar-watchlist-note" class="research-control-notes">
+                                        当前未选中候选
+                                    </div>
+                                    <div id="altcoin-radar-watchlist-list" class="altcoin-radar-watchlist-list">
+                                        <div class="altcoin-radar-watchlist-empty">加载中...</div>
+                                    </div>
+                                </section>
                             </details>
                         </div>
                     </aside>
@@ -2564,11 +2467,11 @@
                                 </div>
                             </div>
                             <div class="altcoin-radar-warning-list">
-                                <div class="altcoin-radar-warning">周度观察，非实时择时。历史精度约 20%，多数候选不会上涨；微盘币流动性有限，不构成买入信号。</div>
-                                <details class="ui-disclosure"><summary>模型边界与历史统计</summary><div class="ui-disclosure-body u-hint">事件级提升约 1.9×，不采用行级 2.7×；收益依赖少数尾部事件，静默期更薄。历史赢家集中于微盘币，估计容量约 $1–2M/周。</div></details>
+                                <div class="altcoin-radar-warning">周度观察，不是买入信号。冻结后的样本外复核（2026-07 至 10，9 份名单）里，前 15 名 7 天平均落后全体 6.6 个百分点；“冲到 +100%”的命中率有提升，但平均收益没有。</div>
+                                <details class="ui-disclosure"><summary>模型边界与历史统计</summary><div class="ui-disclosure-body u-hint">回测事件级提升约 1.9×，不采用行级 2.7×；收益依赖少数尾部事件，静默期更薄。历史赢家集中于微盘币，估计容量约 $1–2M/周。样本外细节见 docs/ALTCOIN_RADAR_REVIEW_2026-10-24.md。</div></details>
                             </div>
                             <div class="table-container altcoin-radar-table-scroll">
-                                <table class="altcoin-radar-table">
+                                <table class="altcoin-radar-table altcoin-radar-table--pump">
                                     <thead>
                                         <tr>
                                             <th>#</th>
@@ -2577,120 +2480,17 @@
                                             <th>主驱动</th>
                                             <th>市值</th>
                                             <th>OI/市值</th>
-                                            <th>30日波动</th>
                                             <th>30日涨幅</th>
                                             <th>7日费率</th>
-                                            <th>惯犯</th>
                                             <th title="前 10 大地址持仓占比（GeckoTerminal，越高越集中/高控盘）">前10持仓</th>
-                                            <th title="未来 30 天解锁量占市值比（DefiLlama，无表为—）">30日解锁</th>
                                         </tr>
                                     </thead>
                                     <tbody id="pump-watchlist-body">
                                         <tr>
-                                            <td colspan="12" class="altcoin-radar-empty">等待名单数据...</td>
+                                            <td colspan="9" class="altcoin-radar-empty">等待名单数据...</td>
                                         </tr>
                                     </tbody>
                                 </table>
-                            </div>
-                        </div>
-
-                        <div class="card altcoin-radar-table-card" id="kol-consensus-card">
-                            <div class="research-lab-header">
-                                <div>
-                                    <h3>大盘 KOL 共识 · 风险体制</h3>
-                                    <div class="research-control-notes">高胜率 KOL 蒸馏的多空判断，仅 5 大币（BTC/ETH/SOL/DOGE/BNB）——判断"现在玩山寨险不险"的宏观背景灯，不是山寨选币信号，不参与上方模型打分。</div>
-                                </div>
-                                <div class="inline-actions">
-                                    <span id="kol-consensus-note" class="altcoin-radar-inline-note">加载中...</span>
-                                </div>
-                            </div>
-                            <div id="kol-consensus-strip" class="altcoin-radar-summary-grid">
-                                <div class="altcoin-radar-summary-metric"><span>风险体制</span><strong>--</strong></div>
-                            </div>
-                        </div>
-
-                        <div class="card altcoin-radar-table-card" id="lsr-crowding-card">
-                            <div class="research-lab-header">
-                                <div>
-                                    <h3>多空拥挤度 · LSR 实时</h3>
-                                    <div class="research-control-notes">聪明钱/大户当前最拥挤的持仓（仓位，非预测）；比值越极端越拥挤，回撤/挤压风险越高。补实时扫描的"控盘/拥挤"维度。</div>
-                                </div>
-                                <div class="inline-actions">
-                                    <span id="lsr-crowding-note" class="altcoin-radar-inline-note">加载中...</span>
-                                </div>
-                            </div>
-                            <div class="table-container altcoin-radar-table-scroll">
-                                <table class="altcoin-radar-table">
-                                    <thead>
-                                        <tr>
-                                            <th>#</th>
-                                            <th>币种</th>
-                                            <th title="聪明钱多头名义/空头名义，>1 偏多 <1 偏空">多空比</th>
-                                            <th>拥挤度</th>
-                                            <th title="约 2 分钟内多空比变化">Δ2m</th>
-                                            <th title="约 4 小时内多空比变化">Δ4h</th>
-                                            <th title="大户持仓数量多空比">大户比</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody id="lsr-crowding-body">
-                                        <tr>
-                                            <td colspan="7" class="altcoin-radar-empty">等待拥挤度数据...</td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <div class="research-top-grid altcoin-radar-top-grid">
-                            <div class="card altcoin-radar-summary-card">
-                                <div class="research-lab-header">
-                                    <div>
-                                        <h3>雷达摘要</h3>
-                                        <div class="research-control-notes">先看今天是否真的有值得追踪的山寨候选，再决定深入哪一个。</div>
-                                    </div>
-                                    <div class="inline-actions">
-                                        <button class="btn btn-sm" id="btn-altcoin-radar-open-research">带入研究工坊</button>
-                                    </div>
-                                </div>
-                                <div id="altcoin-radar-summary-strip" class="altcoin-radar-summary-grid">
-                                    <div class="altcoin-radar-summary-metric">
-                                        <span>扫描币数</span>
-                                        <strong>--</strong>
-                                    </div>
-                                    <div class="altcoin-radar-summary-metric">
-                                        <span>异动启动</span>
-                                        <strong>--</strong>
-                                    </div>
-                                    <div class="altcoin-radar-summary-metric">
-                                        <span>布局吸筹</span>
-                                        <strong>--</strong>
-                                    </div>
-                                    <div class="altcoin-radar-summary-metric">
-                                        <span>高控盘</span>
-                                        <strong>--</strong>
-                                    </div>
-                                    <div class="altcoin-radar-summary-metric">
-                                        <span>降级行数</span>
-                                        <strong>--</strong>
-                                    </div>
-                                    <div class="altcoin-radar-summary-metric">
-                                        <span>当前榜首</span>
-                                        <strong>--</strong>
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div class="card research-status-board altcoin-radar-meta-card">
-                                <h3>扫描元信息</h3>
-                                <div id="altcoin-radar-meta-list" class="list">
-                                    <div class="list-item"><span>状态</span><span>等待扫描</span></div>
-                                    <div class="list-item"><span>缓存</span><span>--</span></div>
-                                    <div class="list-item"><span>币池</span><span>--</span></div>
-                                    <div class="list-item"><span>更新时间</span><span>--</span></div>
-                                </div>
-                                <div id="altcoin-radar-warning-list" class="altcoin-radar-warning-list">
-                                    <div class="altcoin-radar-warning">暂无警告</div>
-                                </div>
                             </div>
                         </div>
 
@@ -2698,40 +2498,32 @@
                             <div class="research-lab-header">
                                 <div>
                                     <h3>实时异动</h3>
-                                    <div class="research-control-notes">量价异动排名，不代表上涨预测。点击候选查看依据。</div>
+                                    <div class="research-control-notes">量价异动排名，只描述当下，不代表上涨预测。点击候选查看依据。</div>
                                 </div>
                                 <div class="inline-actions">
                                     <span id="altcoin-radar-table-note" class="altcoin-radar-inline-note">等待扫描结果...</span>
                                 </div>
                             </div>
                             <div class="table-container altcoin-radar-table-scroll">
-                                <table class="altcoin-radar-table">
+                                <table class="altcoin-radar-table altcoin-radar-table--rank">
                                     <thead>
                                         <tr>
                                             <th>排名</th>
                                             <th>币种</th>
-                                            <th title="量价、异动、叙事和风险惩罚的综合上行筛选分，不代表收益承诺">潜在上行</th>
-                                            <th>布局分</th>
+                                            <th title="量价、异动、叙事和风险惩罚的综合筛选分，不代表收益承诺">潜在上行</th>
                                             <th>异动分</th>
-                                            <th>吸筹分</th>
-                                            <th>控盘分</th>
-                                            <th>点火分</th>
-                                            <th>跃升分</th>
-                                            <th>信号来源</th>
                                             <th>新鲜度</th>
-                                            <th>状态标签</th>
                                             <th>操作</th>
                                         </tr>
                                     </thead>
                                     <tbody id="altcoin-radar-ranking-body">
                                         <tr>
-                                            <td colspan="13" class="altcoin-radar-empty">等待扫描结果...</td>
+                                            <td colspan="6" class="altcoin-radar-empty">等待扫描结果...</td>
                                         </tr>
                                     </tbody>
                                 </table>
                             </div>
                         </div>
-
                     </div>
 
                     <aside class="altcoin-radar-inspector-rail">
@@ -2740,22 +2532,25 @@
                                 <div>
                                     <h3>候选检视器</h3>
                                     <div id="altcoin-radar-selected-subtitle" class="research-control-notes">
-                                        先从左侧榜单选择一个候选，右侧会解释为什么它上榜、哪里需要警惕、下一步怎么处理。
+                                        选择候选后，在这里看依据、建预警或带入研究工坊。
                                     </div>
                                 </div>
-                                <div class="inline-actions">
-                                    <button class="btn btn-sm" id="btn-altcoin-radar-alert-anomaly">建点火预警</button>
-                                    <button class="btn btn-sm" id="btn-altcoin-radar-alert-layout">建跃升预警</button>
-                                    <button class="btn btn-sm" id="btn-altcoin-radar-alert-control">建拥挤预警</button>
-                                    <button class="btn btn-sm" id="btn-altcoin-radar-alert-narrative">建叙事预警</button>
-                                    <button class="btn btn-sm" id="btn-altcoin-radar-alert-recycle">回收当前预警</button>
-                                </div>
+                            </div>
+                            <div class="inline-actions altcoin-radar-inspector-actions">
+                                <button class="btn btn-sm" id="btn-altcoin-radar-open-research">带入研究工坊</button>
+                                <select id="altcoin-radar-alert-kind" aria-label="预警类型">
+                                    <option value="anomaly">点火预警</option>
+                                    <option value="accumulation">跃升预警</option>
+                                    <option value="control">拥挤预警</option>
+                                    <option value="narrative">叙事预警</option>
+                                </select>
+                                <button class="btn btn-sm" id="btn-altcoin-radar-alert-toggle">建预警</button>
+                                <button class="btn btn-sm" id="btn-altcoin-radar-alert-recycle">回收全部预警</button>
                             </div>
 
                             <div id="altcoin-radar-inspector-empty" class="altcoin-radar-inspector-empty">
                                 暂无已选候选
                             </div>
-
                             <div id="altcoin-radar-inspector-shell" class="altcoin-radar-inspector-shell is-hidden">
                                 <div class="altcoin-radar-inspector-head">
                                     <div>
@@ -2765,106 +2560,34 @@
                                     <div id="altcoin-radar-selected-scores" class="altcoin-radar-score-strip"></div>
                                 </div>
 
-                                <div class="altcoin-radar-detail-grid">
-                                    <div class="altcoin-radar-detail-panel">
-                                        <div class="altcoin-radar-panel-title">价格路径</div>
-                                        <div id="altcoin-radar-sparkline" class="altcoin-radar-sparkline">等待加载...</div>
-                                    </div>
-                                    <div class="altcoin-radar-detail-panel">
-                                        <div class="altcoin-radar-panel-title">数据质量</div>
-                                        <div id="altcoin-radar-data-quality" class="list">
-                                            <div class="list-item"><span>状态</span><span>--</span></div>
-                                        </div>
-                                    </div>
+                                <div class="altcoin-radar-detail-panel">
+                                    <div class="altcoin-radar-panel-title">价格路径</div>
+                                    <div id="altcoin-radar-sparkline" class="altcoin-radar-sparkline">等待加载...</div>
                                 </div>
 
-                                <div class="altcoin-radar-detail-grid altcoin-radar-detail-grid-wide">
-                                    <div class="altcoin-radar-detail-panel">
-                                        <div class="altcoin-radar-panel-title">代理行为证据</div>
-                                        <div id="altcoin-radar-proxy-components" class="altcoin-radar-component-list"></div>
-                                        <div id="altcoin-radar-proxy-reasons" class="altcoin-radar-reason-list"></div>
-                                    </div>
-                                    <div class="altcoin-radar-detail-panel">
-                                        <div class="altcoin-radar-panel-title">链上 / 外生确认</div>
-                                        <div id="altcoin-radar-chain-components" class="altcoin-radar-component-list"></div>
-                                        <div id="altcoin-radar-chain-reasons" class="altcoin-radar-reason-list"></div>
-                                    </div>
-                                </div>
-
-                                <div class="altcoin-radar-detail-grid altcoin-radar-detail-grid-wide">
-                                    <div class="altcoin-radar-detail-panel">
-                                        <div class="altcoin-radar-panel-title">点火路径</div>
-                                        <div id="altcoin-radar-ignition-summary" class="altcoin-radar-reason-list">
-                                            <div class="altcoin-radar-reason">等待加载...</div>
-                                        </div>
-                                        <div id="altcoin-radar-ignition-drivers" class="altcoin-radar-tag-row"></div>
-                                    </div>
-                                    <div class="altcoin-radar-detail-panel">
-                                        <div class="altcoin-radar-panel-title">板块联动 / Watchlist</div>
-                                        <div id="altcoin-radar-theme-summary" class="altcoin-radar-reason-list">
-                                            <div class="altcoin-radar-reason">等待加载...</div>
-                                        </div>
-                                        <div id="altcoin-radar-theme-peers" class="altcoin-radar-related-list"></div>
+                                <div class="altcoin-radar-detail-panel">
+                                    <div class="altcoin-radar-panel-title">数据质量</div>
+                                    <div id="altcoin-radar-data-quality" class="list">
+                                        <div class="list-item"><span>等待加载</span><span>--</span></div>
                                     </div>
                                 </div>
 
                                 <div class="altcoin-radar-detail-panel">
-                                    <div class="altcoin-radar-panel-title">观察建议</div>
+                                    <div class="altcoin-radar-panel-title">观察建议与失效条件</div>
                                     <div id="altcoin-radar-action-list" class="altcoin-radar-reason-list">
                                         <div class="altcoin-radar-reason">等待加载...</div>
                                     </div>
                                     <div id="altcoin-radar-action-tags" class="altcoin-radar-tag-row"></div>
-                                </div>
-
-                                <div class="altcoin-radar-detail-grid altcoin-radar-detail-grid-wide">
-                                    <div class="altcoin-radar-detail-panel">
-                                        <div class="altcoin-radar-panel-title">关键指标</div>
-                                        <div id="altcoin-radar-key-metrics" class="list">
-                                            <div class="list-item"><span>指标</span><span>--</span></div>
-                                        </div>
-                                    </div>
-                                    <div class="altcoin-radar-detail-panel">
-                                        <div class="altcoin-radar-panel-title">失效条件 / 风险</div>
-                                        <div id="altcoin-radar-invalidate-list" class="altcoin-radar-reason-list"></div>
-                                    </div>
-                                </div>
-
-                                <div class="altcoin-radar-detail-panel">
-                                    <div class="altcoin-radar-panel-title">相关候选</div>
-                                    <div id="altcoin-radar-related-list" class="altcoin-radar-related-list"></div>
+                                    <div id="altcoin-radar-invalidate-list" class="altcoin-radar-reason-list"></div>
                                 </div>
 
                                 <div class="altcoin-radar-detail-panel">
                                     <div class="altcoin-radar-panel-title">事件时间线 <span id="altcoin-radar-events-badge" class="altcoin-event-badge" style="display:none"></span></div>
                                     <div id="altcoin-radar-event-timeline" class="altcoin-event-timeline">
-                                        <span class="text-muted" style="font-size:12px">选中候选后加载...</span>
-                                    </div>
-                                </div>
-
-                                <div class="altcoin-radar-detail-panel altcoin-perp-scores-panel">
-                                    <div class="altcoin-radar-panel-title">Perp 信号分解</div>
-                                    <div id="altcoin-radar-perp-scores" class="list">
-                                        <div class="list-item"><span>点火分</span><span id="altcoin-perp-ignition">--</span></div>
-                                        <div class="list-item"><span>延续分</span><span id="altcoin-perp-continuation">--</span></div>
-                                        <div class="list-item"><span>拥挤分</span><span id="altcoin-perp-crowding">--</span></div>
-                                        <div class="list-item"><span>跃升分</span><span id="altcoin-perp-rank-jump">--</span></div>
-                                        <div class="list-item"><span>信号来源</span><span id="altcoin-perp-source">--</span></div>
-                                    </div>
-                                </div>
-
-                                <div class="altcoin-radar-detail-panel altcoin-narrative-scores-panel">
-                                    <div class="altcoin-radar-panel-title">Narrative 信号分解</div>
-                                    <div id="altcoin-radar-narrative-scores" class="list">
-                                        <div class="list-item"><span>叙事热度</span><span id="altcoin-narrative-heat">--</span></div>
-                                        <div class="list-item"><span>轮动分</span><span id="altcoin-meme-rotation">--</span></div>
-                                        <div class="list-item"><span>板块</span><span id="altcoin-narrative-sector">--</span></div>
-                                        <div class="list-item"><span>Watchlist</span><span id="altcoin-narrative-watchlist">--</span></div>
-                                        <div class="list-item"><span>叙事来源</span><span id="altcoin-narrative-source">--</span></div>
+                                        <span class="text-muted u-note">暂无近期事件</span>
                                     </div>
                                 </div>
                             </div>
-
-                            <pre id="altcoin-radar-output" class="output-box">等待山寨雷达输出...</pre>
                         </div>
                     </aside>
                 </div>

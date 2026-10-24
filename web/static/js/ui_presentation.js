@@ -39,7 +39,6 @@
     ['ai-agent-info', '模型与运行配置'],
     ['ai-iteration-history', '迭代记录'],
     ['ai-iteration-evidence', '观察证据'],
-    ['altcoin-radar-meta-list', '扫描明细'],
   ];
 
   function prepareStaticContent() {
@@ -81,7 +80,6 @@
     })));
     [
       ['.ai-research-use-guide', '使用指南'],
-      ['.altcoin-radar-control-intro', '使用说明'],
     ].forEach(([selector, label]) => disclosure([document.querySelector(selector)], label));
     // Keep maintenance controls together, away from the primary price workflow.
     const health = document.querySelector('.data-health-card');

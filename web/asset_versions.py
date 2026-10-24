@@ -6,12 +6,12 @@ from typing import Final
 
 ASSET_VERSIONS: Final[dict[str, int]] = {
     "vendor/plotly-2.35.2.min.js": 1,
-    "css/style.css": 142,
+    "css/style.css": 143,
     "css/ai_agent.css": 2,
     "js/app.js": 161,
-    "js/ui_presentation.js": 3,
+    "js/ui_presentation.js": 4,
     "js/research_tracker_diagnostics.js": 1,
-    "js/altcoin_radar.js": 32,
+    "js/altcoin_radar.js": 33,
     "js/research_workbench.js": 12,
     "js/ai_research.js": 82,
     "js/ai_research_diagnostics.js": 7,
