@@ -18,6 +18,28 @@
 
 所有依赖、虚拟环境和运行时文件都留在 `F:\9_Crypto` 项目目录内。
 
+## 入口总览
+
+**日常只用一个入口：`.\web.bat`**（调用链 `web.bat → scripts/web.ps1 → scripts/start_web_ps.ps1 → _once.ps1`；
+后两层是内部实现，不要直接调用）。`scripts/start_web.py` 只是同一入口的 Python 包装。
+`scripts/dev_web.ps1` 已改成转发到 `web.bat start` 的兼容壳，不再手动起 `python main.py`。
+
+| 要做的事 | 入口 | 备注 |
+|---|---|---|
+| 启动 / 查看 / 停止 | `.\web.bat start` / `status` / `stop -IncludeWorkers` | 默认 paper，绑定 127.0.0.1 |
+| 开机后自动拉起并自愈 | 计划任务 `CryptoTradingSystem_WebSupervisor_<哈希>_8000`（登录触发） | 由 `scripts/ensure_web_supervisor_task.ps1` 创建；旧名 `CryptoTradingSystem_WebSupervisor_8000` 已停用，仅作历史 |
+| 新闻拉取 / 新闻 LLM | 随 `web.bat` 自动启动（`managed_entry.py`） | 改 `.env.local` 的模型后需重启这两个 worker |
+| Telegram 前向观察（CryptoQuant + 币安中文群情绪） | Web 内的运行任务 `telegram_forward`，开关 `TELEGRAM_FORWARD_WORKER_ENABLED` | 每 5 分钟用子进程跑 `scripts/telegram_forward_research.py cycle`；详见 `docs/TELEGRAM_AGENT_HANDOFF.md` |
+| Alastar 跟踪器与自动解读 | Web 内的运行任务 `alastar_*` | 随 Web 启动，无需单独入口 |
+| 研究宇宙 / K 线 / Coinglass 补数 | 计划任务 `ResearchUniverseRefresh`（定时）、`WideKlineTopUp`（每日 09:20）、`WeeklyCoinglassTopUp`、`PumpWatchlistWeekly` | 手动补跑见对应 `scripts/run_*.ps1` |
+| 代理（自治交易） | **不随任何入口启动** | 需要时单独 `-StartAutonomousAgent`，并先看 `docs/` 中的熔断说明 |
+
+不要做的事：手动 `uvicorn` / `python main.py`（绕过 supervisor，会遗留 `runtime/` 里的 pid 文件）；
+对守护任务加 `-StartAutonomousAgent`；同一 Telegram 会话让两个采集器同时跑（先核对 `runtime` 锁和聊天里的心跳自动化）。
+
+查看全部在跑的组件：`.\web.bat status`；服务就绪看 `http://127.0.0.1:8000/readyz`，
+Telegram 前向观察的健康在「策略」页的研究跟踪器表（状态列）和 `runtime/telegram_forward_runner.json`。
+
 ## 日常启动
 
 ```powershell
