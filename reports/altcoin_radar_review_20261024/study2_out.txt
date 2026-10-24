@@ -1,0 +1,120 @@
+score rows 60460 timestamps 561 coins 125
+
+===== rank IC, A 2026-02..10 =====
+h                         4h     24h     72h      7d
+score                                               
+accumulation_score    0.0040  0.0274  0.0238  0.0297
+alert_score          -0.0361 -0.0499 -0.0511 -0.0422
+anomaly_score        -0.0333 -0.0448 -0.0441 -0.0352
+continuation_score   -0.0364 -0.0560 -0.0546 -0.0475
+control_score        -0.0205  0.0018  0.0151  0.0249
+ignition_score       -0.0283 -0.0283 -0.0283 -0.0192
+layout_score         -0.0251 -0.0166 -0.0153 -0.0050
+liquidity_trap_score  0.0164  0.0486  0.0614  0.0678
+priority_score           NaN     NaN     NaN     NaN
+risk_penalty          0.0164  0.0486  0.0614  0.0678
+upside_score         -0.0348 -0.0410 -0.0419 -0.0316
+-- NW t-stat
+h                       4h   24h   72h    7d
+score                                       
+accumulation_score    0.49  3.17  2.03  1.82
+alert_score          -4.64 -6.42 -5.28 -5.31
+anomaly_score        -4.23 -5.55 -4.66 -4.87
+continuation_score   -4.44 -6.60 -5.76 -4.27
+control_score        -2.41  0.21  1.27  1.79
+ignition_score       -3.29 -3.61 -2.90 -2.00
+layout_score         -3.05 -1.87 -1.43 -0.38
+liquidity_trap_score  1.61  5.06  4.34  3.81
+priority_score         NaN   NaN   NaN   NaN
+risk_penalty          1.61  5.06  4.34  3.81
+upside_score         -4.02 -4.74 -3.67 -2.73
+
+===== rank IC, B 2025-04..2026-01 =====
+h                         4h     24h     72h      7d
+score                                               
+accumulation_score    0.0415  0.0489  0.0625  0.0635
+alert_score          -0.0319 -0.0163 -0.0136 -0.0180
+anomaly_score        -0.0309 -0.0186 -0.0198 -0.0180
+continuation_score   -0.0393 -0.0332 -0.0454 -0.0425
+control_score         0.0120  0.0118  0.0182  0.0352
+ignition_score       -0.0163 -0.0069  0.0021  0.0049
+layout_score          0.0107  0.0204  0.0269  0.0282
+liquidity_trap_score  0.0349  0.0342  0.0440  0.0622
+priority_score           NaN     NaN     NaN     NaN
+risk_penalty          0.0349  0.0342  0.0440  0.0622
+upside_score         -0.0144 -0.0016  0.0050  0.0040
+-- NW t-stat
+h                       4h   24h   72h    7d
+score                                       
+accumulation_score    3.87  4.40  4.12  2.94
+alert_score          -4.07 -1.84 -1.41 -1.54
+anomaly_score        -3.35 -1.91 -1.72 -1.17
+continuation_score   -4.10 -3.24 -3.71 -2.72
+control_score         1.33  1.27  1.54  2.14
+ignition_score       -2.06 -0.87  0.22  0.43
+layout_score          1.26  2.35  2.55  2.02
+liquidity_trap_score  3.60  3.35  2.94  2.93
+priority_score         NaN   NaN   NaN   NaN
+risk_penalty          3.60  3.35  2.94  2.93
+upside_score         -1.78 -0.19  0.50  0.33
+
+===== rank IC, ALL =====
+h                         4h     24h     72h      7d
+score                                               
+accumulation_score    0.0245  0.0391  0.0449  0.0481
+alert_score          -0.0338 -0.0316 -0.0306 -0.0290
+anomaly_score        -0.0320 -0.0305 -0.0308 -0.0258
+continuation_score   -0.0380 -0.0436 -0.0496 -0.0448
+control_score        -0.0028  0.0073  0.0168  0.0305
+ignition_score       -0.0217 -0.0166 -0.0117 -0.0061
+layout_score         -0.0056  0.0036  0.0077  0.0131
+liquidity_trap_score  0.0265  0.0408  0.0519  0.0648
+priority_score           NaN     NaN     NaN     NaN
+risk_penalty          0.0265  0.0408  0.0519  0.0648
+upside_score         -0.0237 -0.0195 -0.0163 -0.0122
+-- NW t-stat
+h                       4h   24h   72h    7d
+score                                       
+accumulation_score    3.48  5.39  4.49  3.43
+alert_score          -6.10 -5.20 -4.35 -3.88
+anomaly_score        -5.18 -4.70 -4.01 -2.85
+continuation_score   -5.92 -6.39 -6.21 -4.52
+control_score        -0.44  1.13  1.99  2.76
+ignition_score       -3.73 -2.94 -1.68 -0.79
+layout_score         -0.92  0.57  0.99  1.33
+liquidity_trap_score  3.76  5.74  4.98  4.56
+priority_score         NaN   NaN   NaN   NaN
+risk_penalty          3.76  5.74  4.98  4.56
+upside_score         -3.98 -3.16 -2.10 -1.40
+
+===== top-10% by score, excess vs universe EW mean (gross) =====
+
+-- A: top10% excess vs universe (mean per-period return, NW t)
+h                                 4h               24h               72h                7d
+score                                                                                     
+accumulation_score  -0.0005 (t=-1.7)  -0.0005 (t=-0.5)  +0.0009 (t=+0.4)  +0.0043 (t=+0.8)
+anomaly_score       -0.0012 (t=-1.1)  -0.0033 (t=-1.8)  -0.0047 (t=-1.1)  -0.0046 (t=-0.8)
+control_score       -0.0014 (t=-2.9)  +0.0020 (t=+1.5)  +0.0084 (t=+2.2)  +0.0117 (t=+1.6)
+ignition_score      -0.0006 (t=-0.6)  -0.0015 (t=-0.9)  -0.0014 (t=-0.4)  -0.0031 (t=-0.7)
+priority_score         +nan (t=+nan)     +nan (t=+nan)     +nan (t=+nan)     +nan (t=+nan)
+upside_score        -0.0004 (t=-0.4)  -0.0020 (t=-1.1)  -0.0029 (t=-0.8)  -0.0091 (t=-1.9)
+
+-- B: top10% excess vs universe (mean per-period return, NW t)
+h                                 4h               24h               72h                7d
+score                                                                                     
+accumulation_score  +0.0001 (t=+0.2)  +0.0000 (t=+0.0)  +0.0020 (t=+0.9)  +0.0020 (t=+0.4)
+anomaly_score       -0.0010 (t=-1.4)  +0.0020 (t=+1.3)  +0.0063 (t=+2.0)  +0.0085 (t=+2.2)
+control_score       +0.0005 (t=+1.1)  +0.0015 (t=+1.2)  +0.0055 (t=+2.2)  +0.0052 (t=+1.0)
+ignition_score      -0.0006 (t=-1.0)  -0.0006 (t=-0.4)  +0.0010 (t=+0.4)  +0.0005 (t=+0.2)
+priority_score         +nan (t=+nan)     +nan (t=+nan)     +nan (t=+nan)     +nan (t=+nan)
+upside_score        -0.0000 (t=-0.0)  -0.0001 (t=-0.0)  +0.0041 (t=+1.4)  +0.0020 (t=+0.6)
+
+-- ALL: top10% excess vs universe (mean per-period return, NW t)
+h                                 4h               24h               72h                7d
+score                                                                                     
+accumulation_score  -0.0002 (t=-0.9)  -0.0002 (t=-0.3)  +0.0015 (t=+0.9)  +0.0031 (t=+0.8)
+anomaly_score       -0.0011 (t=-1.7)  -0.0004 (t=-0.4)  +0.0013 (t=+0.5)  +0.0026 (t=+0.7)
+control_score       -0.0004 (t=-1.1)  +0.0017 (t=+1.9)  +0.0068 (t=+3.1)  +0.0082 (t=+1.9)
+ignition_score      -0.0006 (t=-1.1)  -0.0010 (t=-0.9)  -0.0001 (t=-0.0)  -0.0011 (t=-0.4)
+priority_score         +nan (t=+nan)     +nan (t=+nan)     +nan (t=+nan)     +nan (t=+nan)
+upside_score        -0.0002 (t=-0.3)  -0.0009 (t=-0.8)  +0.0009 (t=+0.4)  -0.0030 (t=-1.0)

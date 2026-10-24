@@ -1,0 +1,28 @@
+rows 1116
+lists with complete 30d windows: ['2026-07-20', '2026-08-03', '2026-08-10', '2026-09-07', '2026-09-14']
+      list   n  top5_ladder  top5_hold  top10_ladder  top10_hold  top15_ladder  top15_hold  top25_ladder  top25_hold  uni_ladder  uni_hold  rand15_ladder  top15_vs_rand_pctile
+2026-07-20 126       -0.024      0.155         0.011       0.115         0.049       0.099         0.028      -0.001      -0.003    -0.002          0.008                 0.680
+2026-08-03 128       -0.094     -0.109        -0.257      -0.265        -0.037      -0.045         0.017       0.067       0.166     0.142          0.156                 0.053
+2026-08-10 125        0.155      0.299         0.113       0.186        -0.078      -0.029        -0.018       0.082       0.117     0.135          0.120                 0.030
+2026-09-07 120        0.543      0.534         0.178       0.174         0.108       0.105         0.102       0.092       0.163     0.158          0.159                 0.317
+2026-09-14 123       -0.259     -0.259        -0.065      -0.092        -0.036      -0.053         0.016      -0.039       0.136     0.111          0.135                 0.023
+
+mean across lists:
+top5_ladder             0.064
+top5_hold               0.124
+top10_ladder           -0.004
+top10_hold              0.024
+top15_ladder            0.001
+top15_hold              0.015
+top25_ladder            0.029
+top25_hold              0.040
+uni_ladder              0.116
+uni_hold                0.109
+rand15_ladder           0.116
+top15_vs_rand_pctile    0.221
+
+== pump>=+100% (max high within 30d), de-duplicated by coin ==
+top15 distinct coins: 47  pumped(>=100%): 10 ['AKE', 'BANK', 'BR', 'BTW', 'BULLA', 'CAP', 'MUBARAK', 'ON', 'TAKE', 'VELVET']
+rest distinct coins: 265  pumped: 44 ['4', 'ACE', 'AIO', 'AKE', 'APR', 'ARB', 'ARK', 'ARX', 'BAT', 'BEAT', 'BICO', 'BLESS', 'BOME', 'BTW', 'BULLA', 'CHIP', 'DASH', 'ENA', 'ESPORTS', 'GRIFFAIN', 'GUA', 'GWEI', 'H', 'HEI', 'IOST', 'LIT', 'MAGMA', 'MET', 'NIL', 'ORCA', 'PHA', 'PORTAL', 'PROM', 'PUMP', 'SAGA', 'SAND', 'SKYAI', 'STX', 'TRUMP', 'UAI', 'UB', 'VVV', 'ZBT', 'ZRO']
+top15 appearances: 75 pump appearances: 13
+rest appearances: 547 pump appearances: 58

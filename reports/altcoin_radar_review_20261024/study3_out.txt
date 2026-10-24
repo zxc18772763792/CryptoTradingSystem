@@ -1,0 +1,72 @@
+rows 83412 dates 561 coins 558 avg coins/date 148.7
+delisted coins that appeared in the PIT universe: 77
+forward windows that ended at a delisting (exit at last price): 134 of 83412
+
+===== PIT universe: mean rank IC (NW t) =====
+-- 24h
+               score           ALL H1 2025-04..2025-12 H2 2026-01..2026-10
+        upside_score  -0.000(-0.0)        +0.011(+1.3)        -0.011(-1.4)
+        layout_score  +0.022(+3.6)        +0.026(+2.7)        +0.017(+2.3)
+         alert_score  -0.032(-6.0)        -0.026(-3.2)        -0.038(-5.4)
+       anomaly_score  -0.034(-6.0)        -0.025(-2.8)        -0.042(-6.2)
+  accumulation_score +0.061(+10.0)        +0.060(+6.1)        +0.062(+8.5)
+       control_score  +0.002(+0.5)        -0.008(-1.1)        +0.013(+2.0)
+      ignition_score  +0.000(+0.1)        +0.002(+0.3)        -0.001(-0.2)
+  continuation_score -0.073(-12.5)        -0.061(-6.7)       -0.084(-11.6)
+        risk_penalty  +0.028(+5.7)        +0.011(+1.5)        +0.044(+6.7)
+narrative_heat_score  +0.033(+4.8)        +0.037(+3.8)        +0.029(+3.1)
+-- 72h
+               score           ALL H1 2025-04..2025-12 H2 2026-01..2026-10
+        upside_score  +0.010(+1.3)        +0.027(+2.7)        -0.006(-0.5)
+        layout_score  +0.034(+4.2)        +0.041(+3.6)        +0.027(+2.4)
+         alert_score  -0.027(-4.2)        -0.016(-1.9)        -0.038(-4.1)
+       anomaly_score  -0.032(-4.7)        -0.024(-2.3)        -0.040(-4.6)
+  accumulation_score  +0.073(+8.8)        +0.073(+5.6)        +0.074(+7.1)
+       control_score  +0.008(+1.2)        -0.009(-1.0)        +0.024(+2.9)
+      ignition_score  +0.011(+1.6)        +0.016(+1.7)        +0.005(+0.6)
+  continuation_score -0.081(-11.3)        -0.069(-6.2)       -0.093(-10.4)
+        risk_penalty  +0.032(+4.1)        +0.003(+0.3)        +0.059(+5.8)
+narrative_heat_score  +0.045(+4.8)        +0.052(+3.9)        +0.039(+2.9)
+-- 7d
+               score           ALL H1 2025-04..2025-12 H2 2026-01..2026-10
+        upside_score  +0.033(+3.4)        +0.059(+4.7)        +0.008(+0.6)
+        layout_score  +0.060(+5.9)        +0.080(+5.9)        +0.041(+2.9)
+         alert_score  -0.018(-2.8)        -0.002(-0.2)        -0.034(-3.9)
+       anomaly_score  -0.028(-3.7)        -0.021(-1.5)        -0.036(-5.2)
+  accumulation_score  +0.098(+8.9)        +0.109(+6.4)        +0.087(+6.3)
+       control_score  +0.017(+2.1)        +0.002(+0.2)        +0.031(+3.3)
+      ignition_score  +0.028(+3.6)        +0.037(+3.2)        +0.019(+1.9)
+  continuation_score -0.090(-10.3)        -0.080(-5.8)        -0.100(-9.5)
+        risk_penalty  +0.030(+2.8)        -0.001(-0.1)        +0.061(+4.4)
+narrative_heat_score  +0.067(+5.3)        +0.079(+4.4)        +0.056(+3.2)
+
+===== state tags: flagged minus same-date unflagged, NW t =====
+-- ALL
+h                        24h                    72h                     7d
+state                                                                     
+异动启动   -0.0017(t=-1.0,n=561)  -0.0002(t=-0.0,n=561)  +0.0009(t=+0.2,n=561)
+派发风险   +0.0084(t=+1.0,n=206)  +0.0097(t=+0.6,n=206)  +0.0178(t=+0.6,n=206)
+高控盘警戒  -0.0026(t=-2.3,n=561)  +0.0008(t=+0.2,n=561)  +0.0092(t=+1.2,n=561)
+-- H1 2025-04..2025-12
+h                        24h                    72h                     7d
+state                                                                     
+异动启动   -0.0021(t=-1.0,n=275)  +0.0010(t=+0.2,n=275)  +0.0038(t=+0.5,n=275)
+派发风险   -0.0087(t=-0.9,n=104)  +0.0000(t=+0.0,n=104)  +0.0091(t=+0.2,n=104)
+高控盘警戒  -0.0038(t=-2.2,n=275)  +0.0045(t=+0.6,n=275)  +0.0149(t=+1.0,n=275)
+-- H2 2026-01..2026-10
+h                        24h                    72h                     7d
+state                                                                     
+异动启动   -0.0012(t=-0.4,n=286)  -0.0013(t=-0.3,n=286)  -0.0019(t=-0.2,n=286)
+派发风险   +0.0259(t=+2.1,n=102)  +0.0196(t=+0.9,n=102)  +0.0268(t=+0.7,n=102)
+高控盘警戒  -0.0013(t=-0.9,n=286)  -0.0028(t=-1.0,n=286)  +0.0037(t=+0.8,n=286)
+
+===== Strategy: long every 高控盘警戒 coin, hold 72h; net of 0.16% RT + funding; vs liquidity-matched control =====
+offset 0: periods=187 avg flagged/date=11.2 avg liq-rank=105/150 | net -0.0004(t-0.1) excess-vs-universe +0.0008(t+0.2) excess-vs-liq-matched +0.0006(t+0.1) hit 0.48
+offset 1: periods=187 avg flagged/date=11.3 avg liq-rank=105/150 | net +0.0036(t+0.3) excess-vs-universe +0.0045(t+0.4) excess-vs-liq-matched +0.0057(t+0.5) hit 0.40
+offset 2: periods=187 avg flagged/date=11.2 avg liq-rank=104/150 | net -0.0064(t-1.2) excess-vs-universe -0.0071(t-2.0) excess-vs-liq-matched -0.0077(t-1.5) hit 0.38
+mean over offsets: net -0.0010  ex-universe -0.0006  ex-liq-matched -0.0005
+  H1: net +0.0026 ex-uni +0.0040 ex-match +0.0065 (periods 275)
+  H2: net -0.0045 ex-uni -0.0050 ex-match -0.0072 (periods 286)
+permutation (random same-count picks): null mean +0.0002 sd 0.0036; observed +0.0008; p=0.427
+top contributors: {'MYX/USDT': 0.346, 'ZEREBRO/USDT': 0.186, 'XPIN/USDT': 0.179, 'GUA/USDT': 0.104, 'ZAMA/USDT': 0.096, 'BEAT/USDT': 0.093} | total 0.148 ex-top3 -0.563 | #coins 474 periods 187
+delisted coins among flagged picks: 54
