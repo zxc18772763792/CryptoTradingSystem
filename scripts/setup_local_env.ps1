@@ -32,6 +32,12 @@ if (Test-Path $localPython) {
 }
 
 if (-not $SkipRequirements) {
+    if ($python -eq $localPython) {
+        & $localConda install -p $localEnv -c conda-forge --freeze-installed -y `
+            "numpy=1.26.*" "pandas=2.3.*" "pyarrow=24.0.*" `
+            "aiohttp>=3.14.4,<4" "multidict>=6.9.1,<7" "pillow>=13.0.0,<14" "tornado>=6.5.9,<7"
+        if ($LASTEXITCODE -ne 0) { throw "Conda native security dependency installation failed." }
+    }
     $pipArgs = @("-m", "pip", "install")
     if ($Upgrade) { $pipArgs += "--upgrade" }
     $pipArgs += @("-r", (Join-Path $projectRoot "requirements.txt"))
@@ -47,6 +53,11 @@ if (-not $SkipRequirements) {
 & $python (Join-Path $projectRoot "scripts\verify_env.py")
 if ($LASTEXITCODE -ne 0) {
     throw "Environment verification failed. Rerun this script with -Upgrade, or install manually: pip install -r requirements.txt"
+}
+
+if (-not $SkipRequirements) {
+    & $python (Join-Path $projectRoot "scripts\check_dependency_contract.py") --include-dev
+    if ($LASTEXITCODE -ne 0) { throw "Installed versions do not satisfy requirements.txt." }
 }
 
 Write-Host "Done. Start with .\web.bat" -ForegroundColor Green

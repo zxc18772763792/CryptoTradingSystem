@@ -10,5 +10,10 @@ dependencies:
   - pyarrow=24.0.*
   - numpy=1.26.*
   - pandas=2.3.*
+  # Security-sensitive native wheels stay on the same conda-forge runtime.
+  - aiohttp>=3.14.4,<4
+  - multidict>=6.9.1,<7
+  - pillow>=13.0.0,<14
+  - tornado>=6.5.9,<7
   - pip:
       - -r requirements.txt
