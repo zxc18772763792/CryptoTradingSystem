@@ -44,6 +44,12 @@ $patterns = @(
     "uvicorn_web_*.err.log",
     "web_restart_*.out.log",
     "web_restart_*.err.log",
+    "news_worker_*.out.log",
+    "news_worker_*.err.log",
+    "news_llm_worker_*.out.log",
+    "news_llm_worker_*.err.log",
+    "pm_worker_*.out.log",
+    "pm_worker_*.err.log",
     "ui_primary_service_*.log",
     "research_universe_refresh.log.*"
 )

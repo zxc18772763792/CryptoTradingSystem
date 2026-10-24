@@ -178,3 +178,12 @@ exists locally. Reuse the session; do not rerun desktop bootstrap, print credent
 or treat the notification Bot Token as user access. Check current collector locks
 before using the same session concurrently. Historical text and forward observations
 have different availability times; preserve the frozen research protocol.
+
+## 12. Reboot maintenance checkpoint
+
+Before resuming the October 24 maintenance work, read
+[docs/MAINTENANCE_HANDOFF_2026-10-24.md](docs/MAINTENANCE_HANDOFF_2026-10-24.md).
+The user requested a stop for a manual reboot. Check the recorded timestamp and
+current processes; do not restart jobs merely to verify this handoff. The Codex
+Telegram heartbeat has been deleted; do not recreate it. Existing Windows logon/scheduled tasks keep
+their configuration. Preserve local uncommitted changes and research artifacts.
