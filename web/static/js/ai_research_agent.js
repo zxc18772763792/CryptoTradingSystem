@@ -2381,7 +2381,7 @@
   }
 
   function scheduleAgentDetails(options = {}) {
-    if (!isAgentTabActive()) return null;
+    if (!isAgentTabActive()) return Promise.resolve(null);
     if (detailRefreshInFlight) return detailRefreshInFlight;
     const force = options.force === true;
     const notifyOnError = options.notifyOnError === true;

@@ -2223,18 +2223,27 @@ if(!rows.length){tb.innerHTML='<tr><td colspan="10">暂无跟踪器</td></tr>';r
 tb.innerHTML=rows.map(r=>{
 if(r.error)return `<tr><td>${esc(r.name)}</td><td colspan="9">读取失败：${esc(r.error)}</td></tr>`;
 const paired=r.metric_kind==='paired_increment';
-const metric=(v)=>paired?pct(v).replace('%',' 个百分点'):pct(v);
+const excess=r.metric_kind==='excess_return';
+const metric=(v)=>(paired||excess)?pct(v).replace('%',' 个百分点'):pct(v);
 const ci=Array.isArray(r.ci90_pct)?` <span class="u-hint">[${metric(r.ci90_pct[0])}, ${metric(r.ci90_pct[1])}]${r.ci_clusters!=null?` · ${Number(r.ci_clusters)} 组`:''}</span>`:(r.ci_clusters===1&&Number(r.n)>=2?' <span class="u-hint">同属 1 组，暂无区间</span>':'');
 const unit=r.unit||'笔';
-const extra=[r.open?`持仓 ${Number(r.open)}`:'',r.waiting?`待入场 ${Number(r.waiting)}`:'',r.late?`晚到 ${Number(r.late)}`:''].filter(Boolean).join(' · ');
+const intake=r.signal_intake;
+const intakeStatus=intake?(intake.enabled===false?'已停用':intake.last_error?'异常':intake.runner_active?'运行中':'待恢复'):'';
+const intakeFrozen=Number(intake?.counts?.label_frozen||0)+Number(intake?.counts?.already_frozen||0);
+const intakeText=intake?`自动语义解析${intakeStatus} · 已冻结解释 ${intakeFrozen} · 非信号 ${Number(intake.counts?.non_signal||0)}${intake.counts?.predates_auto_intake?` · 启用前帖子 ${Number(intake.counts.predates_auto_intake)}（未回填）`:''}${intake.counts?.label_queued?` · 旧投递待确认 ${Number(intake.counts.label_queued)}`:''}${intake.counts?.retry_pending?` · 待重试 ${Number(intake.counts.retry_pending)}`:''}`:'';
+const intakeStart=intake?.enabled_at_utc?`启用于 ${fmtDateTime(intake.enabled_at_utc)}`:'';
+const intakeEmpty=intake?.enabled&&intake.runner_active&&Object.keys(intake.counts||{}).every(k=>k==='predates_auto_intake')?'启用后尚无新帖，暂无可冻结的前向信号。':'';
+const extra=[r.tracker_status_label||'',r.pending_review?`待复核 ${Number(r.pending_review)}`:'',r.completed_without_primary?`对照待补 ${Number(r.completed_without_primary)}`:'',r.open?`持仓 ${Number(r.open)}`:'',r.waiting?`待入场 ${Number(r.waiting)}`:'',r.late?`晚到 ${Number(r.late)}`:''].filter(Boolean).join(' · ');
 const marks=(r.open_marks||[]).map(m=>`<div><span style="${color(m.mark_pct)}">${esc(m.label)} ${pct(m.mark_pct,2)}</span><div class="u-hint">${esc(m.scope_label||'空头腿')} · ${esc(m.price_basis||'账本标价')} · ${esc(m.price_at?fmtDateTime(m.price_at):'价格时间未记录')}</div>${m.price_return_pct!=null&&m.funding_pct!=null?`<div class="u-hint">价格 ${pct(m.price_return_pct)} · 资金费 ${pct(m.funding_pct)} · 成本 ${pct(m.cost_pct)}</div>`:''}${m.is_partial?'<div class="u-hint">组合净浮盈暂无完整数据</div>':''}</div>`).join('');
 const win=r.win_rate===null||r.win_rate===undefined?'--':`${(Number(r.win_rate)*100).toFixed(0)}%`;
-const actual=paired?`<div class="u-hint">影子自身 ${pct(r.actual_mean_pct,3)}/天 · 同期原版 ${pct(r.paired_evaluation?.baseline?.mean_pct,3)}/天</div>`:'';
-return `<tr><td><strong>${esc(r.name)}</strong><div class="u-hint">${esc(r.group||'')} · ${esc(r.basis_label||'收益分母未记录')}</div></td>`+
-`<td style="max-width:320px;white-space:normal;">${esc(r.rule||'')}</td>`+
+const actual=paired?`<div class="u-hint">影子自身 ${pct(r.actual_mean_pct,3)}/天 · 同期原版 ${pct(r.paired_evaluation?.baseline?.mean_pct,3)}/天</div>`:excess?`<div class="u-hint">实际含资金费净收益 ${pct(r.actual_mean_pct,3)}/笔</div>`:'';
+const point=v=>pct(v).replace('%',' 个百分点');
+const horizons=Array.isArray(r.horizon_comparison)?`<table style="font-size:12px;min-width:560px"><thead><tr><th>持有</th><th>已到期 / 共同</th><th>价格净收益</th><th>同币超额</th><th>较1h增益</th><th>含资金费</th></tr></thead><tbody>${r.horizon_comparison.map(h=>`<tr><td>${Number(h.hours)}h</td><td>${Number(h.completed_n||0)} / ${Number(h.common_n||0)}</td><td>${pct(h.mean_net_pct)}</td><td>${point(h.excess_pp)}</td><td>${point(h.gain_vs_1h_pp)}</td><td>${pct(h.mean_funded_pct)}<div class="u-hint">已补齐 ${Number(h.funded_common_n||0)}/${Number(h.common_n||0)}</div></td></tr>`).join('')}</tbody></table><div class="u-hint">收益只用所有周期已到期且对照完整的共同样本；资金费未全部补齐时不报均值；未成熟不填零，不作周期优胜判定。</div>`:'';
+return `<tr><td><strong>${esc(r.name)}</strong><div class="u-hint">${esc(r.group||'')} · ${esc(r.basis_label||'收益分母未记录')}</div>${intakeText?`<div class="u-hint">${esc(intakeText)}</div>`:''}${intakeStart?`<div class="u-hint">${esc(intakeStart)}</div>`:''}${intakeEmpty?`<div class="u-hint">${esc(intakeEmpty)}</div>`:''}</td>`+
+`<td style="max-width:320px;white-space:normal;">${r.rule?`<details class="ui-table-details"><summary>查看规则</summary><div>${esc(r.rule)}</div></details>`:'--'}</td>`+
 `<td style="color:${verdictColor[r.verdict]||'var(--text-sub)'};" title="${esc(r.verdict_reason||'')}">${esc(r.verdict_label||r.verdict||'--')}</td>`+
 `<td>${Number(r.n||0)} / ${r.min_n??'--'} ${esc(unit)}${extra?`<div class="u-hint">${esc(extra)}</div>`:''}</td>`+
-`<td style="${color(r.mean_pct)}">${esc(r.metric_label||'净收益')} ${metric(r.mean_pct)} / ${esc(unit)}${ci}${actual}</td>`+
+`<td style="${color(r.mean_pct)}">${horizons?`<details class="ui-table-details"><summary>周期对比 · ${r.horizon_comparison.length} 个周期</summary>${horizons}</details>`:`${esc(r.metric_label||'净收益')} ${metric(r.mean_pct)} / ${esc(unit)}${ci}${actual}`}</td>`+
 `<td>${win}</td>`+
 `<td style="${color(r.gross_mean_pct)}">${metric(r.gross_mean_pct)} / ${esc(unit)}${paired?'<div class="u-hint">配对增益</div>':''}</td>`+
 `<td title="${esc(r.cost_scope||'')}">${metric(r.backtest_mean_pct)} / ${esc(unit)}</td>`+
@@ -2635,17 +2644,19 @@ if(!equityChart.drawn){host.on('plotly_relayout',fitEquityYAxis);equityChart.dra
 }
 function drawPie(dist,mode){const box=document.getElementById('holdings-pie');if(!box)return;if(!dist?.length){box.innerHTML='<div class="list-item">暂无可视化资产分布</div>';return;}if(typeof Plotly==='undefined'){box.innerHTML='<div class="list-item">图表库未加载，饼图暂不可用</div>';return;}box.innerHTML='';const top=dist.slice(0,10);Plotly.newPlot(box,[{type:'pie',labels:top.map(x=>x.currency),values:top.map(x=>Number(x.usd_value||0)),hole:.45,textinfo:'label+percent'}],{margin:{l:5,r:5,t:5,b:5},paper_bgcolor:'#162232',plot_bgcolor:'#162232',font:{color:'#e8eef9'},showlegend:false},{displaylogo:false,responsive:true});schedulePlotlyResize(document.getElementById('dashboard')||document);}
 
-function renderRisk(r){const p=document.getElementById('risk-panel');if(!p)return;if(!r){p.innerHTML='<div class="list-item">风控快照暂未返回，稍后自动刷新...</div>';return;}const e=r.equity||{},a=r.alerts||[],c=`risk-${r.risk_level||'low'}`;const dailyTotalRatio=Number((e.daily_total_pnl_ratio??e.daily_pnl_ratio)??0);const stopBasis=Number((e.daily_stop_basis_usd??e.daily_total_pnl_usd??e.daily_pnl_usd)??0);const stopBasisRatio=Number((e.daily_stop_basis_ratio??e.daily_pnl_ratio)??0);p.innerHTML=`
-<div class="list-item"><span>风险等级</span><span class="${c}">${(r.risk_level||'low').toUpperCase()}</span></div>
+function renderRisk(r){const p=document.getElementById('risk-panel');if(!p)return;if(!r){p.innerHTML='<div class="list-item">风控快照暂未返回，稍后自动刷新...</div>';return;}const e=r.equity||{},a=r.alerts||[],c=`risk-${r.risk_level||'low'}`;const dailyTotalRatio=Number((e.daily_total_pnl_ratio??e.daily_pnl_ratio)??0);const stopBasis=Number((e.daily_stop_basis_usd??e.daily_total_pnl_usd??e.daily_pnl_usd)??0);const stopBasisRatio=Number((e.daily_stop_basis_ratio??e.daily_pnl_ratio)??0);const detailsOpen=p.querySelector?.('details')?.open;const reset=document.getElementById('risk-reset-btn');if(reset)reset.style.display=r.trading_halted?'':'none';p.innerHTML=`
+<div class="list-item"><span>风险等级</span><span class="${c}">${esc(({low:'低',medium:'中',high:'高',critical:'严重'})[r.risk_level||'low']||r.risk_level)}</span></div>
 <div class="list-item"><span>风控熔断</span><span>${r.trading_halted?'已触发':'未触发'}</span></div>
 <div class="list-item"><span>日内总盈亏</span><span>${Number((e.daily_total_pnl_usd??e.daily_pnl_usd)||0).toFixed(2)} USDT (${(dailyTotalRatio*100).toFixed(2)}%)</span></div>
-<div class="list-item"><span>熔断依据</span><span>${stopBasis.toFixed(2)} USDT (${(stopBasisRatio*100).toFixed(2)}%)</span></div>
-<div class="list-item"><span>当前持仓浮盈亏</span><span class="${Number(e.current_unrealized_pnl_usd||0)>=0?'positive':'negative'}">${Number(e.current_unrealized_pnl_usd||0).toFixed(2)} USDT</span></div>
-<div class="list-item"><span>今日已实现盈亏</span><span class="${Number(e.daily_realized_pnl_usd||0)>=0?'positive':'negative'}">${Number(e.daily_realized_pnl_usd||0).toFixed(2)} USDT</span></div>
 <div class="list-item"><span>最大回撤</span><span>${(Number(e.max_drawdown||0)*100).toFixed(2)}%</span></div>
 <div class="list-item"><span>杠杆上限</span><span>${Number(r.limits?.max_leverage||0).toFixed(2)}x</span></div>
 <div class="list-item"><span>最近告警</span><span>${a.length} 条</span></div>
-${a.slice(-3).map(x=>`<div class="list-item"><span>${x.title}</span><span>${x.timestamp?.substring(11,19)||''}</span></div>`).join('')}`;}
+${a.slice(-3).map(x=>`<div class="list-item"><span>${esc(x.title)}</span><span>${esc(x.timestamp?.substring(11,19)||'')}</span></div>`).join('')}
+<details class="ui-disclosure" data-ui-disclosure="true"${detailsOpen?' open':''}><summary>盈亏与熔断明细</summary><div class="ui-disclosure-body">
+<div class="list-item"><span>熔断依据</span><span>${stopBasis.toFixed(2)} USDT (${(stopBasisRatio*100).toFixed(2)}%)</span></div>
+<div class="list-item"><span>当前持仓浮盈亏</span><span class="${Number(e.current_unrealized_pnl_usd||0)>=0?'positive':'negative'}">${Number(e.current_unrealized_pnl_usd||0).toFixed(2)} USDT</span></div>
+<div class="list-item"><span>今日已实现盈亏</span><span class="${Number(e.daily_realized_pnl_usd||0)>=0?'positive':'negative'}">${Number(e.daily_realized_pnl_usd||0).toFixed(2)} USDT</span></div>
+</div></details>`;}
 
 function hasRenderableBalanceSnapshot(balancePayload){
 const payload=(balancePayload&&typeof balancePayload==='object')?balancePayload:{};
