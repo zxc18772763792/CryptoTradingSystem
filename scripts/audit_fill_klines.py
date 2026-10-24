@@ -221,6 +221,14 @@ async def fill(rows: List[Dict[str, Any]], limiter, workers: int = 4) -> List[Di
     return todo
 
 
+def fill_error_summary(filled: List[Dict[str, Any]], top: int = 3) -> str:
+    """Most common fill errors, so a log line says why a run failed (10/21-10/24 only said "errors 2975")."""
+    from collections import Counter
+
+    counts = Counter(str(r["fill_error"])[:140] for r in filled if "fill_error" in r)
+    return "; ".join(f"{n}x {message}" for message, n in counts.most_common(top))
+
+
 def _jsonable(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     for r in rows:
@@ -260,6 +268,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         filled = asyncio.run(fill(rows, limiter))
         print(f"topped up {sum('downloaded' in r for r in filled)} series, {sum(r.get('downloaded', 0) for r in filled):,} bars; "
               f"errors {sum('fill_error' in r for r in filled)}", flush=True)
+        if any("fill_error" in r for r in filled):
+            print(f"  fill errors: {fill_error_summary(filled)}", flush=True)
         return 1 if any("fill_error" in r for r in filled) else 0
     before = audit(keys, limiter, now)
     print(summarize(before, "before"), flush=True)

@@ -320,6 +320,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         filled = asyncio.run(afk.fill(rows, limiter))
         print(f"klines: filled {sum('downloaded' in r for r in filled)} series, {sum(r.get('downloaded', 0) for r in filled):,} bars; "
               f"errors {sum('fill_error' in r for r in filled)}", flush=True)
+        if any("fill_error" in r for r in filled):
+            print(f"  fill errors: {afk.fill_error_summary(filled)}", flush=True)
         report["klines_filled"] = afk._jsonable(filled)
         report["klines_tolerant"] = refill_tolerant(filled, limiter)
         if report["klines_tolerant"]["series"]:
