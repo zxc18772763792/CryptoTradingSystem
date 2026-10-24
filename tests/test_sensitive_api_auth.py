@@ -542,7 +542,7 @@ def test_strategy_export_routes_are_dependency_gated_and_sanitized():
 def test_account_mutation_api_key_must_have_manage_accounts_permission(monkeypatch):
     app = _build_app(("/api/trading", trading_accounts.router))
     client = TestClient(app)
-    monkeypatch.setattr(trading_api.account_manager, "delete_account", lambda account_id: True)
+    monkeypatch.setattr(trading_api.account_manager, "delete_account", lambda account_id, **kwargs: True)
 
     monkeypatch.setattr(
         ops_auth_module,

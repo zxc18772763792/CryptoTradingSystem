@@ -83,7 +83,7 @@ async def get_stoploss_policy(mode: Optional[str] = None):
 
 @router.post(
     "/analytics/stoploss/policy",
-    dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change", "manage_strategies"))],
+    dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change"))],
 )
 async def update_stoploss_policy(request: trading_api.StoplossPolicyUpdateRequest):
     return await trading_api.update_stoploss_policy(request)

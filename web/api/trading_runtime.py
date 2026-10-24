@@ -120,7 +120,10 @@ async def get_risk_report():
 @router.post("/risk/params", dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change"))])
 async def update_risk_params(request: RiskUpdateRequest):
     payload = request.model_dump(exclude_none=True)
-    risk_manager.update_parameters(payload)
+    try:
+        risk_manager.update_parameters(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     invalidate_trading_stats_cache()
     _schedule_audit_log(
         module="risk",
@@ -135,7 +138,7 @@ async def update_risk_params(request: RiskUpdateRequest):
     }
 
 
-@router.post("/risk/reset", dependencies=[Depends(require_sensitive_ops_permissions("ack_alerts", "approve_risk_change"))])
+@router.post("/risk/reset", dependencies=[Depends(require_sensitive_ops_permissions("approve_risk_change"))])
 async def reset_risk_halt():
     risk_manager.reset_halt()
     invalidate_trading_stats_cache()

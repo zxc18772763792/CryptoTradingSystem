@@ -31,7 +31,7 @@ from core.governance.audit import GovernanceAuditEvent, write_audit
 from core.deployment.promotion_engine import transition_candidate, transition_proposal
 from core.news.storage import db as news_db
 from core.trading import execution_engine, order_manager, position_manager
-from web.api.auth import require_sensitive_ops_permissions
+from web.api.auth import require_request_permissions, require_sensitive_ops_permissions
 from core.research.orchestrator import (
     cancel_proposal_job,
     create_manual_proposal,
@@ -3218,12 +3218,26 @@ async def get_ai_autonomous_agent_runtime_config(request: Request):
     return cfg
 
 
+def _require_ai_live_approval(request: Request, updates=None) -> None:
+    cfg = autonomous_trading_agent.get_runtime_config()
+    changes = dict(updates or {})
+    disarming = bool(changes) and all(
+        (key in ("enabled", "allow_live") and value is False)
+        or (key == "mode" and value == "shadow")
+        for key, value in changes.items()
+    )
+    if not disarming and (cfg.get("allow_live") or changes.get("allow_live")):
+        require_request_permissions(request, "approve_live")
+
+
 async def update_ai_autonomous_agent_runtime_config(
     request: Request,
     payload: AIAutonomousAgentConfigUpdateRequest,
 ):
+    changes = payload.model_dump(exclude_unset=True)
+    _require_ai_live_approval(request, changes)
     try:
-        updated = await autonomous_trading_agent.update_runtime_config(**payload.model_dump(exclude_unset=True))
+        updated = await autonomous_trading_agent.update_runtime_config(**changes)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"updated": True, "config": updated}
@@ -3237,6 +3251,7 @@ async def update_ai_autonomous_agent_risk_config(
     request: Request,
     payload: AIAutonomousAgentRiskConfigUpdateRequest,
 ):
+    require_request_permissions(request, "approve_risk_change")
     try:
         from core.risk.risk_manager import risk_manager  # noqa: PLC0415
 
@@ -3283,6 +3298,7 @@ async def start_ai_autonomous_agent(
     request: Request,
     payload: AIAutonomousAgentStartRequest = AIAutonomousAgentStartRequest(),
 ):
+    _require_ai_live_approval(request)
     trading_mode = _current_trading_mode()
     update_kwargs: Dict[str, Any] = {}
     if payload.enable:
@@ -3350,6 +3366,7 @@ async def run_ai_autonomous_agent_once(
     request: Request,
     payload: AIAutonomousAgentRunOnceRequest = AIAutonomousAgentRunOnceRequest(),
 ):
+    _require_ai_live_approval(request)
     return await autonomous_trading_agent.trigger_run_once(
         trigger="api_manual",
         force=bool(payload.force),

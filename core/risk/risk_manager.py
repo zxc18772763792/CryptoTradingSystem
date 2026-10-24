@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import threading
 from dataclasses import dataclass
@@ -897,6 +898,22 @@ class RiskManager:
         """Return True if an order can pass risk checks."""
         self._check_new_day()
 
+        # Invalid arithmetic cannot be allowed to skip comparison-based caps.
+        try:
+            equity = float(account_equity if account_equity is not None else self._current_equity or 0.0)
+            notional = float(order_value or 0.0)
+            leverage = float(leverage)
+            allocation_value = float(strategy_allocation)
+            valid_numbers = all(math.isfinite(v) for v in (notional, leverage, allocation_value))
+            valid_numbers = valid_numbers and (allow_close or math.isfinite(equity))
+            if allow_close and not math.isfinite(equity):
+                equity = 0.0  # Missing entry equity must not strand a legitimate reduce-only exit.
+        except (TypeError, ValueError, OverflowError):
+            valid_numbers = False
+        if not valid_numbers or notional < 0 or leverage < 1 or allocation_value < 0:
+            self._add_alert(title="无效订单数值", message="订单权益、金额、杠杆或分配比例不是有效有限数", severity="critical")
+            return False
+
         if getattr(self, "_governance_kill_switch", False):
             self._add_alert(title="交易被阻止", message="governance kill_switch enabled",
                             severity="critical", data={"symbol": symbol, "side": side})
@@ -938,9 +955,6 @@ class RiskManager:
                 severity="critical",
             )
             return False
-
-        equity = float(account_equity or self._current_equity or 0.0)
-        notional = float(order_value or 0.0)
 
         # Fail-closed: a fresh entry whose size/equity cannot be verified must be
         # rejected rather than silently bypassing every notional cap below.
@@ -992,7 +1006,14 @@ class RiskManager:
                 return False
 
             if strategy_name:
-                allocation = max(0.0, min(float(strategy_allocation or 1.0), 1.0))
+                allocation = min(allocation_value, 1.0)
+                if allocation == 0:
+                    self._add_alert(
+                        title="策略资金分配为零",
+                        message=f"策略 {strategy_name} 没有可用于新增仓位的资金分配",
+                        severity="warning",
+                    )
+                    return False
                 if allocation > 0:
                     allocated_capital = equity * allocation
                     current_strategy_exposure = sum(
@@ -1502,38 +1523,41 @@ class RiskManager:
             "autonomy_rolling_7d_drawdown_reduce_only": "autonomy_rolling_7d_drawdown_reduce_only",
         }
 
-        for key, attr in mapping.items():
-            if key in params and params[key] is not None:
-                setattr(self, attr, float(params[key]))
-
         autonomy_aliases = {
             "daily_stop_buffer_ratio": "autonomy_daily_stop_buffer_ratio",
             "max_drawdown_reduce_only": "autonomy_max_drawdown_reduce_only",
             "rolling_3d_drawdown_reduce_only": "autonomy_rolling_3d_drawdown_reduce_only",
             "rolling_7d_drawdown_reduce_only": "autonomy_rolling_7d_drawdown_reduce_only",
         }
-        for key, attr in autonomy_aliases.items():
-            if key in params and params[key] is not None:
-                setattr(self, attr, float(params[key]))
+        # Parse the entire payload before mutating limits. A later invalid field
+        # must not leave earlier fields applied, or a NaN count installed after
+        # its int conversion raises. Validate aliases even when they overwrite
+        # another supplied name so malformed inputs always fail closed.
+        updates: Dict[str, float] = {}
+        input_mapping = {**mapping, **autonomy_aliases, "max_daily_loss": "max_daily_loss_ratio"}
+        for key, attr in input_mapping.items():
+            if key not in params or params[key] is None:
+                continue
+            try:
+                value = float(params[key])
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(f"{key} must be a finite number") from exc
+            if not math.isfinite(value):
+                raise ValueError(f"{key} must be a finite number")
+            updates[attr] = int(value) if attr in {"max_daily_trades", "max_open_positions"} else value
 
-        # Backward-compatible names.
-        if "max_daily_loss" in params and params["max_daily_loss"] is not None:
-            self.max_daily_loss_ratio = float(params["max_daily_loss"])
-
-        if "max_daily_trades" in params and params["max_daily_trades"] is not None:
-            self.max_daily_trades = int(float(params["max_daily_trades"]))
-        if "max_open_positions" in params and params["max_open_positions"] is not None:
-            self.max_open_positions = int(float(params["max_open_positions"]))
-
-        self.max_position_size = max(0.001, min(self.max_position_size, 1.0))
-        self.max_daily_loss_ratio = max(0.001, min(self.max_daily_loss_ratio, 1.0))
-        self.max_daily_loss_usd = max(0.0, self.max_daily_loss_usd)
-        self.max_daily_trades = max(1, int(self.max_daily_trades))
-        self.max_open_positions = max(1, int(self.max_open_positions))
-        self.max_leverage = max(1.0, float(self.max_leverage))
-        self.balance_volatility_alert_pct = max(0.01, min(float(self.balance_volatility_alert_pct), 1.0))
-        self._normalize_autonomy_thresholds()
-        self._save_autonomy_threshold_overlay()
+        with self._state_lock:
+            for attr, value in updates.items():
+                setattr(self, attr, value)
+            self.max_position_size = max(0.001, min(self.max_position_size, 1.0))
+            self.max_daily_loss_ratio = max(0.001, min(self.max_daily_loss_ratio, 1.0))
+            self.max_daily_loss_usd = max(0.0, self.max_daily_loss_usd)
+            self.max_daily_trades = max(1, int(self.max_daily_trades))
+            self.max_open_positions = max(1, int(self.max_open_positions))
+            self.max_leverage = max(1.0, float(self.max_leverage))
+            self.balance_volatility_alert_pct = max(0.01, min(float(self.balance_volatility_alert_pct), 1.0))
+            self._normalize_autonomy_thresholds()
+            self._save_autonomy_threshold_overlay()
 
         logger.info(f"Risk parameters updated: {params}")
 
