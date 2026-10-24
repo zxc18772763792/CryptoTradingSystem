@@ -34,6 +34,11 @@ def _telegram_cryptoquant() -> Dict[str, Any]:
     return cryptoquant()
 
 
+def _cryptoquant_alert() -> Dict[str, Any]:
+    from core.research.cryptoquant_alert_shadow import summary
+    return summary()
+
+
 def _telegram_binance_chat() -> Dict[str, Any]:
     from core.research.telegram_forward_tracker import binance_chat
     return binance_chat()
@@ -103,6 +108,10 @@ TRACKERS: List[Dict[str, Any]] = [
      "rule_key": "telegram_cryptoquant_24h",
      "rule": "cryptoquant_official 频道新帖语义复核后冻结方向，下一5分钟边界入场BTC，固定持有24小时；扣20bps往返成本及实际资金费，另记40bps压力成本与同入场做多对照。采集中断的窗口不补、不当作中性。仅纸面。",
      "load": _telegram_cryptoquant},
+    {"id": "cryptoquant_alert_shadow_v1", "name": "CryptoQuant Alert · BTC 交易所流向（影子）", "group": "Telegram信号", "unit": "笔",
+     "rule_key": "cryptoquant_alert_shadow_v1",
+     "rule": "@cryptoquant_alert 公开页首次收件的 BTC 交易所流向告警（流入／矿工转入做空，大额流出做多），收件及冻结后≥60秒下一5分钟开盘，1/4/24/72小时退出同时冻结，24h 为主周期；较入场前30天同向精确均值的超额，24小时内首条告警才计入统计。模板外文字只计数不交易。仅记录，不触发开仓。",
+     "load": _cryptoquant_alert},
     {"id": "telegram_binance_chat_sentiment", "name": "币安中文群情绪 · 4本账本", "group": "Telegram信号", "unit": "笔",
      "rule_key": "telegram_binance_chat_sentiment",
      "rule": "BinanceChinese 群按小时／6小时聚合去重后的作者方向（每窗口≥5个账号、不平衡≥0.4），顺势与反向各一本，持有6小时。四本共用同一条聊天流且互为镜像，不是四个独立样本；表中为小时顺势主账本，其余见账本明细。探索性前向方案，不宣称历史验证。仅纸面。",
@@ -209,6 +218,11 @@ def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
         return {"metric_kind": "excess_return", "metric_label": "相对同币零分布超额", "metric_unit_label": "百分点/笔",
                 "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金；超额非账户收益",
                 "gross_notional_multiplier": 1, "cost_scope": "主统计双方均扣20bps、均忽略资金费；实际含资金费收益另列",
+                "is_paper": True}
+    if tid == "cryptoquant_alert_shadow_v1":
+        return {"metric_kind": "excess_return", "metric_label": "相对入场前30天同向均值超额", "metric_unit_label": "百分点/笔",
+                "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金；超额非账户收益",
+                "gross_notional_multiplier": 1, "cost_scope": "主统计往返20bps、忽略资金费；实际含资金费与40/80bps压力另列。样本为空时为空，不是0%",
                 "is_paper": True}
     if tid in ("telegram_cryptoquant_24h", "telegram_binance_chat_sentiment"):
         return {"metric_kind": "net_return", "metric_label": "净收益", "metric_unit_label": "%/笔",

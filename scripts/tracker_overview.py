@@ -25,6 +25,7 @@ UNITS = {"笔": "%/笔", "天": "%/天", "月": "%/月", "期": "%/期"}
 EVIDENCE = {
     "alastar_horizons_v3": "docs/ALASTAR_HORIZON_V3.md",
     "alastar_fresh_call_1h_v2": "docs/ALASTAR_PAPER_V2.md",
+    "cryptoquant_alert_shadow_v1": "docs/CRYPTOQUANT_ALERT_SHADOW.md",
     "telegram_cryptoquant_24h": "docs/TELEGRAM_AGENT_HANDOFF.md",
     "telegram_binance_chat_sentiment": "docs/TELEGRAM_AGENT_HANDOFF.md",
     "unlock_short": "docs/UNLOCK_EVENT_STUDY_2026-09-27.md",

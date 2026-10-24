@@ -55,6 +55,8 @@ def test_alastar_paper_tracker_has_a_supervised_runtime_worker():
     assert callable(factories['alastar_paper_tracker']['factory'])
     assert factories['alastar_horizon_tracker']['restart_on_failure'] is True
     assert callable(factories['alastar_horizon_tracker']['factory'])
+    assert factories['cryptoquant_alert_shadow']['restart_on_failure'] is True  # idles until the protocol is activated
+    assert callable(factories['cryptoquant_alert_shadow']['factory'])
     assert factories['alastar_signal_intake']['restart_on_failure'] is True
     assert callable(factories['alastar_signal_intake']['factory'])
 

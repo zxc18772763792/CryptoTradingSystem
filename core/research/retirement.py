@@ -42,6 +42,10 @@ RULES: Dict[str, Dict[str, Any]] = {
     "alastar_fresh_call_1h_v2": {"min_n": 66, "unit": "trade", "backtest_mean_pct": None,
                                "decision_engine": "alastar_protocol_v2", "futility_n": 40, "primary_alpha": .05},
     # Telegram forward books: protocol-owned (telegram-three-source-paper-v1), descriptive screen only.
+    # CryptoQuant Alert BTC-flow shadow: protocol-owned (cryptoquant_alert_btc_flow_shadow_v1), 40-event futility / 66-event review.
+    "cryptoquant_alert_shadow_v1": {"min_n": 66, "unit": "trade", "backtest_mean_pct": None,
+                                    "decision_engine": "cryptoquant_alert_shadow_protocol_v1", "futility_n": 40,
+                                    "diagnostic_only": True},
     "telegram_cryptoquant_24h": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,
                                  "decision_engine": "telegram_forward_protocol", "diagnostic_only": True},
     "telegram_binance_chat_sentiment": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,

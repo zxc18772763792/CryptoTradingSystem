@@ -110,3 +110,7 @@
 **不要在已激活目录重跑 `collect --history`、重置数据库、覆盖初始快照或修改阈值。** cycle 核对 CLI、核心、桥接器及文本/复核规则的实现哈希；修改代码后报实现变化是保护行为。需要研究新规则时另开研究目录和新前向协议，保留现有账本；机械修复也应有明确迁移记录，不能仅替换哈希让它通过。
 
 本地分析与审计材料见 [reports/telegram_live_research_20261024/README.md](../reports/telegram_live_research_20261024/README.md)。
+
+## 第四个来源：@cryptoquant_alert（公开页，不走 Telethon 会话）
+
+2026-10-24 按用户要求接入，**与上面三个固定来源和独立 Telethon 会话无关**：由新闻采集器轮询 `t.me/s/cryptoquant_alert` 公开页（无需账号），只存档不入新闻库，解析 BTC 交易所流向告警后写前向影子账本，只记录、不触发开仓。入口与规则见 [CryptoQuant Alert 影子账本](CRYPTOQUANT_ALERT_SHADOW.md)。不要把它并进上面三个来源的研究目录或冻结协议，也不要用它扩大 Telethon 采集范围。
