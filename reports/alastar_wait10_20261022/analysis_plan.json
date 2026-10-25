@@ -1,0 +1,47 @@
+{
+  "created_at_utc": "2026-10-22T09:50:50.117009+00:00",
+  "question": "Short only after price first rallies 10% from a call baseline?",
+  "primary_cohort": "text_fresh",
+  "fresh_short_label_pool": 19,
+  "fresh_192h_nonoverlap_n": 17,
+  "excluded_overlap_ids": [
+    "telegram:alastartrades:51:e1",
+    "telegram:alastartrades:60:e1"
+  ],
+  "secondary_cohorts": [
+    "text_broad",
+    "image_short"
+  ],
+  "horizons": [
+    1,
+    4,
+    24,
+    72,
+    168
+  ],
+  "waiting_budgets_hours": [
+    1,
+    4,
+    24
+  ],
+  "primary_wait_hours": 24,
+  "threshold": 0.1,
+  "reference": "next5m open at/after publication+60sec; historical proxy, not real receive time",
+  "primary_execution": "first completed5m high>=1.1*baseline, next5m open; max wait includes entry",
+  "limit_sensitivity": "ideal resting short at exactly1.1*baseline; ignores queue/partial fill; holding clock rounded to touch-bar end, touch-bar high counts",
+  "exit_clocks": [
+    "after_entry",
+    "signal_deadline"
+  ],
+  "unfilled": "zero return per original signal, no fee; not an account return",
+  "missing": "unknown, never zero",
+  "cost_bps": 20,
+  "stress_cost_bps": 80,
+  "margin": "same approximate1x99% adverse rise as frozen research; no mark-price liquidation",
+  "null": "secondary internally consistent hourly model: same next-open policy, 30d hourly starts ending no later than anchor-192h; max192h path completed before real hourly anchor",
+  "null_minimum": 100,
+  "phases_cutoff": "2026-07-17 06:29:15+00:00",
+  "statistics": "week bootstrap5000 descriptive95% intervals; no winning-parameter claim",
+  "historical_exploratory_only": true,
+  "active_ledger_changed": false
+}

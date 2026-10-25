@@ -1,0 +1,15 @@
+{
+  "verified_at_utc": "2026-10-22T11:07:29.513573+00:00",
+  "human_quote": "OK那还是维持原样下单吧",
+  "decision": "keep_original_entry_rules",
+  "wait_for_10pct_rally_enabled": false,
+  "verified_mode": "paper",
+  "trackers": [
+    {"id": "alastar_horizons_v3", "runner_active": true, "common_completed_n": 0},
+    {"id": "alastar_fresh_call_1h_v2", "runner_active": true, "completed_n": 0}
+  ],
+  "scope": "Maintain the existing simulated signal observation rules, including semantic review and timing gates.",
+  "frozen_protocols_sources_and_journals_modified": false,
+  "runtime_mode_changed": false,
+  "new_order_submitted": false
+}

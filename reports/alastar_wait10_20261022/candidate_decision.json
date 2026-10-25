@@ -1,0 +1,12 @@
+{
+  "decided_at_utc": "2026-10-22T10:10:19.303813+00:00",
+  "candidate": "wait_for_10pct_rally_then_short",
+  "status": "historical_research_not_promoted",
+  "registered_or_activated": false,
+  "threshold": 0.1,
+  "primary_wait_hours": 24,
+  "primary_execution": "next5m open after first touch",
+  "reason": "Triggered-subset improvement failed to offset missed short winners; no historical improvement evidence in the primary cohort.",
+  "v2_v3_frozen_sources_protocols_and_activation_unchanged": true,
+  "future_guarantee": false
+}
