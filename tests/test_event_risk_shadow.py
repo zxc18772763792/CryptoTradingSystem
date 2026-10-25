@@ -55,10 +55,11 @@ class Market:
         if name == "fundingRate":
             if self.funding_down:
                 return Response({}, 503)
-            if "startTime" not in params:
-                return Response([{"fundingTime": self.next_ms - k * self.interval_hours * HOUR, "fundingRate": self.rate}
-                                 for k in (2, 1)])
-            return Response([r for r in self.rows if params["startTime"] <= r["fundingTime"] <= params["endTime"]])
+            if "startTime" in params or "endTime" in params:
+                return Response("<html>403 Forbidden</html>", 403)  # Binance's WAF on window queries (10/24, 10/25)
+            history = [{"fundingTime": self.next_ms - k * self.interval_hours * HOUR, "fundingRate": self.rate} for k in (2, 1)]
+            published = sorted((r for r in history + self.rows if r["fundingTime"] <= now_ms), key=lambda r: r["fundingTime"])
+            return Response(published[-int(params["limit"]):])  # the latest `limit` settlements, oldest first
         raise AssertionError(url)
 
 
@@ -286,6 +287,37 @@ def test_settlements_stamped_milliseconds_late_are_not_coverage_gaps():
     market.rows = [{"fundingTime": market.next_ms + k * HOUR + 3, "fundingRate": 0, "markPrice": 100} for k in range(13)]
     run(market, state)
     assert record["status"] == "closed" and record["funding_pct"] == 0
+    assert all(set(params) == {"symbol", "limit"} for name, params in market.calls if name == "fundingRate")
+
+
+def test_a_full_page_that_starts_after_entry_cannot_prove_coverage(monkeypatch):
+    market, state = Market(), registered()
+    run(market, state)
+    market.now += timedelta(hours=5, minutes=1)
+    market.rows = [{"fundingTime": market.next_ms + k * HOUR, "fundingRate": -0.01, "markPrice": 100} for k in range(5)]
+    monkeypatch.setattr(risk, "FUNDING_HISTORY_LIMIT", 3)  # the latest three: all after entry
+    run(market, state)
+    assert row(state)["monitoring_status"] == "unavailable"
+    assert "not covered" in row(state)["unavailable_reason"]
+    monkeypatch.setattr(risk, "FUNDING_HISTORY_LIMIT", 1000)
+    run(market, state)
+    assert row(state)["monitoring_status"] == "available"
+    # five -1% settlements: the short pays each, scaled by mark over entry price
+    assert row(state)["mark"]["funding_pct"] == pytest.approx(-5 * 0.01 * 100 / row(state)["legs"][0]["entry_price"] * 100)
+
+
+def test_a_shortened_funding_cadence_reads_an_hourly_sized_page():
+    market, state = Market(), registered()
+    market.interval_hours = 4  # entered on a 4h schedule
+    run(market, state)
+    market.interval_hours = 1  # Binance moved the contract to hourly settlements
+    market.now += timedelta(hours=9, minutes=1)
+    market.rows = [{"fundingTime": market.next_ms + k * HOUR, "fundingRate": 0, "markPrice": 100} for k in range(9)]
+    market.calls.clear()
+    run(market, state)
+    assert row(state)["monitoring_status"] == "available"
+    limits = [params["limit"] for name, params in market.calls if name == "fundingRate"]
+    assert limits == [9 // 4 + 3, 9 + 3]  # the entry cadence's page could not reach the entry; the hourly one did
 
 
 def test_existing_position_keeps_monitoring_when_source_collection_is_empty():

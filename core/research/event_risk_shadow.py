@@ -19,6 +19,10 @@ STATE_KEY = "event_risk_shadow"
 # Binance stamps a settlement a few milliseconds after its scheduled time (GUNUSDT 2026-10-24
 # 04:00:00.003); an exact match read that as a coverage gap on every pass. Intervals are >= 1 h.
 SETTLEMENT_TOLERANCE_MS = 60_000
+HOUR_MS = 3_600_000
+# fundingRate is read in its latest-N form only: Binance's WAF answered 403 to the startTime/endTime
+# form while the plain limit form kept working (2026-10-24 and 10-25), so a window query is never sent.
+FUNDING_HISTORY_LIMIT = 1000
 INVALID_SOURCE_STATUSES = {"schedule_changed", "cancelled", "invalidated", "entry_failed", "no_perp", "delisted"}
 CONFIG = {
     "version": "event-risk-v1",
@@ -123,7 +127,7 @@ async def _funding_reference(client, symbol: str, due_ms: int,
         # fundingInfo lists adjusted contracts only. The next scheduled timestamp
         # minus the latest actual settlement supplies this contract's current
         # interval without presuming an eight-hour default.
-        history = await _json(client, "fundingRate", {"symbol": symbol, "endTime": _ms(now), "limit": 2})
+        history = await _json(client, "fundingRate", {"symbol": symbol, "limit": 2})  # the latest two
         if not isinstance(history, list) or len(history) < 2:
             raise Unavailable(f"no settlement timestamp/interval for {symbol}")
         times = sorted({int(_number(r.get("fundingTime"), "fundingTime", positive=True)) for r in history})
@@ -142,24 +146,30 @@ async def _funding_reference(client, symbol: str, due_ms: int,
             "observed_at": _iso(now), "source_time_ms": int(stamp)}
 
 
+async def _settlements_since(client, leg: Dict[str, Any], clock) -> list:
+    """Every settlement of the leg's symbol from before its entry until now, in the latest-N form.
+
+    The page is sized from the entry schedule's interval, then from an hourly one if the contract's
+    cadence has since shortened. A full page whose earliest settlement is after the entry cannot
+    prove coverage back to the entry, so it is unavailable rather than a shorter sum."""
+    start = int(leg["entry_ms"])
+    span = max(0, _ms(clock()) - start)
+    steps = (max(1, int(leg["funding_reference"]["interval_ms"])), HOUR_MS)
+    for limit in sorted({min(FUNDING_HISTORY_LIMIT, span // step + 3) for step in steps}):
+        rows = await _json(client, "fundingRate", {"symbol": leg["symbol"], "limit": limit})
+        if not isinstance(rows, list):
+            raise Unavailable(f"missing settlements for {leg['symbol']}")
+        if len(rows) < limit or min(int(r["fundingTime"]) for r in rows) <= start:
+            return rows
+    raise Unavailable(f"settlement history since entry not covered for {leg['symbol']}")
+
+
 async def _funding_cash(client, leg: Dict[str, Any], end_ms: int, clock, cache) -> float:
     """Settled cash per leg entry notional, including settlement mark-price scaling."""
     start = int(leg["entry_ms"])
-    # read a little past the cutoff so a scheduled settlement stamped just after it still counts as published
+    # a scheduled settlement stamped just after the cutoff still counts as published
     read_until = end_ms + SETTLEMENT_TOLERANCE_MS
-    cursor, rows = start + 1, []
-    while cursor <= read_until:
-        page = await _json(client, "fundingRate", {"symbol": leg["symbol"], "startTime": cursor,
-                                                  "endTime": read_until, "limit": 1000})
-        if not isinstance(page, list):
-            raise Unavailable(f"missing settlements for {leg['symbol']}")
-        rows.extend(page)
-        if len(page) < 1000:
-            break
-        latest = max(int(r["fundingTime"]) for r in page)
-        if latest < cursor:
-            raise Unavailable("funding pagination did not advance")
-        cursor = latest + 1
+    rows = await _settlements_since(client, leg, clock)
     relevant = {int(r["fundingTime"]): r for r in rows if start < int(r["fundingTime"]) <= end_ms}
     published = [int(r["fundingTime"]) for r in rows if start < int(r["fundingTime"]) <= read_until]
 
