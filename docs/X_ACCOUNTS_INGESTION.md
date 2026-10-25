@@ -36,7 +36,7 @@ X 网页端未公开的 GraphQL 接口。
 ## 采集什么
 
 - 每次轮询对每个白名单账号请求最新 `x_accounts_tweets_per_account`（默认 20）条，按 `since` 过滤。
-  高频发帖账号若一个周期内超过该条数，会漏掉更早的帖子；没有历史回填。
+  高频发帖账号若一个周期内超过该条数，会漏掉更早的帖子。历史回填见 `scripts/backfill_x_kol.py`（写入研究存档，不进新闻库）。
 - 只收账号**自己的原创帖、自回复串、引用帖**（引用的原文放在 payload `quoted_text`）。
   跳过：纯转推、回复他人、没有文字的纯图片帖、时间戳缺失或不带时区的帖子（不会编造日期）。
 - 币种标签只取 `$BTC` 这类 cashtag 和 `XXXUSDT` 交易对，普通 `#话题` 不当币种。
@@ -46,10 +46,14 @@ X 网页端未公开的 GraphQL 接口。
 
 ## 请求预算与失败行为
 
-- Scweet 默认每个账号每天 300 次请求（`x_accounts_daily_requests_limit`），一个账号每次轮询约 2 次请求
-  （用户查询＋时间线）。默认每小时轮询一次，约可覆盖 6 个账号：`账号数 × 2 × 每天轮询次数 ≤ 300`。
-  账号更多就拉长 `NEWS_INTERVAL_X_ACCOUNTS`（该变量读进程环境，不读 `.env.local`）。调高每日上限会增加封号风险。
+- Scweet 默认每个账号每天 300 次请求（`x_accounts_daily_requests_limit`）。实测一个账号一次轮询、≤20 条约 1 次请求（用户 ID 查询有缓存）。现在 13 个账号每 2 小时一轮，约 160 次/天。账号更多就拉长 `NEWS_INTERVAL_X_ACCOUNTS`（该变量读进程环境，不读 `.env.local`）。调高每日上限会增加封号风险。
+- X 自己的限流更紧：10/25 在一个 15 分钟窗口里约 49 次请求后返回 429。回填请用 `scripts/backfill_x_kol.py`（每 15 分钟最多 30 次），别写循环。
+- Scweet 出错时返回空列表而不是抛异常；采集器会捕获它的警告并查状态库里的 `last_error_code`，把这类空结果当失败，不会记成"该账号没有新帖"。
 - 账号之间至少间隔约 6 秒加抖动；单个账号失败只记日志，其余继续。
 - 遇到登录被拒／账号被锁（AuthError）暂停 6 小时，限流（RateLimitError）或额度用尽暂停 30 分钟；
   暂停期间不向 X 发请求，来源错误里会显示剩余时间。登录被拒后需要换新的 `auth_token`，再重启 worker。
 - 所有账号都失败才算来源失败，不推进游标。
+
+## 研究存档（仅研究账号）
+
+`x_accounts_archive: true` 时，每次轮询返回的所有帖子（含转推、回复、纯图片帖，带标记）都追加写入`data/research/x_kol/<账号>.jsonl`，记录发帖时间、首次看到的时间和来源（实时／回填）。`x_accounts_archive_only_handles` 里的账号只存档，不产生新闻条目，也不触发 LLM 抽取。KOL 研究的做法和结论见 [X_KOL_RESEARCH_PROTOCOL.md](X_KOL_RESEARCH_PROTOCOL.md)，后续 agent 先读 [X_AGENT_HANDOFF.md](X_AGENT_HANDOFF.md)。

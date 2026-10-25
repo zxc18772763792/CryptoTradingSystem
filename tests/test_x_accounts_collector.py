@@ -234,7 +234,7 @@ def test_async_scweet_call_runs_with_or_without_a_live_loop():
 def test_manager_keeps_x_off_until_enabled_configured_and_credentialed(monkeypatch):
     cfg = load_news_rule_config(ROOT / "config/news_rules.yaml", ROOT / "config/symbols.yaml")
     assert "x_accounts" in cfg["defaults"]["news_sources"]
-    assert worker._source_interval("x_accounts") == 3600
+    assert worker._source_interval("x_accounts") == 7200
     assert news_db.SOURCE_IMPORTANCE["x_accounts"] < news_db.SOURCE_IMPORTANCE["telegram_alastar"]
 
     def build(config, **env):
@@ -247,7 +247,8 @@ def test_manager_keeps_x_off_until_enabled_configured_and_credentialed(monkeypat
         manager._close_collectors(specs)
         return [spec.name for spec in specs], errors
 
-    with_handles = {"defaults": {**cfg["defaults"], "x_accounts_handles": ["alpha"]}}
+    with_handles = {"defaults": {**cfg["defaults"], "x_accounts_handles": ["alpha"],
+                                 "x_accounts_archive_only_handles": []}}
     names, errors = build(with_handles)
     assert names == [] and any("NEWS_ENABLE_X_ACCOUNTS is not true" in e for e in errors)
     names, errors = build(with_handles, NEWS_ENABLE_X_ACCOUNTS="true")
@@ -272,3 +273,55 @@ def test_all_source_pulls_skip_disabled_x_quietly(monkeypatch):
         assert not any("x_accounts" in e for e in errors)
     finally:
         manager._close_collectors(specs)
+
+
+def test_a_swallowed_429_is_a_rate_limit_not_a_quiet_account(monkeypatch):
+    monkeypatch.setattr(x_accounts, "refusal_code", lambda _client: 429)
+    collector = _collector(FakeClient())
+    with pytest.raises(RuntimeError, match="All X accounts failed"):
+        collector.pull_latest()
+    assert list(collector.last_account_errors) == ["alpha"]  # the same answer awaits the rest: stop asking
+    assert "429" in collector.last_account_errors["alpha"]
+    with pytest.raises(RuntimeError, match="paused for another"):
+        _collector(FakeClient()).pull_latest()
+
+
+def test_an_empty_answer_with_no_refusal_on_record_stays_quiet(monkeypatch):
+    monkeypatch.setattr(x_accounts, "refusal_code", lambda _client: None)
+    assert _collector(FakeClient()).pull_latest() == []
+
+
+def _archived(tmp_path, monkeypatch):
+    from core.news import x_archive
+
+    monkeypatch.setattr(x_archive, "archive_dir", lambda: tmp_path)
+    monkeypatch.setattr(x_archive, "_seen", {})
+    return x_archive
+
+
+def test_archive_keeps_everything_a_poll_returns_and_archive_only_handles_make_no_news(tmp_path, monkeypatch):
+    archive = _archived(tmp_path, monkeypatch)
+    alpha = [_tweet(1), _tweet(2, is_retweet=True, text="RT @x: no"), _tweet(3, in_reply_to_user="stranger")]
+    client = FakeClient({"alpha": alpha, "beta": [_tweet(4, handle="beta")]})
+    collector = _collector(client, x_accounts_archive=True, x_accounts_archive_only_handles=["beta"])
+    items = collector.pull_latest()
+    assert [item["payload"]["tweet_id"] for item in items] == ["1"]  # news: alpha's own post only
+    stored = {(r["handle"], r["tweet_id"]): r for r in archive.load_archive(directory=tmp_path)}
+    assert set(stored) == {("alpha", "1"), ("alpha", "2"), ("alpha", "3"), ("beta", "4")}
+    assert stored[("alpha", "2")]["is_retweet"] and stored[("beta", "4")]["provenance"] == "live"
+    collector.pull_latest()  # a second poll adds nothing
+    assert len(archive.load_archive(directory=tmp_path)) == 4
+
+
+def test_archive_failure_does_not_stop_news(tmp_path, monkeypatch):
+    archive = _archived(tmp_path, monkeypatch)
+    monkeypatch.setattr(archive, "observe", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    items = _collector(FakeClient({"alpha": [_tweet(1)]}), x_accounts_archive=True).pull_latest()
+    assert [item["payload"]["tweet_id"] for item in items] == ["1"]
+
+
+def test_archive_only_handles_must_be_allowlisted_and_archived():
+    with pytest.raises(ValueError, match="archive_only"):
+        XAccountsCollector(_cfg(x_accounts_archive=True, x_accounts_archive_only_handles=["stranger"]))
+    with pytest.raises(ValueError, match="archive_only"):
+        XAccountsCollector(_cfg(x_accounts_archive_only_handles=["alpha"]))

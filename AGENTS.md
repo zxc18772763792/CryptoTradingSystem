@@ -187,3 +187,13 @@ The user requested a stop for a manual reboot. Check the recorded timestamp and
 current processes; do not restart jobs merely to verify this handoff. The Codex
 Telegram heartbeat has been deleted; do not recreate it. Existing Windows logon/scheduled tasks keep
 their configuration. Preserve local uncommitted changes and research artifacts.
+
+## 13. X (Twitter) collection
+
+For anything touching X/Twitter data or the KOL research, read
+[docs/X_AGENT_HANDOFF.md](docs/X_AGENT_HANDOFF.md) first. The collector logs in with the
+`auth_token` of the user's dedicated X account (in `.env.local`) through Scweet, which
+breaks X's terms: a ban also kills live collection, so make every real request count
+(probe small, mind the daily request budget). Never print, echo or commit the token, and
+never log in, create accounts or decrypt browser cookies for the user. Scweet returns an
+empty list instead of raising on network errors; do not treat an empty answer as "no posts".
