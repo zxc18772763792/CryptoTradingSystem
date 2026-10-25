@@ -1,0 +1,93 @@
+{
+  "window": [
+    "2026-07-27",
+    "2026-10-24"
+  ],
+  "days_with_enough_accounts": 90,
+  "universe_coins_per_day_median": 107.0,
+  "mentioned_coin_days": 501,
+  "tests": {
+    "T1_mentioned_vs_not": {
+      "days": 87,
+      "mean_gross": -0.0033529369903760806,
+      "mean_net": -0.00655293699037608,
+      "std": 0.025973969661909513,
+      "se": 0.0027847018454029786,
+      "t": -1.2040560090521546,
+      "p_two_sided": 0.23153842307884606,
+      "halves_gross": [
+        0.0025254203210525556,
+        -0.009097695271999521
+      ],
+      "min_detectable_gross_80pct_power": 0.00779716516712834,
+      "cost_per_day": 0.0032,
+      "holm_p": 0.4630768461576921,
+      "verdict": {
+        "passes": false,
+        "checks": {
+          "holm_p<0.01": false,
+          "net_mean>0": false,
+          "both_halves_positive_gross": false,
+          "days>=60": true
+        }
+      }
+    },
+    "T2_net_positive_vs_negative": {
+      "days": 46,
+      "mean_gross": -0.0019622610273655784,
+      "mean_net": -0.005162261027365578,
+      "std": 0.05856542233886545,
+      "se": 0.008635000432680033,
+      "t": -0.22724504100071646,
+      "p_two_sided": 0.831958402079896,
+      "halves_gross": [
+        -0.0038964564880743695,
+        -2.806556665678644e-05
+      ],
+      "min_detectable_gross_80pct_power": 0.02417800121150409,
+      "cost_per_day": 0.0032,
+      "holm_p": 0.831958402079896,
+      "verdict": {
+        "passes": false,
+        "checks": {
+          "holm_p<0.01": false,
+          "net_mean>0": false,
+          "both_halves_positive_gross": false,
+          "days>=60": false
+        }
+      }
+    },
+    "T3_two_plus_accounts_vs_not": {
+      "days": 64,
+      "mean_gross": -0.005455601578724901,
+      "mean_net": -0.008655601578724902,
+      "std": 0.021536990450298037,
+      "se": 0.0026921238062872547,
+      "t": -2.0265047119986646,
+      "p_two_sided": 0.046347682615869204,
+      "halves_gross": [
+        -0.004678612537293856,
+        -0.006232590620155948
+      ],
+      "min_detectable_gross_80pct_power": 0.007537946657604312,
+      "cost_per_day": 0.0032,
+      "holm_p": 0.13904304784760763,
+      "verdict": {
+        "passes": false,
+        "checks": {
+          "holm_p<0.01": false,
+          "net_mean>0": false,
+          "both_halves_positive_gross": false,
+          "days>=60": true
+        }
+      }
+    }
+  },
+  "created_at": "2026-10-25T07:08:21.032148+00:00",
+  "placebo_shift_days": 0,
+  "archive_records": 4710,
+  "hashes": {
+    "protocol_sha256": "6891aa9e44aa042cca74063133f0edc55428bbc574d1c0d44c481beae339fff5",
+    "script_sha256": "3b47056af4b8ca73fa4f4fc4f7c06bbb4fdac773e663caf52f3fa999c7db43fd"
+  }
+}
