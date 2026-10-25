@@ -87,3 +87,30 @@ reports/**/cache/
 reports/**/*_cache/
 reports/**/exchange_info_snapshot.json
 reports/binance_200pct_factor_mining_2026-07-18_futures_extended/analysis_summary.json
+
+# Machine output of the 2026-10-20..24 report runs stays local. The curated notes
+# (.md/.py/.ipynb/.png) and the small decision files below are tracked.
+reports/**/originals/
+reports/**/source_snapshots/
+reports/alastar_followup_20261021/*.json
+reports/alastar_response_20261021/*.json
+reports/alastar_horizons_20261022/*.json
+reports/alastar_horizons_20261022/*.html
+reports/alastar_paper_readiness_20261022/*.json
+reports/alastar_short_risk_20261022/*.json
+reports/alastar_tracker_activation_20261022/*.json
+reports/alastar_wait10_20261022/*.json
+reports/alastar_wait10_20261022/history/
+!reports/alastar_wait10_20261022/USER_DECISION_KEEP_ORIGINAL.json
+!reports/alastar_wait10_20261022/candidate_decision.json
+!reports/alastar_wait10_20261022/analysis_plan.json
+reports/audit_remediation_20261023/*.json
+reports/audit_remediation_20261023/*.xml
+reports/full_audit_2026-10-22_parts/*.json
+reports/full_audit_2026-10-22_parts/*.jsonl
+reports/full_audit_2026-10-22_parts/*.xml
+reports/team_bugfix_20261023/*.json
+reports/team_bugfix_20261023/*.xml
+reports/telegram_live_research_20261024/*.json
+reports/telegram_signal_study_20261020/artifact.json
+reports/telegram_text_20261023/*.json
