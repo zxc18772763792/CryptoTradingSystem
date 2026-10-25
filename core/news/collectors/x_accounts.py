@@ -13,6 +13,10 @@ are not the account's own words; a quote keeps the account's text, with the quot
 text in the payload. Posts are third-party commentary. Pictures without text never
 enter the news store. Like the Telegram collector, one handle's failure does not
 stop the others and only an all-handle failure raises.
+
+With ``x_accounts_archive: true`` every post a poll returns (retweets and replies
+included) is also written to the research archive, and handles listed in
+``x_accounts_archive_only_handles`` produce no news item at all.
 """
 from __future__ import annotations
 
@@ -90,7 +94,7 @@ def _x_handles(value: Any) -> List[str]:
     return handles
 
 
-def _publication_time(value: Any) -> Optional[datetime]:
+def publication_time(value: Any) -> Optional[datetime]:
     """Never invent a date for a missing, malformed, or timezone-less date."""
     text = str(value or "").strip()
     if not text:
@@ -132,13 +136,39 @@ def _fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:8]
 
 
+class XRateLimited(RuntimeError):
+    """X answered 429 (or refused the session) while Scweet swallowed it and returned an empty list."""
+
+    def __init__(self, code: int):
+        self.code = code
+        super().__init__(f"X refused the account with HTTP {code}")
+
+
 def _failure_kind(exc: BaseException) -> str:
     names = {cls.__name__ for cls in type(exc).__mro__}
-    if names & {"AuthError", "AccountSessionAuthError"}:
+    if names & {"AuthError", "AccountSessionAuthError"} or getattr(exc, "code", None) in (401, 403):
         return "auth"
-    if names & {"RateLimitError", "AccountPoolExhausted"}:
+    if names & {"RateLimitError", "AccountPoolExhausted", "XRateLimited"}:
         return "rate_limit"
     return "other"
+
+
+def refusal_code(client: Any) -> Optional[int]:
+    """The HTTP status X last refused this account with (401/403/429), from Scweet's own state file.
+
+    Scweet cools the account down on a 429 and then answers later calls with an empty list and no
+    warning, so an empty answer cannot be told from a quiet account without asking the state file.
+    """
+    try:
+        from Scweet import ScweetDB
+
+        for row in ScweetDB(client.config.db_path).list_accounts():
+            code = row.get("last_error_code")
+            if code in (401, 403, 429):
+                return int(code)
+    except Exception:  # noqa: BLE001 - a missing signal means "unknown", never a failure of its own
+        logger.debug("could not read Scweet account state", exc_info=True)
+    return None
 
 
 def _run_async(factory):
@@ -198,6 +228,26 @@ class XAccountsCollector(BaseNewsCollector):
         if self.jitter_sec <= 0:
             self.jitter_sec = 3.0
         self.last_account_errors: Dict[str, str] = {}
+        # Research archive of every post read (core/news/x_archive.py). Archive-only handles are polled
+        # and archived like the others but create no news item, so they cost no AI extraction.
+        self.archive_enabled = defaults.get("x_accounts_archive") is True
+        only = defaults.get("x_accounts_archive_only_handles") or []
+        self.archive_only_handles = _x_handles(only) if only else []
+        if any(h not in self.handles for h in self.archive_only_handles) or (
+                self.archive_only_handles and not self.archive_enabled):
+            # An archive-only handle that is not archived would be read and silently thrown away.
+            raise ValueError("x_accounts_archive_only_handles must be allowlisted and need x_accounts_archive: true")
+
+    def _archive(self, handle: str, tweets: List[Any]) -> None:
+        if not self.archive_enabled:
+            return
+        try:
+            from core.news.x_archive import observe
+
+            observe(handle, tweets, provenance="live")
+        except Exception:
+            # A research-archive failure must not stop news ingestion.
+            logger.exception("X research archive failed for %s", handle)
 
     def _scrub(self, value: Any) -> str:
         return str(value).replace(self._token, "***")
@@ -252,7 +302,12 @@ class XAccountsCollector(BaseNewsCollector):
                 tweets = _run_async(lambda: client.aget_profile_tweets([handle], limit=self.tweets_per_account))
             finally:
                 scweet_logger.removeHandler(capture)
-            if tweets or not capture.messages:
+            if tweets:
+                return tweets
+            if not capture.messages:
+                code = refusal_code(client)
+                if code:
+                    raise XRateLimited(code)
                 return tweets
             if attempt < 3 and any("status=599" in m or "curl:" in m for m in capture.messages):
                 # A connection dropped by the proxy / TLS never reached X and says nothing about the account.
@@ -278,7 +333,7 @@ class XAccountsCollector(BaseNewsCollector):
             reply_to = str(tweet.get("in_reply_to_user") or "").lower()
             if reply_to and reply_to != handle:
                 continue
-            published = _publication_time(tweet.get("timestamp"))
+            published = publication_time(tweet.get("timestamp"))
             if published is None:
                 continue
             full_text = re.sub(r"\n{3,}", "\n\n", html.unescape(str(tweet.get("text") or "")).replace("\r\n", "\n")).strip()
@@ -366,6 +421,9 @@ class XAccountsCollector(BaseNewsCollector):
                     self._pause(kind, _AUTH_PAUSE_SEC if kind == "auth" else _RATE_PAUSE_SEC, reason)
                     break
                 succeeded += 1
+                self._archive(handle, tweets)
+                if handle in self.archive_only_handles:
+                    continue
                 for item in self._from_tweets(handle, tweets):
                     if datetime.fromisoformat(item["published_at"]) >= since:
                         items.append(item)

@@ -52,7 +52,18 @@
   telegram_archive_only_channels: [cryptoquant_alert]
   # X accounts to read (1-20 handles, no URLs); empty keeps the source disabled. A handle costs about two X
   # requests per poll, so handles x 2 x polls per day must stay under x_accounts_daily_requests_limit.
-  x_accounts_handles: [wublockchain12, williamlab, whaleinsider]
+  # The first three feed the news pipeline; the rest are research-only (archive, no news item, no AI
+  # extraction). The list and the selection criteria are frozen in docs/X_KOL_RESEARCH_PROTOCOL.md.
+  x_accounts_handles: [
+      wublockchain12, williamlab, whaleinsider,
+      watcherguru, lookonchain, onchainlens, embercn,
+      cryptokaleo, inversebrah, pentosh1, btcdayu, cz_binance, saylor,
+    ]
+  x_accounts_archive: true
+  x_accounts_archive_only_handles: [
+      watcherguru, lookonchain, onchainlens, embercn,
+      cryptokaleo, inversebrah, pentosh1, btcdayu, cz_binance, saylor,
+    ]
   x_accounts_timeout_sec: 30
   x_accounts_max_records: 80
   x_accounts_tweets_per_account: 20

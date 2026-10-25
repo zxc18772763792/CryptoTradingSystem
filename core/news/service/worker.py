@@ -29,9 +29,9 @@ DEFAULT_INTERVALS = {
     "cryptocompare_news": 90,
     "opennews": 45,
     "telegram_alastar": 60,
-    # One logged-in X session with a daily request budget (Scweet default 300). A handle costs about two
-    # requests per poll (user lookup + timeline), so hourly polls fit ~6 handles.
-    "x_accounts": 3600,
+    # One logged-in X session with a daily request budget (Scweet default 300). A handle costs about one
+    # request per poll (the user lookup is cached), so 13 handles every 2 hours is ~160 requests a day.
+    "x_accounts": 7200,
     "jin10": 120,
     "coinglass_economic_data": 300,
     "coinglass_financial_events": 600,
