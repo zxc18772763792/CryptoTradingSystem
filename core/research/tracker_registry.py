@@ -135,7 +135,7 @@ TRACKERS: List[Dict[str, Any]] = [
     {"id": "coinglass_composite_7d_wide_eq", "name": "Coinglass 七日合成组合 · 等权扩池", "group": "因子", "unit": "期",
      "rule_key": "coinglass_composite_7d_wide_eq",
      "rule": "234 个币（原 131 个加成交额前 200 里另外 103 个），8 个信号只取方向、等权，做多前五分之一、做空后五分之一，"
-             "持有 7 天；这个版本是看过次要结果后挑的，以前向为准",
+             "持有 7 天。2026-10-25 停用：上线依据来自对数收益记账错误（更正后回测 −0.20%/期），不再建新组合，已开的照常结算",
      "load": _composite_wide},
     {"id": "korea_caution_hedged", "name": "韩国交易所警示后做空 · 对冲版（Upbit + Bithumb 合并）", "group": "韩国交易所",
      "unit": "笔", "rule_key": "korea_caution_hedged",

@@ -305,8 +305,8 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("coinglass_net_position", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_net_position)
         await _run_job("coinglass_daily_store", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_store)
         await _run_job("coinglass_composite", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_composite)
-        if coinglass_daily_store.WIDE_COINS:  # the wide book needs the held-out coins kept current
-            await _run_job("coinglass_composite_wide", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_composite_wide)
+        # stopped 2026-10-25: opens no new book, but its open books still settle here
+        await _run_job("coinglass_composite_wide", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_composite_wide)
         if delist_risk.MODEL_PATH.exists():
             await _run_job("delist_risk", DELIST_RISK_INTERVAL_SEC, now, force, delist)
     return status()

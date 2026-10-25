@@ -19,7 +19,8 @@ be moving). Research only: nothing here trades.
 Since 2026-10-12 the update also keeps the held-out coins of the equal-weight wide composite current
 (the 103 most-traded perps outside the 131, scripts/coinglass_wide_study.py; about 620 more requests
 a day, seeded from that study's download). They come after the 131, so the 131-coin composite forms
-as early as before; the whole pass takes about 4.7 hours.
+as early as before; the whole pass takes about 4.7 hours. Off again since 2026-10-25 (WIDE_COINS), when
+that tracker stopped opening books; their files stay where they are.
 """
 from __future__ import annotations
 
@@ -40,7 +41,9 @@ UNIVERSE_PATH = PROJECT_ROOT / "data" / "research" / "xs_reversal" / "universe.j
 PERP_SYMBOLS_PATH = PROJECT_ROOT / "data" / "research" / "lsr_positioning" / "perp_symbols.json"
 WIDE_UNIVERSE_PATH = PROJECT_ROOT / "data" / "research" / "coinglass_wide" / "universe.json"
 WIDE_SEED_DIR = PROJECT_ROOT / "data" / "research" / "coinglass_wide" / "raw"
-WIDE_COINS = True  # keep the held-out coins current too (the equal-weight wide composite tracker, since 2026-10-12)
+# keep the held-out coins current too: only the equal-weight wide composite tracker read them (2026-10-12),
+# and it stopped opening books on 2026-10-25 (core/research/coinglass_composite_tracker.py WIDE_STOPPED_AT)
+WIDE_COINS = False
 KEEP_DAYS = 60
 DAY_MS = 86_400_000
 HOUR_MS = 3_600_000

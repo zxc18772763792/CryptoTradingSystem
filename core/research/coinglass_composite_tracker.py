@@ -33,6 +33,16 @@ secondary results (it also led on 10/11), so only this forward record can confir
 asked for it to run anyway. Own state file and rule "coinglass_composite_7d_wide_eq". It forms once
 the store has 90% of the 234 coins, about two hours after the 131-coin book (the store asks the 131
 first).
+
+Corrected 2026-10-25: the studies booked each leg's log return, which credits a pumping short with
+-log(exit/entry) instead of its arithmetic loss. With (entry - exit) / entry short legs (as this
+tracker books them) the 131-coin IC-weighted book is +0.10% per book (not +0.17%), and the wide
+equal-weight book -0.20% (not +0.40%; -0.83% on the 103 held-out coins). The ranking ICs are
+unchanged. The registered rules keep their numbers (frozen at registration).
+
+Stopped 2026-10-25 at the user's request, since the wide tracker's premise was the corrected +0.40%:
+no "wide" book opens on or after WIDE_STOPPED_AT; books already open still settle, and its state
+file stays as the record. The daily store no longer keeps the 103 held-out coins current.
 """
 from __future__ import annotations
 
@@ -64,18 +74,25 @@ READY_SHARE = 0.9
 FORM_DEADLINE = timedelta(hours=12)
 LATE_GRACE = timedelta(minutes=30)  # a pass this long after the deadline with no book: the day is missed
 SETTLE_GRACE = timedelta(days=1)
-BACKTEST_REFERENCE = ("2025-05..2026-10 out of sample, weights from 2024-01..2025-05: +0.17% per 7-day book after 0.12% "
-                      "costs and Binance funding (sd 3.1%), positive in 5 of 7 quarters; the equal-weight variant 7 of 7")
+# corrected 2026-10-25: short legs had been booked as log returns (+0.17% per book, equal-weight 7 of 7 quarters)
+BACKTEST_REFERENCE = ("2025-05..2026-10 out of sample, weights from 2024-01..2025-05: +0.10% per 7-day book after 0.12% "
+                      "costs and Binance funding, positive in 5 of 7 quarters, -0.02%/book at 0.20% costs; the equal-weight "
+                      "variant +0.18%, 5 of 7")
 WIDE_STATE_PATH = PROJECT_ROOT / "data" / "research" / "coinglass_composite_wide_eq" / "tracker.json"
+# corrected 2026-10-25: the +0.40% (+0.48% on the 103) that started this tracker came from log-return short legs
 WIDE_BACKTEST_REFERENCE = ("2025-05..2026-10, 234 coins (103 never seen by the weights), the training ICs' signs with equal "
-                           "weight: +0.40% per 7-day book after 0.12% costs and Binance funding (+0.48% on the 103 alone); "
-                           "chosen after it beat the IC-weighted book in two studies' secondary results, so it is likely high")
+                           "weight: -0.20% per 7-day book after 0.12% costs and Binance funding (-0.83% on the 103 alone), "
+                           "with arithmetic short legs; the ranking IC (+0.03) holds, the book does not pay")
+WIDE_STOPPED_AT = datetime(2026, 10, 26, tzinfo=timezone.utc)  # the first book day it no longer opens
+WIDE_STOP_REASON = ("2026-10-25 停用：上线依据 +0.40%/期 来自对数收益记账错误，按算术收益回测为 −0.20%/期；"
+                    "不再建新组合，已开的组合照常结算，账本保留")
 # tracker -> its state, universe, rule and books: the judged book is "main", the other one its shadow
 VARIANTS: Dict[str, Dict[str, Any]] = {
     "main": {"state_path": STATE_PATH, "rule": "coinglass_composite_7d", "reference": BACKTEST_REFERENCE,
              "universe": lambda: store.universe(), "books": (("main", WEIGHTS), ("shadow", SHADOW_WEIGHTS))},
     "wide": {"state_path": WIDE_STATE_PATH, "rule": "coinglass_composite_7d_wide_eq", "reference": WIDE_BACKTEST_REFERENCE,
-             "universe": lambda: store.wide_universe(), "books": (("main", SHADOW_WEIGHTS), ("shadow", WEIGHTS))},
+             "universe": lambda: store.wide_universe(), "books": (("main", SHADOW_WEIGHTS), ("shadow", WEIGHTS)),
+             "stopped_at": WIDE_STOPPED_AT, "stop_reason": WIDE_STOP_REASON},
 }
 
 
@@ -276,8 +293,12 @@ async def tick(client, *, variant: str = "main", state_path: Optional[Path] = No
     day = store.last_closed_day(now)
     key = day.date().isoformat()
     opens = day + timedelta(days=1)
-    # a day's book only when the tracker was already running as the day opened
-    if key not in state["books"] and datetime.fromisoformat(state["started_at"]) <= opens:
+    stopped_at = spec.get("stopped_at")
+    if stopped_at is not None and "stopped" not in state:
+        state["stopped"] = {"at": stopped_at.isoformat(), "reason": spec["stop_reason"], "recorded_at": now.isoformat()}
+    # a day's book only when the tracker was already running as the day opened, and not after it stopped
+    if (key not in state["books"] and datetime.fromisoformat(state["started_at"]) <= opens
+            and (stopped_at is None or opens < stopped_at)):
         coins: Dict[str, Dict[str, Any]] = {}
         universe = spec["universe"]()
         for _, perp in universe:
@@ -334,6 +355,11 @@ def summary(state: Dict[str, Any], variant: str = "main") -> Dict[str, Any]:
             out.update(retirement=part["retirement"], forward_completed=len(returns), forward_open=part["open"],
                        forward_mean_net_pct=part["mean_net_pct"], forward_win_rate=part["positive_share"])
         out[book_variant] = part
+    stopped_at = spec.get("stopped_at")
+    if stopped_at is not None:
+        still_open = out["main"]["open"]
+        out.update(stopped_at=stopped_at.isoformat(), stop_reason=spec["stop_reason"],
+                   tracker_status_label=f"已停用 · {still_open} 份待结算" if still_open else "已停用")
     latest = max((d for d, r in records.items() if (r.get("main") or {}).get("longs")), default=None)
     if latest:
         book = records[latest]["main"]

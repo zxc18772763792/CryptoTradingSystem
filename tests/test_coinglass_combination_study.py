@@ -46,7 +46,7 @@ def test_composite_of_one_signal_is_its_signed_rank_score_and_needs_half_the_wei
 
 def test_buffered_book_charges_only_the_names_it_replaces():
     ranking = np.tile(np.arange(40, dtype=float), (60, 1))  # a fixed ranking: one entry, then no trades
-    fwd = np.tile(np.arange(40, dtype=float) * 0.001, (60, 1))
+    fwd = np.log1p(np.tile(np.arange(40, dtype=float) * 0.001, (60, 1)))  # the panel's labels are log returns
     out = combo.buffered_book(_frame(ranking), _frame(fwd), cost=0.001)
     spread = (np.arange(32, 40).mean() - np.arange(0, 8).mean()) * 0.001
     assert out["gross_per_day"] == pytest.approx(spread)

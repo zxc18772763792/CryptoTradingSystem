@@ -29,6 +29,8 @@ def corr(a, b) -> float:
 
 
 def spread(score: pd.DataFrame, fwd: pd.DataFrame) -> pd.Series:
+    """Gross quintile spread of arithmetic returns (``fwd`` holds the panel's log returns)."""
+    fwd = np.expm1(fwd)
     out = {}
     for t in score.index:
         s, f = score.loc[t], fwd.loc[t]

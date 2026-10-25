@@ -112,7 +112,7 @@ def test_residualizing_removes_a_signal_that_is_only_past_return():
 
 def test_quintile_spread_charges_costs_on_turnover_only():
     signal = _frame(np.tile(np.arange(40, dtype=float), (400, 1)))  # fixed ranking: no turnover after day 1
-    fwd = _frame(np.tile(np.arange(40, dtype=float) * 0.001, (400, 1)))
+    fwd = _frame(np.log1p(np.tile(np.arange(40, dtype=float) * 0.001, (400, 1))))  # log returns, as the panel's
     out = study.quintile_spread(signal, fwd, direction=1.0, cost_round_trip=0.001)
     top, bottom = np.arange(32, 40).mean() * 0.001, np.arange(0, 8).mean() * 0.001
     assert out["gross"] == pytest.approx(top - bottom)

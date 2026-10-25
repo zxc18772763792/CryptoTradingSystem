@@ -79,6 +79,8 @@ RULES: Dict[str, Dict[str, Any]] = {
     # added 2026-10-11 with the Coinglass composite tracker, before its first forward book. Unit: one
     # 7-day book (net % after costs and funding), clustered by the week it closes in; 364 books = 52
     # weeks. Mean from scripts/coinglass_combination_study.py --robustness (training-weight 7d book).
+    # Corrected 2026-10-25: the study booked log-return legs; with arithmetic short legs, as the tracker
+    # books them, the mean is +0.10. The rule stays as registered.
     "coinglass_composite_7d": {"min_n": 364, "unit": "book", "backtest_mean_pct": 0.174},
     # added 2026-10-11 with the reversal tracker's liquidation-shock shadow, before its first day.
     # Unit: shadow minus main net per position per day; mean from the same study's C1 replay with
@@ -89,6 +91,8 @@ RULES: Dict[str, Dict[str, Any]] = {
     # Mean: that book's net per 7-day book in scripts/coinglass_wide_study.py (A2, sign-equal,
     # 2025-05..2026-10). The variant was chosen after seeing it, so the mean is likely high; here it
     # only sets the decay bar, which a high mean makes stricter, not looser.
+    # Corrected 2026-10-25: that +0.40 came from log-return legs; with arithmetic short legs, as the
+    # tracker books them, the book is -0.20 (docs/COINGLASS_WIDE_STUDY_2026-10-12.md). Rule as registered.
     "coinglass_composite_7d_wide_eq": {"min_n": 364, "unit": "book", "backtest_mean_pct": 0.40},
 }
 VERDICT_LABELS = {

@@ -361,7 +361,13 @@ def coin_permutation(signal: pd.DataFrame, label: pd.DataFrame, reps: int = N_PE
 
 def quintile_spread(signal: pd.DataFrame, fwd: pd.DataFrame, direction: float, horizon: int,
                     cost_round_trip: float = COST_ROUND_TRIP) -> Dict[str, float]:
-    """Top-minus-bottom quintile held h days, rebalanced every h days, averaged over the h offsets."""
+    """Top-minus-bottom quintile held h days, rebalanced every h days, averaged over the h offsets.
+
+    ``fwd`` holds the panel's log returns (rank-invariant, so the ICs use them as they are). A book
+    earns arithmetic returns: a short leg is (entry - exit) / entry. Until 2026-10-25 the spread was
+    taken over log returns, which credits a pumping short with -log(exit/entry) instead of its loss
+    and overstated books whose short leg is the more volatile one."""
+    fwd = np.expm1(fwd)
     gross, net, turnover = [], [], []
     days = list(signal.index)
     for offset in range(horizon):

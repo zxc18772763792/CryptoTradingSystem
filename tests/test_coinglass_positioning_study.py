@@ -75,11 +75,21 @@ def test_permutation_rejects_a_persistent_coin_trait():
 
 def test_quintile_spread_charges_turnover_once_per_offset():
     signal = _frame(np.tile(np.arange(40, dtype=float), (300, 1)))  # a fixed ranking never turns over
-    fwd = _frame(np.tile(np.arange(40, dtype=float) * 0.003, (300, 1)))  # 3-day returns
+    fwd = _frame(np.log1p(np.tile(np.arange(40, dtype=float) * 0.003, (300, 1))))  # 3-day log returns, as the panel's
     out = study.quintile_spread(signal, fwd, direction=1.0, horizon=3, cost_round_trip=0.001)
     spread = (np.arange(32, 40).mean() - np.arange(0, 8).mean()) * 0.003
     assert out["gross_per_day"] == pytest.approx(spread / 3)
     assert out["net_per_day"] == pytest.approx((spread - 2 * 0.001 * 3 / 300) / 3, rel=0.02)
+
+
+def test_quintile_spread_books_arithmetic_returns_so_a_pumping_short_loses():
+    # the short leg (bottom fifth) triples, the long leg gains 50%: log returns +1.10 vs +0.41 would
+    # call the book a +0.69 winner; held, it loses 200% on the shorts and makes 50% on the longs
+    signal = _frame(np.tile(np.arange(40, dtype=float), (21, 1)))
+    fwd = np.zeros((21, 40))
+    fwd[:, :8], fwd[:, 32:] = np.log(3.0), np.log(1.5)
+    out = study.quintile_spread(signal, _frame(fwd), direction=1.0, horizon=7, cost_round_trip=0.0)
+    assert out["gross_per_day"] == pytest.approx((0.5 - 2.0) / 7)
 
 
 class _Relay:

@@ -136,6 +136,29 @@ def world(monkeypatch, tmp_path):
     return w
 
 
+def test_a_stopped_wide_tracker_opens_no_new_book_but_settles_the_open_ones(world, monkeypatch, tmp_path):
+    monkeypatch.setitem(ct.VARIANTS["wide"], "stopped_at", D + timedelta(days=2))  # day D's book opens, day D+1's does not
+    wide_state = tmp_path / "wide.json"
+    ct.save_state({"started_at": (D - timedelta(days=2)).isoformat(), "books": {}}, wide_state)
+
+    def run(now):
+        monkeypatch.setattr(ct, "_now", lambda: now)
+        return asyncio.run(ct.tick(world.binance, variant="wide", state_path=wide_state))
+
+    run(D + timedelta(days=1, hours=5))
+    summary = run(D + timedelta(days=2, hours=5))
+    state = json.loads(wide_state.read_text(encoding="utf-8"))
+    assert list(state["books"]) == [D.date().isoformat()]  # nothing for day D+1, not even "missed"
+    assert state["stopped"]["at"] == (D + timedelta(days=2)).isoformat()
+    assert summary["tracker_status_label"] == "已停用 · 1 份待结算"
+    summary = run(D + timedelta(days=8, hours=6))
+    state = json.loads(wide_state.read_text(encoding="utf-8"))
+    assert state["books"][D.date().isoformat()]["main"]["status"] == "closed"
+    assert list(state["books"]) == [D.date().isoformat()]
+    assert summary["tracker_status_label"] == "已停用" and summary["forward_completed"] == 1
+    assert "stopped_at" not in ct.summary(json.loads(world.state.read_text(encoding="utf-8")))  # the 131-coin tracker runs on
+
+
 def test_forms_when_the_store_is_ready_misses_after_the_deadline(world):
     opens = D + timedelta(days=1)
     world.complete = set(PERPS[:20])            # half the coins updated: not ready yet

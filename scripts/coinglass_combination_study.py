@@ -132,7 +132,10 @@ def composite(panel: Dict[str, pd.DataFrame], weights: Dict[str, float]) -> pd.D
 
 # ------------------------------------------------------------------------------------ portfolios
 def buffered_book(score: pd.DataFrame, fwd_1d: pd.DataFrame, cost: float = COST) -> Dict[str, float]:
-    """Daily check: enter long in the top ENTER_Q, leave once outside the top EXIT_Q (shorts mirrored)."""
+    """Daily check: enter long in the top ENTER_Q, leave once outside the top EXIT_Q (shorts mirrored).
+
+    ``fwd_1d`` is the panel's log return; the book earns its arithmetic return (see single.quintile_spread)."""
+    fwd_1d = np.expm1(fwd_1d)
     longs: Set[str] = set()
     shorts: Set[str] = set()
     gross, net, turnover = [], [], []
@@ -197,7 +200,9 @@ def pattern_events(panel: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
 
 
 def relative(fwd: pd.DataFrame) -> pd.DataFrame:
-    return fwd.sub(fwd.mean(axis=1), axis=0)
+    """The coin's arithmetic return minus the day's cross-sectional mean (``fwd`` holds log returns)."""
+    simple = np.expm1(fwd)
+    return simple.sub(simple.mean(axis=1), axis=0)
 
 
 def event_values(events: pd.DataFrame, rel: pd.DataFrame) -> Tuple[np.ndarray, pd.DatetimeIndex]:
@@ -478,7 +483,11 @@ def daily_funding(cache: Dict[str, List[List[float]]], index: pd.DatetimeIndex, 
 
 def funded_books(score: pd.DataFrame, fwd: pd.DataFrame, fwd_1d: pd.DataFrame, funding: pd.DataFrame, h: int,
                  cost: float) -> Dict[str, Any]:
-    """The plain h-day and the buffered daily book, each net of costs AND funding (long pays, short earns)."""
+    """The plain h-day and the buffered daily book, each net of costs AND funding (long pays, short earns).
+
+    ``fwd`` and ``fwd_1d`` are the panel's log returns; the books earn arithmetic ones (see
+    single.quintile_spread), so a short leg is (entry - exit) / entry."""
+    fwd, fwd_1d = np.expm1(fwd), np.expm1(fwd_1d)
     held = funding.rolling(h).sum().shift(-(h - 1))  # funding over days D+1 .. D+h
     plain_net, plain_fund, long_leg, short_leg, quarters = [], [], [], [], []
     days = list(score.index)

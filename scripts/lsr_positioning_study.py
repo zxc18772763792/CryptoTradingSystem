@@ -284,7 +284,11 @@ def coin_permutation(signal: pd.DataFrame, label: pd.DataFrame, reps: int = N_PE
 
 def quintile_spread(signal: pd.DataFrame, fwd: pd.DataFrame, direction: float,
                     cost_round_trip: float = COST_ROUND_TRIP) -> Dict[str, float]:
-    """Daily top-minus-bottom quintile at each hour of day, averaged over the 24 start hours."""
+    """Daily top-minus-bottom quintile at each hour of day, averaged over the 24 start hours.
+
+    ``fwd`` holds log returns (fine for rank ICs); the book earns arithmetic ones, so a short leg is
+    (entry - exit) / entry (log returns were spread directly until 2026-10-25)."""
+    fwd = np.expm1(fwd)
     gross, net, turnover = [], [], []
     for hour in range(24):
         prev: Optional[Tuple[set, set]] = None
