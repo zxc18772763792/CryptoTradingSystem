@@ -29,6 +29,14 @@ _lock = threading.Lock()
 _seen: Dict[str, set] = {}
 
 
+# The 13 accounts frozen in docs/X_KOL_RESEARCH_PROTOCOL.md. More handles may be polled and archived (for news or other
+# research), but the KOL studies read only this cohort unless told otherwise, so later additions cannot leak in.
+FROZEN_COHORT = (
+    "wublockchain12", "williamlab", "whaleinsider", "watcherguru", "lookonchain", "onchainlens", "embercn",
+    "cryptokaleo", "inversebrah", "pentosh1", "btcdayu", "cz_binance", "saylor",
+)
+
+
 def archive_dir() -> Path:
     return ROOT / "data" / "research" / "x_kol"
 
