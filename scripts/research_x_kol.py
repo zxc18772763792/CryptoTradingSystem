@@ -377,9 +377,9 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    from core.news.x_archive import load_archive
+    from core.news.x_archive import FROZEN_COHORT, load_archive
 
-    records = load_archive(args.handles)
+    records = load_archive(args.handles or FROZEN_COHORT)  # the frozen cohort unless handles are given
     if args.placebo_shift_days:
         shift = pd.Timedelta(days=args.placebo_shift_days)
         records = [{**r, "created_at": (pd.Timestamp(r["created_at"]) + shift).isoformat() if r.get("created_at") else None}

@@ -33,16 +33,16 @@ from config.settings import settings
 from core.news.collectors.x_accounts import (
     XAccountsCollector, XRateLimited, _ScweetWarnings, _failure_kind, _run_async, refusal_code, setting,
 )
+from core.news import x_pacing
+from core.news.x_batch import make_client
 from core.news.x_archive import observe, oldest_created
 from core.utils.proxy_env import ensure_proxy_env
 
-BACKFILL_DB = ROOT / "data" / "x_accounts" / "scweet_backfill.db"
 POSTS_PER_PAGE = 20
 # X refused the account after 49 requests inside 15 minutes, and again when two 26-request reads sat 13 minutes
 # apart. Scweet's limiter restarts with every read, so the script keeps its own sliding window: no more than
-# WINDOW_MAX_REQUESTS requests inside any WINDOW_SECONDS, whatever the reads are.
-WINDOW_SECONDS = 900.0
-WINDOW_MAX_REQUESTS = 40
+# core.news.x_pacing.WINDOW_MAX_REQUESTS requests inside any 15 minutes, whoever made them (the news worker
+# and the growth tracker write to the same ledger).
 
 
 def parse_plan(items: list[str], default_depth: int) -> list[tuple[str, int]]:
@@ -54,37 +54,9 @@ def parse_plan(items: list[str], default_depth: int) -> list[tuple[str, int]]:
     return plan
 
 
-def seconds_to_wait(history: list[tuple[float, int]], needed: int, now: float) -> float:
-    """How long until `needed` more requests fit under the window cap, given (finished_at, requests) history."""
-    live = [(at, n) for at, n in history if now - at < WINDOW_SECONDS]
-    total = sum(n for _, n in live) + needed
-    wait = 0.0
-    for at, n in sorted(live):  # drop the oldest reads until the rest fit
-        if total <= WINDOW_MAX_REQUESTS:
-            break
-        wait = at + WINDOW_SECONDS - now
-        total -= n
-    return max(0.0, wait)
-
-
 def estimate_requests(plan: list[tuple[str, int]]) -> int:
     # one timeline request per page, plus one user lookup per account on first sight
     return sum(math.ceil(depth / POSTS_PER_PAGE) + 1 for _handle, depth in plan)
-
-
-def make_client(daily_limit: int):
-    from Scweet import Scweet, ScweetConfig
-
-    BACKFILL_DB.parent.mkdir(parents=True, exist_ok=True)
-    return Scweet(
-        auth_token=setting("X_AUTH_TOKEN"),
-        db_path=str(BACKFILL_DB),
-        proxy=setting("X_PROXY") or setting("HTTPS_PROXY") or setting("HTTP_PROXY") or None,
-        manifest_scrape_on_init=True,
-        # X returned 429 after 49 requests inside one window on 2026-10-25 (Scweet's measured ceiling is 50 per
-        # 15 minutes), so pace to well under it: 30 per window, at least 2 seconds apart.
-        config=ScweetConfig(daily_requests_limit=daily_limit, window_request_limit=30, min_delay_s=2.0),
-    )
 
 
 def read_depth(client, handle: str, depth: int) -> list:
@@ -134,16 +106,15 @@ def main() -> int:
     ensure_proxy_env(settings)
     # Also validates the token and proxy settings the same way the news collector does.
     XAccountsCollector({"defaults": {"x_accounts_handles": [h for h, _ in plan]}})
-    client = make_client(daily_limit=args.max_requests + 40)
+    client = make_client()
     results = {}
-    history: list[tuple[float, int]] = []
     try:
         for index, (handle, depth) in enumerate(plan):
-            pause = max(args.pause if index else 0.0,
-                        seconds_to_wait(history, math.ceil(depth / POSTS_PER_PAGE) + 1, time.time()))
-            if pause:
-                print(f"waiting {pause:.0f}s before {handle} to stay under X's window", flush=True)
-                time.sleep(pause + random.uniform(0, 4))
+            if index:
+                time.sleep(args.pause + random.uniform(0, 4))
+            needed = math.ceil(depth / POSTS_PER_PAGE) + 1
+            x_pacing.wait_for_room(needed, announce=lambda m, h=handle: print(f"{h}: {m}", flush=True))
+            x_pacing.record(needed, "backfill")  # reserve before reading so other jobs see it
             try:
                 tweets = read_depth(client, handle, depth)
             except Exception as exc:  # noqa: BLE001 - classify, then decide whether to go on
@@ -154,7 +125,6 @@ def main() -> int:
                     print("Stopping: X is refusing the session or the budget is spent.", file=sys.stderr)
                     break
                 continue
-            history.append((time.time(), math.ceil(len(tweets) / POSTS_PER_PAGE) + 1))
             saved = observe(handle, tweets, provenance="backfill")
             results[handle] = {**saved, "oldest": oldest_created(handle)}
             print(f"{handle}: read {len(tweets)} new_in_archive={saved['new']} oldest={results[handle]['oldest']}")

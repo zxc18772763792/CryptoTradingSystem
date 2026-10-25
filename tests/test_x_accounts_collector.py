@@ -23,7 +23,10 @@ NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 
 @pytest.fixture(autouse=True)
-def _isolated(monkeypatch):
+def _isolated(monkeypatch, tmp_path):
+    from core.news import x_pacing
+
+    monkeypatch.setattr(x_pacing, "LEDGER", tmp_path / "ledger" / "request_ledger.jsonl")
     monkeypatch.setattr(x_accounts, "_pauses", {})
     monkeypatch.setenv("X_AUTH_TOKEN", TOKEN)
     monkeypatch.delenv("X_PROXY", raising=False)
@@ -325,3 +328,12 @@ def test_archive_only_handles_must_be_allowlisted_and_archived():
         XAccountsCollector(_cfg(x_accounts_archive=True, x_accounts_archive_only_handles=["stranger"]))
     with pytest.raises(ValueError, match="archive_only"):
         XAccountsCollector(_cfg(x_accounts_archive_only_handles=["alpha"]))
+
+
+def test_each_poll_is_logged_in_the_shared_request_ledger(tmp_path):
+    from core.news import x_pacing
+
+    collector = _collector(FakeClient({"alpha": [_tweet(i) for i in range(1, 26)], "beta": []}))
+    collector.pull_latest()
+    # 25 posts -> 2 pages for alpha, a quiet beta still cost 1 request
+    assert x_pacing.recent_total(path=tmp_path / "ledger" / "request_ledger.jsonl") == 3

@@ -238,6 +238,16 @@ class XAccountsCollector(BaseNewsCollector):
             # An archive-only handle that is not archived would be read and silently thrown away.
             raise ValueError("x_accounts_archive_only_handles must be allowlisted and need x_accounts_archive: true")
 
+    @staticmethod
+    def _log_requests(tweets_read: int) -> None:
+        """Tell the batch jobs (backfill, growth tracker) how many requests this poll just used."""
+        try:
+            from core.news import x_pacing
+
+            x_pacing.record(max(1, -(-tweets_read // 20)), "live")
+        except Exception:  # noqa: BLE001 - bookkeeping must never stop news ingestion
+            logger.debug("could not write the X request ledger", exc_info=True)
+
     def _archive(self, handle: str, tweets: List[Any]) -> None:
         if not self.archive_enabled:
             return
@@ -421,6 +431,7 @@ class XAccountsCollector(BaseNewsCollector):
                     self._pause(kind, _AUTH_PAUSE_SEC if kind == "auth" else _RATE_PAUSE_SEC, reason)
                     break
                 succeeded += 1
+                self._log_requests(len(tweets))
                 self._archive(handle, tweets)
                 if handle in self.archive_only_handles:
                     continue

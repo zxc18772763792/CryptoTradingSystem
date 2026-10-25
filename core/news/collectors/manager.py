@@ -151,6 +151,16 @@ class _CollectorSpec:
     collector: Any
 
 
+def _partial_failures(collector: Any) -> List[str]:
+    """Accounts / channels a collector survived: it returned items from the others, so the pull still counts as a
+    success, but the failed ones must stay visible in the source state instead of only in a log line."""
+    for attr in ("last_account_errors", "last_channel_errors"):
+        failed = getattr(collector, attr, None)
+        if isinstance(failed, dict) and failed:
+            return [f"{name}: {reason}"[:200] for name, reason in failed.items()]
+    return []
+
+
 class MultiSourceNewsCollector:
     """Aggregate from multiple collectors, de-duplicate and return source stats."""
 
@@ -457,6 +467,9 @@ class MultiSourceNewsCollector:
                     source_stats[spec.name]["pulled_count"] = len(items)
                     source_stats[spec.name]["cursor_after"] = new_cursor
                     cursor_updates[spec.name] = new_cursor
+                    partial = _partial_failures(spec.collector)
+                    if partial:
+                        source_stats[spec.name]["partial_errors"] = partial
                 except Exception as exc:
                     err_msg = f"{spec.name} incremental pull failed: {exc}"
                     logger.warning(err_msg)

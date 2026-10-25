@@ -638,6 +638,11 @@ async def pull_source_once(
         asyncio.create_task(on_news_inserted(inserted))
 
     source_errors = (bundle.get("source_stats") or {}).get(source, {}).get("errors") or []
+    partial_errors = (bundle.get("source_stats") or {}).get(source, {}).get("partial_errors") or []
+    if partial_errors and not source_errors:
+        # Some accounts/channels failed while others delivered: not a source failure (no breaker, no pause), but the
+        # state row must say so, because save_news_raw above just cleared last_error on the successful pull.
+        await news_db.set_source_state(source, last_error="partial: " + "; ".join(partial_errors)[:480])
     if (
         source == "telegram_alastar"
         and not items
@@ -671,6 +676,7 @@ async def pull_source_once(
         "inserted_count": len(inserted),
         "queued_count": int(queue_stats.get("queued_count") or 0),
         "errors": bundle.get("errors") or [],
+        "partial_errors": partial_errors,
         "source_stats": bundle.get("source_stats") or {},
     }
 
@@ -721,7 +727,9 @@ async def worker_loop(cfg: Dict[str, Any], *, once: bool = False, pull_enabled: 
                     continue
                 try:
                     result = await pull_source_once(cfg, source)
-                    logger.info(f"news pull source={source} inserted={result.get('inserted_count', 0)} queued={result.get('queued_count', 0)} errors={len(result.get('errors') or [])}")
+                    logger.info(f"news pull source={source} inserted={result.get('inserted_count', 0)} queued={result.get('queued_count', 0)} errors={len(result.get('errors') or [])} partial={len(result.get('partial_errors') or [])}")
+                    if result.get("partial_errors"):
+                        logger.warning(f"news pull source={source} partial failures: {result['partial_errors']}")
                 except Exception as exc:
                     logger.warning(f"news worker source={source} failed: {exc}")
                 next_due[source] = now + _source_interval(source)
