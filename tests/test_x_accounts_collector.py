@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -60,12 +61,29 @@ class FakeClient:
         self.errors = errors or {}
         self.calls = []
 
-    def get_profile_tweets(self, users, *, limit=None):
+    async def aget_profile_tweets(self, users, *, limit=None):
         self.calls.append((tuple(users), limit))
         handle = users[0]
         if handle in self.errors:
             raise self.errors[handle]
         return list(self.by_handle.get(handle, []))
+
+
+class FlakyClient(FakeClient):
+    """Scweet answers a failed request with an empty list and a log warning instead of raising."""
+
+    def __init__(self, by_handle=None, fail_times=0, detail="status=599 snippet=curl: (35) connection closed"):
+        super().__init__(by_handle)
+        self.fail_times = fail_times
+        self.detail = detail
+
+    async def aget_profile_tweets(self, users, *, limit=None):
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            self.calls.append((tuple(users), limit))
+            logging.getLogger("Scweet.api_engine").warning("Profile user lookup failed username=%s %s", users[0], self.detail)
+            return []
+        return await super().aget_profile_tweets(users, limit=limit)
 
 
 def _collector(client, **extra):
@@ -174,10 +192,42 @@ def test_rate_limit_pauses_but_keeps_items_already_read():
         _collector(client).pull_latest()
 
 
-def test_sync_scweet_call_works_from_a_thread_with_a_running_loop():
-    async def inside_loop():
-        return x_accounts._run_blocking(lambda: asyncio.run(asyncio.sleep(0, "done")))
+def test_a_dropped_connection_is_retried(monkeypatch):
+    monkeypatch.setattr(x_accounts.time, "sleep", lambda _seconds: None)
+    for detail in ("status=599 snippet=closed", "Transaction-id bootstrap exception: curl: (35) closed abruptly"):
+        client = FlakyClient({"alpha": [_tweet(1)]}, fail_times=2, detail=detail)
+        collector = _collector(client, x_accounts_handles=["alpha"])
+        assert [item["payload"]["tweet_id"] for item in collector.pull_latest()] == ["1"]
+        assert len(client.calls) == 3 and collector.last_account_errors == {}
 
+
+def test_an_empty_answer_with_warnings_is_a_failure_not_a_quiet_account(monkeypatch):
+    monkeypatch.setattr(x_accounts.time, "sleep", lambda _seconds: None)
+    client = FlakyClient({"beta": [_tweet(2, handle="beta")]}, fail_times=3, detail=f"status=599 token={TOKEN}")
+    collector = _collector(client)
+    items = collector.pull_latest()
+    assert [item["payload"]["handle"] for item in items] == ["beta"]
+    assert set(collector.last_account_errors) == {"alpha"}
+    assert "X request failed" in collector.last_account_errors["alpha"]
+    assert TOKEN not in collector.last_account_errors["alpha"]
+    assert len(client.calls) == 4  # alpha three times (two retries), then beta
+    with pytest.raises(RuntimeError, match="All X accounts failed"):
+        _collector(FlakyClient(fail_times=4, detail="status=403 forbidden")).pull_latest()
+
+
+def test_a_quiet_account_without_warnings_is_not_an_error():
+    collector = _collector(FakeClient())
+    assert collector.pull_latest() == [] and collector.last_account_errors == {}
+
+
+def test_async_scweet_call_runs_with_or_without_a_live_loop():
+    async def work():
+        return "done"
+
+    async def inside_loop():
+        return x_accounts._run_async(work)
+
+    assert x_accounts._run_async(work) == "done"
     assert asyncio.run(inside_loop()) == "done"
 
 
@@ -204,7 +254,9 @@ def test_manager_keeps_x_off_until_enabled_configured_and_credentialed(monkeypat
     assert names == [] and any("X_AUTH_TOKEN missing" in e for e in errors)
     names, errors = build(with_handles, NEWS_ENABLE_X_ACCOUNTS="true", X_AUTH_TOKEN=TOKEN)
     assert names == ["x_accounts"] and errors == []
-    names, errors = build(cfg, NEWS_ENABLE_X_ACCOUNTS="true", X_AUTH_TOKEN=TOKEN)  # shipped config: no handles
+    assert _x_handles(cfg["defaults"]["x_accounts_handles"])  # the shipped allowlist is valid
+    no_handles = {"defaults": {**cfg["defaults"], "x_accounts_handles": []}}
+    names, errors = build(no_handles, NEWS_ENABLE_X_ACCOUNTS="true", X_AUTH_TOKEN=TOKEN)
     assert names == [] and any("x_accounts disabled" in e and "x_accounts_handles" in e for e in errors)
     assert all(TOKEN not in e for e in errors)
 
