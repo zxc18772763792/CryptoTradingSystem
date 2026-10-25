@@ -51,11 +51,12 @@
   # Archived for the CryptoQuant Alert shadow ledger only; no news item, no AI extraction.
   telegram_archive_only_channels: [cryptoquant_alert]
   # X accounts to read (1-20 handles, no URLs); empty keeps the source disabled. A handle costs about two X
-  # requests per poll, so handles x 2 x polls per day must stay under x_accounts_daily_requests_limit.
-  # The first three feed the news pipeline; the rest are research-only (archive, no news item, no AI
-  # extraction). The list and the selection criteria are frozen in docs/X_KOL_RESEARCH_PROTOCOL.md.
+  # requests on its first poll (user lookup + timeline), usually one thereafter; keep the daily total
+  # under x_accounts_daily_requests_limit. The first four feed news; the rest are archive-only.
+  # bitcoinarchive was added on 2026-10-25 for news and future research. The original 13-account
+  # research cohort remains frozen separately in docs/X_KOL_RESEARCH_PROTOCOL.md.
   x_accounts_handles: [
-      wublockchain12, williamlab, whaleinsider,
+      wublockchain12, williamlab, whaleinsider, bitcoinarchive,
       watcherguru, lookonchain, onchainlens, embercn,
       cryptokaleo, inversebrah, pentosh1, btcdayu, cz_binance, saylor,
     ]
