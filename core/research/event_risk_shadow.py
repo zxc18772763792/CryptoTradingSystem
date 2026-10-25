@@ -16,6 +16,9 @@ from typing import Any, Callable, Dict, Iterable, Optional
 
 FAPI = "https://fapi.binance.com/fapi/v1"
 STATE_KEY = "event_risk_shadow"
+# Binance stamps a settlement a few milliseconds after its scheduled time (GUNUSDT 2026-10-24
+# 04:00:00.003); an exact match read that as a coverage gap on every pass. Intervals are >= 1 h.
+SETTLEMENT_TOLERANCE_MS = 60_000
 INVALID_SOURCE_STATUSES = {"schedule_changed", "cancelled", "invalidated", "entry_failed", "no_perp", "delisted"}
 CONFIG = {
     "version": "event-risk-v1",
@@ -142,10 +145,12 @@ async def _funding_reference(client, symbol: str, due_ms: int,
 async def _funding_cash(client, leg: Dict[str, Any], end_ms: int, clock, cache) -> float:
     """Settled cash per leg entry notional, including settlement mark-price scaling."""
     start = int(leg["entry_ms"])
+    # read a little past the cutoff so a scheduled settlement stamped just after it still counts as published
+    read_until = end_ms + SETTLEMENT_TOLERANCE_MS
     cursor, rows = start + 1, []
-    while cursor <= end_ms:
+    while cursor <= read_until:
         page = await _json(client, "fundingRate", {"symbol": leg["symbol"], "startTime": cursor,
-                                                  "endTime": end_ms, "limit": 1000})
+                                                  "endTime": read_until, "limit": 1000})
         if not isinstance(page, list):
             raise Unavailable(f"missing settlements for {leg['symbol']}")
         rows.extend(page)
@@ -156,7 +161,12 @@ async def _funding_cash(client, leg: Dict[str, Any], end_ms: int, clock, cache) 
             raise Unavailable("funding pagination did not advance")
         cursor = latest + 1
     relevant = {int(r["fundingTime"]): r for r in rows if start < int(r["fundingTime"]) <= end_ms}
-    if not relevant and end_ms >= int(leg["funding_reference"]["next_funding_ms"]):
+    published = [int(r["fundingTime"]) for r in rows if start < int(r["fundingTime"]) <= read_until]
+
+    def settled(scheduled_ms: int) -> bool:
+        return any(abs(stamp - scheduled_ms) <= SETTLEMENT_TOLERANCE_MS for stamp in published)
+
+    if not relevant and end_ms >= int(leg["funding_reference"]["next_funding_ms"]) + SETTLEMENT_TOLERANCE_MS:
         raise Unavailable(f"expected settlements absent for {leg['symbol']}")
     key = ("coverage_schedule", leg["symbol"])
     if key not in cache:
@@ -166,12 +176,12 @@ async def _funding_cash(client, leg: Dict[str, Any], end_ms: int, clock, cache) 
     expected_tail = next_ms - max(1, math.ceil((next_ms - end_ms) / interval)) * interval
     leg["funding_coverage"] = {"cash_through_ms": end_ms, "latest_settlement_ms": max(relevant, default=None),
                                "expected_tail_ms": expected_tail, "current_schedule": current}
-    if start < expected_tail <= end_ms and expected_tail not in relevant:
+    if start < expected_tail <= end_ms and not settled(expected_tail):
         raise Unavailable(f"latest expected settlement unpublished for {leg['symbol']}")
     entry_schedule = leg["funding_reference"]
     if interval == int(entry_schedule["interval_ms"]):
         expected = range(int(entry_schedule["next_funding_ms"]), end_ms + 1, interval)
-        if any(start < stamp and stamp not in relevant for stamp in expected):
+        if any(start < stamp and not settled(stamp) for stamp in expected):
             raise Unavailable(f"settlement coverage has gaps for {leg['symbol']}")
     cash = 0.0
     for row in relevant.values():

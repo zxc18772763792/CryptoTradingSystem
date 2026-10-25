@@ -272,6 +272,22 @@ def test_missing_tail_settlement_does_not_finalize_as_known_zero():
     assert "latest expected settlement" in row(state)["unavailable_reason"]
 
 
+def test_settlements_stamped_milliseconds_late_are_not_coverage_gaps():
+    # Binance stamps settlements a few ms after the hour (GUNUSDT 2026-10-24 04:00:00.003)
+    market, state = Market(), registered()
+    run(market, state)
+    market.now += timedelta(hours=2, minutes=1)
+    market.rows = [{"fundingTime": market.next_ms + k * HOUR + 3, "fundingRate": 0, "markPrice": 100} for k in range(2)]
+    run(market, state)
+    record = row(state)
+    assert record["status"] == "open" and record["monitoring_status"] == "available"
+    assert record["mark"]["funding_pct"] == 0
+    market.now += timedelta(hours=11)
+    market.rows = [{"fundingTime": market.next_ms + k * HOUR + 3, "fundingRate": 0, "markPrice": 100} for k in range(13)]
+    run(market, state)
+    assert record["status"] == "closed" and record["funding_pct"] == 0
+
+
 def test_existing_position_keeps_monitoring_when_source_collection_is_empty():
     market, state = Market(), registered()
     run(market, state)
