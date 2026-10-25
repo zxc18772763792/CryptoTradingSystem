@@ -116,3 +116,7 @@ Codex 本聊天心跳自动化 **`telegram` 已于2026-10-24按用户要求删�
 ## 第四个来源：@cryptoquant_alert（公开页，不走 Telethon 会话）
 
 2026-10-24 按用户要求接入，**与上面三个固定来源和独立 Telethon 会话无关**：由新闻采集器轮询 `t.me/s/cryptoquant_alert` 公开页（无需账号），只存档不入新闻库，解析 BTC 交易所流向告警后写前向影子账本，只记录、不触发开仓。入口与规则见 [CryptoQuant Alert 影子账本](CRYPTOQUANT_ALERT_SHADOW.md)。不要把它并进上面三个来源的研究目录或冻结协议，也不要用它扩大 Telethon 采集范围。
+
+## 10/25 新关注的四个 KOL 频道（只读回溯研究，不在前向范围内）
+
+2026-10-25 按用户“又关注了几个频道，请测试研究”的要求，用同一独立会话只读列出对话、按 `Channel.date`（加入时间）认定 11:45–11:48 UTC 新加入的四个频道（Market Dealer、@next10xgem1、@wiseadvicebysumit、@Therichtrader_Reborn），并回溯采集 180 天存活历史；每个频道单独持一次 `reader.lock`，Web 前向任务未受影响。结论与复现见 [新 KOL 研究](TELEGRAM_NEW_KOLS_RESEARCH_20261025.md)：四个都没有跟单优势。它们**不属于**上面三个固定来源的授权与前向采集范围；没有建跟踪器、没有接入新闻流程。要做前向观察须用户另行决定，next10xgem1 是公开频道，可走公开页而不用本会话。
