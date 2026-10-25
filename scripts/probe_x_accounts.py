@@ -20,20 +20,22 @@ from core.news.collectors.x_accounts import XAccountsCollector
 from core.utils.proxy_env import ensure_proxy_env
 
 
-def probe(handle: str, limit: int, days: int) -> dict:
+def probe(handles: list[str], limit: int, days: int) -> dict:
     ensure_proxy_env(settings)
     collector = XAccountsCollector(
-        {"defaults": {"x_accounts_handles": [handle], "x_accounts_tweets_per_account": limit}}
+        {"defaults": {"x_accounts_handles": handles, "x_accounts_tweets_per_account": limit}}
     )
     try:
-        items = collector.pull_latest(max_records=limit, since_minutes=max(1, days) * 1440)
+        items = collector.pull_latest(max_records=limit * len(handles), since_minutes=max(1, days) * 1440)
     finally:
         collector.close()
     return {
-        "handle": handle,
+        "handles": collector.handles,
+        "errors": collector.last_account_errors,
         "count": len(items),
         "posts": [
             {
+                "handle": item["payload"]["handle"],
                 "published_at": item["published_at"],
                 "url": item["url"],
                 "symbols": item["symbols"],
@@ -47,13 +49,15 @@ def probe(handle: str, limit: int, days: int) -> dict:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("handle", help="X handle to read, without @")
-    parser.add_argument("--limit", type=int, default=5, help="posts to request (1-100)")
+    parser.add_argument("handles", nargs="+", help="X handles to read, without @")
+    parser.add_argument("--limit", type=int, default=5, help="posts to request per handle (1-100)")
     parser.add_argument("--days", type=int, default=30, help="ignore posts older than this")
     args = parser.parse_args()
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")  # posts are often Chinese; a Windows pipe defaults to GBK
     try:
-        print(json.dumps(probe(args.handle.strip().removeprefix("@"), max(1, min(args.limit, 100)), args.days),
-                         ensure_ascii=False, indent=2))
+        print(json.dumps(probe([h.strip().removeprefix("@") for h in args.handles], max(1, min(args.limit, 100)),
+                               args.days), ensure_ascii=False, indent=2))
     except Exception as exc:  # noqa: BLE001 - a probe reports any failure and exits non-zero
         print(f"x_accounts probe failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         raise SystemExit(1)

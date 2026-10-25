@@ -141,14 +141,40 @@ def _failure_kind(exc: BaseException) -> str:
     return "other"
 
 
-def _run_blocking(func, *args, **kwargs):
-    """Scweet's sync API calls asyncio.run, which refuses to run on a thread with a live loop."""
+def _run_async(factory):
+    """Run one Scweet coroutine to completion on a private selector loop.
+
+    Scweet's sync API is just asyncio.run, which refuses a thread that already has a
+    live loop and, on Windows, uses the Proactor loop that curl_cffi has to work around
+    with an extra selector thread. A private loop avoids both.
+    """
+    def run():
+        loop = asyncio.SelectorEventLoop()
+        try:
+            return loop.run_until_complete(factory())
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            finally:
+                loop.close()
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return func(*args, **kwargs)
+        return run()
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(func, *args, **kwargs).result()
+        return pool.submit(run).result()
+
+
+class _ScweetWarnings(logging.Handler):
+    """Scweet logs a failed request and returns an empty list instead of raising; keep what it said."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.messages: List[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
 
 
 class XAccountsCollector(BaseNewsCollector):
@@ -213,6 +239,26 @@ class XAccountsCollector(BaseNewsCollector):
                 raise RuntimeError(f"X login failed: {problems[0]}")
             _clients[key] = client
             return client
+
+    def _fetch(self, client: Any, handle: str) -> List[Any]:
+        """Read one timeline. An empty answer that came with warnings is a failure, not a quiet account."""
+        scweet_logger = logging.getLogger("Scweet")
+        attempt = 0
+        while True:
+            attempt += 1
+            capture = _ScweetWarnings()
+            scweet_logger.addHandler(capture)
+            try:
+                tweets = _run_async(lambda: client.aget_profile_tweets([handle], limit=self.tweets_per_account))
+            finally:
+                scweet_logger.removeHandler(capture)
+            if tweets or not capture.messages:
+                return tweets
+            if attempt < 3 and any("status=599" in m or "curl:" in m for m in capture.messages):
+                # A connection dropped by the proxy / TLS never reached X and says nothing about the account.
+                time.sleep(3.0 * attempt)
+                continue
+            raise RuntimeError("X request failed: " + self._scrub(capture.messages[0])[:200])
 
     def _from_tweets(self, handle: str, tweets: List[Any]) -> List[Dict[str, Any]]:
         items: List[Dict[str, Any]] = []
@@ -307,7 +353,7 @@ class XAccountsCollector(BaseNewsCollector):
             for handle in self.handles:
                 try:
                     self._respect_rate_limit()
-                    tweets = _run_blocking(client.get_profile_tweets, [handle], limit=self.tweets_per_account)
+                    tweets = self._fetch(client, handle)
                 except Exception as exc:
                     # One handle's failure must not drop the others, unless X is refusing the
                     # session itself: every further request would get the same answer.

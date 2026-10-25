@@ -19,12 +19,9 @@ X 网页端未公开的 GraphQL 接口。
 ## 启用步骤
 
 1. 用专用小号在浏览器登录 x.com，开发者工具 → Application → Cookies → `https://x.com`，复制 `auth_token` 的值。
-2. 写入 `.env.local`：
-
-   ```
-   NEWS_ENABLE_X_ACCOUNTS=true
-   X_AUTH_TOKEN=<粘贴 auth_token>
-   ```
+2. 在自己的终端运行 `scripts\set_x_token.py`，在隐藏提示处粘贴 token。它会把 `X_AUTH_TOKEN` 和
+   `NEWS_ENABLE_X_ACCOUNTS=true` 写进 `.env.local`，保留其他行，只显示 token 长度；确认 `.env.local`
+   被 gitignore 才会写。也可以手动在 `.env.local` 加这两行。
 
 3. 在 [news_rules.yaml](../config/news_rules.yaml) 填 `x_accounts_handles`（1–20 个，不带 @ 和链接）。
    留空则来源保持禁用并在来源错误里提示。
