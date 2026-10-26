@@ -18,7 +18,7 @@
   "labels": {
     "rule_version": "kol4-v1",
     "module": "core/research/kol4_call_labels.py",
-    "module_sha256": "6422edd615e65590ca29c0bb6ff97f35b6156ce54ed9c40194f4381acaee8bbf",
+    "module_sha256": "166c7ed75515ab242b95fdcce6ca98d0ac931d0c45465d0f041afbeed29c16bf",
     "copied_from": "scripts/research_telegram_new_kols.py at commit 1e9f9c1 (the code that sealed the 2026-10-25 labels)",
     "eligible_labels": ["trade_plan", "direct_call"],
     "conditional_calls": "excluded",
