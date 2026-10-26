@@ -47,6 +47,7 @@ from core.data.data_storage import (  # noqa: E402
     prepare_utc_kline_frame,
     _heal_local_existing_against_utc,
 )
+from core.data.kline_partitions import edge_part_files, list_part_files  # noqa: E402
 from core.data.parquet_lock import parquet_partition_lock  # noqa: E402
 from core.data.path_utils import (  # noqa: E402
     candidate_symbol_dirs,
@@ -353,17 +354,14 @@ def local_bounds(storage_root: Path, key: SeriesKey) -> LocalBounds:
                 first.append(item.first)
             if item.last:
                 last.append(item.last)
-        parts_dir = symbol_root / f"{key.timeframe}_parts"
-        if not parts_dir.exists():
-            continue
-        files = sorted(parts_dir.glob("*.parquet"))
+        files = list_part_files(symbol_root / f"{key.timeframe}_parts")
         file_count += len(files)
-        edge_files = files[:1] + (files[-1:] if len(files) > 1 else [])
-        for path in edge_files:
+        first_files, last_files = edge_part_files(files)
+        for path in dict.fromkeys(first_files + last_files):
             item = parquet_bounds(path)
-            if item.first:
+            if item.first and path in first_files:
                 first.append(item.first)
-            if item.last:
+            if item.last and path in last_files:
                 last.append(item.last)
     return LocalBounds(
         first=min(first) if first else None,

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from config.settings import settings
+from core.data.kline_partitions import list_part_files, newest_first
 from core.data.path_utils import candidate_symbol_dirs
 
 
@@ -93,12 +94,11 @@ def _load_close_series_cached(
             frame = _read_parquet_tail(single, tail_rows=tail_rows)
             if not frame.empty:
                 frames.append(frame)
-        parts_dir = symbol_root / f"{timeframe}_parts"
-        if parts_dir.exists():
-            for part_path in sorted(parts_dir.glob("*.parquet"))[-12:]:
-                frame = _read_parquet_tail(part_path, tail_rows=tail_rows)
-                if not frame.empty:
-                    frames.append(frame)
+        newest = newest_first(list_part_files(symbol_root / f"{timeframe}_parts"))[:12]
+        for part_path, _ in reversed(newest):
+            frame = _read_parquet_tail(part_path, tail_rows=tail_rows)
+            if not frame.empty:
+                frames.append(frame)
     if not frames:
         return pd.Series(dtype=float)
     df = pd.concat(frames).sort_index()

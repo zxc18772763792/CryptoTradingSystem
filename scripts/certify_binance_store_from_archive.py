@@ -27,6 +27,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -382,7 +383,10 @@ def partition_targets(storage_root: Path, today: datetime, since: str, only: Opt
         if only and symbol_dir.name.rsplit("_", 1)[0].upper() not in only:
             continue
         for timeframe in PARTITION_TIMEFRAMES:
-            files = sorted((symbol_dir / f"{timeframe}_parts").glob("*.parquet"))
+            # Day files only: month/year files are verified by construction, and an unmarked day kept in a legacy
+            # pack is older than anything the hourly refresh rewrites (core/data/kline_partitions.py).
+            files = sorted(path for path in (symbol_dir / f"{timeframe}_parts").glob("*.parquet")
+                           if re.fullmatch(r"\d{4}-\d{2}-\d{2}", path.stem))
             if not files or not (since <= files[-1].stem <= yesterday):
                 continue
             newest = datetime.strptime(files[-1].stem, "%Y-%m-%d")

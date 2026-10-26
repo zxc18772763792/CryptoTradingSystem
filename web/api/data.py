@@ -37,7 +37,8 @@ from core.data import (
     second_level_backfill_manager,
     download_binance_1s_daily_archive,
 )
-from core.data.data_storage import _normalize_parquet_frame_index
+from core.data.data_storage import _normalize_parquet_frame_index, _parquet_max_timestamp
+from core.data.kline_partitions import DAY, list_part_files, newest_first, stem_period
 from core.exchanges import Kline
 from core.data.alpha_market_data import (
     ALPHA_DATA_SOURCE,
@@ -3423,17 +3424,26 @@ def _expand_symbols_with_local(
 
 
 def _latest_partition_end_time(exchange: str, symbol: str, timeframe: str) -> Optional[datetime]:
+    """Midnight after the newest stored partition day (a day file's name, else a month/year file's last bar)."""
     for sym_dir in candidate_symbol_dirs(Path(settings.DATA_STORAGE_PATH), exchange, symbol):
-        parts_dir = sym_dir / f"{timeframe}_parts"
-        if not parts_dir.exists() or not parts_dir.is_dir():
-            continue
-        files = sorted(parts_dir.glob("*.parquet"), reverse=True)
-        for path in files:
-            try:
-                day = pd.Timestamp(path.stem).to_pydatetime()
-                return day + timedelta(days=1)
-            except Exception:
-                continue
+        newest: Optional[datetime] = None
+        for path, last_day in newest_first(list_part_files(sym_dir / f"{timeframe}_parts")):
+            period = stem_period(path.stem)
+            if period is None or (newest is not None and last_day < newest.date()):
+                break
+            if period[2] == DAY:
+                day = datetime.combine(period[0], datetime.min.time())
+            else:
+                try:
+                    latest = _parquet_max_timestamp(path)
+                except Exception:
+                    continue
+                if latest is None:
+                    continue
+                day = datetime.combine(latest.date(), datetime.min.time())
+            newest = day if newest is None else max(newest, day)
+        if newest is not None:
+            return newest + timedelta(days=1)
     return None
 
 

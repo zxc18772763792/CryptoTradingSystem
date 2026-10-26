@@ -94,7 +94,7 @@ wide = oi.pivot(index="time", columns="perp", values="close")                # �
 
 - **K 线**
   - 每个币一个目录，每个周期一个 parquet，索引是开盘时间（UTC，无时区），列是 open / high / low / close / volume。
-  - 少数币另有按天分区的 `<周期>_parts/` 目录，由每小时任务写入，读的时候要合并。
+  - 少数币另有 `<周期>_parts/` 目录，由每小时任务写入，读的时候要和主文件合并（用项目的读取函数即可）。10/26 起分钟线每月一个文件（`2026-10.parquet`），小时线和日线每年一个（`2026.parquet`），无 UTC 标记的老日子打包在 `<期>.legacy.parquet`，少数按天文件留着不动；秒级仍按天。说明见 `docs/KLINE_PARTS_CONSOLIDATION_2026-10-26.md`。
 - **读取方式**
   - 项目的读取函数是 `core.data.data_storage.load_klines_from_parquet(exchange="binance_futures", symbol="BTC/USDT", timeframe="1h")`，现货把 exchange 换成 `binance`。
   - 它遇到损坏的文件会把文件挪进隔离区，只读分析时可以直接用 pandas / pyarrow 读。

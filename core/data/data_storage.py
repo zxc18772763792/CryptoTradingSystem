@@ -5,6 +5,8 @@
 import json
 import os
 import asyncio
+import time
+from contextlib import ExitStack
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
@@ -26,7 +28,21 @@ from config.database import (
 )
 from core.exchanges import Kline
 from core.data.path_utils import candidate_symbol_dirs, canonical_symbol_dir
-from core.data.parquet_lock import parquet_partition_lock
+from core.data.parquet_lock import parquet_partition_lock, partition_lock_path
+from core.data.kline_partitions import (
+    DAY,
+    daily_part_path,
+    legacy_pack_path,
+    list_part_files,
+    newest_first,
+    overlapping_part_files,
+    partition_granularity,
+    partition_stems,
+    read_order,
+    rows_match_partition,
+    series_lock_target,
+    stem_period,
+)
 
 
 PARQUET_WRITE_LOCK_TIMEOUT_SECONDS = float(
@@ -356,6 +372,171 @@ def _heal_local_existing_against_utc(
     return verified
 
 
+def write_parquet_atomic(frame: pd.DataFrame, path: Path) -> None:
+    """Write a kline part through a unique temp file and os.replace.
+
+    Callers hold the partition's lock for the whole read-modify-write; the swap
+    keeps readers from observing a partial file. Windows refuses the swap while
+    a reader has the target open, so it is retried briefly.
+    """
+    table = pa.Table.from_pandas(frame)
+    tmp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+    try:
+        pq.write_table(table, str(tmp_path), compression="zstd", compression_level=9)
+        for attempt in range(6):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def discard_partition_lock_file(partition_path: Path) -> None:
+    """Delete the lock file of a daily part that has just been removed (Windows only).
+
+    Windows refuses to delete a file another process has open, so a waiter can
+    never be left holding a deleted lock (the race core.data.parquet_lock warns
+    about); a refused delete leaves the lock file in place. Elsewhere lock files
+    are kept.
+    """
+    if os.name != "nt":
+        return
+    try:
+        partition_lock_path(partition_path).unlink()
+    except OSError:
+        pass
+
+
+def _merge_into_part(part_path: Path, rows: pd.DataFrame, *,
+                     absorbed: List[pd.DataFrame] = ()) -> bool:
+    """Merge UTC rows into one part file under the caller's lock; True if it was rewritten.
+
+    Stored history passes the shared UTC guard first. ``absorbed`` are verified
+    daily frames being folded into a month/year file; they rank between the
+    stored rows and the incoming ones.
+    """
+    incoming_df = _normalize_parquet_frame_index(rows)
+    existing_df: Optional[pd.DataFrame] = None
+    existing_was_verified = False
+    sources: List[pd.DataFrame] = []
+    if part_path.exists():
+        try:
+            existing_df = pd.read_parquet(part_path)
+            existing_was_verified = _has_utc_timestamp_metadata(existing_df)
+            existing_df = _heal_local_existing_against_utc(
+                existing_df, incoming_df
+            )
+        except Exception as e:
+            logger.warning(f"Failed to merge partition file {part_path}: {e}")
+            # Never replace unknown/corrupt history with only the
+            # latest batch after a failed merge validation.
+            raise
+        sources.append(existing_df)
+    sources.extend(absorbed)
+    sources.append(incoming_df)
+    merged_df = pd.concat(sources)
+    merged_df = merged_df[~merged_df.index.duplicated(keep="last")]
+    merged_df = merged_df.sort_index()
+    merged_df.attrs = {**(existing_df.attrs if existing_df is not None else {}), **incoming_df.attrs}
+    if not rows_match_partition(merged_df.index, part_path):
+        raise ValueError("Stored rows violate UTC partition date; explicit repair required")
+    if (not absorbed and existing_df is not None and merged_df.equals(existing_df)
+            and existing_was_verified):
+        return False
+    write_parquet_atomic(merged_df, part_path)
+    return True
+
+
+def _save_period_parts(parts_dir: Path, df: pd.DataFrame, granularity: str) -> List[Path]:
+    """Merge UTC rows into month/year part files, folding in the old-layout days they touch.
+
+    A verified daily file for a day being written is absorbed into the period
+    file and removed, so each day lives in one file. An unverified daily file
+    keeps receiving its own day through the UTC guard, as before this layout:
+    it is refused unless the incoming bars verify every stored row. A day held
+    in the period's legacy pack passes the same guard against that day's rows;
+    once verified it moves into the period file.
+    """
+    written: List[Path] = []
+    absorbed_paths: List[Path] = []
+    with parquet_partition_lock(
+        series_lock_target(parts_dir),
+        timeout_seconds=PARQUET_WRITE_LOCK_TIMEOUT_SECONDS,
+    ):
+        for stem, period_df in df.groupby(partition_stems(df.index, granularity), sort=True):
+            target = parts_dir / f"{stem}.parquet"
+            days = pd.Index(period_df.index.date)
+            with ExitStack() as day_locks:
+                absorbed: List[tuple] = []
+                daily_days = []
+                for part_day in sorted(set(days)):
+                    day_path = daily_part_path(parts_dir, part_day)
+                    if not day_path.exists():
+                        continue
+                    day_locks.enter_context(parquet_partition_lock(
+                        day_path,
+                        timeout_seconds=PARQUET_WRITE_LOCK_TIMEOUT_SECONDS,
+                    ))
+                    if not day_path.exists():
+                        continue
+                    day_rows = period_df[days == part_day]
+                    try:
+                        stored = pd.read_parquet(day_path)
+                    except Exception:
+                        stored = None  # the legacy merge below reports and refuses it
+                    if stored is not None and _has_utc_timestamp_metadata(stored):
+                        absorbed.append((day_path, _heal_local_existing_against_utc(stored, day_rows)))
+                        continue
+                    if _merge_into_part(day_path, day_rows):
+                        written.append(day_path)
+                    daily_days.append(part_day)
+                pack_path, pack, pack_days, taken = legacy_pack_path(parts_dir, stem), None, None, []
+                if pack_path.exists():
+                    pack_last = _parquet_max_timestamp(pack_path)
+                    if pack_last is None or min(days) <= pack_last.date():
+                        pack = pd.read_parquet(pack_path)
+                        pack_days = pd.Index(pack.index.date)
+                for part_day in sorted(set(days) - set(daily_days)) if pack is not None else []:
+                    in_pack = pack_days == part_day
+                    if not in_pack.any():
+                        continue
+                    stored = pack[in_pack]
+                    stored.attrs = dict(pack.attrs)
+                    absorbed.append((None, _heal_local_existing_against_utc(stored, period_df[days == part_day])))
+                    taken.append(part_day)
+                rows = period_df[~days.isin(daily_days)]
+                if rows.empty:
+                    continue
+                if _merge_into_part(target, rows, absorbed=[frame for _, frame in absorbed]):
+                    written.append(target)
+                if taken:
+                    # Only after the period file holds them: a crash here
+                    # leaves the day in both files, never in neither.
+                    remaining = pack[~pack_days.isin(taken)]
+                    if remaining.empty:
+                        pack_path.unlink()
+                    else:
+                        remaining.attrs = dict(pack.attrs)
+                        write_parquet_atomic(remaining, pack_path)
+                    written.append(pack_path)
+                for day_path, _ in absorbed:
+                    if day_path is not None:
+                        day_path.unlink()
+                        absorbed_paths.append(day_path)
+    for day_path in absorbed_paths:
+        discard_partition_lock_file(day_path)
+    return written
+
+
 class DataStorage:
     """数据存储管理器"""
 
@@ -468,8 +649,11 @@ class DataStorage:
         symbol_dir = canonical_symbol_dir(self.storage_path, exchange, symbol)
         parts_dir = symbol_dir / f"{timeframe}_parts"
         parts_dir.mkdir(parents=True, exist_ok=True)
+        granularity = partition_granularity(timeframe)
 
         def _save_sync() -> List[Path]:
+            if granularity != DAY:
+                return _save_period_parts(parts_dir, df, granularity)
             written_parts: List[Path] = []
             grouped = df.groupby(df.index.date, sort=True)
             for part_day, day_df in grouped:
@@ -478,52 +662,8 @@ class DataStorage:
                     part_path,
                     timeout_seconds=PARQUET_WRITE_LOCK_TIMEOUT_SECONDS,
                 ):
-                    incoming_df = _normalize_parquet_frame_index(day_df)
-                    merged_df = incoming_df
-                    existing_df: Optional[pd.DataFrame] = None
-                    existing_was_verified = False
-                    if part_path.exists():
-                        try:
-                            existing_df = pd.read_parquet(part_path)
-                            existing_was_verified = _has_utc_timestamp_metadata(existing_df)
-                            existing_df = _heal_local_existing_against_utc(
-                                existing_df, incoming_df
-                            )
-                            merged_df = pd.concat([existing_df, incoming_df])
-                        except Exception as e:
-                            logger.warning(f"Failed to merge partition file {part_path}: {e}")
-                            # Never replace unknown/corrupt history with only the
-                            # latest batch after a failed merge validation.
-                            raise
-                    merged_df = merged_df[~merged_df.index.duplicated(keep="last")]
-                    merged_df = merged_df.sort_index()
-                    merged_df.attrs = {**(existing_df.attrs if existing_df is not None else {}), **incoming_df.attrs}
-                    if any(merged_df.index.strftime("%Y-%m-%d") != part_path.stem):
-                        raise ValueError("Stored rows violate UTC partition date; explicit repair required")
-                    if (existing_df is not None and merged_df.equals(existing_df)
-                            and existing_was_verified):
-                        continue
-                    table = pa.Table.from_pandas(merged_df)
-                    # The lock protects the full read-modify-write transaction;
-                    # os.replace additionally keeps readers from observing a
-                    # partially-written file.
-                    tmp_path = part_path.with_name(f"{part_path.name}.{uuid4().hex}.tmp")
-                    try:
-                        pq.write_table(
-                            table,
-                            str(tmp_path),
-                            compression="zstd",
-                            compression_level=9,
-                        )
-                        os.replace(tmp_path, part_path)
-                    except Exception:
-                        try:
-                            if tmp_path.exists():
-                                tmp_path.unlink()
-                        except OSError:
-                            pass
-                        raise
-                    written_parts.append(part_path)
+                    if _merge_into_part(part_path, day_df):
+                        written_parts.append(part_path)
             return written_parts
 
         written_parts = await asyncio.to_thread(_save_sync)
@@ -546,6 +686,10 @@ class DataStorage:
         end_time = _normalize_parquet_boundary(end_time)
         def _load_sync() -> pd.DataFrame:
             frames: List[pd.DataFrame] = []
+            # Concatenated in this order. Part rows are arranged as the daily
+            # layout concatenated them, so the unstable sort below resolves
+            # duplicate timestamps (main vs parts) exactly as it always did.
+            ordered: List[pd.DataFrame] = []
             for symbol_root in candidate_symbol_dirs(self.storage_path, exchange, symbol):
                 file_path = symbol_root / f"{timeframe}.parquet"
                 parts_dir = symbol_root / f"{timeframe}_parts"
@@ -560,46 +704,59 @@ class DataStorage:
                         if not single_df.empty:
                             single_df = _normalize_parquet_frame_index(single_df)
                             frames.append(single_df)
+                            ordered.append(single_df)
                     except Exception as e:
                         logger.warning(f"Failed to load parquet file {file_path}: {e}")
                         _quarantine_corrupted_parquet(file_path, e)
 
-                if not parts_dir.exists():
+                part_files = list_part_files(parts_dir)
+                if not part_files:
                     continue
 
-                part_files = sorted(parts_dir.glob("*.parquet"))
+                lower = upper = None
                 if start_time or end_time:
-                    # Partition pruning by daily file name (YYYY-MM-DD.parquet) to avoid loading the full history.
+                    # Prune by the day/month/year named in each file, with the
+                    # one-day margin the daily layout always used.
                     lower = (pd.Timestamp(start_time).date() - timedelta(days=1)) if start_time else None
                     upper = (pd.Timestamp(end_time).date() + timedelta(days=1)) if end_time else None
-                    filtered_files: List[Path] = []
-                    for part_file in part_files:
-                        try:
-                            part_day = pd.Timestamp(part_file.stem).date()
-                        except Exception:
-                            filtered_files.append(part_file)
-                            continue
-                        if lower and part_day < lower:
-                            continue
-                        if upper and part_day > upper:
-                            continue
-                        filtered_files.append(part_file)
-                    part_files = filtered_files
+                    part_files = overlapping_part_files(part_files, lower, upper)
 
+                part_frames: List[pd.DataFrame] = []
+                part_paths: List[Path] = []
                 for part_file in part_files:
                     try:
                         part_df = pd.read_parquet(part_file)
                         if part_df.empty:
                             continue
                         part_df = _normalize_parquet_frame_index(part_df)
+                        period = stem_period(part_file.stem)
+                        if period is not None and period[0] != period[1] and (lower or upper):
+                            # Keep exactly the days the daily layout would have loaded.
+                            days = part_df.index.normalize()
+                            if lower:
+                                part_df = part_df[days >= pd.Timestamp(lower)]
+                                days = part_df.index.normalize()
+                            if upper:
+                                part_df = part_df[days <= pd.Timestamp(upper)]
+                            if part_df.empty:
+                                continue
                         frames.append(part_df)
+                        part_frames.append(part_df)
+                        part_paths.append(part_file)
                     except Exception as e:
                         logger.warning(f"Failed to load partition file {part_file}: {e}")
+                if not part_frames:
+                    continue
+                parts_df = pd.concat(part_frames) if len(part_frames) > 1 else part_frames[0]
+                order = read_order(part_frames, part_paths)
+                if len(order) != len(parts_df) or not (order[1:] > order[:-1]).all():
+                    parts_df = parts_df.iloc[order]
+                ordered.append(parts_df)
 
             if not frames:
                 return pd.DataFrame()
 
-            df = pd.concat(frames).sort_index()
+            df = pd.concat(ordered).sort_index()
             df = df[~df.index.duplicated(keep="last")]
             # Compatibility reads must not launder an unverified monolith into
             # a certified UTC frame merely by concatenating it with new parts.
@@ -642,17 +799,19 @@ class DataStorage:
                         logger.warning(f"Failed to inspect parquet metadata {legacy_path}: {exc}")
 
                 parts_dir = symbol_root / f"{timeframe}_parts"
-                if not parts_dir.exists():
-                    continue
-                for part_path in sorted(parts_dir.glob("*.parquet"), reverse=True):
+                newest_part: Optional[datetime] = None
+                for part_path, last_day in newest_first(list_part_files(parts_dir)):
+                    if newest_part is not None and last_day < newest_part.date():
+                        break  # this file and every later one end before the newest bar found
                     try:
                         latest = _parquet_max_timestamp(part_path)
                     except Exception as exc:
                         logger.warning(f"Failed to inspect parquet metadata {part_path}: {exc}")
                         continue
-                    if latest is not None:
-                        candidates.append(latest)
-                        break
+                    if latest is not None and (newest_part is None or latest > newest_part):
+                        newest_part = latest
+                if newest_part is not None:
+                    candidates.append(newest_part)
             return max(candidates) if candidates else None
 
         return await asyncio.to_thread(_latest_sync)

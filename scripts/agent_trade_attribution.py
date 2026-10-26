@@ -35,6 +35,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from core.data.kline_partitions import list_part_files, overlapping_part_files  # noqa: E402
 from scripts.agent_call_edge import day_bootstrap_ci, default_journals  # noqa: E402
 
 STATE_DIR = PROJECT_ROOT / "data" / "cache" / "runtime_state"
@@ -105,16 +106,20 @@ _BARS: Dict[str, Optional[pd.DataFrame]] = {}
 
 
 def load_bars(symbol: str, first_day: str, last_day: str, root: Path = KLINE_DIR) -> Optional[pd.DataFrame]:
-    """5m OHLC from the local daily parquet parts (files named YYYY-MM-DD), indexed by bar open time."""
+    """5m OHLC from the local parquet parts (day, month or legacy-pack files), indexed by bar open time."""
     if symbol not in _BARS:
-        parts = [p for p in sorted((root / symbol.replace("/", "_") / "5m_parts").glob("*.parquet"))
-                 if first_day <= p.stem <= last_day]
+        parts = overlapping_part_files(list_part_files(root / symbol.replace("/", "_") / "5m_parts"),
+                                       pd.Timestamp(first_day).date(), pd.Timestamp(last_day).date())
         frames = []
         for part in parts:
             try:
-                frames.append(pd.read_parquet(part, columns=["open", "high", "low", "close"]))
+                frame = pd.read_parquet(part, columns=["open", "high", "low", "close"])
             except Exception:
                 continue
+            if len(part.stem) != 10:  # a month file or pack: only the requested days, as the day files gave
+                days = pd.to_datetime(frame.index).strftime("%Y-%m-%d")
+                frame = frame[(days >= first_day) & (days <= last_day)]
+            frames.append(frame)
         if not frames:
             _BARS[symbol] = None
         else:

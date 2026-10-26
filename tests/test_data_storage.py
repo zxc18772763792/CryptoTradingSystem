@@ -156,7 +156,7 @@ def test_save_klines_to_db_batches_and_ignores_duplicates(tmp_path: Path, monkey
     asyncio.run(_run())
 
 
-def test_save_klines_to_parquet_writes_incremental_daily_parts(tmp_path: Path):
+def test_save_klines_to_parquet_writes_monthly_parts_for_minute_bars(tmp_path: Path):
     storage = DataStorage()
     storage.storage_path = tmp_path / "historical"
     storage.cache_path = tmp_path / "cache"
@@ -190,8 +190,7 @@ def test_save_klines_to_parquet_writes_incremental_daily_parts(tmp_path: Path):
 
     symbol_dir = canonical_symbol_dir(storage.storage_path, "binance", "ETH/USDT")
     parts_dir = symbol_dir / "15m_parts"
-    assert (parts_dir / "2026-01-01.parquet").exists()
-    assert (parts_dir / "2026-01-02.parquet").exists()
+    assert sorted(p.name for p in parts_dir.glob("*.parquet")) == ["2026-01.parquet"]
     assert not (symbol_dir / "15m.parquet").exists()
 
     loaded = asyncio.run(
@@ -432,7 +431,7 @@ def test_naive_new_klines_require_explicit_utc_caller_declaration(tmp_path):
         asyncio.run(storage.save_klines_to_parquet(bars,'binance','ETH/USDT','1h'))
     assert not storage.storage_path.exists()
     asyncio.run(storage.save_klines_to_parquet(bars,'binance','ETH/USDT','1h',timestamp_timezone='UTC'))
-    target=canonical_symbol_dir(storage.storage_path,'binance','ETH/USDT')/'1h_parts/2026-01-01.parquet'
+    target=canonical_symbol_dir(storage.storage_path,'binance','ETH/USDT')/'1h_parts/2026.parquet'
     assert pd.read_parquet(target).attrs['cts_timestamp_timezone']=='UTC'
 
 
@@ -442,9 +441,9 @@ def test_aware_non_utc_writer_partitions_by_actual_utc_date(tmp_path):
     bars[0].timestamp=datetime(2026,1,1,2,tzinfo=timezone(timedelta(hours=8)))
     asyncio.run(storage.save_klines_to_parquet(bars,'binance','ETH/USDT','1h'))
     parts=canonical_symbol_dir(storage.storage_path,'binance','ETH/USDT')/'1h_parts'
-    assert (parts/'2025-12-31.parquet').exists()
-    assert not (parts/'2026-01-01.parquet').exists()
-    assert pd.read_parquet(parts/'2025-12-31.parquet').index[0]==pd.Timestamp('2025-12-31 18:00')
+    assert (parts/'2025.parquet').exists()
+    assert not (parts/'2026.parquet').exists()
+    assert pd.read_parquet(parts/'2025.parquet').index[0]==pd.Timestamp('2025-12-31 18:00')
 
 
 def test_combined_compatibility_read_remains_unverified_when_any_source_is_unknown(tmp_path):

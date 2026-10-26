@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from core.data.kline_partitions import rows_match_partition, series_locks_for
 from core.data.parquet_lock import parquet_partition_lock
 
 OHLCV = ["open", "high", "low", "close", "volume"]
@@ -125,7 +126,7 @@ def plan_repair(path: str | Path, reference: pd.DataFrame) -> dict:
         return plan
     result = _validate(frame)
     result.index = pd.DatetimeIndex([r["utc"] for r in evidence["rows"]], name="timestamp")
-    if path.parent.name.endswith("_parts") and any(result.index.strftime("%Y-%m-%d") != path.stem):
+    if path.parent.name.endswith("_parts") and not rows_match_partition(result.index, path):
         plan["reason"] = "cross_day_requires_group_rebucketing"
         return plan
     coalesced = []
@@ -161,7 +162,7 @@ def plan_explicit(path: str | Path, result: pd.DataFrame, *, evidence: dict,
     if not evidence.get("method"):
         raise RepairConflict("Explicit repair requires recorded evidence method")
     path = Path(path).resolve()
-    if path.parent.name.endswith("_parts") and any(output.index.strftime("%Y-%m-%d") != path.stem):
+    if path.parent.name.endswith("_parts") and not rows_match_partition(output.index, path):
         raise RepairConflict("Output rows do not belong to UTC partition filename")
     return {"path": str(path), "pre_hash": expected_hash,
             "status": "ready", "result": output, "result_hash": _frame_hash(output), "evidence": evidence,
@@ -206,6 +207,8 @@ def apply_plan(plan: dict | list[dict], run_dir: str | Path) -> dict:
                "status": "preparing", "files": []}
     _json(run / "manifest.json", journal, exclusive=True)
     with ExitStack() as stack:
+        for series_lock in series_locks_for(paths):
+            stack.enter_context(parquet_partition_lock(series_lock))
         for path in sorted(paths, key=lambda p: str(p).lower()):
             stack.enter_context(parquet_partition_lock(path))
         for p, path in zip(plans, paths):
@@ -267,6 +270,8 @@ def rollback_run(run_dir: str | Path) -> dict:
     if journal["status"] == "rolled_back":
         return journal
     with ExitStack() as stack:
+        for series_lock in series_locks_for(Path(item["path"]) for item in journal["files"]):
+            stack.enter_context(parquet_partition_lock(series_lock))
         for item in sorted(journal["files"], key=lambda p: p["path"].lower()):
             stack.enter_context(parquet_partition_lock(Path(item["path"])))
         restore = []
