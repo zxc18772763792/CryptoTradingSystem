@@ -46,6 +46,10 @@ RULES: Dict[str, Dict[str, Any]] = {
     "cryptoquant_alert_shadow_v1": {"min_n": 66, "unit": "trade", "backtest_mean_pct": None,
                                     "decision_engine": "cryptoquant_alert_shadow_protocol_v1", "futility_n": 40,
                                     "diagnostic_only": True},
+    # next10xgem1 24h fade: protocol-owned (next10xgem1_fade_24h_v1), 245-event futility / 490-event review.
+    "next10xgem1_fade_24h_v1": {"min_n": 490, "unit": "trade", "backtest_mean_pct": None,
+                                "decision_engine": "next10xgem1_fade_24h_v1", "futility_n": 245,
+                                "diagnostic_only": True},
     "telegram_cryptoquant_24h": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,
                                  "decision_engine": "telegram_forward_protocol", "diagnostic_only": True},
     "telegram_binance_chat_sentiment": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,

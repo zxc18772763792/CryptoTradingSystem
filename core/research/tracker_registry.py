@@ -39,6 +39,11 @@ def _cryptoquant_alert() -> Dict[str, Any]:
     return summary()
 
 
+def _next10xgem1_fade() -> Dict[str, Any]:
+    from core.research.next10xgem1_fade_tracker import summary
+    return summary()
+
+
 def _telegram_binance_chat() -> Dict[str, Any]:
     from core.research.telegram_forward_tracker import binance_chat
     return binance_chat()
@@ -112,6 +117,12 @@ TRACKERS: List[Dict[str, Any]] = [
      "rule_key": "cryptoquant_alert_shadow_v1",
      "rule": "@cryptoquant_alert 公开页首次收件的 BTC 交易所流向告警（流入／矿工转入做空，大额流出做多），收件及冻结后≥60秒下一5分钟开盘，1/4/24/72小时退出同时冻结，24h 为主周期；较入场前30天同向精确均值的超额，24小时内首条告警才计入统计。模板外文字只计数不交易。仅记录，不触发开仓。",
      "load": _cryptoquant_alert},
+    {"id": "next10xgem1_fade_24h_v1", "name": "next10xgem1 喊单反向 · 做空24h（纸面）", "group": "Telegram信号", "unit": "笔",
+     "rule_key": "next10xgem1_fade_24h_v1",
+     "rule": "@next10xgem1 公开页首次收件的无条件做多喊单（冻结的 kol4-v1 文字规则），收件及冻结后≥60秒下一5分钟开盘做空币安永续，"
+             "固定持有24小时；另记50%灾难止损版。每笔1,000 USDT 名义、最多同时8笔、同币一笔；较入场前30天同币逐小时起点"
+             "24h做空均值的超额为主统计，245笔无效性检查、490笔复核。仅纸面，不下单。",
+     "load": _next10xgem1_fade},
     {"id": "telegram_binance_chat_sentiment", "name": "币安中文群情绪 · 4本账本", "group": "Telegram信号", "unit": "笔",
      "rule_key": "telegram_binance_chat_sentiment",
      "rule": "BinanceChinese 群按小时／6小时聚合去重后的作者方向（每窗口≥5个账号、不平衡≥0.4），顺势与反向各一本，持有6小时。四本共用同一条聊天流且互为镜像，不是四个独立样本；表中为小时顺势主账本，其余见账本明细。探索性前向方案，不宣称历史验证。仅纸面。",
@@ -218,6 +229,12 @@ def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
         return {"metric_kind": "excess_return", "metric_label": "相对同币零分布超额", "metric_unit_label": "百分点/笔",
                 "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金；超额非账户收益",
                 "gross_notional_multiplier": 1, "cost_scope": "主统计双方均扣20bps、均忽略资金费；实际含资金费收益另列",
+                "is_paper": True}
+    if tid == "next10xgem1_fade_24h_v1":
+        return {"metric_kind": "excess_return", "metric_label": "相对入场前30天同币均值超额", "metric_unit_label": "百分点/笔",
+                "return_basis": "single_leg_notional", "basis_label": "该笔做空名义本金（1,000 USDT）；超额非账户收益",
+                "gross_notional_multiplier": 1,
+                "cost_scope": "主统计往返20bps、忽略资金费；含资金费、80bps压力与50%止损版另列。样本为空时为空，不是0%",
                 "is_paper": True}
     if tid == "cryptoquant_alert_shadow_v1":
         return {"metric_kind": "excess_return", "metric_label": "相对入场前30天同向均值超额", "metric_unit_label": "百分点/笔",

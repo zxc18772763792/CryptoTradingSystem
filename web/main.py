@@ -2212,6 +2212,12 @@ async def _cryptoquant_alert_shadow_worker(stop_event: asyncio.Event) -> None:
     await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("cryptoquant_alert_shadow", success=ok))
 
 
+async def _next10xgem1_fade_worker(stop_event: asyncio.Event) -> None:
+    from core.research.next10xgem1_fade_tracker import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("next10xgem1_fade", success=ok))
+
+
 async def _telegram_forward_worker(stop_event: asyncio.Event) -> None:
     from core.research.telegram_forward_runner import worker
 
@@ -2270,6 +2276,11 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         "cryptoquant_alert_shadow": {
             # Idles until the shadow protocol is explicitly activated; records only, never orders.
             "factory": lambda stop_event: _cryptoquant_alert_shadow_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "next10xgem1_fade": {
+            # Idles until the fade protocol is explicitly activated; paper ledger only, never orders.
+            "factory": lambda stop_event: _next10xgem1_fade_worker(stop_event),
             "restart_on_failure": True,
         },
         "cusum_monitor": {
