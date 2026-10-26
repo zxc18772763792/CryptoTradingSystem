@@ -114,6 +114,7 @@ class TelegramPublicChannelCollector(BaseNewsCollector):
         super().__init__(cfg)
         self.max_text_chars = clamp_int(defaults.get("telegram_alastar_max_text_chars"), 16000, 64, 20000)
         self.observation_archive_enabled = defaults.get("telegram_alastar_observation_archive") is True
+        self.observation_compaction = defaults.get("telegram_observation_compaction") is True
         archived = defaults.get("telegram_observation_archive_channels", ["alastartrades"])
         self.archive_channels = [c for c in _public_channels(archived) if c in self.channels]
         only = defaults.get("telegram_archive_only_channels") or []
@@ -290,4 +291,11 @@ class TelegramPublicChannelCollector(BaseNewsCollector):
                 logger.exception("Telegram research observation archive failed for %s", channel)
                 for item in page_items:
                     item["payload"]["observation_archive_status"] = "failed"
+            if self.observation_compaction:
+                # Packs old duplicate-only polls (F: has 1 MiB clusters); a no-op most polls.
+                try:
+                    from core.news.alastar_observation import archive_dir, compact_runs
+                    compact_runs(archive_dir(channel), channel=channel)
+                except Exception:
+                    logger.exception("Telegram research archive compaction failed for %s", channel)
         return page_items

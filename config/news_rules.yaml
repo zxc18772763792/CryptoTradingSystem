@@ -50,6 +50,9 @@
   telegram_observation_archive_channels: [alastartrades, cryptoquant_alert]
   # Archived for the CryptoQuant Alert shadow ledger only; no news item, no AI extraction.
   telegram_archive_only_channels: [cryptoquant_alert]
+  # Pack archive polls that saw nothing new, once older than 48 h and outside the newest 2000, into gzip
+  # bundles (F: is exFAT with 1 MiB clusters: one file per poll was ~0.8 GB a day per channel).
+  telegram_observation_compaction: true
   # X accounts to read (1-20 handles, no URLs); empty keeps the source disabled. A handle costs about two X
   # requests on its first poll (user lookup + timeline), usually one thereafter; keep the daily total
   # under x_accounts_daily_requests_limit. The first four feed news; the rest are archive-only.

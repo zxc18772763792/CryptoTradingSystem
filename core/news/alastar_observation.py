@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import gzip
 import hashlib
 import json
 import os
@@ -31,6 +32,17 @@ MAX_RECORDS = 5000
 MAX_INPUT_BYTES = 20 * 1024 * 1024
 OUTAGE_GAP_SECONDS = 600     # a live gap longer than the eligibility cutoff is an outage, not polling
 LATENCY_MARKS = (60, 180, 300, 600)
+# F: is exFAT with 1 MiB clusters: one ~5 KB run file per poll costs ~0.8 GB a day per channel. Old
+# duplicate-only runs are packed into gzip bundles. Ledgers read run files directly (health: the
+# newest 12; first-receipt lookups: the newest 400, or any run carrying new_revisions), so the newest
+# runs, recent runs and every run with a new revision always stay single files.
+RUN_BUNDLES = "run_bundles"
+COMPACT_KEEP_RECENT_RUNS = 2000
+COMPACT_MIN_AGE = timedelta(hours=48)
+COMPACT_MIN_BATCH = 500
+COMPACT_MAX_BATCH = 1000  # bounds how long one pass holds the archive lock
+_RUN_FILE = re.compile(r"\d{12}\.json\Z")
+_BUNDLE_FILE = re.compile(r"(\d{12})-(\d{12})\.jsonl\.gz\Z")
 
 
 def _utc(value: Any) -> datetime:
@@ -197,6 +209,69 @@ def _apply_run(state: dict[str, Any], run: dict[str, Any], channel: str = CHANNE
         item["latest_observation_mode"] = run["mode"]
 
 
+def _run_files_after(output: Path, sequence: int) -> Iterator[tuple[int, bytes]]:
+    """Single run files after `sequence`, until the first one that does not exist (the checkpoint path)."""
+    while True:
+        path = output / "runs" / f"{sequence + 1:012d}.json"
+        if not path.exists():
+            return
+        sequence += 1
+        yield sequence, path.read_bytes()
+
+
+def _bundle_runs(path: Path) -> Iterator[tuple[int, bytes]]:
+    """(sequence, exact run-file bytes) of one bundle; each line carries the run's own SHA-256."""
+    match = _BUNDLE_FILE.fullmatch(path.name)
+    if not match:
+        raise RuntimeError("Unexpected file name in run_bundles/")
+    first, last = int(match.group(1)), int(match.group(2))
+    previous = first - 1
+    with gzip.open(path, "rt", encoding="utf-8") as stream:
+        for line in stream:
+            entry = json.loads(line)
+            raw = entry["raw"].encode("utf-8")
+            number = entry["sequence"]
+            if not first <= number <= last or number <= previous or _digest(raw) != entry["sha256"]:
+                raise RuntimeError("Archive run bundle is invalid; preserve files for manual review")
+            previous = number
+            yield number, raw
+
+
+def _committed_runs(output: Path) -> Iterator[tuple[int, bytes]]:
+    """Every committed run in sequence order, merged from gzip bundles and single run files.
+
+    A run present in both (a crash between writing a bundle and deleting its files) must be
+    byte-identical; it is yielded once. Missing sequences are left for the caller's chain check.
+    """
+    files: dict[int, Path] = {}
+    for path in (output / "runs").glob("*.json"):
+        if not _RUN_FILE.fullmatch(path.name):
+            raise RuntimeError("Unexpected file name in runs/; preserve files for manual review")
+        files[int(path.stem)] = path
+    bundles = sorted((output / RUN_BUNDLES).glob("*.jsonl.gz")) if (output / RUN_BUNDLES).exists() else []
+    bundled = (item for bundle in bundles for item in _bundle_runs(bundle))
+    numbers = sorted(files)
+    index = 0
+    item = next(bundled, None)
+    last = 0
+    while item is not None or index < len(numbers):
+        number = numbers[index] if index < len(numbers) else None
+        if item is not None and (number is None or item[0] <= number):
+            if item[0] <= last:
+                raise RuntimeError("Archive run bundles overlap; preserve files for manual review")
+            if item[0] == number:
+                if files[number].read_bytes() != item[1]:
+                    raise RuntimeError("A bundled run differs from its run file; preserve files for manual review")
+                index += 1
+            last = item[0]
+            yield item
+            item = next(bundled, None)
+        else:
+            last = number
+            yield number, files[number].read_bytes()
+            index += 1
+
+
 def _load_runs(output: Path, *, verify_full: bool = False, channel: str = CHANNEL) -> tuple[int, dict[str, Any], str | None]:
     """Tail-checked checkpoint + only uncheckpointed runs; full replay on recovery.
 
@@ -225,24 +300,15 @@ def _load_runs(output: Path, *, verify_full: bool = False, channel: str = CHANNE
             raise RuntimeError("Archive checkpoint tail hash chain is invalid; run --verify and preserve files for review")
         state = checkpoint["messages"]
         previous_hash = checkpoint["last_run_sha256"]
-        paths = None
+        source = _run_files_after(output, sequence)
     else:
         # Missing/corrupt projections are disposable. Verify every committed
         # run when reconstructing, including a missing sequence in the middle.
-        paths = sorted((output / "runs").glob("*.json"))
+        source = _committed_runs(output)
     checked_evidence: set[str] = set()
-    while True:
-        if paths is not None:
-            if sequence >= len(paths):
-                break
-            path = paths[sequence]
-        else:
-            path = output / "runs" / f"{sequence + 1:012d}.json"
-            if not path.exists():
-                break
-        raw = path.read_bytes()
+    for number, raw in source:
         run = json.loads(raw)
-        if (path.name != f"{sequence + 1:012d}.json" or run.get("sequence") != sequence + 1
+        if (number != sequence + 1 or run.get("sequence") != sequence + 1
                 or run.get("previous_run_sha256") != previous_hash):
             raise RuntimeError("Archive run sequence/hash chain is invalid; preserve files for manual review")
         preview = run.get("raw_preview") or {}
@@ -350,8 +416,8 @@ def receipt_latency(output: Path | str = DEFAULT_OUTPUT, *, now: datetime | str 
     with _archive_lock(output):
         run_count, state, last_hash = _load_runs(output, verify_full=True, channel=channel)
         live_times = []
-        for path in sorted((output / "runs").glob("*.json")):
-            run = json.loads(path.read_bytes())
+        for _, raw in _committed_runs(output):
+            run = json.loads(raw)
             if run["mode"] == "live_public_preview":
                 live_times.append(_utc(run["observed_at_utc"]))
         samples = []
@@ -460,6 +526,87 @@ def observe_records(
         return {**summary, "run_file": path.relative_to(output).as_posix(),
                 "observed_at_utc": observed.isoformat(), "mode": mode,
                 "run_observation_count": len(observations), "new_revision_count": len(revisions)}
+
+
+def _manifest(output: Path, channel: str) -> dict[str, Any]:
+    path = output / RUN_BUNDLES / "manifest.json"
+    if not path.exists():
+        return {"schema_version": 1, "channel": channel, "packed_through": 0, "bundles": []}
+    manifest = json.loads(path.read_bytes())
+    if manifest.get("schema_version") != 1 or manifest.get("channel") != channel:
+        raise RuntimeError("Run bundle manifest belongs to another channel or schema")
+    return manifest
+
+
+def compact_runs(output: Path | str = DEFAULT_OUTPUT, *, channel: str = CHANNEL, now: datetime | str | None = None,
+                 keep_recent: int = COMPACT_KEEP_RECENT_RUNS, min_age: timedelta = COMPACT_MIN_AGE,
+                 min_batch: int = COMPACT_MIN_BATCH, max_batch: int = COMPACT_MAX_BATCH,
+                 dry_run: bool = False) -> dict[str, Any]:
+    """Pack one batch of old duplicate-only run files into a gzip bundle; never edits a run.
+
+    Only runs older than both the newest `keep_recent` sequences and `min_age`, and without
+    new_revisions, are packed. The bundle is written and read back before any run file is
+    deleted, and the manifest records progress, so a crash leaves at worst byte-identical
+    duplicates that replay accepts and the next call removes. Returns what was (or would be) done.
+    """
+    output = Path(output).resolve()
+    channel = _channel(channel)
+    current = _utc(now or datetime.now(timezone.utc))
+    with _archive_lock(output):
+        manifest = _manifest(output, channel)
+        count, _, _ = _load_runs(output, channel=channel)
+        bundles = manifest["bundles"]
+        if bundles and not bundles[-1]["files_removed"] and not dry_run:
+            # Finish an interrupted deletion: only files whose bytes the bundle already holds.
+            if bundles[-1]["file"]:
+                for number, raw in _bundle_runs(output / bundles[-1]["file"]):
+                    path = output / "runs" / f"{number:012d}.json"
+                    if path.exists() and path.read_bytes() == raw:
+                        path.unlink()
+            bundles[-1]["files_removed"] = True
+            _atomic_bytes(output / RUN_BUNDLES / "manifest.json", _json_bytes(manifest))
+        start = manifest["packed_through"] + 1
+        limit = min(count - keep_recent, start + max_batch - 1)
+        chosen: list[tuple[int, bytes]] = []
+        kept = 0
+        last = start - 1
+        for number in range(start, limit + 1):
+            raw = (output / "runs" / f"{number:012d}.json").read_bytes()
+            run = json.loads(raw)
+            if run.get("sequence") != number:
+                raise RuntimeError("Run file sequence is invalid; preserve files for manual review")
+            if current - _utc(run["observed_at_utc"]) < min_age:
+                break
+            last = number
+            if run["new_revisions"]:
+                kept += 1  # first receipts and revisions stay files: ledgers look them up by path
+            else:
+                chosen.append((number, raw))
+        result = {"channel": channel, "run_count": count, "scanned": last - start + 1, "packed": len(chosen),
+                  "kept_with_revisions": kept, "packed_through": manifest["packed_through"], "dry_run": dry_run}
+        if last - start + 1 < min_batch:
+            return {**result, "packed": 0, "reason": "fewer old runs than one batch"}
+        if dry_run:
+            return {**result, "would_pack_through": last}
+        entry = {"first_sequence": start, "last_sequence": last, "runs": len(chosen), "kept_with_revisions": kept,
+                 "created_at_utc": current.isoformat(), "files_removed": False, "file": None}
+        if chosen:
+            path = output / RUN_BUNDLES / f"{start:012d}-{last:012d}.jsonl.gz"
+            lines = "".join(json.dumps({"sequence": number, "sha256": _digest(raw), "raw": raw.decode("utf-8")},
+                                       ensure_ascii=False, sort_keys=True) + "\n" for number, raw in chosen)
+            payload = gzip.compress(lines.encode("utf-8"), mtime=0)
+            _atomic_bytes(path, payload)
+            if list(_bundle_runs(path)) != chosen:
+                raise RuntimeError("Run bundle did not read back identically; nothing was deleted")
+            entry.update(file=path.relative_to(output).as_posix(), sha256=_digest(payload), bytes=len(payload))
+        bundles.append(entry)
+        manifest["packed_through"] = last
+        _atomic_bytes(output / RUN_BUNDLES / "manifest.json", _json_bytes(manifest))
+        for number, _ in chosen:
+            (output / "runs" / f"{number:012d}.json").unlink()
+        entry["files_removed"] = True
+        _atomic_bytes(output / RUN_BUNDLES / "manifest.json", _json_bytes(manifest))
+        return {**result, "packed_through": last, "bundle": entry["file"]}
 
 
 def import_jsonl(path: Path, max_records: int = MAX_RECORDS) -> tuple[list[dict[str, Any]], dict[str, Any]]:
