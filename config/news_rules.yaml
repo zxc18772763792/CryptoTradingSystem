@@ -40,16 +40,17 @@
   # CRYPTOCOMPARE_API_KEY optional; without key collector still runs with stricter rate limit.
   # OPENNEWS_TOKEN is required when NEWS_ENABLE_OPENNEWS=true; opennews is added dynamically when both are present.
   chaincatcher_flash_timeout_sec: 20
-  telegram_alastar_channels: [alastartrades, cryptoquant_alert]
+  telegram_alastar_channels: [alastartrades, cryptoquant_alert, next10xgem1]
   telegram_alastar_timeout_sec: 20
   telegram_alastar_max_records: 40
   telegram_alastar_retry_count: 1
   # Immutable first receipt / revision archive for research; never issues trades.
   telegram_alastar_observation_archive: true
   # Channels (subset of telegram_alastar_channels) whose first receipts are archived; each gets its own directory.
-  telegram_observation_archive_channels: [alastartrades, cryptoquant_alert]
-  # Archived for the CryptoQuant Alert shadow ledger only; no news item, no AI extraction.
-  telegram_archive_only_channels: [cryptoquant_alert]
+  telegram_observation_archive_channels: [alastartrades, cryptoquant_alert, next10xgem1]
+  # Archived for the CryptoQuant Alert shadow ledger and the next10xgem1 fade paper ledger only;
+  # no news item, no AI extraction.
+  telegram_archive_only_channels: [cryptoquant_alert, next10xgem1]
   # Pack archive polls that saw nothing new, once older than 48 h and outside the newest 2000, into gzip
   # bundles (F: is exFAT with 1 MiB clusters: one file per poll was ~0.8 GB a day per channel).
   telegram_observation_compaction: true
