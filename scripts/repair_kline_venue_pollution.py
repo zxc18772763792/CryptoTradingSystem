@@ -6,6 +6,7 @@ data.binance.vision (public, no proxy traffic).
 
     python scripts/repair_kline_venue_pollution.py plan                      # dry run: writes a plan directory only
     python scripts/repair_kline_venue_pollution.py plan --only BTC --timeframes 15m
+    python scripts/repair_kline_venue_pollution.py plan --mode remove-perp-only  # perp bars on days without spot bars
     python scripts/repair_kline_venue_pollution.py apply --plan <plan dir>   # preflight: what would be written now
     python scripts/repair_kline_venue_pollution.py apply --plan <plan dir> --apply
     python scripts/repair_kline_venue_pollution.py verify --plan <plan dir>  # reader view now vs the plan's "after"
@@ -36,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -44,6 +46,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from core.data.kline_venue_repair import (  # noqa: E402
+    ACTED,
     CLASSES,
     OHLCV,
     REPLACED,
@@ -85,7 +88,9 @@ def _latest_days_file() -> Path:
 
 def cmd_plan(args: argparse.Namespace) -> int:
     days_file = args.days_file or _latest_days_file()
-    targets = load_targets(days_file, only=args.only, timeframes=args.timeframes)
+    mode = "remove" if args.mode == "remove-perp-only" else "replace"
+    acted = list(ACTED[mode])
+    targets = load_targets(days_file, only=args.only, timeframes=args.timeframes, mode=mode)
     out = args.out_dir / f"plan_{utc_stamp()}"
     out.mkdir(parents=True, exist_ok=False)
     print(f"{len(targets)} series, {sum(len(t.days) for t in targets)} series-days from {days_file.name}; "
@@ -97,7 +102,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         futures = [pool.submit(fetch_archives, target, fetch_archive_day, workers=args.workers) for target in targets]
         for n, (target, future) in enumerate(zip(targets, futures), 1):
             try:
-                plan = plan_series(args.root, target, future.result())
+                plan = plan_series(args.root, target, future.result(), mode=mode)
             except Exception as exc:  # noqa: BLE001 - one series' failure is reported, the rest continue
                 series.append({"series": target.series, "status": "error", "reason": f"{type(exc).__name__}: {exc}"})
                 print(f"  {n}/{len(targets)} {target.series}: error {exc}", flush=True)
@@ -128,7 +133,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
     blocked_rows = all_unresolved[all_unresolved["blocked"].astype(bool)]
     diagnosis = []
     for (name, day), rows in blocked_rows.groupby(["series", blocked_rows["timestamp"].dt.date.astype(str)]):
-        diagnosis.extend(diagnose_blocked_day(by_series[name], day, dict(tuple(rows.groupby("file"))), fetch_archive_day))
+        diagnosis.extend(diagnose_blocked_day(by_series[name], day, dict(tuple(rows.groupby("file"))), fetch_archive_day,
+                                              acted=acted))
     pd.DataFrame(diagnosis).to_csv(out / "blocked_days.csv", index=False)
     changes_sha = write(changes, "changes.parquet")
     write(unresolved, "unresolved.parquet")
@@ -139,7 +145,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
     day_frame = pd.DataFrame(days)
     checked = day_frame[day_frame["status"] == "checked"] if len(day_frame) else day_frame
     summary = {
-        "generated_at": out.name.removeprefix("plan_"), "days_file": str(days_file), "storage_root": str(args.root),
+        "generated_at": out.name.removeprefix("plan_"), "mode": mode, "days_file": str(days_file),
+        "storage_root": str(args.root),
         "series": len(targets), "series_status": dict(Counter(s["status"] for s in series)),
         "series_days": int(len(day_frame)), "series_days_checked": int(len(checked)),
         "series_days_skipped": dict(Counter(day_frame.loc[day_frame["status"] != "checked", "status"])) if len(day_frame) else {},
@@ -150,10 +157,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "blocked_file_days": len(diagnosis),
         "rows_on_blocked_file_days": dict(Counter(blocked_rows["class"])),
         "blocked_explained_by": dict(Counter(item["explained_by"] for item in diagnosis)),
-        "reader_days_equal_spot_archive_after": int(checked["reader_after_equals_spot_archive"].sum()) if len(checked) else 0,
-        "reader_replaceable_rows_before": int(sum(checked[f"before_{c}"].sum() for c in REPLACED)) if len(checked) else 0,
-        "reader_replaceable_rows_after": int(sum(checked[f"after_{c}"].sum() for c in REPLACED)) if len(checked) else 0,
-        "replaced_classes": list(REPLACED), "changes_sha256": changes_sha,
+        "reader_days_equal_spot_archive_after": (int(checked["reader_after_equals_spot_archive"].fillna(False).astype(bool).sum())
+                                                 if len(checked) and mode == "replace" else None),
+        "reader_replaceable_rows_before": int(sum(checked[f"before_{c}"].sum() for c in acted)) if len(checked) else 0,
+        "reader_replaceable_rows_after": int(sum(checked[f"after_{c}"].sum() for c in acted)) if len(checked) else 0,
+        "reader_rows_before": int(checked["reader_rows_before"].sum()) if len(checked) else 0,
+        "reader_rows_after": int(checked["reader_rows_after"].sum()) if len(checked) else 0,
+        "replaced_classes": acted, "changes_sha256": changes_sha,
         "seconds": round(time.time() - began),
     }
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
@@ -169,9 +179,18 @@ def _load_plan(plan_dir: Path, args: argparse.Namespace) -> pd.DataFrame:
     changes = pd.read_parquet(path)
     archives = pd.read_parquet(plan_dir / "archives.parquet")
     spot = archives[archives["market"] == "spot"].set_index(["series", "timestamp"])[OHLCV]
-    after = changes.set_index(["series", "timestamp"])[[f"after_{n}" for n in OHLCV]]
-    if not (spot.reindex(after.index).to_numpy() == after.to_numpy()).all():
+    perp = archives[archives["market"] == "perp"].set_index(["series", "timestamp"])[OHLCV]
+    keyed = changes.set_index(["series", "timestamp"])
+    after = keyed[[f"after_{n}" for n in OHLCV]].to_numpy()
+    removal = np.isnan(after).all(axis=1)
+    if not (spot.reindex(keyed.index[~removal]).to_numpy() == after[~removal]).all():
         raise SystemExit("changes.parquet: some 'after' values are not the spot archive bars; re-plan")
+    # A row to remove must be the perp bar (prices) at a time with no spot bar.
+    removed = keyed[removal]
+    perp_prices = perp.reindex(removed.index)[["open", "high", "low", "close"]].to_numpy()
+    stored = removed[[f"before_{n}" for n in ("open", "high", "low", "close")]].to_numpy()
+    if not ((perp_prices == stored).all(axis=1).all() and spot.reindex(removed.index).isna().all(axis=1).all()):
+        raise SystemExit("changes.parquet: a row to remove is not a perp bar at a time without spot bars; re-plan")
     keep = pd.Series(True, index=changes.index)
     if args.only:
         keep &= changes["series"].str.split("_").str[0].str.upper().isin({s.upper() for s in args.only})
@@ -219,10 +238,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     days = pd.read_csv(args.plan / "days.csv")
     days = days[days["status"] == "checked"]
     archives = pd.read_parquet(args.plan / "archives.parquet")
+    summary_path = args.plan / "summary.json"
+    acted = (json.loads(summary_path.read_text(encoding="utf-8")).get("replaced_classes") if summary_path.exists()
+             else None) or list(REPLACED)
     rows = []
     for series, planned in days.groupby("series", sort=True):
         symbol_dir, timeframe = series.split("/")
-        rows.extend(verify_series(args.root, symbol_dir, timeframe, planned, archives[archives["series"] == series]))
+        rows.extend(verify_series(args.root, symbol_dir, timeframe, planned, archives[archives["series"] == series],
+                                  acted=acted))
     frame = pd.DataFrame(rows).merge(days[["series", "day", "files_blocked"]], on=["series", "day"])
     path = args.plan / f"verify_{utc_stamp()}.csv"
     frame.to_csv(path, index=False)
@@ -260,6 +283,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     plan = sub.add_parser("plan", help="dry run: write a plan directory, change nothing")
     plan.add_argument("--days-file", type=Path, help="polluted_days_*.jsonl (default: the newest scan)")
+    plan.add_argument("--mode", choices=("replace", "remove-perp-only"), default="replace",
+                      help="replace perp bars with spot bars, or remove perp bars on days without spot bars")
     plan.add_argument("--only", nargs="*", help="base assets, e.g. BTC ETH")
     plan.add_argument("--timeframes", nargs="*")
     plan.add_argument("--workers", type=int, default=4, help="archive downloads per series")

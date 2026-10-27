@@ -22,8 +22,15 @@ series-day the fingerprint of what ``DataStorage.load_klines_from_parquet``
 returns before and after (computed by reading the planned bytes in place of
 the files).
 
+**Remove mode** (``mode="remove"``). For days on which Binance spot has no
+bars at all (no daily spot archive), rows whose prices equal the perp archive
+(``perp_no_spot``) are taken out of the file instead of replaced: there is no
+spot bar to put there. Their values stay in the plan's change set (and in the
+backups). The same clock gate applies, counting rows that match nothing.
+
 **Apply**. Per series: every planned row must still hold its planned "before"
-values (or already the "after" values); otherwise the series is left alone as
+values (or already the "after" values, or be gone if it is to be removed);
+otherwise the series is left alone as
 stale. Rows the plan does not touch may have changed since (hourly refresh):
 they are written back as they are now. The write itself is
 ``core.data.parquet_timezone_repair.apply_plan``: it takes the series and file
@@ -70,7 +77,7 @@ SPOT_NAMESPACE = "binance"
 # USD-M publishes no second-level archive, so perp bars cannot be told apart there.
 ARCHIVE_TIMEFRAMES = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "1d")
 CLASSES = ("spot", "perp", "perp_volume", "perp_forming", "spot_forming", "neither",
-           "no_spot_bar", "no_perp_bar", "spot_bar_invalid")
+           "perp_no_spot", "no_spot_bar", "no_perp_bar", "spot_bar_invalid")
 # Only exact archive evidence is replaced; "perp_forming" is a resemblance (perp open, range inside the perp bar)
 # that also fits partial bars of unclear origin, so it is reported, not replaced.
 REPLACED = ("perp", "perp_volume")
@@ -79,6 +86,9 @@ REPLACED = ("perp", "perp_volume")
 # of bars stored 8 hours off, where a few rows equal the perp bar at the stored time by coincidence. On the
 # 2026-10-27 plan every day was at most 20% or at least 50% unmatched.
 MAX_NEITHER_SHARE = 0.25
+# What each mode acts on, and which class counts as "matches nothing" for the clock gate.
+ACTED = {"replace": REPLACED, "remove": ("perp_no_spot",)}
+UNMATCHED = {"replace": "neither", "remove": "no_spot_bar"}
 METHOD = "venue_repair_spot_archive_v1"
 
 # (market "spot" | "perp", raw symbol e.g. BTCUSDT, timeframe, UTC day "YYYY-MM-DD") -> archive bars, or
@@ -104,11 +114,12 @@ class SeriesTarget:
 
 
 def load_targets(days_file: Path, *, only: Optional[Iterable[str]] = None,
-                 timeframes: Optional[Iterable[str]] = None) -> List[SeriesTarget]:
+                 timeframes: Optional[Iterable[str]] = None, mode: str = "replace") -> List[SeriesTarget]:
     """Series-days to check, from a ``polluted_days_*.jsonl`` written by the scan with ``--confirm``.
 
-    A day qualifies when the confirm step found rows equal to the perp archive and not to the spot archive,
-    or could not compare because the perp archive was not published yet (it is retried here).
+    Replace mode: the confirm step found rows equal to the perp archive and not to the spot archive, or could
+    not compare because the perp archive was not published yet (it is retried here). Remove mode: the spot
+    archive had no file for the day and rows equal the perp archive (``rows_perp_no_spot_archive``).
     """
 
     only_set = {s.upper() for s in only} if only else None
@@ -124,10 +135,14 @@ def load_targets(days_file: Path, *, only: Optional[Iterable[str]] = None,
                 continue
             if tf_set and timeframe not in tf_set:
                 continue
-            confirmed = int(record.get("rows_perp_not_spot") or 0) > 0
-            unconfirmed = "rows_perp_not_spot" not in record and record.get("rows_equal_perp_archive") is None
-            if not (confirmed or unconfirmed):
-                continue
+            if mode == "remove":
+                if not int(record.get("rows_perp_no_spot_archive") or 0) > 0:
+                    continue
+            else:
+                confirmed = int(record.get("rows_perp_not_spot") or 0) > 0
+                unconfirmed = "rows_perp_not_spot" not in record and record.get("rows_equal_perp_archive") is None
+                if not (confirmed or unconfirmed):
+                    continue
             item = grouped.setdefault(record["series"], {"days": set(), "perp": record.get("perp_reference") or symbol_dir})
             item["days"].add(record["day"])
     return [SeriesTarget(series.split("/")[0], series.split("/")[1], sorted(item["days"]), item["perp"])
@@ -177,6 +192,8 @@ def classify(values: np.ndarray, spot: np.ndarray, perp: np.ndarray) -> np.ndarr
       a range inside the final perp bar and no more than its volume (reported only: partial bars of other origin
       fit it too);
     * ``spot_forming``: the same against the spot bar (spot data, only incomplete: left as it is);
+    * ``perp_no_spot``: no spot bar exists at that time and the prices equal the perp archive (removed in remove
+      mode, reported in replace mode);
     * ``neither``, ``no_spot_bar``, ``no_perp_bar``: left as they are;
     * ``spot_bar_invalid``: would be replaced, but the spot archive bar fails the bar checks.
     """
@@ -194,6 +211,7 @@ def classify(values: np.ndarray, spot: np.ndarray, perp: np.ndarray) -> np.ndarr
 
     out = np.full(len(values), "neither", dtype=object)
     rules = [
+        (~has_spot & has_perp & px_perp, "perp_no_spot"),
         (~has_spot, "no_spot_bar"),
         (eq_spot, "spot"),
         (~has_perp, "no_perp_bar"),
@@ -354,6 +372,7 @@ class SeriesPlan:
     changes: Optional[pd.DataFrame] = None
     unresolved: Optional[pd.DataFrame] = None
     archives: Optional[pd.DataFrame] = None
+    mode: str = "replace"
 
 
 def _row_records(series: str, file: str, stamps: pd.DatetimeIndex, classes: np.ndarray,
@@ -367,17 +386,25 @@ def _row_records(series: str, file: str, stamps: pd.DatetimeIndex, classes: np.n
 
 
 def plan_series(storage_root: Path, target: SeriesTarget,
-                archives: Dict[str, Dict[str, Optional[pd.DataFrame]]]) -> SeriesPlan:
+                archives: Dict[str, Dict[str, Optional[pd.DataFrame]]], *, mode: str = "replace") -> SeriesPlan:
     """Plan the repair of one series (no file is written). See the module docstring."""
 
-    plan = SeriesPlan(target)
+    plan = SeriesPlan(target, mode=mode)
+    acted = ACTED[mode]
     storage_root = Path(storage_root)
     series_root = storage_root / SPOT_NAMESPACE / target.symbol_dir
-    usable = [day for day in target.days if archives["spot"].get(day) is not None and archives["perp"].get(day) is not None]
+    has = {m: {day for day in target.days if archives[m].get(day) is not None} for m in ("spot", "perp")}
+    if mode == "remove":
+        usable = [day for day in target.days if day in has["perp"] and day not in has["spot"]]
+    else:
+        usable = [day for day in target.days if day in has["spot"] and day in has["perp"]]
     for day in target.days:
         if day not in usable:
-            missing = [m for m in ("spot", "perp") if archives[m].get(day) is None]
-            plan.days.append({"series": target.series, "day": day, "status": "no_archive_" + "_".join(missing)})
+            if mode == "remove" and day in has["spot"]:
+                status = "spot_archive_exists"
+            else:
+                status = "no_archive_" + "_".join(m for m in ("spot", "perp") if day not in has[m])
+            plan.days.append({"series": target.series, "day": day, "status": status})
     evidence = []
     for market in ("spot", "perp"):
         for day in target.days:
@@ -387,7 +414,8 @@ def plan_series(storage_root: Path, target: SeriesTarget,
     if evidence:
         plan.archives = pd.concat(evidence).rename_axis("timestamp").reset_index()
     if not usable:
-        plan.status, plan.reason = "nothing_to_do", "no day has both archives"
+        plan.status, plan.reason = "nothing_to_do", ("no day without spot bars" if mode == "remove"
+                                                     else "no day has both archives")
         return plan
     day_stamps = [pd.Timestamp(day) for day in usable]
     spot_ref = _references(archives["spot"], usable)
@@ -418,16 +446,16 @@ def plan_series(storage_root: Path, target: SeriesTarget,
             classes = classify(values, spot, perp_ref.reindex(stamps)[OHLCV].to_numpy(float))
             counts = Counter(classes)
             row_days = stamps.normalize()
-            unmatched = pd.Series(classes == "neither").groupby(row_days).mean()
+            unmatched = pd.Series(classes == UNMATCHED[mode]).groupby(row_days).mean()
             blocked_days = unmatched.index[unmatched > MAX_NEITHER_SHARE]
             blocked = np.asarray(row_days.isin(blocked_days))
-            replace = np.isin(classes, REPLACED) & ~blocked
+            replace = np.isin(classes, acted) & ~blocked
             record = {"series": target.series, "file": rel, "kind": file_kind(path), "rows": int(len(raw)),
                       "rows_on_days": int(len(positions)), "pre_sha256": pre_hash,
                       "frame_hash_before": _frame_hash(raw),
                       **{f"n_{name}": int(counts.get(name, 0)) for name in CLASSES},
                       "blocked_days": ";".join(day.date().isoformat() for day in blocked_days),
-                      "rows_blocked": int((np.isin(classes, REPLACED) & blocked).sum())}
+                      "rows_blocked": int((np.isin(classes, acted) & blocked).sum())}
             for day in blocked_days:
                 blocked_files[day] += 1
             keep = blocked | ~(np.isin(classes, ("spot",)) | replace)
@@ -436,25 +464,33 @@ def plan_series(storage_root: Path, target: SeriesTarget,
                 unresolved.append(rows.assign(blocked=blocked[keep]))
             record["rows_changed"] = int(replace.sum())
             if replace.any():
-                planned = raw.copy()
-                columns = [planned.columns.get_loc(name) for name in OHLCV]
-                for column, source in zip(columns, spot[replace].T):
-                    planned.iloc[positions[replace], column] = source
+                untouched = np.ones(len(raw), dtype=bool)
+                untouched[positions[replace]] = False
+                if mode == "remove":
+                    planned = raw.iloc[untouched].copy()
+                    planned.attrs = dict(raw.attrs)
+                    rest = planned
+                    after = np.full(values[replace].shape, np.nan)
+                else:
+                    planned = raw.copy()
+                    columns = [planned.columns.get_loc(name) for name in OHLCV]
+                    for column, source in zip(columns, spot[replace].T):
+                        planned.iloc[positions[replace], column] = source
+                    rest = planned.iloc[untouched]
+                    after = spot[replace]
                 payload = _parquet_bytes(planned)
                 check = pd.read_parquet(io.BytesIO(payload))
                 pd.testing.assert_frame_equal(_validate(planned, unique=True), check, check_exact=True, check_freq=False)
                 if check.attrs != raw.attrs:
                     raise RepairConflict(f"{rel}: attributes would not survive the rewrite")
-                untouched = np.ones(len(raw), dtype=bool)
-                untouched[positions[replace]] = False
-                if not np.array_equal(check.iloc[untouched][OHLCV].to_numpy(float), raw.iloc[untouched][OHLCV].to_numpy(float),
-                                      equal_nan=True):
+                if not (np.array_equal(rest[OHLCV].to_numpy(float), raw.iloc[untouched][OHLCV].to_numpy(float),
+                                       equal_nan=True) and rest.index.equals(raw.index[untouched])):
                     raise RepairConflict(f"{rel}: rows outside the plan would change")
                 overrides[path] = payload
                 record.update(planned_post_sha256=hashlib.sha256(payload).hexdigest(),
-                              frame_hash_after=_frame_hash(check))
+                              frame_hash_after=_frame_hash(check), rows_after=int(len(check)))
                 changes.append(_row_records(target.series, rel, stamps[replace], classes[replace],
-                                            values[replace], spot[replace]))
+                                            values[replace], after))
             plan.files.append(record)
     except RepairConflict as exc:  # StalePlan included
         plan.status, plan.reason = "refused", str(exc)
@@ -481,7 +517,8 @@ def plan_series(storage_root: Path, target: SeriesTarget,
                "files_blocked": int(blocked_files.get(day, 0)),
                "reader_rows_before": digest_before[day][0], "reader_digest_before": digest_before[day][1],
                "reader_rows_after": digest_after[day][0], "reader_digest_after": digest_after[day][1],
-               "reader_after_equals_spot_archive": archive_digest.get(day) == digest_after[day]}
+               "reader_after_equals_spot_archive": (archive_digest.get(day) == digest_after[day]
+                                                    if mode == "replace" else None)}
         for name in CLASSES:
             row[f"before_{name}"] = int(classes_before[day].get(name, 0))
             row[f"after_{name}"] = int(classes_after[day].get(name, 0))
@@ -489,7 +526,7 @@ def plan_series(storage_root: Path, target: SeriesTarget,
     plan.days.sort(key=lambda r: r["day"])
     plan.changes = pd.concat(changes, ignore_index=True) if changes else None
     plan.unresolved = pd.concat(unresolved, ignore_index=True) if unresolved else None
-    if any(sum(r.get(f"after_{name}", 0) for name in REPLACED) for r in plan.days if not r.get("files_blocked")):
+    if any(sum(r.get(f"after_{name}", 0) for name in acted) for r in plan.days if not r.get("files_blocked")):
         plan.status, plan.reason = "refused", "the reader would still return replaceable rows after the repair"
         return plan
     plan.status = "ready" if changes else "nothing_to_do"
@@ -497,7 +534,7 @@ def plan_series(storage_root: Path, target: SeriesTarget,
 
 
 def diagnose_blocked_day(target: SeriesTarget, day: str, rows_by_file: Dict[str, pd.DataFrame],
-                         fetch: ArchiveFetcher) -> List[dict]:
+                         fetch: ArchiveFetcher, acted: Iterable[str] = REPLACED) -> List[dict]:
     """What a blocked file-day holds: the share of its rows equal (OHLCV) to spot or perp bars 0 or 8 hours away.
 
     Reporting only. Bars stored on the local clock belong to the timezone repair
@@ -520,7 +557,7 @@ def diagnose_blocked_day(target: SeriesTarget, day: str, rows_by_file: Dict[str,
                 shares[f"{market}{hours:+d}h"] = float((values == found).all(axis=1).mean()) if len(values) else 0.0
         best = max(shares, key=shares.get)
         out.append({"series": target.series, "day": day, "file": rel, "rows": int(len(rows)),
-                    "rows_blocked": int(np.isin(rows["class"], REPLACED).sum()),
+                    "rows_blocked": int(np.isin(rows["class"], list(acted)).sum()),
                     "explained_by": best if shares[best] >= 0.95 else "unexplained",
                     **{f"share_{name}": round(value, 4) for name, value in shares.items()}})
     return out
@@ -546,25 +583,31 @@ def _no_new_period_locks(paths: Iterable[Path]) -> Iterator[None]:
 
 
 def _changed_frame(raw: pd.DataFrame, rows: pd.DataFrame, rel: str) -> Tuple[Optional[pd.DataFrame], Counter]:
-    """``raw`` with the planned rows replaced, or None when every planned row already holds its "after" values."""
+    """``raw`` with the planned rows replaced or removed, or None when every planned row is already done.
+
+    A row whose planned "after" values are all NaN is to be removed; it is done once it is gone.
+    """
 
     index = _utc_ns(raw.index)
     lookup = pd.Series(np.arange(len(index)), index=index)
+    stamps = pd.DatetimeIndex(rows["timestamp"]).as_unit("ns")
     if lookup.index.has_duplicates:
-        dup = lookup.index[lookup.index.duplicated()]
-        if pd.DatetimeIndex(rows["timestamp"]).isin(dup).any():
+        if stamps.isin(lookup.index[lookup.index.duplicated()]).any():
             raise StalePlan(f"{rel}: duplicate timestamps on planned rows")
         lookup = lookup[~lookup.index.duplicated(keep="last")]
-    stamps = pd.DatetimeIndex(rows["timestamp"]).as_unit("ns")
-    missing = stamps[~stamps.isin(lookup.index)]
-    if len(missing):
-        raise StalePlan(f"{rel}: {len(missing)} planned rows are gone (first {missing.min()})")
-    positions = lookup.loc[stamps].to_numpy()
-    current = raw.iloc[positions][OHLCV].to_numpy(float)
     before = rows[[f"before_{n}" for n in OHLCV]].to_numpy(float)
     after = rows[[f"after_{n}" for n in OHLCV]].to_numpy(float)
-    is_before = (current == before).all(axis=1)
-    is_after = (current == after).all(axis=1)
+    removal = np.isnan(after).all(axis=1)
+    present = np.asarray(stamps.isin(lookup.index))
+    if (~present & ~removal).any():
+        gone = stamps[~present & ~removal]
+        raise StalePlan(f"{rel}: {len(gone)} planned rows are gone (first {gone.min()})")
+    positions = np.full(len(stamps), -1)
+    positions[present] = lookup.loc[stamps[present]].to_numpy()
+    current = np.full(before.shape, np.nan)
+    current[present] = raw.iloc[positions[present]][OHLCV].to_numpy(float)
+    is_before = present & (current == before).all(axis=1)
+    is_after = np.where(removal, ~present, present & (current == after).all(axis=1))
     if not (is_before | is_after).all():
         bad = stamps[~(is_before | is_after)]
         raise StalePlan(f"{rel}: {len(bad)} planned rows changed since the plan (first {bad.min()})")
@@ -572,8 +615,16 @@ def _changed_frame(raw: pd.DataFrame, rows: pd.DataFrame, rel: str) -> Tuple[Opt
     if not is_before.any():
         return None, counts
     output = raw.copy()
+    swap = is_before & ~removal
     for i, name in enumerate(OHLCV):
-        output.iloc[positions[is_before], output.columns.get_loc(name)] = after[is_before, i]
+        output.iloc[positions[swap], output.columns.get_loc(name)] = after[swap, i]
+    drop = positions[is_before & removal]
+    if len(drop):
+        keep = np.ones(len(output), dtype=bool)
+        keep[drop] = False
+        trimmed = output.iloc[keep].copy()
+        trimmed.attrs = dict(raw.attrs)
+        output = trimmed
     return output, counts
 
 
@@ -662,7 +713,7 @@ def rollback_series(series_run_dir: Path) -> dict:
 
 
 def verify_series(storage_root: Path, symbol_dir: str, timeframe: str, days: pd.DataFrame,
-                  archives: pd.DataFrame) -> List[dict]:
+                  archives: pd.DataFrame, acted: Iterable[str] = REPLACED) -> List[dict]:
     """Reader view of each planned day now, against the plan's "after" fingerprint and the archives."""
 
     day_stamps = [pd.Timestamp(day) for day in days["day"]]
@@ -677,7 +728,7 @@ def verify_series(storage_root: Path, symbol_dir: str, timeframe: str, days: pd.
         rows, digest = digests[day]
         out.append({"series": planned["series"], "day": planned["day"], "reader_rows": rows,
                     "matches_planned_after": digest == planned["reader_digest_after"],
-                    "replaceable_rows_left": int(sum(counts[day].get(name, 0) for name in REPLACED)),
+                    "replaceable_rows_left": int(sum(counts[day].get(name, 0) for name in acted)),
                     **{f"now_{name}": int(counts[day].get(name, 0)) for name in CLASSES}})
     return out
 

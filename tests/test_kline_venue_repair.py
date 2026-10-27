@@ -288,3 +288,94 @@ def test_load_targets_takes_confirmed_and_unpublished_days(tmp_path):
     assert targets["BTC_USDT/15m"].days == [DAY_A]
     assert targets["PEPE_USDT/5m"].multiplier == 1000.0
     assert [t.series for t in load_targets(path, only=["pepe"])] == ["PEPE_USDT/5m"]
+
+
+# ---------------------------------------------------------------------------- remove mode
+
+
+NO_SPOT_A, NO_SPOT_B = "2026-07-13", "2026-07-14"
+
+
+@pytest.fixture()
+def no_spot_store(tmp_path):
+    """XYZ 15m, a coin with no spot bars on July 13/14: perp bars in the main file and in a legacy pack."""
+
+    root = tmp_path / "historical"
+    symbol = root / "binance" / "XYZ_USDT"
+    main = _perp(NO_SPOT_A)
+    main.iloc[7, :] = [main.iloc[7, 0], main.iloc[7, 1] - 0.1, main.iloc[7, 2] + 0.1, main.iloc[7, 0], 9.0]  # inexact
+    _write(symbol / "15m.parquet", main)
+    _write(symbol / "15m_parts" / "2026-07.legacy.parquet", pd.concat([_perp(NO_SPOT_B), _spot("2026-07-20")]))
+    return root
+
+
+def _no_spot_fetch(market, raw, timeframe, day):
+    if market == "spot":
+        return None if day in (NO_SPOT_A, NO_SPOT_B) else _spot(day)
+    return _perp(day)
+
+
+def _remove_plan(root):
+    target = SeriesTarget("XYZ_USDT", "15m", [NO_SPOT_A, NO_SPOT_B], "XYZ_USDT")
+    return plan_series(root, target, fetch_archives(target, _no_spot_fetch, workers=2), mode="remove")
+
+
+def test_remove_plan_takes_perp_rows_out_and_keeps_the_rest(no_spot_store):
+    hashes = _hashes(no_spot_store)
+    plan = _remove_plan(no_spot_store)
+    assert _hashes(no_spot_store) == hashes
+    assert plan.status == "ready", plan.reason
+    assert set(plan.changes["class"]) == {"perp_no_spot"} and len(plan.changes) == 15
+    assert plan.changes[[f"after_{n}" for n in OHLCV]].isna().all().all()
+    assert list(plan.unresolved["class"]) == ["no_spot_bar"]           # the inexact row stays, reported
+    files = {f["file"]: f for f in plan.files}
+    assert files["15m.parquet"]["rows_after"] == 1
+    assert files["15m_parts/2026-07.legacy.parquet"]["rows_after"] == 8  # the July 20 spot bars stay
+    days = {d["day"]: d for d in plan.days}
+    assert days[NO_SPOT_A]["before_perp_no_spot"] == 7 and days[NO_SPOT_A]["after_perp_no_spot"] == 0
+    assert days[NO_SPOT_A]["reader_rows_after"] == 1 and days[NO_SPOT_B]["reader_rows_after"] == 0
+    assert days[NO_SPOT_A]["reader_after_equals_spot_archive"] is None
+
+
+def test_remove_apply_is_idempotent_verifiable_and_reversible(no_spot_store):
+    hashes = _hashes(no_spot_store)
+    plan = _remove_plan(no_spot_store)
+    run = no_spot_store.parent / "run" / "XYZ_USDT__15m"
+    result = apply_series(no_spot_store, "XYZ_USDT", "15m", plan.changes, run)
+    assert result["status"] == "complete", result
+    files = {f["file"]: f for f in plan.files}
+    for rel, record in files.items():
+        if record.get("rows_changed"):
+            assert sha256(no_spot_store / "binance" / "XYZ_USDT" / rel) == record["planned_post_sha256"]
+    pack = pd.read_parquet(no_spot_store / "binance" / "XYZ_USDT" / "15m_parts" / "2026-07.legacy.parquet")
+    pd.testing.assert_frame_equal(pack, _spot("2026-07-20"), check_freq=False)
+    assert pack.attrs == {}
+    days = pd.DataFrame([d for d in plan.days if d["status"] == "checked"])
+    checks = verify_series(no_spot_store, "XYZ_USDT", "15m", days, plan.archives, acted=["perp_no_spot"])
+    assert all(c["matches_planned_after"] and c["replaceable_rows_left"] == 0 for c in checks)
+    again = apply_series(no_spot_store, "XYZ_USDT", "15m", plan.changes, no_spot_store.parent / "run2" / "XYZ_USDT__15m")
+    assert again["status"] == "already_applied"
+    assert rollback_series(run)["status"] == "rolled_back"
+    assert _hashes(no_spot_store) == hashes
+
+
+def test_a_row_to_remove_that_changed_leaves_the_series_alone(no_spot_store):
+    plan = _remove_plan(no_spot_store)
+    path = no_spot_store / "binance" / "XYZ_USDT" / "15m.parquet"
+    frame = pd.read_parquet(path)
+    frame.iloc[0, 3] = 555.0
+    _write(path, frame)
+    with pytest.raises(StalePlan):
+        prepare_series(no_spot_store, "XYZ_USDT", "15m", plan.changes)
+
+
+def test_remove_targets_come_from_days_without_spot_archive(tmp_path):
+    records = [
+        {"series": "HYPE_USDT/5m", "day": NO_SPOT_A, "file": "a", "perp_reference": "HYPE_USDT",
+         "rows_equal_spot_archive": None, "rows_equal_perp_archive": 287, "rows_perp_no_spot_archive": 287},
+        {"series": "BTC_USDT/5m", "day": NO_SPOT_A, "file": "b", "perp_reference": "BTC_USDT", "rows_perp_not_spot": 9},
+    ]
+    path = tmp_path / "days.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in records), encoding="utf-8")
+    assert [t.series for t in load_targets(path, mode="remove")] == ["HYPE_USDT/5m"]
+    assert [t.series for t in load_targets(path)] == ["BTC_USDT/5m"]
