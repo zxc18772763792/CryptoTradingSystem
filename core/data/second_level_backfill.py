@@ -14,6 +14,7 @@ import pandas as pd
 from loguru import logger
 
 from config.settings import settings
+from core.data.kline_venue import SPOT, exchange_market_type
 from core.data.parquet_lock import parquet_partition_lock
 from core.exchanges.exchange_manager import exchange_manager
 from core.data.path_utils import canonical_symbol_dir, canonical_symbol_dirname
@@ -370,6 +371,19 @@ class SecondLevelBackfillManager:
             return
         task.status = "running"
         self._save_state(task)
+
+        # 1s bars land in the spot store; a futures-mode connector would
+        # aggregate perp trades into it.
+        market = exchange_market_type(task.exchange, exchange_manager.get_exchange(task.exchange))
+        if market != SPOT:
+            task.status = "failed"
+            task.last_error = (
+                f"{task.exchange} connector serves {market} data; "
+                "second-level bars are stored as spot"
+            )
+            self._save_state(task)
+            logger.warning(f"Second-level backfill [{task_id}] refused: {task.last_error}")
+            return
 
         cursor = task.current_time
         while cursor < task.end_time:

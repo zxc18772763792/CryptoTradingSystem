@@ -16,6 +16,7 @@ from loguru import logger
 
 from config.settings import settings
 from core.data.data_storage import data_storage
+from core.data.kline_venue import connector_market_type, venue_matches_store
 from core.exchanges.base_exchange import Kline
 from core.exchanges.exchange_manager import exchange_manager
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
@@ -84,6 +85,10 @@ _DEFAULT_LIVE_FETCH_BACKOFF_SEC = 30.0
 _CANONICAL_KLINE_LIMIT = 500
 _STRATEGY_CYCLE_TIMEOUT_SEC = 45.0
 _SIGNAL_NOTIFY_CALLBACK_TIMEOUT_SEC = 2.0
+# The public fallback reads USD-M perpetual bars; they feed strategies in
+# memory but never the spot store.
+_BINANCE_PUBLIC_KLINE_URL = "https://fapi.binance.com/fapi/v1/klines"
+_BINANCE_PUBLIC_KLINE_MARKET = "future"
 _BINANCE_PUBLIC_KLINE_INTERVALS = {
     "1m",
     "3m",
@@ -609,6 +614,7 @@ class StrategyManager:
                         timeframe=timeframe,
                         live_df=live_df,
                         existing_df=df,
+                        market_type=connector_market_type(connector),
                     )
                     if df.empty:
                         df = live_df
@@ -639,6 +645,7 @@ class StrategyManager:
                         timeframe=timeframe,
                         live_df=fallback_df,
                         existing_df=df,
+                        market_type=_BINANCE_PUBLIC_KLINE_MARKET,
                     )
                     df = fallback_df if df.empty else pd.concat([df, fallback_df])
                     df = df[~df.index.duplicated(keep="last")].sort_index()
@@ -661,6 +668,7 @@ class StrategyManager:
                         timeframe=timeframe,
                         live_df=fallback_df,
                         existing_df=df,
+                        market_type=_BINANCE_PUBLIC_KLINE_MARKET,
                     )
                     df = fallback_df if df.empty else pd.concat([df, fallback_df])
                     df = df[~df.index.duplicated(keep="last")].sort_index()
@@ -746,8 +754,13 @@ class StrategyManager:
         timeframe: str,
         live_df: pd.DataFrame,
         existing_df: pd.DataFrame,
+        market_type: str,
     ) -> None:
         if live_df.empty:
+            return
+        # Strategies may run on perp bars, but the local store under `exchange`
+        # is spot: persisting them there pollutes every later reader.
+        if not venue_matches_store(exchange, market_type):
             return
         new_df = live_df.copy()
         if not existing_df.empty:
@@ -814,7 +827,7 @@ class StrategyManager:
                 verify=get_shared_ssl_context(),
             ) as client:
                 response = await client.get(
-                    "https://fapi.binance.com/fapi/v1/klines",
+                    _BINANCE_PUBLIC_KLINE_URL,
                     params={"symbol": clean_symbol, "interval": tf, "limit": req_limit},
                 )
                 response.raise_for_status()

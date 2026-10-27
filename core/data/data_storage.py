@@ -43,6 +43,7 @@ from core.data.kline_partitions import (
     series_lock_target,
     stem_period,
 )
+from core.data.kline_venue import SPOT, require_store_venue
 
 
 PARQUET_WRITE_LOCK_TIMEOUT_SECONDS = float(
@@ -627,10 +628,14 @@ class DataStorage:
         timeframe: str,
         *,
         timestamp_timezone: Optional[str] = None,
+        market_type: str = SPOT,
     ) -> str:
         """淇濆瓨K绾挎暟鎹埌Parquet鏂囦欢"""
         if not klines:
             return ""
+        # ``market_type`` is where the bars came from: perp bars never go into a
+        # spot namespace such as ``binance`` (see core.data.kline_venue).
+        require_store_venue(exchange, symbol, timeframe, market_type)
 
         data = [
             {

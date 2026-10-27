@@ -39,6 +39,7 @@ from core.data import (
 )
 from core.data.data_storage import _normalize_parquet_frame_index, _parquet_max_timestamp
 from core.data.kline_partitions import DAY, list_part_files, newest_first, stem_period
+from core.data.kline_venue import SPOT, exchange_market_type, require_store_venue
 from core.exchanges import Kline
 from core.data.alpha_market_data import (
     ALPHA_DATA_SOURCE,
@@ -1331,7 +1332,13 @@ def _parquet_path(exchange: str, symbol: str, timeframe: str) -> Path:
     return canonical_symbol_dir(Path(settings.DATA_STORAGE_PATH), exchange, symbol) / f"{timeframe}.parquet"
 
 
-async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
+async def _save_df_to_parquet(
+    exchange: str,
+    symbol: str,
+    timeframe: str,
+    df: pd.DataFrame,
+    market_type: str = SPOT,
+) -> None:
     """Persist only the touched daily partitions.
 
     The prior API-specific writer rewrote the whole legacy parquet file on
@@ -1342,6 +1349,7 @@ async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd
     """
     if df.empty:
         return
+    require_store_venue(exchange, symbol, timeframe, market_type)
 
     if df.attrs.get("cts_timestamp_status") == "unverified_naive":
         raise ValueError("Unverified historical timestamps require a timezone audit before writing")
@@ -1373,6 +1381,15 @@ async def _save_df_to_parquet(exchange: str, symbol: str, timeframe: str, df: pd
         )
     ]
     await data_storage.save_klines_to_parquet(klines, exchange, symbol, timeframe)
+
+
+def _live_source_is_spot(exchange: str) -> bool:
+    """Whether the shared connector's klines/trades are spot data.
+
+    The store and charts under ``exchange`` are spot; with
+    ``BINANCE_DEFAULT_TYPE=future`` the Binance connector returns perp data.
+    """
+    return exchange_market_type(exchange, exchange_manager.get_exchange(exchange)) == SPOT
 
 
 def _serialize_kline_frame(df: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -1506,7 +1523,7 @@ async def _fetch_public_trades(
         except Exception:
             connector = None
 
-    if not connector:
+    if not connector or not _live_source_is_spot(exchange):
         return []
 
     client = getattr(connector, "_client", None)
@@ -3934,6 +3951,12 @@ async def get_klines(
         }
 
     async def _fetch_live_df(ex_name: str, live_limit: int) -> pd.DataFrame:
+        if not _live_source_is_spot(ex_name):
+            # The connector serves perp bars; take Binance's spot REST instead
+            # and leave other venues to local data.
+            if ex_name == "binance" and timeframe not in _SUB_MINUTE_TIMEFRAMES:
+                return await _fetch_binance_public_klines(symbol, timeframe, limit=live_limit)
+            return pd.DataFrame()
         if timeframe in _SUB_MINUTE_TIMEFRAMES:
             effective_limit = max(120, min(int(live_limit or 0), 480))
             seconds = _timeframe_seconds(timeframe)

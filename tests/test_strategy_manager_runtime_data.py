@@ -102,7 +102,7 @@ def test_live_fetch_failure_backoff_escalates_and_caps():
     assert manager._live_fetch_backoff_until[key] > time.monotonic()
 
 
-def test_load_market_data_timeout_uses_binance_public_fallback_and_persists(monkeypatch):
+def test_load_market_data_timeout_uses_binance_public_fallback_without_persisting(monkeypatch):
     async def _run() -> None:
         module = importlib.import_module("core.strategies.strategy_manager")
         manager = StrategyManager()
@@ -147,16 +147,9 @@ def test_load_market_data_timeout_uses_binance_public_fallback_and_persists(monk
         )
 
         assert result.index.max() == pd.Timestamp("2026-04-02 10:45:00")
-        saved_klines = save_mock.await_args.args[0]
-        assert [k.timestamp for k in saved_klines] == [
-            datetime(2026, 4, 2, 10, 30, tzinfo=timezone.utc),
-            datetime(2026, 4, 2, 10, 45, tzinfo=timezone.utc),
-        ]
-        assert save_mock.await_args.kwargs == {
-            "exchange": "binance",
-            "symbol": "BTC/USDT",
-            "timeframe": "15m",
-        }
+        # The fallback reads USD-M perpetual bars: fine for the strategy, but
+        # they must not be written into the spot store under "binance".
+        save_mock.assert_not_awaited()
 
     asyncio.run(_run())
 

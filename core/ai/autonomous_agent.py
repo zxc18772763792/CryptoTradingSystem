@@ -44,6 +44,7 @@ from core.ai.signal_aggregator import signal_aggregator
 from core.observability.decision_trace import DecisionTrace, append_gate
 from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
 from core.data import data_storage
+from core.data.kline_venue import connector_market_type, venue_matches_store
 from core.exchanges.exchange_manager import exchange_manager
 from core.marketdata.runtime_price_provider import get_realtime_price
 from core.news.storage import db as news_db
@@ -2379,13 +2380,17 @@ class AutonomousTradingAgent:
                         or local_last_bar_age_sec is None
                         or local_last_bar_age_sec > max(float(timeframe_sec) + 60.0, 300.0)
                     )
-                    if should_persist_live:
+                    # A futures-mode connector returns perp bars; the store
+                    # under `exchange` is spot, so those stay in memory only.
+                    live_market_type = connector_market_type(connector)
+                    if should_persist_live and venue_matches_store(exchange, live_market_type):
                         with contextlib.suppress(Exception):
                             await data_storage.save_klines_to_parquet(
                                 klines=live_klines,
                                 exchange=exchange,
                                 symbol=symbol,
                                 timeframe=normalized_timeframe,
+                                market_type=live_market_type,
                             )
                     if df.empty:
                         df = live_df

@@ -13,6 +13,7 @@ from loguru import logger
 
 from config.settings import settings
 from core.data.data_storage import data_storage
+from core.data.kline_venue import SPOT, connector_market_type
 from core.exchanges import Kline, exchange_manager
 
 try:
@@ -47,11 +48,6 @@ def _normalize_market_type(value: str, fallback: str = "spot") -> str:
     return normalized if normalized in {"spot", "future", "swap", "margin"} else "spot"
 
 
-def _public_default_type(exchange: str) -> str:
-    attr = f"{str(exchange or '').strip().upper()}_DEFAULT_TYPE"
-    return _normalize_market_type(str(getattr(settings, attr, "spot") or "spot"))
-
-
 def _proxy_url() -> Optional[str]:
     proxy = str(settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip()
     return proxy or None
@@ -70,6 +66,19 @@ def _resolve_public_market_symbol(client: Any, symbol: str, default_type: str) -
     base = base.strip().upper()
     quote = quote.split(":", 1)[0].strip().upper()
     if not base or not quote:
+        return raw_symbol
+
+    if default_type not in {"future", "swap"}:
+        # A contract of the same name is a different venue: when the spot pair
+        # is missing, let ccxt report it instead of returning perp bars.
+        for market in markets.values():
+            if (
+                market.get("spot")
+                and str(market.get("base") or "").upper() == base
+                and str(market.get("quote") or "").upper() == quote
+                and str(market.get("symbol") or "").strip()
+            ):
+                return str(market["symbol"])
         return raw_symbol
 
     contract_symbol = f"{base}/{quote}:{quote}"
@@ -111,11 +120,15 @@ def _resolve_public_market_symbol(client: Any, symbol: str, default_type: str) -
 
 
 class _PublicCCXTKlineConnector:
-    """Unauthenticated OHLCV source used when live trading connectors are down."""
+    """Unauthenticated OHLCV source for filling the local (spot) store.
 
-    def __init__(self, exchange: str):
+    Unlike the trading connector it does not follow ``<EXCHANGE>_DEFAULT_TYPE``:
+    with ``BINANCE_DEFAULT_TYPE=future`` that would return perp bars.
+    """
+
+    def __init__(self, exchange: str, market_type: str = SPOT):
         self.name = str(exchange or "").strip().lower()
-        self.default_type = _public_default_type(self.name)
+        self.default_type = _normalize_market_type(market_type)
         self._client: Any = None
         self._markets_loaded = False
 
@@ -304,6 +317,15 @@ class HistoricalDataManager:
         if not connector:
             logger.warning(
                 f"Exchange connector unavailable for {exchange}; using public ccxt OHLCV client"
+            )
+            public_connector = _PublicCCXTKlineConnector(exchange)
+            connector = public_connector
+        elif connector_market_type(connector) != SPOT:
+            # The store under `exchange` is spot; a futures-mode trading
+            # connector would fill it with perp bars.
+            logger.info(
+                f"{exchange} trading connector serves {connector_market_type(connector)} bars; "
+                "downloading spot bars with the public ccxt OHLCV client"
             )
             public_connector = _PublicCCXTKlineConnector(exchange)
             connector = public_connector

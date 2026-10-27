@@ -169,7 +169,7 @@ python scripts/collect_coinglass_macro.py                # 市场指标
   - 22 个（IMX、MEME、PIXEL、BOME、W、EIGEN 等）在 2026-06-01 至 06-05 有 26–111 根与归档和实时接口都不符，也不是 ±8h 或永续价，原因没查出来；
 - 45 个 `unverified_segments_remain` 的现货 1h 修复队列文件、已退市序列：没碰；
 - 日线（1d）单行日分区：守护要求至少 3 根不同蜡烛，单行永远过不了；主文件 1d 已认证并每日补尾，读取时会合并，不影响使用；
-- AAVE / OP / RUNE / SUI 现货 15m 在 10/17–10/20 的分区存的是 USD-M 永续价格（整天与永续归档逐根吻合、与现货不符），是场所污染不是时区，没改；
+- AAVE / OP / RUNE / SUI 现货 15m 在 10/17–10/20 的分区存的是 USD-M 永续价格（整天与永续归档逐根吻合、与现货不符），是场所污染不是时区，没改；10/27 全库扫描：131 个现货序列（81 个币，5m/15m/1m/1h，集中在 7–10 月）共约 34 万根是永续价，写入路径已修、存量未改，见 [KLINE_VENUE_POLLUTION_2026-10-27.md](KLINE_VENUE_POLLUTION_2026-10-27.md)；
 - 另有一批币在币安现货从未上市（AKE、BTW、CC、M、RATS、SATS、UB、VELVET）或指数类永续（ALL、BTCDOM），本地只有空壳目录，没有缺数据。
 
 遇到新的“补数几乎全报错”：先看日志里的 `fill errors:` 一行（10/24 起会打印最常见的错误文案）。含 `Unverified parquet timezone` 就是这个守护，重跑上面的脚本即可（已认证的文件会跳过）：
