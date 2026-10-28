@@ -176,7 +176,7 @@ python scripts/repair_kline_venue_pollution.py rollback --run <计划目录>/run
 
 回滚：`python scripts/repair_kline_venue_pollution.py rollback --run data/research/kline_venue_repair_20261027/plan_20261027T150432Z/run_20261027T231425Z`。
 
-## 移出没有现货的永续行：试运行（待审，未写入）
+## 移出没有现货的永续行（10/28 01:06 UTC 已执行）
 
 `plan --mode remove-perp-only --days-file polluted_days_20261027T135305Z.jsonl` → `data/research/kline_venue_repair_20261027/plan_20261027T232642Z/`。
 
@@ -199,11 +199,17 @@ python scripts/repair_kline_venue_pollution.py rollback --run <计划目录>/run
 - 成交量为 0 的 1,643 行（AKT 15m 主文件 05-11–05-21、六个币 1h 主文件 06-01–06-05）价格是永续、没有成交量，像是 Coinglass 价格历史兜底写进来的，不是共用连接器。
 - 复核：每一行要删的价格逐值等于永续归档、那天现货归档一行都没有；没有重复行。读取函数在这些日子返回的行 19,523 → 29，可删行 19,494 → 0。没有被闸门挡住的日子。预检（不写）：22 个序列全部可写。
 
+**执行（用户审过后）：** 执行前重跑预检，22 个序列仍全部可写；记录 `plan_20261027T232642Z/run_20261028T010654Z/`。22 个序列全部 `complete`，没有 stale；22 个文件执行后 sha256 全部等于计划值，这些文件合计 19,523 行 → 29 行（删 19,494 行）；包旁边没有残留锁文件（主文件旁的 `.lock` 是全库每个主文件都有的常驻锁）。
+
+`verify`（`verify_20261028T010709Z.csv`）：125 个日子读取函数指纹**全部**等于计划的“修复后”指纹，可删行 0，读取函数在这些日子共返回 29 行（都是上面说的残留行）。
+
+回滚：`python scripts/repair_kline_venue_pollution.py rollback --run data/research/kline_venue_repair_20261027/plan_20261027T232642Z/run_20261028T010654Z`。
+
 ## 需要人决定的
 
 - **修复之后新写进去的永续行。** 修复执行时网页服务还没重启，仍会往 BTC 1m 最近几天写永续价；10-27 及以后的行要等官方日归档发布后重新扫描（`scan_kline_venue_pollution.py --confirm`）、重新计划。
 - **存成本地时钟的永续行**（约 76.7 万行，2026-01 到 08，DOT/BTC/ETH 1m 最多）和两轮被闸门挡住的 317 个文件×日（其中 951 根在存储时刻就等于永续，包括 FET/JTO/ORDI/RENDER 主文件里来源不明的几天）：交给时区修复，或单独决定。
-- **币安现货当天没有 K 线的永续行**（19,494 行，AKE、AKT、BTW、DRIFT、GOAT、HYPE、M、MEW、POPCAT、RATS、SATS、UB、VELVET、XMR、ZETA）：没有现货可换，删除、挪去 `binance_futures/` 还是保留，需要决定。
+- **币安现货当天没有 K 线的永续行**（19,494 行，AKE、AKT、BTW、DRIFT、GOAT、HYPE、M、MEW、POPCAT、RATS、SATS、UB、VELVET、XMR、ZETA）：10/28 已从现货库删除（见上节），没写进 `binance_futures/`；要不要把 5m/15m 写进期货库另行决定。删完后 21 个现货序列各剩 1–3 行未收完的永续样 K 线，要不要一并清掉也待定。
 - **跨场所兜底。** `run_download_historical_data` 在 Binance 原生下载失败时，会把 Gate 的 K 线、Coinglass 的价格历史以 `binance` 写进库（提示文案里写明了“已使用 Gate/Coinglass 补齐”）。这是设计上的选择，没动；如果库要严格等于币安现货，应该去掉或改存别的命名空间。
 - **策略在内存里拼接现货历史和永续最新几根。** 修复只管不写库；策略看到的序列尾部仍是永续价，属于信号口径问题。
 - **还在跑旧代码的进程。** 网页服务 10/27 07:52 启动，没有这次修复，重启前数据页图表刷新仍会把永续价写进现货库。按要求没有重启。
