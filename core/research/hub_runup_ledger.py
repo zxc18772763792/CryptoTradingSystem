@@ -166,9 +166,16 @@ class Market:
             raise ValueError("unsupported public endpoint")
         if self.calls >= self.max_calls:
             raise RuntimeError("request bound reached for this cycle")
+        import requests
         self.calls += 1
-        requested = now_utc()
-        response = self.session.get(BASE + path, params=params, timeout=(5, 20))
+        for attempt in range(3):  # transport drops (proxy SSL EOF, resets) only; refusals are never retried
+            requested = now_utc()
+            try:
+                response = self.session.get(BASE + path, params=params, timeout=(5, 20))
+                break
+            except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                if attempt == 2:
+                    raise
         received = now_utc()
         if response.status_code in (403, 418, 429):
             raise RuntimeError(f"HTTP {response.status_code}: refused, not retried")
@@ -469,7 +476,10 @@ class Ledger:
             try:
                 rt["clock"] = market.clock(3)
             except Exception as exc:
-                rt["clock"] = {"ok": False, "checked_at": now.isoformat(), "error": type(exc).__name__}
+                # an unreachable time endpoint is not a bad clock: the last good reading stays valid for
+                # CLOCK_MAX_AGE, after which receipts are marked clock_unverified
+                rt["clock_error"] = {"at": now.isoformat(), "type": type(exc).__name__}
+                rt.setdefault("clock", {"ok": False, "checked_at": now.isoformat()})
         if not rt.get("universe") or now - utc(rt["universe"]["fetched_at"]) >= UNIVERSE_MAX_AGE:
             try:
                 rt["universe"] = market.universe()

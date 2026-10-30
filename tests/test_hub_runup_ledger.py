@@ -143,3 +143,28 @@ def test_flat_market_settles_at_expiry_and_gets_a_flat_control(tmp_path, monkeyp
     assert ctrl["n_post"] == 58 and ctrl["excess_post"] == pytest.approx(0.0, abs=1e-12)
     s = hub.summary(tmp_path)
     assert s["books"]["filtered"]["controlled"] == 1 and s["books"]["all"]["traded"] == 1
+
+
+def test_unreachable_time_endpoint_keeps_the_last_good_clock(tmp_path, monkeypatch):
+    import asyncio
+
+    led, rt = ledger_with(tmp_path, monkeypatch, now=T0 + timedelta(minutes=6))
+    rt["universe"]["fetched_at"] = T0.isoformat()
+    led.save_runtime(rt)
+
+    class Down(FakeMarket):
+        def __init__(self, *a, **k):
+            super().__init__()
+
+        def clock(self, samples=3):
+            raise ConnectionError("proxy dropped the TLS session")
+
+    async def busy(after_id):
+        raise PermissionError("reader.lock busy")
+
+    monkeypatch.setattr(hub, "Market", Down)
+    monkeypatch.setattr(hub, "telegram_fetch", busy)
+    report = asyncio.run(led.cycle())
+    assert report["telegram"] == "lock_busy"
+    after = led.runtime()
+    assert after["clock"] == {"ok": True, "checked_at": T0.isoformat()} and after["clock_error"]["type"] == "ConnectionError"
