@@ -1,7 +1,10 @@
 """Forward paper ledger for fading @next10xgem1 long calls. Records only; no orders.
 
-Pre-registered in ``config/research_protocols/next10xgem1_fade_24h_v1.json`` after the exploratory
-study docs/TELEGRAM_NEXT10XGEM1_FADE_STUDY_20261026.md. The news collector archives every first
+Pre-registered in ``config/research_protocols/next10xgem1_fade_24h_v2.json``; v1 (same rule, registered
+2026-10-26 after docs/TELEGRAM_NEXT10XGEM1_FADE_STUDY_20261026.md) lost 4 of 11 first calls to single
+proxy TLS drops at freeze time, so v2 retries transport errors, refreshes the perpetual list and the
+clock reading ahead of calls and keeps the last good ones. v1's byte-identical copy
+``next10xgem1_fade_v1_frozen`` only settles the positions it already held. The news collector archives every first
 receipt of the public preview t.me/s/next10xgem1 (archive-only, ``core.news.alastar_observation``).
 Each fresh unconditional long call that the frozen kol4-v1 labels (``core.research.kol4_call_labels``)
 find in a first receipt after activation becomes one paper short on the Binance USDT perpetual: the
@@ -32,10 +35,10 @@ from core.research import kol4_call_labels as labels
 
 ROOT = Path(__file__).resolve().parents[2]
 CHANNEL = "next10xgem1"
-TRACKER_ID = "next10xgem1_fade_24h_v1"
-PROTOCOL_ID = "next10xgem1_fade_24h_v1"
-OUTPUT = ROOT / "data/research/next10xgem1_fade_24h_v1"
-PROTOCOL = ROOT / "config/research_protocols/next10xgem1_fade_24h_v1.json"
+TRACKER_ID = "next10xgem1_fade_24h_v2"
+PROTOCOL_ID = "next10xgem1_fade_24h_v2"
+OUTPUT = ROOT / "data/research/next10xgem1_fade_24h_v2"
+PROTOCOL = ROOT / "config/research_protocols/next10xgem1_fade_24h_v2.json"
 LABELS = Path(labels.__file__)
 DEV_HISTORY = Path.home() / ".crypto_trading_system/research/telegram_new_kols_20261025/next10xgem1_history.json"
 ELIGIBLE_LABELS = ("trade_plan", "direct_call")
@@ -59,13 +62,18 @@ NULL_DAYS = 30
 UNAVAILABLE_AFTER = timedelta(days=7)
 BOUNDARY_MS = 60_000
 UNIVERSE_MAX_AGE = timedelta(hours=6)
+UNIVERSE_FALLBACK_MAX_AGE = timedelta(days=7)
+REFRESH_RETRY = timedelta(minutes=5)
+CLOCK_EVERY = timedelta(minutes=5)
+CLOCK_MAX_AGE = timedelta(minutes=10)
+TRANSPORT_ATTEMPTS = 3
 POLL_SECONDS = 15
 KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 FUNDING_URL = "https://fapi.binance.com/fapi/v1/fundingRate"
 TIME_URL = "https://fapi.binance.com/fapi/v1/time"
 INFO_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
 IMPLEMENTATION_RULES = {
-    "version": "next10xgem1-fade-20261026",
+    "version": "next10xgem1-fade-20261030-v2",
     "entry": "next 5m open at least 60s after max(first receipt, freeze commit)",
     "entry_price": "official 5m kline open at the planned entry; a freeze committed after it is recorded as missed",
     "maximum_entry_delay_after_publication_minutes": 30,
@@ -76,6 +84,11 @@ IMPLEMENTATION_RULES = {
     "zero_trade_bars": "kept: an official bar without trades still carries the exchange's OHLC",
     "path_gap": "a missing 5m bar inside the hold leaves the settlement unavailable; retried, never filled",
     "ignored_first_receipt_reasons": ["visible_edit"],
+    "transport_retries": "each public read retries a proxy/TLS drop, reset or timeout up to 3 attempts; HTTP refusals are not retried",
+    "universe_refresh": "refreshed every pass once older than 6h (failed refreshes retried after 5 min); a freeze uses the newest list, falling back to one up to 7 days old",
+    "clock_cache": "5-read clock check every 5 min; a freeze uses the last reading if it is ok and at most 10 min old",
+    "clock_failure_reasons": {"clock_gate_failed": "offset or round trip beyond the limits",
+                              "clock_unreachable": "no reading within the last 10 min"},
 }
 
 
@@ -236,9 +249,16 @@ class PublicMarketData:
         if self.failed or self.calls >= self.max_calls:
             raise RuntimeError("Public data pass stopped or request bound reached")
         self.calls += 1
-        requested = now_utc()
+        import requests
         try:
-            response = self.session.get(url, params=params, timeout=(5, 20))
+            for attempt in range(TRANSPORT_ATTEMPTS):  # drops only; refusals and bad bodies are never retried
+                requested = now_utc()
+                try:
+                    response = self.session.get(url, params=params, timeout=(5, 20))
+                    break
+                except (requests.exceptions.SSLError, requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                    if attempt == TRANSPORT_ATTEMPTS - 1:
+                        raise
             response.raise_for_status()
             if len(response.content) > 4 * 1024 * 1024:
                 raise ValueError("Public response exceeds evidence bound")
@@ -513,15 +533,38 @@ class Journal:
         return None
 
     def universe(self, state: Dict[str, Any], provider_factory) -> Optional[Dict[str, Any]]:
+        """Newest TRADING list; a failed refresh keeps the previous list for up to 7 days."""
         cached = state.get("universe")
-        if cached and 0 <= (now_utc() - _utc(cached["fetched_at_utc"])).total_seconds() <= UNIVERSE_MAX_AGE.total_seconds():
+        age = (now_utc() - _utc(cached["fetched_at_utc"])) if cached else None
+        if age is not None and timedelta(0) <= age <= UNIVERSE_MAX_AGE:
             return cached
-        try:
-            fresh = provider_factory().universe()
-        except (ValueError, KeyError, OSError, RuntimeError, TypeError):
-            return None
-        state["universe"] = fresh
-        return fresh
+        tried = state.get("universe_attempt_at_utc")
+        if not tried or now_utc() - _utc(tried) >= REFRESH_RETRY or age is None or age > UNIVERSE_FALLBACK_MAX_AGE:
+            state["universe_attempt_at_utc"] = now_utc().isoformat()
+            try:
+                state["universe"] = provider_factory().universe()
+                return state["universe"]
+            except (ValueError, KeyError, OSError, RuntimeError, TypeError) as exc:
+                state.setdefault("errors", []).append({"at": now_utc().isoformat(), "stage": "universe",
+                                                       "type": type(exc).__name__})
+        return cached if age is not None and timedelta(0) <= age <= UNIVERSE_FALLBACK_MAX_AGE else None
+
+    def clock(self, state: Dict[str, Any], provider_factory, force: bool = False) -> Optional[Dict[str, Any]]:
+        """Last clock reading if it is at most 10 min old; refreshed every 5 min, or now when forced and not ok."""
+        cached = state.get("last_clock_check")
+        age = (now_utc() - _utc(cached["checked_at_utc"])) if cached else None
+        usable = bool(cached) and age is not None and timedelta(0) <= age <= CLOCK_MAX_AGE
+        if age is None or age >= CLOCK_EVERY or (force and not (usable and cached.get("ok"))):
+            tried = state.get("clock_attempt_at_utc")
+            if force or not tried or now_utc() - _utc(tried) >= timedelta(minutes=1):
+                state["clock_attempt_at_utc"] = now_utc().isoformat()
+                try:
+                    cached = provider_factory().clock_check()
+                    state["last_clock_check"], usable = cached, True
+                except (ValueError, KeyError, OSError, RuntimeError) as exc:
+                    state.setdefault("errors", []).append({"at": now_utc().isoformat(), "stage": "clock",
+                                                           "type": type(exc).__name__})
+        return cached if usable else None
 
     def sync(self, state: Dict[str, Any], provider_factory) -> List[Dict[str, Any]]:
         """Freeze every eligible call first received live after activation; other posts are counted only."""
@@ -578,16 +621,10 @@ class Journal:
                 reasons.append(gate)
             clock = None
             if not reasons:
-                cached = state.get("last_clock_check")
-                if cached and 0 <= (now_utc() - _utc(cached["checked_at_utc"])).total_seconds() <= 120 and cached.get("ok"):
-                    clock = cached
-                else:
-                    try:
-                        clock = provider_factory().clock_check()
-                        state["last_clock_check"] = clock
-                    except (ValueError, KeyError, OSError, RuntimeError):
-                        clock = {"ok": False}
-                if not clock.get("ok"):
+                clock = self.clock(state, provider_factory, force=True)
+                if clock is None:
+                    reasons.append("clock_unreachable")
+                elif not clock.get("ok"):
                     reasons.append("clock_gate_failed")
             frozen = now_utc()
             published, received = _utc(first["published_at_utc"]), _utc(first["observed_at_utc"])
@@ -756,6 +793,9 @@ class Tracker:
             state = runtime(self.journal.output)
             records, _ = self.journal._state()
             if records:
+                # Keep the list and the clock warm so a call never depends on one fetch at freeze time.
+                self.journal.universe(state, self.factory)
+                self.journal.clock(state, self.factory)
                 actions = self.journal.sync(state, self.factory) + self.journal.tick(self.factory, state)
                 state["last_actions"] = [{"kind": a["kind"], "event_id": a["payload"].get("event_id")} for a in actions]
             state.update(last_tick_at_utc=now_utc().isoformat(), continuous_runner=self.managed, process_id=os.getpid(),
@@ -818,7 +858,7 @@ def summary(journal: Optional[Journal] = None) -> Dict[str, Any]:
     return {
         "retirement": {"n": len(done), "min_n": TARGET_N, "mean_pct": _mean(primary), "ci90_pct": None, "verdict": verdict,
                        "label": "待协议复核" if verdict == "review_due" else "积累新样本" if records else "未激活",
-                       "reason": "next10xgem1 首次收件的无条件做多喊单，下一5分钟开盘做空永续，固定持有24小时；"
+                       "reason": "v2（10/30 起；v1 因代理断连漏单停收）：next10xgem1 首次收件的无条件做多喊单，下一5分钟开盘做空永续，固定持有24小时；"
                                  "主统计为较入场前30天同币逐小时起点24h做空精确均值的超额（价格口径、20bps）；"
                                  f"245笔无效性检查，490笔复核。{('当前门槛：' + gate) if gate else ''}", "clusters": None},
         "started_at": activated, "updated_at": stamp or activated, "runner_active": running, "continuous_runner": running,
@@ -884,3 +924,38 @@ async def worker(stop_event: asyncio.Event, heartbeat=None) -> None:
             state = runtime(tracker.journal.output)
             state["continuous_runner"] = False
             tracker.save(state)
+
+
+async def settle_retired_v1(stop_event: asyncio.Event, heartbeat=None) -> None:
+    """v1 takes no new calls after the v2 migration; its byte-identical copy settles what it already holds."""
+    from core.research import next10xgem1_fade_v1_frozen as v1
+    tracker = v1.Tracker(managed=True)
+    output = tracker.journal.output
+
+    def one_pass() -> None:
+        with _archive_lock(output / "pass"):
+            state = v1.runtime(output)
+            actions = tracker.journal.tick(tracker.factory, state)
+            state.update(last_tick_at_utc=now_utc().isoformat(), continuous_runner=True, process_id=os.getpid(),
+                         last_pass_error=None, live_orders=False, retired_to=PROTOCOL_ID,
+                         last_actions=[{"kind": a["kind"], "event_id": a["payload"].get("event_id")} for a in actions])
+            tracker.save(state)
+
+    with _archive_lock(output / "owner"):
+        while not stop_event.is_set():
+            ok = True
+            try:
+                await asyncio.to_thread(one_pass)
+            except Exception as exc:  # noqa: BLE001 - recorded, retried next pass
+                ok = False
+                state = v1.runtime(output)
+                state.setdefault("errors", []).append({"at": now_utc().isoformat(), "type": type(exc).__name__,
+                                                       "reason": str(exc)[:180]})
+                state["last_pass_error"] = type(exc).__name__
+                tracker.save(state)
+            if heartbeat:
+                heartbeat(ok)
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
+                pass

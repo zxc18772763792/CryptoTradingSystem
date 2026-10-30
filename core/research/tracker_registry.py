@@ -44,6 +44,20 @@ def _next10xgem1_fade() -> Dict[str, Any]:
     return summary()
 
 
+def _next10xgem1_fade_v1() -> Dict[str, Any]:
+    """Retired at the v2 migration: its frozen copy only settles what it held, so it never waits for calls."""
+    from core.research.next10xgem1_fade_v1_frozen import summary
+    out = summary()
+    held = (out.get("forward_open") or 0) + (out.get("forward_waiting") or 0)
+    out["tracker_status_label"] = "已停收 · 持仓结算中" if held else "已停收 · 结算完毕"
+    return out
+
+
+def _alastartrader1() -> Dict[str, Any]:
+    from core.research.alastartrader1_ledger import registry_summary
+    return registry_summary()
+
+
 def _hub_runup() -> Dict[str, Any]:
     from core.research.hub_runup_ledger import registry_summary
     return registry_summary()
@@ -122,12 +136,24 @@ TRACKERS: List[Dict[str, Any]] = [
      "rule_key": "cryptoquant_alert_shadow_v1",
      "rule": "@cryptoquant_alert 公开页首次收件的 BTC 交易所流向告警（流入／矿工转入做空，大额流出做多），收件及冻结后≥60秒下一5分钟开盘，1/4/24/72小时退出同时冻结，24h 为主周期；较入场前30天同向精确均值的超额，24小时内首条告警才计入统计。模板外文字只计数不交易。仅记录，不触发开仓。",
      "load": _cryptoquant_alert},
-    {"id": "next10xgem1_fade_24h_v1", "name": "next10xgem1 喊单反向 · 做空24h（纸面）", "group": "Telegram信号", "unit": "笔",
-     "rule_key": "next10xgem1_fade_24h_v1",
+    {"id": "next10xgem1_fade_24h_v2", "name": "next10xgem1 喊单反向 · 做空24h v2（纸面）", "group": "Telegram信号", "unit": "笔",
+     "rule_key": "next10xgem1_fade_24h_v2",
      "rule": "@next10xgem1 公开页首次收件的无条件做多喊单（冻结的 kol4-v1 文字规则），收件及冻结后≥60秒下一5分钟开盘做空币安永续，"
              "固定持有24小时；另记50%灾难止损版。每笔1,000 USDT 名义、最多同时8笔、同币一笔；较入场前30天同币逐小时起点"
-             "24h做空均值的超额为主统计，245笔无效性检查、490笔复核。仅纸面，不下单。",
+             "24h做空均值的超额为主统计，245笔无效性检查、490笔复核。v2 规则同 v1，只修代理断连漏单：请求重试、"
+             "交易对清单和时钟读数提前刷新并保留上一份。仅纸面，不下单。",
      "load": _next10xgem1_fade},
+    {"id": "next10xgem1_fade_24h_v1", "name": "next10xgem1 喊单反向 v1（已停收，仅结算持仓）", "group": "Telegram信号", "unit": "笔",
+     "rule_key": "next10xgem1_fade_24h_v1",
+     "rule": "规则同 v2。10/30 因 11 个首次喊单里 4 个被代理断连跳过而停收，迁移到 v2；已持有的仓位由字节相同的冻结副本照原规则结算，"
+             "结果单列，不并入 v2 样本。",
+     "load": _next10xgem1_fade_v1},
+    {"id": "alastartrader1_as_written_v1", "name": "@alastartrader1（冒充号）· 按原文执行（纸面）", "group": "Telegram信号",
+     "unit": "笔", "rule_key": "alastartrader1_as_written_v1",
+     "rule": "冒充 Alastar 的 @alastartrader1 公开页首次收件（10分钟内）的结构化喊单，冻结后下一根1分钟开盘按原文挂单："
+             "各止盈档平均分仓、原文止损，止盈1或止损先到即撤单，72小时未成交作废、最长14天，不加杠杆，另记原文杠杆的爆仓结果。"
+             "同币一笔；入场45天后算同币同几何对照。只作观察，不是可交易策略。",
+     "load": _alastartrader1},
     {"id": "hub_runup_filter_v1", "name": "CRYPTO SIGNALS HUB · 按原文执行，过滤追涨单（纸面）", "group": "Telegram信号",
      "unit": "笔", "rule_key": "hub_runup_filter_v1",
      "rule": "HUB 私密频道首次收件（3分钟内）的市价信号，冻结后下一根1分钟开盘入场，按原文全部止盈档平均分仓、原文止损、"
@@ -247,7 +273,13 @@ def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
                 "gross_notional_multiplier": 1,
                 "cost_scope": "主统计双方均扣20bps、均忽略资金费；实际含资金费收益、不过滤账本与原文杠杆结果另列。入场45天后才有对照，样本为空时为空，不是0%",
                 "is_paper": True}
-    if tid == "next10xgem1_fade_24h_v1":
+    if tid == "alastartrader1_as_written_v1":
+        return {"metric_kind": "net_return", "metric_label": "不加杠杆净收益", "metric_unit_label": "%/笔",
+                "return_basis": "single_leg_notional", "basis_label": "该笔成交部分的名义本金（不加杠杆）；非账户收益",
+                "gross_notional_multiplier": 1,
+                "cost_scope": "往返20bps；含资金费与原文杠杆爆仓结果另列。未成交、发帖时已过止盈的单不计入。样本为空时为空，不是0%",
+                "is_paper": True}
+    if tid in ("next10xgem1_fade_24h_v1", "next10xgem1_fade_24h_v2"):
         return {"metric_kind": "excess_return", "metric_label": "相对入场前30天同币均值超额", "metric_unit_label": "百分点/笔",
                 "return_basis": "single_leg_notional", "basis_label": "该笔做空名义本金（1,000 USDT）；超额非账户收益",
                 "gross_notional_multiplier": 1,

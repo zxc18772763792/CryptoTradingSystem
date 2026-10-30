@@ -1,0 +1,52 @@
+{
+  "protocol_id": "alastartrader1_as_written_v1",
+  "registered_on": "2026-10-30",
+  "question": "What does a follower get from the structured calls of @alastartrader1 when each is executed as written from its first public receipt?",
+  "source_identity": {
+    "channel": "alastartrader1",
+    "is_alastar": false,
+    "evidence": [
+      "2026-10-22 review: the official Alastar profile's DM is @alastartrader (no 1); this channel sells VIP/PREMIUM access and 'recovery' deposit plans through @Albanwatts",
+      "posts 2049/2059 (deposit $500 earn $6,800), 2056 (VIP price list), 2060 ('$10K to $1M challenge, DM me')",
+      "post 2064 (BEAMX LONG 50x, entry 0.004040) went out in the same second as post 2066 ('BEAMX TP3 HIT +201%'); price was 0.00463, above every target, and TP3 had traded at 06:50 UTC"
+    ]
+  },
+  "receipt": {
+    "archive": "the news collector's first live receipt of the public preview https://t.me/s/alastartrader1 (data/research/telegram_observation/alastartrader1)",
+    "maximum_receipt_delay_seconds": 600,
+    "maximum_freeze_delay_after_receipt_seconds": 600,
+    "collector_exclusions": "any first-receipt exclusion other than a visible edit (late first observation, truncated text, media only) excludes the post",
+    "clock": "a Binance server-time reading (3 reads, minimum round trip, |offset| <= 2 s, round trip <= 10 s) taken within 10 minutes of the receipt; refreshed every 5 minutes"
+  },
+  "signal": {
+    "rules_module": "core/research/kol_bracket_engine.py (frozen hub-v1 bracket rules, imported unchanged)",
+    "call": "LONG or SHORT (exactly one) in the first three lines, a symbol, and a TP line",
+    "eligible_completeness": ["full_bracket", "targets_without_stop"],
+    "entry_types": ["limit", "market"],
+    "not_signals": "recaps ('TP3 HIT'), analyses without a side in the header, promotions, media-only posts"
+  },
+  "universe": "Binance USD-M USDT perpetual with status TRADING (1000x prefixes resolved) in the newest exchangeInfo snapshot, refreshed every 6 hours; a failed refresh keeps the previous snapshot for up to 7 days",
+  "execution": {
+    "module": "core/research/hub_runup_ledger.py simulate() (imported unchanged)",
+    "activation": "next official 1-minute open after the freeze",
+    "entries": "written limit legs; a leg already through the market fills at the activation open; a market entry fills at the activation open",
+    "cancel": "unfilled legs are cancelled when TP1 or the stop trades first, after TP1, or after 72 hours",
+    "targets": "every written target an equal slice of the filled size",
+    "stop": "the written stop",
+    "maximum_hold_days": 14,
+    "bars": "1-minute for two hours, then 5-minute with 1-minute replay of ambiguous bars",
+    "leverage": "unlevered for the main result; the written leverage's isolated liquidation path is recorded alongside",
+    "round_trip_cost_bps": 20,
+    "funding": "actual settlements from the latest-N public fundingRate query; unproven coverage is recorded as unavailable",
+    "one_position_per_coin": true
+  },
+  "control": "45 days after entry: the same relative bracket on the same coin on 1h bars at 58 starts every 12 hours over days 1-30 after entry (and 30 days before), price only at 20 bps; excess = signal on 1h minus the post mean",
+  "sample": {
+    "review_at_traded": 60,
+    "maximum_months": 12,
+    "futility_stop": false,
+    "role": "descriptive monitoring of an impersonator channel; no pass rule, never a strategy to trade"
+  },
+  "execution_authorized": false,
+  "promotion_allowed": false
+}

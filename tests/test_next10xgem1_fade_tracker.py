@@ -378,3 +378,123 @@ def test_the_module_never_names_an_order_or_account_endpoint():
     source = fade.Path(fade.__file__).read_text(encoding="utf-8")
     for forbidden in ("/fapi/v1/order", "/fapi/v2/account", "/fapi/v1/leverage", "create_order", "api_key", "apiKey"):
         assert forbidden not in source
+
+
+# ----------------------------------------------------------------------------------------- v2 operations
+def test_a_failed_list_refresh_keeps_the_previous_list_instead_of_skipping_the_call(world):
+    w = world
+    activate(w)
+    assert post(w, CALL)[0]["payload"]["primary_sample"] is True
+    w.advance(25 * 3600)                                                     # list is now older than 6 hours
+
+    def dropped():
+        raise RuntimeError("Official public data unavailable (SSLError)")
+
+    w.market.universe = dropped
+    event = post(w, "#PEPE buy and hold big Move soon")[0]["payload"]
+    assert event["symbol"] == "1000PEPEUSDT" and event["primary_sample"] is True
+    assert any(e.get("stage") == "universe" for e in w.state["errors"])
+    w.state["universe"]["fetched_at_utc"] = (w.clock["now"] - timedelta(days=8)).isoformat()
+    stale = post(w, "BTCUSDT buy and hold big Move soon")[0]["payload"]
+    assert stale["exclusion_reasons"] == ["universe_unavailable"]          # nothing usable within 7 days
+
+
+def test_tick_keeps_the_list_and_clock_warm_and_a_freeze_reuses_a_recent_clock_reading(world):
+    w = world
+    activate(w)
+    tracker = fade.Tracker(w.journal, w.provider)
+    tracker.tick()
+    state = fade.runtime(w.journal.output)
+    assert state["universe"]["symbols"] and state["last_clock_check"]["ok"] is True
+    calls = []
+
+    def dropped():
+        calls.append(1)
+        raise RuntimeError("Official public data unavailable (SSLError)")
+
+    w.market.clock_check = dropped
+    w.state = state
+    w.clock["now"] += timedelta(minutes=3)
+    assert post(w, CALL)[0]["payload"]["primary_sample"] is True              # 3-minute-old reading still valid
+    w.advance(25 * 3600)
+    w.state["universe"]["fetched_at_utc"] = w.clock["now"].isoformat()
+    late = post(w, "#PEPE buy and hold big Move soon")[0]["payload"]
+    assert late["exclusion_reasons"] == ["clock_unreachable"] and calls
+    w.market.clock_check = lambda: {"ok": False, "checked_at_utc": fade.now_utc().isoformat()}
+    bad = post(w, "BTCUSDT buy and hold big Move soon")[0]["payload"]
+    assert bad["exclusion_reasons"] == ["clock_gate_failed"]
+
+
+def test_transport_drops_are_retried_but_refusals_are_not(tmp_path, monkeypatch):
+    import requests
+
+    class Response:
+        def __init__(self, status, body=b'{"serverTime": 1}'):
+            self.status_code, self.content = status, body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise requests.exceptions.HTTPError(str(self.status_code))
+
+        def json(self):
+            return json.loads(self.content)
+
+    market = fade.PublicMarketData(tmp_path)
+    attempts = []
+
+    def flaky(url, params=None, timeout=None):
+        attempts.append(url)
+        if len(attempts) < 3:
+            raise requests.exceptions.SSLError("UNEXPECTED_EOF_WHILE_READING")
+        return Response(200)
+
+    monkeypatch.setattr(market.session, "get", flaky)
+    rows, _, _, _ = market._fetch(fade.TIME_URL, {})
+    assert rows == {"serverTime": 1} and len(attempts) == 3 and market.calls == 1
+    refused = fade.PublicMarketData(tmp_path)
+    attempts.clear()
+    monkeypatch.setattr(refused.session, "get", lambda url, params=None, timeout=None: attempts.append(url) or Response(403))
+    with pytest.raises(RuntimeError, match="unavailable"):
+        refused._fetch(fade.TIME_URL, {})
+    assert len(attempts) == 1
+
+
+def test_the_retired_v1_copy_is_byte_identical_and_only_settles(tmp_path, monkeypatch):
+    import asyncio
+    from core.research import next10xgem1_fade_v1_frozen as v1
+    assert fade.sha(fade.Path(v1.__file__).read_bytes()) == \
+        "f17854a9cd7c1ada7c1e7328f8a64254881d5088e5252238e5ceef09b7dfcc17"   # hash pinned in the v1 journal
+    assert v1.PROTOCOL_ID == "next10xgem1_fade_24h_v1" and fade.PROTOCOL_ID == "next10xgem1_fade_24h_v2"
+    calls = []
+
+    class Journal:
+        output = tmp_path
+
+        def tick(self, factory, state):
+            calls.append("tick")
+            return []
+
+        def sync(self, state, factory):
+            raise AssertionError("a retired journal must not freeze new calls")
+
+    class Retired:
+        def __init__(self, managed=False):
+            self.journal, self.factory = Journal(), None
+
+        def save(self, state):
+            (tmp_path / "runtime.json").write_text(json.dumps(state), encoding="utf-8")
+
+    monkeypatch.setattr(v1, "Tracker", Retired)
+    beats = []
+
+    async def run():
+        stop = asyncio.Event()
+        task = asyncio.create_task(fade.settle_retired_v1(stop, heartbeat=beats.append))
+        while not beats:
+            await asyncio.sleep(0.01)
+        stop.set()
+        await asyncio.wait_for(task, 2)
+
+    asyncio.run(run())
+    assert calls == ["tick"] and beats == [True]
+    assert json.loads((tmp_path / "runtime.json").read_text(encoding="utf-8"))["retired_to"] == fade.PROTOCOL_ID

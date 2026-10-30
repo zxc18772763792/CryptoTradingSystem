@@ -1,0 +1,118 @@
+{
+  "protocol_id": "next10xgem1_fade_24h_v2",
+  "registered_on": "2026-10-30",
+  "supersedes": {
+    "protocol_id": "next10xgem1_fade_24h_v1",
+    "registered_on": "2026-10-26",
+    "reason": "v1 recorded 4 of its 11 distinct first calls (BAND, CETUS, BEAMX as universe_unavailable; PUNDIX as clock_gate_failed) as skipped because one exchangeInfo or server-time read failed on a proxy TLS drop at freeze time, with no retry and no fallback to the previous perpetual list. The rule being tested is unchanged; only these operational defects are fixed.",
+    "v1_at_migration": "4 completed primary events, 3 open positions; v1 takes no new calls and its byte-identical module copy core/research/next10xgem1_fade_v1_frozen.py settles the open ones. v1 and v2 results are reported separately, never pooled into the v2 decision sample."
+  },
+  "hypothesis": "A fresh unconditional long call from the Telegram channel @next10xgem1 is followed by a 24h price path worse than the same coin's recent 24h paths: shorting the Binance USDT perpetual at the first 5m open after the call and holding 24h beats the same coin's pre-entry 30-day hourly-start 24h short mean.",
+  "study": {
+    "doc": "docs/TELEGRAM_NEXT10XGEM1_FADE_STUDY_20261026.md",
+    "commit": "706fdee",
+    "in_sample": {
+      "trades": 318,
+      "mean_net_pct": 0.94,
+      "excess_vs_same_coin_null_pp": 1.55,
+      "excess_week_cluster_ci95_pp": [
+        -0.04,
+        3.18
+      ],
+      "sd_pct": 13.8
+    },
+    "status": "post-hoc hypothesis from 180 days of surviving posts; this forward ledger is its first independent test"
+  },
+  "source": {
+    "channel": "next10xgem1",
+    "receipt": "first live receipt of the public preview https://t.me/s/next10xgem1, archived by the news collector (archive-only: no news item, no AI call)",
+    "first_receipt_max_delay_after_publication_seconds": 600,
+    "collector_health": "four latest live polls of the channel, each gap <= 600 s, latest no older than 600 s"
+  },
+  "labels": {
+    "rule_version": "kol4-v1",
+    "module": "core/research/kol4_call_labels.py",
+    "module_sha256": "166c7ed75515ab242b95fdcce6ca98d0ac931d0c45465d0f041afbeed29c16bf",
+    "copied_from": "scripts/research_telegram_new_kols.py at commit 1e9f9c1 (the code that sealed the 2026-10-25 labels)",
+    "eligible_labels": [
+      "trade_plan",
+      "direct_call"
+    ],
+    "conditional_calls": "excluded",
+    "side": "long calls only; each is faded with a short",
+    "text": "the first received revision only; later edits never rewrite a frozen label",
+    "development_sample": {
+      "file": "%USERPROFILE%/.crypto_trading_system/research/telegram_new_kols_20261025/next10xgem1_history.json",
+      "history_sha256": "06583438c9da6a21ea022bfa99c9f6c487f72bd6ce58b82fac148c786644cac9",
+      "posts": 1815,
+      "label_counts": {
+        "bias_view": 13,
+        "direct_call": 310,
+        "direction_without_symbol": 3,
+        "no_text": 8,
+        "other": 1116,
+        "recap_or_promo": 331,
+        "trade_plan": 34
+      }
+    }
+  },
+  "universe": "the call's ticker resolves (kol4-v1 resolve_symbol, 1000x prefixes included) to a Binance USD-M USDT perpetual with status TRADING in the newest exchangeInfo snapshot: refreshed every pass once older than 6 hours, and when a refresh fails the previous snapshot is used for up to 7 days",
+  "book": {
+    "name": "plain_24h",
+    "side": -1,
+    "entry": "first official 5m kline open at least 60 s after max(first receipt, freeze commit)",
+    "maximum_entry_delay_after_publication_minutes": 30,
+    "holding_hours": 24,
+    "exit": "official 5m open exactly 24h after entry",
+    "liquidation": "a 5m high >= 2x entry before exit is a -100% result (1x collateral)",
+    "round_trip_cost_bps": 20,
+    "stress_cost_bps": 80,
+    "notional_usdt_per_trade": 1000,
+    "max_open_positions": 8,
+    "one_position_per_coin": true
+  },
+  "secondary_book": {
+    "name": "catastrophe_stop_50",
+    "stop": "same entries; the first 5m bar whose high reaches 1.5x entry exits at that level, or at the bar's open if it opens beyond it, plus 0.5% slippage",
+    "role": "descriptive only; not part of the pass or futility rule"
+  },
+  "funding": "actual settlements between entry and exit from the latest-N public fundingRate query (no time-window parameters); a settlement within 60 s of either boundary counts only if adverse; unproven coverage is recorded as unavailable, never as zero",
+  "control": {
+    "null": "exact mean of every hourly-start 24h short on the same coin (same liquidation and stop rules, price-only, 20bps) whose window lies inside the 30 days before entry",
+    "minimum_null_starts": 168,
+    "funding_in_null": false
+  },
+  "primary_statistic": "mean over primary-sample completed events of (plain_24h price-only net at 20bps minus the plain null mean)",
+  "sample": {
+    "target_completed": 490,
+    "power": "80% one-sided at 5% for +1.55pp at sd 13.8%",
+    "futility_at": 245,
+    "futility_rule": "if the mean primary excess of the first 245 completed events is <= 0 the ledger stops taking new events",
+    "maximum_months": 24,
+    "early_stop_for_success": false,
+    "unavailable_after_days": 7
+  },
+  "pass_rule": [
+    "weekly block bootstrap one-sided 95% lower bound of the mean primary excess > 0",
+    "mean plain_24h net with funding > 0",
+    "mean primary excess without the single best event > 0",
+    "mean plain_24h price-only net at the 80bps stress cost > 0"
+  ],
+  "independence": "a call on a coin whose earlier position is still inside its 24h window, or a call arriving while 8 positions are open, is recorded as skipped and never settled",
+  "exclusions": [
+    "not a first live receipt within 600 s of publication, a truncated text, or a revision after first observation (a visible edit at first receipt is allowed, as in the study)",
+    "no TRADING USDT perpetual for the ticker",
+    "collector health failed, or no Binance clock reading within 10 minutes (clock_unreachable), or the reading is beyond the limits (clock_gate_failed)",
+    "planned entry more than 30 minutes after publication",
+    "a predeclared gate (futility, review, maximum duration) is active",
+    "a 5m price path with a missing bar for 7 days after the planned exit (recorded as unavailable and counted)"
+  ],
+  "execution_authorized": false,
+  "promotion_allowed": false,
+  "operational_changes_from_v1": [
+    "every public Binance read retries a proxy/TLS drop, connection reset or timeout up to 3 attempts; HTTP refusals (403/418/429) and invalid bodies are not retried",
+    "the perpetual list is refreshed ahead of calls on every pass, not only at freeze time",
+    "the clock check (5 reads, minimum round trip, |offset| <= 2 s, round trip <= 10 s) runs every 5 minutes; a freeze uses the last reading if it is at most 10 minutes old",
+    "a freeze without any clock reading in the last 10 minutes is excluded as clock_unreachable; a reading beyond the limits stays clock_gate_failed"
+  ]
+}

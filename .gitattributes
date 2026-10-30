@@ -2,3 +2,10 @@
 config/research_protocols/hub_runup_filter_v1.json -text
 core/research/hub_runup_ledger.py -text
 core/research/kol_bracket_engine.py -text
+
+# hash-pinned by the alastartrader1_as_written_v1 paper ledger: store and check out byte-for-byte
+config/research_protocols/alastartrader1_as_written_v1.json -text
+core/research/alastartrader1_ledger.py -text
+
+# hash-pinned by the next10xgem1_fade_24h_v2 paper ledger (stored as written: LF)
+config/research_protocols/next10xgem1_fade_24h_v2.json -text

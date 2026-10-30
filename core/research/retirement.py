@@ -50,6 +50,13 @@ RULES: Dict[str, Dict[str, Any]] = {
     "next10xgem1_fade_24h_v1": {"min_n": 490, "unit": "trade", "backtest_mean_pct": None,
                                 "decision_engine": "next10xgem1_fade_24h_v1", "futility_n": 245,
                                 "diagnostic_only": True},
+    # v2 (2026-10-30): same rule; transport retries and pre-refreshed list/clock after v1 lost 4/11 calls to proxy drops.
+    "next10xgem1_fade_24h_v2": {"min_n": 490, "unit": "trade", "backtest_mean_pct": None,
+                                "decision_engine": "next10xgem1_fade_24h_v2", "futility_n": 245,
+                                "diagnostic_only": True},
+    # @alastartrader1 (impersonator) calls executed as written: descriptive monitoring, review at 60 traded calls.
+    "alastartrader1_as_written_v1": {"min_n": 60, "unit": "trade", "backtest_mean_pct": None,
+                                     "decision_engine": "alastartrader1_as_written_v1", "diagnostic_only": True},
     # HUB as-written with the run-up filter: protocol-owned (hub_runup_filter_v1), 80-event futility / 160-event review.
     "hub_runup_filter_v1": {"min_n": 160, "unit": "trade", "backtest_mean_pct": None,
                             "decision_engine": "hub_runup_filter_v1", "futility_n": 80, "diagnostic_only": True},

@@ -2218,10 +2218,22 @@ async def _next10xgem1_fade_worker(stop_event: asyncio.Event) -> None:
     await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("next10xgem1_fade", success=ok))
 
 
+async def _next10xgem1_fade_v1_settle_worker(stop_event: asyncio.Event) -> None:
+    from core.research.next10xgem1_fade_tracker import settle_retired_v1
+
+    await settle_retired_v1(stop_event, heartbeat=lambda ok: _touch_runtime_task("next10xgem1_fade_v1_settle", success=ok))
+
+
 async def _hub_runup_ledger_worker(stop_event: asyncio.Event) -> None:
     from core.research.hub_runup_ledger import worker
 
     await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("hub_runup_ledger", success=ok))
+
+
+async def _alastartrader1_ledger_worker(stop_event: asyncio.Event) -> None:
+    from core.research.alastartrader1_ledger import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("alastartrader1_ledger", success=ok))
 
 
 async def _telegram_forward_worker(stop_event: asyncio.Event) -> None:
@@ -2293,6 +2305,16 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             # Idles until hub_runup_filter_v1 is activated; then a child-process cycle every 30 s
             # (Telethon read under reader.lock + settlement). Paper ledger only, never orders.
             "factory": lambda stop_event: _hub_runup_ledger_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "next10xgem1_fade_v1_settle": {
+            # v1 stopped taking calls at the v2 migration; this only settles the positions it already held.
+            "factory": lambda stop_event: _next10xgem1_fade_v1_settle_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "alastartrader1_ledger": {
+            # Idles until alastartrader1_as_written_v1 is activated; then a cycle every 30 s off the event loop.
+            "factory": lambda stop_event: _alastartrader1_ledger_worker(stop_event),
             "restart_on_failure": True,
         },
         "cusum_monitor": {
