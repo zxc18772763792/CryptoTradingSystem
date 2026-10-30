@@ -17,6 +17,7 @@ import gzip
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 import time
@@ -626,7 +627,11 @@ class Engine:
         w = min(w, self.qty)
         if w <= 0:
             return
-        self.pnl += self.p.side * (price / self.avg - 1) * w - COST * w
+        if why == "liquidated":
+            # isolated liquidation forfeits the whole margin of the remaining slice, not just the move to the liq price
+            self.pnl += -w / self._lev() - COST * w
+        else:
+            self.pnl += self.p.side * (price / self.avg - 1) * w - COST * w
         self.qty -= w
         self.events.append((str(t), why, price, w))
         if self.qty <= 1e-12:
@@ -634,10 +639,14 @@ class Engine:
             self.status = "closed"
             self.exit_reason, self.exit_time = why, t
 
+    def _lev(self):
+        # an unlevered short is still fully margined: it is wiped out when the price doubles
+        return self.p.liq_leverage or (1.0 if self.p.side < 0 else None)
+
     def _liq(self):
-        if not self.p.liq_leverage or self.avg is None:
+        L = self._lev()
+        if not L or self.avg is None:
             return None
-        L = self.p.liq_leverage
         return self.avg * (1 - self.p.side * (1 / L - MMR))
 
     def _adverse_level(self):
@@ -713,7 +722,7 @@ class Engine:
 
     def _intrabar(self, t, bar, bar_len):
         p = self.p
-        unfilled = [i for i, f in enumerate(self.leg_filled) if not f] if t < self.deadline else []
+        unfilled = [i for i, f in enumerate(self.leg_filled) if f is False] if t < self.deadline else []
         entry_hit = [i for i in unfilled if self._touch(bar, p.legs[i], False)]
         open_tps = [k for k, d in enumerate(self.tp_done) if not d]
         tp_hit = [k for k in open_tps if self._touch(bar, p.targets[k], True)]
@@ -745,7 +754,7 @@ class Engine:
             if adv is not None and self._beyond(o, adv, False):
                 self._exit(t, o, self.qty, self._adv_reason(adv))
                 return
-        unfilled = [i for i, f in enumerate(self.leg_filled) if not f] if t < self.deadline else []
+        unfilled = [i for i, f in enumerate(self.leg_filled) if f is False] if t < self.deadline else []
         # pre-entry cancels (TP1 first is the conservative order for entry+TP1)
         if not self.fills:
             tp1 = p.targets[0] if p.targets else None
@@ -835,37 +844,65 @@ def build_plan(sig: dict, ref: float, mult: float, leverage: float | None = None
     if sig.get("target_pct_margin") and not targets:
         lev = sig.get("leverage") or 10.0
         targets = [entry_ref * (1 + side * pct / 100 / lev) for pct in sig["target_pct_margin"]]
-    # sanity: price scale vs market
-    # Unit/scale errors only: a passive limit (long below / short above market) may rest far away,
-    # which is how Zetoshi writes deep "safety mode" entries; it then simply may not fill.
+    # Unit slips such as ETH "TP 1.7" for 1,700 or a stop with one zero missing: rescale a level by a
+    # power of ten only when that lands it near the activation price (what a human follower sees).
+    # Passive limit legs are never rescaled: a deep resting order is a legitimate instruction.
+    repaired = 0
+
+    def fix(x, anchor, powers=(3, -3)):
+        nonlocal repaired
+        if 0.2 < x / anchor < 5.0:
+            return x
+        for k in powers:
+            y = x * 10.0 ** k
+            if 0.67 < y / anchor < 1.5:
+                repaired += 1
+                return y
+        return None
+
+    fixed_legs = []
     for x in legs:
         passive = side * (ref - x) >= 0
-        if not ((0.2 < x / ref < 5.0) if passive else (0.5 < x / ref < 2.0)):
+        if passive and 0.2 < x / ref < 5.0:
+            fixed_legs.append(x)
+            continue
+        y = None if passive else fix(x, ref)
+        if y is None or not (0.5 < y / ref < 2.0):
             return None, "price_scale_mismatch"
-    for x in targets[:1] + ([stop] if stop else []):
-        if not (0.2 < x / entry_ref < 5.0):
-            return None, "price_scale_mismatch"
+        fixed_legs.append(y)
+    legs = fixed_legs
+    entry_ref = (np.mean(legs) if legs else ref)
+    targets = [fix(x, entry_ref) for x in targets]
+    # thousands written as decimals (HUB "1.7" for 1,700) for every level; a dropped/extra zero only on stops,
+    # since a target off by 10x can be a real instruction that just makes no sense (HUB AKE short, 07-15)
+    stop = fix(stop, entry_ref, (1, -1, 3, -3)) if stop else stop
+    if any(x is None for x in targets) or (sig["stop"] is not None and stop is None):
+        return None, "price_scale_mismatch"
     targets = sorted(targets, key=lambda x: side * x)
+    market = sig["entry_type"] == "market"
     if any(side * (tp - entry_ref) <= 0 for tp in targets):
-        return None, "target_on_wrong_side_of_entry"
+        # for a market order the reference is the price a follower actually gets: the move already happened
+        return None, "stale_target_passed" if market else "target_on_wrong_side_of_entry"
     if stop is not None and side * (entry_ref - stop) <= 0:
-        return None, "stop_on_wrong_side_of_entry"
+        return None, "stale_stop_passed" if market else "stop_on_wrong_side_of_entry"
     n = len(targets)
     weights = sig.get("target_weights") or ([1.0 / (n + 1)] * n if sig.get("open_ended") and n else [1.0 / n] * n if n else [])
-    return Plan(side, sig["entry_type"] == "market", legs, targets, weights, stop, bool(sig.get("be_after_tp1")),
-                liq_leverage=leverage), "ok"
+    return Plan(side, market, legs, targets, weights, stop, bool(sig.get("be_after_tp1")),
+                liq_leverage=leverage), "ok" if not repaired else f"ok_unit_repaired_{repaired}"
 
 
 # ---------------------------------------------------------------- simulate
 
 HOLD = pd.Timedelta(days=14)
 ENTRY_VALID = pd.Timedelta(hours=72)
-DATA_END = pd.Timestamp("2026-10-28 00:00")
+# last complete hour when the run starts (override with KOL_DATA_END for an exact rerun); recorded in run_meta.json
+DATA_END = pd.Timestamp(os.environ.get("KOL_DATA_END") or (pd.Timestamp.now(tz="UTC").tz_convert(None).floor("h") - pd.Timedelta(hours=1)))
 
 
 def signal_bars(native: str, act: pd.Timestamp):
     """1m for the first two hours, 5m afterwards up to the hold limit; falls back to local 1h."""
-    end = min(act + HOLD + pd.Timedelta(minutes=5), DATA_END)
+    # always fetch the 14-day window (stable cache key); shorter-hold variants stop early via the engine expiry
+    end = min(act + pd.Timedelta(days=14, minutes=5), DATA_END)
     a1 = act.floor("min")
     m1 = klines(native, "1m", a1, a1 + pd.Timedelta(hours=2))
     m5 = klines(native, "5m", (a1 + pd.Timedelta(hours=2)).floor("5min"), end) if end > a1 + pd.Timedelta(hours=2) else m1.iloc[:0]
@@ -894,7 +931,8 @@ def simulate_one(sig: dict, leverage_mode: bool = False):
         return {"status": "immature", "native": native}
     segments, source = signal_bars(native, act)
     first = segments[0][0]
-    first = first[first.index >= act.floor(segments[0][1])]
+    # same bar the engine fills a market order on (first bar opening at/after activation)
+    first = first[first.index >= act.ceil(segments[0][1])]
     if first.empty:
         return {"status": "no_market_data", "native": native}
     ref = float(first.iloc[0]["open"])
@@ -916,7 +954,7 @@ def simulate_one(sig: dict, leverage_mode: bool = False):
     elif eng.status == "pending":
         eng.status = "expired_unfilled"
     out = eng.result()
-    out.update({"native": native, "mult": mult, "ref": ref, "source": source,
+    out.update({"native": native, "mult": mult, "ref": ref, "source": source, "plan_check": why,
                 "plan": {"legs": plan.legs, "targets": plan.targets, "weights": plan.weights, "stop": plan.stop,
                          "market": plan.entry_market, "be": plan.be_after_tp1, "liq_leverage": plan.liq_leverage}})
     if leverage_mode and out.get("ret_on_filled") is not None:
@@ -932,7 +970,7 @@ def relative_plan(sig_plan: dict, ref: float) -> dict:
 
 def run_1h(native, side, relp, start, h, fund):
     bars = h[(h.index >= start) & (h.index < start + HOLD + pd.Timedelta(hours=1))]
-    if len(bars) < 24 * 14:
+    if len(bars) < HOLD / pd.Timedelta(hours=1):
         return None
     ref = float(bars.iloc[0]["open"])
     plan = Plan(side, relp["market"], [x * ref for x in relp["legs"]], [x * ref for x in relp["targets"]], relp["weights"],
@@ -1016,6 +1054,137 @@ def cmd_sensitivity(_args) -> None:
         print(name, Counter((x["channel"], x["status"]) for x in res), flush=True)
     DEEP_REST, ENTRY_VALID = False, pd.Timedelta(hours=72)
     write_json(OUT / "sensitivity_limits.json", out)
+
+
+# Improvement variants, declared before any variant result was computed (2026-10-30). Each one is
+# applied identically to the signal and to both same-coin baselines.
+VARIANTS = {
+    "as_written": {},
+    "be_after_tp1": {"be": True},
+    "tp1_only": {"tp1_only": True},
+    "hold_72h": {"hold": pd.Timedelta(hours=72)},
+    "hold_24h": {"hold": pd.Timedelta(hours=24)},
+}
+FILTERS = {
+    "skip_runup_1pct": "30-minute move before publication in the signal direction >= 1% -> skip",
+    "skip_tp1_under_0.3pct": "distance from the fill reference to TP1 < 0.3% -> skip (round-trip cost is 0.2%)",
+}
+
+
+def variant_sig(sig: dict, spec: dict) -> dict:
+    s = dict(sig)
+    if spec.get("be"):
+        s["be_after_tp1"] = True
+    if spec.get("tp1_only") and s["targets"]:
+        s["targets"] = [sorted(s["targets"], key=lambda x: s["side"] * x)[0]]
+        s["target_weights"], s["open_ended"] = [1.0], False
+    return s
+
+
+def pre_move(native: str, sig: dict) -> float | None:
+    """Signal-direction return over the 30 minutes before publication (observable at entry)."""
+    pub = pd.Timestamp(sig["published_at"]).tz_convert(None).floor("min")
+    f = klines(native, "1m", pub - pd.Timedelta(minutes=30), pub + pd.Timedelta(minutes=1))
+    if len(f) < 20:
+        return None
+    return sig["side"] * (float(f.iloc[-1]["open"]) / float(f.iloc[0]["open"]) - 1)
+
+
+def cmd_improve(_args) -> None:
+    global HOLD
+    labels = {(s["channel"], s["message_id"]): s for s in read_json(OUT / "labels_before_prices.json")}
+    base = [r for r in read_json(OUT / "trades.json") if r.get("plan")]
+    out = {"declared": {"variants": {k: {kk: str(vv) for kk, vv in v.items()} for k, v in VARIANTS.items()},
+                        "filters": FILTERS, "risk_sizing": "notional = 1% equity / stop distance at fill; account return = 1% x R"},
+           "rows": []}
+    feats = {}
+    for r in base:
+        sig = labels[(r["channel"], r["message_id"])]
+        t1 = r["plan"]["targets"][0] if r["plan"]["targets"] else None
+        feats[(r["channel"], r["message_id"])] = {
+            "pre_move_30m": pre_move(r["native"], sig),
+            "tp1_dist": abs(t1 / r["ref"] - 1) if t1 else None,
+            "stop_dist": abs(r["plan"]["stop"] / (r.get("avg_entry") or r["ref"]) - 1) if r["plan"]["stop"] else None}
+    for name, spec in VARIANTS.items():
+        HOLD = spec.get("hold", pd.Timedelta(days=14))
+        for r in base:
+            key = (r["channel"], r["message_id"])
+            sig = variant_sig(labels[key], spec)
+            v = simulate_one(sig) if name != "as_written" else r
+            row = {"variant": name, "channel": r["channel"], "message_id": r["message_id"], "symbol": r["symbol"],
+                   "activation": r["activation"], "point_in_time": r["point_in_time"], **feats[key],
+                   **{k: v.get(k) for k in ("status", "exit_reason", "ret_on_filled", "filled_fraction", "tps_hit")}}
+            n = null_for(sig, v) if v.get("plan") else None
+            row.update({k: (n or {}).get(k) for k in ("signal_1h", "null_mean", "excess", "null_post_mean", "excess_post")})
+            out["rows"].append(row)
+        print(name, "done", flush=True)
+        write_json(OUT / "improve.json", out)
+    HOLD = pd.Timedelta(days=14)
+
+
+def block_p(values: pd.Series, weeks: pd.Series, reps: int = 4000, seed: int = 11) -> float | None:
+    """Two-sided week-block bootstrap p-value for mean == 0 (recentred)."""
+    rng = np.random.default_rng(seed)
+    groups = [g.to_numpy() - values.mean() for _, g in values.groupby(weeks.values)]
+    if len(groups) < 3:
+        return None
+    obs = abs(values.mean())
+    hits = 0
+    for _ in range(reps):
+        pick = rng.integers(0, len(groups), len(groups))
+        hits += abs(np.concatenate([groups[j] for j in pick]).mean()) >= obs
+    return (hits + 1) / (reps + 1)
+
+
+def cmd_improve_report(_args) -> None:
+    data = read_json(OUT / "improve.json")
+    df = pd.DataFrame(data["rows"])
+    df = df[df["point_in_time"]]
+    df["week"] = pd.to_datetime(df["activation"]).dt.tz_convert(None).dt.to_period("W").astype(str)
+    masks = {"all": lambda d: d.index == d.index,
+             "skip_runup_1pct": lambda d: ~(d["pre_move_30m"].fillna(0) >= 0.01),
+             "skip_tp1_under_0.3pct": lambda d: ~(d["tp1_dist"].fillna(1) < 0.003)}
+    cells = []
+    for ch, g in df.groupby("channel"):
+        for var, gv in g.groupby("variant"):
+            for fname, m in masks.items():
+                d = gv[m(gv)].sort_values("activation")
+                traded = d[d["ret_on_filled"].notna()]
+                ex = d[d["excess_post"].notna()]
+                if len(traded) < 5:
+                    continue
+                r = traded["ret_on_filled"].astype(float)
+                half = len(r) // 2
+                cell = {"channel": ch, "variant": var, "filter": fname, "trades": len(traded), "mean": r.mean(),
+                        "median": r.median(), "first_half": r.iloc[:half].mean(), "second_half": r.iloc[half:].mean(),
+                        "excess_pre": d["excess"].dropna().mean(), "excess_post": ex["excess_post"].mean() if len(ex) else None,
+                        "excess_post_ci": block_ci(ex["excess_post"].astype(float).reset_index(drop=True),
+                                                   ex["week"].reset_index(drop=True)) if len(ex) >= 5 else None,
+                        "p_post": block_p(ex["excess_post"].astype(float).reset_index(drop=True),
+                                          ex["week"].reset_index(drop=True)) if len(ex) >= 5 else None}
+                cells.append(cell)
+    # Benjamini-Hochberg over every cell that has a p-value
+    ps = sorted([(c["p_post"], i) for i, c in enumerate(cells) if c["p_post"] is not None])
+    m = len(ps)
+    q_prev = 1.0
+    for rank, (p, i) in reversed(list(enumerate(ps, 1))):
+        q_prev = min(q_prev, p * m / rank)
+        cells[i]["q_post"] = q_prev
+    # risk-based sizing on the as-written trades: 1% of equity at risk per trade
+    base = df[(df["variant"] == "as_written") & df["ret_on_filled"].notna() & df["stop_dist"].notna()]
+    sizing = {}
+    for ch, g in base.groupby("channel"):
+        R = g["ret_on_filled"].astype(float) / g["stop_dist"].astype(float)
+        sizing[ch] = {"trades": len(g), "mean_R": R.mean(), "median_R": R.median(),
+                      "account_ret_per_trade_at_1pct_risk": 0.01 * R.mean(), "worst_R": R.min(),
+                      "median_notional_x_equity": float((0.01 / g["stop_dist"].astype(float)).median())}
+    write_json(OUT / "improve_summary.json", {"cells": cells, "risk_sizing": sizing, "declared": data["declared"]})
+    show = pd.DataFrame(cells)
+    pd.set_option("display.width", 250)
+    for col in ("mean", "median", "first_half", "second_half", "excess_pre", "excess_post"):
+        show[col] = (show[col].astype(float) * 100).round(2)
+    print(show.drop(columns=["excess_post_ci"]).to_string())
+    print(json.dumps(sizing, indent=1, default=str))
 
 
 def cmd_retry(_args) -> None:
@@ -1185,9 +1354,9 @@ def cmd_report(_args) -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["label", "simulate", "retry", "sensitivity", "nulls", "report"])
+    ap.add_argument("cmd", choices=["label", "simulate", "retry", "sensitivity", "nulls", "improve", "improve_report", "report"])
     args = ap.parse_args()
-    {"label": cmd_label, "simulate": cmd_simulate, "retry": cmd_retry, "sensitivity": cmd_sensitivity, "nulls": cmd_nulls, "report": cmd_report}[args.cmd](args)
+    {"label": cmd_label, "simulate": cmd_simulate, "retry": cmd_retry, "sensitivity": cmd_sensitivity, "nulls": cmd_nulls, "improve": cmd_improve, "improve_report": cmd_improve_report, "report": cmd_report}[args.cmd](args)
 
 
 if __name__ == "__main__":
