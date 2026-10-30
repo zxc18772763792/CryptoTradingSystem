@@ -2218,6 +2218,12 @@ async def _next10xgem1_fade_worker(stop_event: asyncio.Event) -> None:
     await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("next10xgem1_fade", success=ok))
 
 
+async def _hub_runup_ledger_worker(stop_event: asyncio.Event) -> None:
+    from core.research.hub_runup_ledger import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("hub_runup_ledger", success=ok))
+
+
 async def _telegram_forward_worker(stop_event: asyncio.Event) -> None:
     from core.research.telegram_forward_runner import worker
 
@@ -2281,6 +2287,12 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
         "next10xgem1_fade": {
             # Idles until the fade protocol is explicitly activated; paper ledger only, never orders.
             "factory": lambda stop_event: _next10xgem1_fade_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "hub_runup_ledger": {
+            # Idles until hub_runup_filter_v1 is activated; then a child-process cycle every 30 s
+            # (Telethon read under reader.lock + settlement). Paper ledger only, never orders.
+            "factory": lambda stop_event: _hub_runup_ledger_worker(stop_event),
             "restart_on_failure": True,
         },
         "cusum_monitor": {

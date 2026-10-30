@@ -1,0 +1,77 @@
+{
+  "protocol_id": "hub_runup_filter_v1",
+  "registered_on": "2026-10-30",
+  "hypothesis": "CRYPTO SIGNALS HUB market-entry signals executed exactly as written (every listed target with an even split, the stated stop, 14-day cap) beat the same bracket on the same coin at other times, once signals posted after a run of at least 1% in the signal's direction over the 30 minutes before publication are skipped.",
+  "study": {
+    "doc": "docs/TELEGRAM_KOL_EXECUTION_BACKTEST_20261028.md",
+    "commit": "399fcba",
+    "in_sample": {"trades": 90, "mean_net_pct": 1.01, "excess_vs_post30d_same_coin_pp": 1.42,
+                  "excess_sd_pp": 5.0, "excess_p_week_block": 0.031, "bh_q_over_70_cells": 0.35,
+                  "mean_net_without_best_5pct": 0.26},
+    "status": "post-hoc rule chosen among 70 cells of a retrospective study of surviving posts; this ledger is its first independent test. The unfiltered book is kept to measure whether the filter itself adds anything."
+  },
+  "source": {
+    "channel": "CRYPTO SIGNALS HUB (private broadcast channel, Telegram channel id 2095234574, no public preview)",
+    "access": "the user's existing independent Telethon session (docs/TELEGRAM_AGENT_HANDOFF.md), read-only get_messages after the last seen id; never joins, sends, downloads media or touches other dialogs",
+    "authorization": "user request of 2026-10-30 in the Claude session that built this ledger: forward paper ledger for this channel only",
+    "poll": "every 30 s while the shared reader.lock is free; a busy lock skips that poll (no forced unlock, no second session)",
+    "receipt": "first time a message id is returned; the first received text is frozen and later edits are never read back",
+    "first_receipt_max_delay_after_publication_seconds": 180,
+    "edit_rule": "an edit visible at first receipt is allowed only if it was made within 600 s of publication (as in the study)",
+    "clock": "local clock checked against Binance server time at most 10 minutes before the receipt: |offset| <= 2 s with a round trip <= 10 s"
+  },
+  "rules": {
+    "rule_version": "hub-v1",
+    "module": "core/research/kol_bracket_engine.py",
+    "copied_from": "scripts/research_kol_execution.py at commit 399fcba (parse_hub, classify, Plan, Engine, build_plan)",
+    "eligible": "parse_hub returns a signal with entry 'OPEN MARKET PRICE' (market) and completeness full_bracket or targets_without_stop",
+    "symbol": "ticker -> Binance USD-M USDT perpetual (plain, then 1000- and 1000000-prefixed) with status TRADING in an exchangeInfo snapshot no older than 6 hours",
+    "units": "frozen build_plan: thousands written as decimals are rescaled; a stop may also be off by one zero; a target already passed at the fill price makes the signal stale (not traded)"
+  },
+  "filter": {
+    "name": "skip_runup_1pct",
+    "pre_move": "side x (open of the 1m bar at the publication minute / open of the 1m bar 30 minutes earlier - 1)",
+    "rule": "pre_move >= 0.01 -> not in the primary book",
+    "unavailable": "a missing pre-move bar leaves the signal out of the primary book (recorded), never assumed to pass"
+  },
+  "execution": {
+    "decision": "freeze = the cycle that first parses the receipt; it must commit within 600 s of first receipt",
+    "entry": "market order at the open of the first official 1m bar starting at or after the freeze",
+    "targets": "even split over all listed targets; the last target closes the remainder",
+    "stop": "stated stop as stop-market (gap -> bar open); none stated -> none",
+    "unlevered": "position = notional; an unlevered short is wiped out (-100%) if the price doubles",
+    "max_hold_days": 14,
+    "bars": "official 1m for the first 2 hours, 5m afterwards; a 5m bar touching both a target and the stop is replayed on 1m; still ambiguous -> stop first",
+    "cost": "10 bps per side on every fill",
+    "funding": "actual settlements from latest-N fundingRate reads (no time window); unproven coverage leaves net_with_funding unavailable, never zero",
+    "leverage_book": "descriptive only: same trade at the stated minimum leverage, isolated, liquidation at 1/L - 0.5% forfeiting the margin",
+    "overlap": "within each book, a signal on a coin whose earlier position in that book is still open at the new entry is recorded as skipped"
+  },
+  "books": {
+    "primary": "filtered: eligible, on-time, clock-verified signals that pass skip_runup_1pct",
+    "secondary": "all: the same signals without the filter (measures the filter's own value)"
+  },
+  "control": {
+    "null": "same coin, same relative bracket, official 1h klines, 58 hourly starts every 12 h from entry + 1 day (post window, the study's primary baseline); price-only and 20 bps round trip for both sides of the comparison",
+    "signal_on_same_engine": "the signal re-run on the same 1h engine starting at the hour on or after its entry",
+    "secondary_null": "58 starts every 12 h from entry - 30 days (pre window); descriptive",
+    "available_at": "entry + 45 days",
+    "minimum_null_starts": 20
+  },
+  "primary_statistic": "mean over primary-book events with a control of (signal_1h - null_post_mean)",
+  "sample": {
+    "target_completed": 160,
+    "power": "about 80% one-sided at 5% for +1.0 pp at sd 5.0 pp (the in-sample effect is expected to shrink; +1.42 pp would need 77)",
+    "futility_at": 80,
+    "futility_rule": "if the mean primary excess of the first 80 controlled events is <= 0 the ledger stops taking new events",
+    "maximum_months": 18,
+    "early_stop_for_success": false
+  },
+  "pass_rule": [
+    "weekly block bootstrap one-sided 95% lower bound of the mean primary excess > 0",
+    "mean primary-book net (1m/5m execution, with funding where proven) > 0",
+    "mean primary excess without the single best event > 0",
+    "mean primary-book price-only net at double cost (20 bps per side) > 0"
+  ],
+  "integrity": "protocol, ledger module and frozen rules module are SHA-256 pinned at activation and in every journal record; any change stops the journal (start v2 instead). Records only; no account or order endpoint is ever called."
+}

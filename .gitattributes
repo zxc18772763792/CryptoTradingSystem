@@ -1,0 +1,4 @@
+# hash-pinned by the hub_runup_filter_v1 paper ledger: store and check out byte-for-byte
+config/research_protocols/hub_runup_filter_v1.json -text
+core/research/hub_runup_ledger.py -text
+core/research/kol_bracket_engine.py -text

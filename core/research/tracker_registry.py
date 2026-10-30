@@ -44,6 +44,11 @@ def _next10xgem1_fade() -> Dict[str, Any]:
     return summary()
 
 
+def _hub_runup() -> Dict[str, Any]:
+    from core.research.hub_runup_ledger import registry_summary
+    return registry_summary()
+
+
 def _telegram_binance_chat() -> Dict[str, Any]:
     from core.research.telegram_forward_tracker import binance_chat
     return binance_chat()
@@ -123,6 +128,12 @@ TRACKERS: List[Dict[str, Any]] = [
              "固定持有24小时；另记50%灾难止损版。每笔1,000 USDT 名义、最多同时8笔、同币一笔；较入场前30天同币逐小时起点"
              "24h做空均值的超额为主统计，245笔无效性检查、490笔复核。仅纸面，不下单。",
      "load": _next10xgem1_fade},
+    {"id": "hub_runup_filter_v1", "name": "CRYPTO SIGNALS HUB · 按原文执行，过滤追涨单（纸面）", "group": "Telegram信号",
+     "unit": "笔", "rule_key": "hub_runup_filter_v1",
+     "rule": "HUB 私密频道首次收件（3分钟内）的市价信号，冻结后下一根1分钟开盘入场，按原文全部止盈档平均分仓、原文止损、"
+             "最长14天，不加杠杆；发帖前30分钟已顺向走过≥1%的不进主账本（另记不过滤账本）。主统计为较入场后30天同币同几何"
+             "1h起点均值的超额，80笔无效性检查、160笔复核。仅纸面，不下单。",
+     "load": _hub_runup},
     {"id": "telegram_binance_chat_sentiment", "name": "币安中文群情绪 · 4本账本", "group": "Telegram信号", "unit": "笔",
      "rule_key": "telegram_binance_chat_sentiment",
      "rule": "BinanceChinese 群按小时／6小时聚合去重后的作者方向（每窗口≥5个账号、不平衡≥0.4），顺势与反向各一本，持有6小时。四本共用同一条聊天流且互为镜像，不是四个独立样本；表中为小时顺势主账本，其余见账本明细。探索性前向方案，不宣称历史验证。仅纸面。",
@@ -229,6 +240,12 @@ def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
         return {"metric_kind": "excess_return", "metric_label": "相对同币零分布超额", "metric_unit_label": "百分点/笔",
                 "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金；超额非账户收益",
                 "gross_notional_multiplier": 1, "cost_scope": "主统计双方均扣20bps、均忽略资金费；实际含资金费收益另列",
+                "is_paper": True}
+    if tid == "hub_runup_filter_v1":
+        return {"metric_kind": "excess_return", "metric_label": "相对入场后30天同币同几何均值超额", "metric_unit_label": "百分点/笔",
+                "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金（不加杠杆）；超额非账户收益",
+                "gross_notional_multiplier": 1,
+                "cost_scope": "主统计双方均扣20bps、均忽略资金费；实际含资金费收益、不过滤账本与原文杠杆结果另列。入场45天后才有对照，样本为空时为空，不是0%",
                 "is_paper": True}
     if tid == "next10xgem1_fade_24h_v1":
         return {"metric_kind": "excess_return", "metric_label": "相对入场前30天同币均值超额", "metric_unit_label": "百分点/笔",
