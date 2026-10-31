@@ -114,6 +114,7 @@ def observe(handle: str, tweets: Iterable[Dict[str, Any]], *, provenance: str = 
     path = _path(handle, directory)
     offered = 0
     fresh: List[str] = []
+    pending_ids: set[str] = set()
     with _lock:
         known = _known_ids(path)
         for tweet in tweets or []:
@@ -121,14 +122,16 @@ def observe(handle: str, tweets: Iterable[Dict[str, Any]], *, provenance: str = 
                 continue
             offered += 1
             record = to_record(handle, tweet, observed, provenance)
-            if record is None or record["tweet_id"] in known:
+            if record is None or record["tweet_id"] in known or record["tweet_id"] in pending_ids:
                 continue
-            known.add(record["tweet_id"])
+            pending_ids.add(record["tweet_id"])
             fresh.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
         if fresh:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8", newline="\n") as handle_file:
                 handle_file.write("\n".join(fresh) + "\n")
+            # A failed append must remain retryable in this long-running process.
+            known.update(pending_ids)
     return {"new": len(fresh), "offered": offered}
 
 

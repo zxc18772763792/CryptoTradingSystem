@@ -1,6 +1,6 @@
 # Telegram 本机接入：后续 agent 交接
 
-更新：2026-10-24，Asia/Shanghai。本文件是操作入口；详细调查与历史验证记录见 [接入研究](TELEGRAM_REALTIME_ACCESS_20261024.md)。
+更新：2026-10-27，Asia/Shanghai。本文件是操作入口；详细调查与历史验证记录见 [接入研究](TELEGRAM_REALTIME_ACCESS_20261024.md)。
 
 ## 已验证的事实
 
@@ -83,6 +83,10 @@ Codex 本聊天心跳自动化 **`telegram` 已于2026-10-24按用户要求删�
 
 ### 应先读取哪些文件
 
+2026-10-29用户要求继续修复并重启服务后，公开行情wrapper新增独立传输层：`scripts/telegram_market_transport.py`。它保持原官方端点、明确配置的原代理与TLS校验，复用连接，传输/部分5xx最多尝试3次；拒绝与限流不重试、不切换出口。公开响应、UTC接收时间和SHA存入`data/research/telegram_market_transport/`。冻结CLI/核心/桥接器/规则的字节、激活及协议指纹均未替换。兼容记录与受管重启验证见[本轮修复](TRACKER_REPAIR_RESTART_2026-10-29.md)。运行结果仍以新的`forward_status.json`和runner为准，不能只凭源码变更称已恢复。
+
+同轮验证又确认Telegram偶发 `IncompleteReadError`。兼容wrapper对临时断连/超时最多重连一次，沿用同一DPAPI会话并始终持原study/reader锁；旧client已finally断开后才重连。已收到的片段及first_received保留，完整性与冻结仍由原函数判断。认证/身份错误、FloodWait、拒绝和锁不重试，历史模式不重放。无正文恢复记录单独保存在`data/research/telegram_transport_recovery/`，不能把重连当新授权或新登录。
+
 | 文件 | 用途 |
 |---|---|
 | `forward_status.json` | 最近成功时间、来源完整性、积压、冻结/结算计数、journal尾哈希 |
@@ -121,6 +125,8 @@ Codex 本聊天心跳自动化 **`telegram` 已于2026-10-24按用户要求删�
 
 2026-10-30 按用户要求激活 `hub_runup_filter_v1`：HUB 是私密频道、没有公开页，所以由网页后台任务 `hub_runup_ledger` 每 30 秒起子进程，用**同一个独立会话**只读 `get_messages`（频道 id 2095234574，上次之后的新消息），每次都先拿 `reader.lock`，锁忙就跳过，不强占、不并发、不加入/发送/下载媒体。它与上面三来源协议无关，不扩大三来源的采集或用途。入口与规则见 [HUB 账本说明](HUB_RUNUP_LEDGER.md)；冻结文件改字节即停账。
 
-## 10/25 新关注的四个 KOL 频道（只读回溯研究，不在前向范围内）
+## 10/25 新关注的四个 KOL 频道与后续纸面研究
 
-2026-10-25 按用户“又关注了几个频道，请测试研究”的要求，用同一独立会话只读列出对话、按 `Channel.date`（加入时间）认定 11:45–11:48 UTC 新加入的四个频道（Market Dealer、@next10xgem1、@wiseadvicebysumit、@Therichtrader_Reborn），并回溯采集 180 天存活历史；每个频道单独持一次 `reader.lock`，Web 前向任务未受影响。结论与复现见 [新 KOL 研究](TELEGRAM_NEW_KOLS_RESEARCH_20261025.md)：四个都没有跟单优势。它们**不属于**上面三个固定来源的授权与前向采集范围；没有建跟踪器、没有接入新闻流程。要做前向观察须用户另行决定，next10xgem1 是公开频道，可走公开页而不用本会话。
+2026-10-25 按用户“又关注了几个频道，请测试研究”的要求，用同一独立会话只读列出对话、按 `Channel.date`（加入时间）认定 11:45–11:48 UTC 新加入的四个频道（Market Dealer、@next10xgem1、@wiseadvicebysumit、@Therichtrader_Reborn），并回溯采集 180 天存活历史；每个频道单独持一次 `reader.lock`，Web 前向任务未受影响。初次结论与复现见 [新 KOL 研究](TELEGRAM_NEW_KOLS_RESEARCH_20261025.md)。22:35 北京时间重新核对，仍是这四个，未发现更晚新增频道；22:37 按审计后的资金费/对照口径完成重算，76 项相关测试通过，原始标签与结果保留。[最新复算及独立核验](TELEGRAM_NEW_KOLS_RECHECK_20261025.md)是当前结果入口：两家样本不足，另两家未通过有效性门槛；不能将存活样本负收益外推成反向策略有效。它们**不属于**上面三个固定来源的冻结前向协议；没有建跟踪器、没有接入新闻流程。要做前向观察须用户另行决定，next10xgem1 是公开频道，可走公开页而不用本会话。
+
+**后续状态（10/27）：** 上段“没有建跟踪器”是 10/25 时点。next10xgem1 已于 **10/26 13:17:26 UTC** 按用户要求另行激活独立反向纸面账，走公开页只存档，不使用三来源 Telethon 前向协议。入口 [纸面账说明](NEXT10XGEM1_FADE_TRACKER.md)，规则/代码哈希固定，不能改文件后替换哈希强行继续。10/27 15:08 UTC 重新枚举已加入频道，仍只有四个相关新频道；后续窗口 61 条帖子产生 4 条明确喊单，2 笔已成熟、2 笔未到期，均属回溯而非前向。独立纸面账当前 2 笔持仓、0 笔结算，样本不足；详情与复查代码见 [10/27 继续研究](TELEGRAM_KOL_FOLLOWUP_20261027.md)。本轮未改现有激活/交易状态。

@@ -23,17 +23,23 @@ import ssl
 import threading
 from typing import Optional
 
+import certifi
+
 _SHARED_CONTEXT: Optional[ssl.SSLContext] = None
 _LOCK = threading.Lock()
 
 
 def get_shared_ssl_context() -> ssl.SSLContext:
-    """Return the cached default TLS context, creating it on first use."""
+    """Cache platform trust plus the project's CA bundle, retaining TLS verification."""
     global _SHARED_CONTEXT
     if _SHARED_CONTEXT is None:
         with _LOCK:
             if _SHARED_CONTEXT is None:
-                _SHARED_CONTEXT = ssl.create_default_context()
+                context = ssl.create_default_context()
+                # Platform/Conda trust can lag a public CA-chain rotation. Keep
+                # its roots (including local trust) and add httpx's CA bundle.
+                context.load_verify_locations(cafile=certifi.where())
+                _SHARED_CONTEXT = context
     return _SHARED_CONTEXT
 
 

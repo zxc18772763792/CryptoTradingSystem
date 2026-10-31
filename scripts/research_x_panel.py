@@ -55,8 +55,9 @@ def coverage_starts(records: List[Dict[str, Any]]) -> Dict[str, pd.Timestamp]:
     """First full day with data per handle: its 3rd-oldest post, so one pinned old post cannot stretch it."""
     stamps: Dict[str, List[pd.Timestamp]] = {}
     for rec in records:
-        if rec.get("created_at"):
-            stamps.setdefault(str(rec["handle"]), []).append(pd.Timestamp(rec["created_at"]).tz_convert("UTC"))
+        stamp = rec.get("first_seen_at") if rec.get("provenance") == "live" else rec.get("created_at")
+        if stamp:
+            stamps.setdefault(str(rec["handle"]), []).append(pd.Timestamp(stamp).tz_convert("UTC"))
     return {h: sorted(v)[min(2, len(v) - 1)].ceil("D") for h, v in stamps.items()}
 
 
@@ -74,6 +75,10 @@ def signal_tables(events: List[Dict[str, Any]], cover: Dict[str, pd.Timestamp], 
         t = day + pd.Timedelta(days=1)
         if t not in s1.index:
             continue
+        if event.get("provenance") == "live":
+            observed = event.get("observed_at")
+            if observed is None or pd.isna(observed) or observed >= t:
+                continue  # a delayed poll cannot retroactively enter at midnight
         if (t, handle, event["coin"]) not in seen:
             seen.add((t, handle, event["coin"]))
             s1.at[t, event["coin"]] += 1.0
@@ -214,6 +219,17 @@ def main() -> int:
     result = analyze(events, cover, pd.DataFrame(opens), pd.DataFrame(dvol), flips=args.flips)
     result["created_at"] = datetime.now(timezone.utc).isoformat()
     result["placebo_shift_days"] = args.placebo_shift_days
+    result["provenance"] = args.provenance
+    result["availability_revision"] = "2026-10-25-audit: live posts require first receipt before midnight entry"
+    if args.provenance == "live":
+        # Section 9 asks for a SHORT attention book including actual funding.
+        # These section-8, price-only exploratory tables cannot confirm it.
+        for value in result.get("tests", {}).values():
+            value.pop("verdict", None)
+        result["forward_hypothesis"] = {
+            "status": "not_assessed", "promotion_allowed": False,
+            "reason": "Protocol section 9 requires the reversed T3 book, actual funding and at least 120 valid days; section-8 price-only tables are descriptive.",
+        }
     result["archive_records"] = len(records)
     result["hashes"] = {
         "protocol_sha256": hashlib.sha256((ROOT / "docs" / "X_KOL_RESEARCH_PROTOCOL.md").read_bytes()).hexdigest(),

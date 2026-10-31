@@ -67,6 +67,7 @@ Research only: nothing here places orders.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -75,6 +76,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+import httpx
 from loguru import logger
 
 from core.research import event_risk_shadow, retirement, signal_evidence
@@ -118,6 +120,8 @@ CLASSIFIER_VERSION = hashlib.sha1("|".join(
     r.pattern for r in (CAUTION, RELEASED, KRW_LISTING, NOT_LISTING)).encode("utf-8")).hexdigest()[:10]
 NOTICE_FIELDS = ("id", "title", "first_listed_at", "listed_at", "category", "need_update_badge")
 ENTRY_BOOK_MAX_LAG_SEC = 6 * 3600  # later than this the book no longer describes the entry
+REQUEST_RETRY_DELAY_SEC = 0.25
+HEALTH_MAX_AGE_SEC = 75 * 60
 REASONS = ("disclosure_or_supply", "security_incident", "project_or_team_issue", "network_or_technical",
            "legal_or_regulatory", "other")
 REASON_SYSTEM_PROMPT = f"""You read a Korean crypto-exchange notice that designates a coin as a caution item.
@@ -144,6 +148,58 @@ def save_state(state: Dict[str, Any], path: Path = STATE_PATH) -> None:
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     tmp.replace(path)
+
+
+class _ResilientClient:
+    """Bounded retries and safe operational diagnostics, scoped to one serial tick."""
+
+    def __init__(self, client):
+        self.client = client
+        self.phase = "contracts"
+        self.failures: List[Dict[str, Any]] = []
+        self.retries = 0
+
+    def issue(self, error: str, endpoint: str = "") -> None:
+        item = {"phase": self.phase, "endpoint": endpoint, "error": error}
+        if item not in self.failures:
+            self.failures.append(item)
+
+    async def get(self, url, **kwargs):
+        endpoint = str(url).split("?", 1)[0].rsplit("/", 1)[-1]
+        for attempt in range(2):
+            try:
+                response = await self.client.get(url, **kwargs)
+            except (httpx.TransportError, ConnectionError, TimeoutError) as exc:
+                if attempt == 0:
+                    self.retries += 1
+                    await asyncio.sleep(REQUEST_RETRY_DELAY_SEC)
+                    continue
+                self.issue(type(exc).__name__, endpoint)
+                raise
+            # Rate limits and access denials wait for the scheduler rather than
+            # immediately issuing the same blocked request again.
+            if response.status_code in {408, 500, 502, 503, 504} and attempt == 0:
+                self.retries += 1
+                await asyncio.sleep(REQUEST_RETRY_DELAY_SEC)
+                continue
+            if response.status_code >= 400 and response.status_code != 400:
+                self.issue(f"HTTP {response.status_code}", endpoint)
+            return response
+
+
+def collection_health(state: Dict[str, Any]) -> Dict[str, Any]:
+    health = dict(state.get("collection_health") or {})
+    stamp = health.get("last_attempt_at") or state.get("updated_at")
+    try:
+        age = max(0.0, (_now() - datetime.fromisoformat(stamp)).total_seconds())
+    except (TypeError, ValueError):
+        age = None
+    health["age_sec"] = round(age, 1) if age is not None else None
+    if age is None or age > HEALTH_MAX_AGE_SEC:
+        health["status"] = "stale"
+    else:
+        health.setdefault("status", "unknown")
+    return health
 
 
 def caution_tickers(title: str) -> List[str]:
@@ -195,6 +251,9 @@ def _listed_at(notice: Dict[str, Any]) -> datetime:
 
 def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], day0_ms: int, now_ms: float) -> Dict[str, Any]:
     """Backtest rules on daily bars [[open_ms, open, high, low, close], ...] starting at day 0."""
+    from core.research.tracker_data_quality import funding_rate_sum, validate_daily_path
+
+    validate_daily_path(bars, start_ms=day0_ms, end_ms=day0_ms + (HOLD_DAYS + 1) * DAY_MS)
     by_open = {int(b[0]): b for b in bars}
 
     def closed_bar(k: int) -> Optional[List[float]]:
@@ -220,7 +279,7 @@ def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], day0_
             exit_px, exit_ms, out["status"] = bar[4], bar[0] + DAY_MS, "closed"
     mark = exit_px if exit_px is not None else last[4]
     until = exit_ms if exit_ms is not None else now_ms
-    fund = sum(float(f["fundingRate"]) for f in funding if entry_ms <= int(f["fundingTime"]) <= until)
+    fund = funding_rate_sum(funding, entry_ms, int(until))
     out.update(exit_price=exit_px, exit_at=exit_ms, funding=round(fund, 6),
                return_pct=round(((entry - mark) / entry - ROUND_TRIP_COST + fund) * 100, 3),
                mark_price=mark,
@@ -235,27 +294,32 @@ async def _notices(client, pages: int = 2) -> List[Dict[str, Any]]:
         resp = await client.get(UPBIT, params={"os": "web", "page": page, "per_page": 20, "category": "trade"},
                                 headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code != 200 or not resp.text.startswith("{"):
-            break
-        out += resp.json()["data"]["notices"]
+            raise RuntimeError(f"Upbit notices HTTP {resp.status_code}")
+        rows = resp.json()["data"]["notices"]
+        if not isinstance(rows, list):
+            raise ValueError("Invalid Upbit notice list")
+        out += rows
     return out
 
 
 async def _bithumb_json(client, url: str, params: Dict[str, Any]) -> Any:
     """GET with one retry; None when Bithumb is unreachable (its TLS via the proxy is intermittent)."""
-    for attempt in range(2):
+    for attempt in range(1 if isinstance(client, _ResilientClient) else 2):
         try:
             resp = await client.get(url, params=params, headers={"User-Agent": "Mozilla/5.0"})
             if resp.status_code == 200:
                 return resp.json()
         except Exception as exc:  # noqa: BLE001 - each detector fails on its own, retried next pass
-            logger.debug(f"bithumb caution: {url} attempt {attempt + 1} failed: {exc}")
+            logger.debug(f"bithumb caution: {url} attempt {attempt + 1} failed: {type(exc).__name__}")
     return None
 
 
 async def _bithumb_notices(client, state: Dict[str, Any], now: datetime) -> List[Dict[str, Any]]:
     """Bithumb caution events in the Upbit notice shape (id, title, first_listed_at)."""
     out: List[Dict[str, Any]] = []
-    rows = await _bithumb_json(client, BITHUMB_NOTICES, {"count": 20}) or []
+    rows = await _bithumb_json(client, BITHUMB_NOTICES, {"count": 20})
+    if not isinstance(rows, list) and isinstance(client, _ResilientClient):
+        client.issue("Notice feed unavailable or malformed", "bithumb_notices")
     for row in rows if isinstance(rows, list) else []:
         title = str(row.get("title") or "")
         published = str(row.get("published_at") or "")
@@ -267,6 +331,8 @@ async def _bithumb_notices(client, state: Dict[str, Any], now: datetime) -> List
                     "listed_at": str(row.get("modified_at") or ""), "category": ",".join(row.get("categories") or []),
                     "source": "bithumb_notice"})
     markets = await _bithumb_json(client, BITHUMB_MARKETS, {"isDetails": "true"})
+    if not isinstance(markets, list) and isinstance(client, _ResilientClient):
+        client.issue("Market flags unavailable or malformed", "bithumb_markets")
     if isinstance(markets, list):  # unreachable: keep the previous baseline, so no designation is lost
         flagged = {str(m["market"]).split("-", 1)[1] for m in markets
                    if str(m.get("market", "")).startswith("KRW-") and m.get("market_warning") == "CAUTION"}
@@ -300,6 +366,8 @@ async def _spot_history_30d(client, ticker: str, day0_ms: int) -> bool:
     """True when the coin had a Binance USDT spot daily bar 30 days before the notice (the study's universe)."""
     start = day0_ms - BACKFILL_DAYS * DAY_MS
     resp = await client.get(f"{SPOT}/klines", params={"symbol": f"{ticker}USDT", "interval": "1d", "startTime": start, "limit": 1})
+    if resp.status_code not in {200, 400}:
+        raise RuntimeError(f"Spot history HTTP {resp.status_code}")
     rows = resp.json() if resp.status_code == 200 else []
     return isinstance(rows, list) and bool(rows) and int(rows[0][0]) == start
 
@@ -307,7 +375,8 @@ async def _spot_history_30d(client, ticker: str, day0_ms: int) -> bool:
 async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, strategy: str = "caution") -> Dict[str, Any]:
     spec = STRATEGIES[strategy]
     state_path = state_path or spec["state_path"]
-    state = load_state(state_path)
+    state = await asyncio.to_thread(load_state, state_path)
+    client = _ResilientClient(client)
     started = datetime.fromisoformat(state["started_at"])
     now = _now()
     now_ms = now.timestamp() * 1000
@@ -318,19 +387,47 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
                    if int(trade.get("day0_ms") or 0) + DAY_MS <= now_ms
                    or trade.get("status") in {"open", "closed", "stopped", "delisted"}]
         event_risk_shadow.register(state, now, entered)
-        save_state(state, state_path)
-    info = await client.get(f"{FAPI}/exchangeInfo")
-    info.raise_for_status()
+        await asyncio.to_thread(save_state, state, state_path)
+    contracts: Dict[str, Any] = {}
+    perps: Optional[Dict[str, int]] = None
     # Only live contracts: a settled perp still appears in exchangeInfo with frozen, flat klines.
-    contracts = {s["symbol"]: s for s in info.json().get("symbols", [])
-                 if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT"}
-    perps = {sym: int(s.get("onboardDate") or 0) for sym, s in contracts.items() if s.get("status") == "TRADING"}
+    try:
+        info = await client.get(f"{FAPI}/exchangeInfo")
+        if info.status_code != 200:
+            raise RuntimeError(f"Contract lookup HTTP {info.status_code}")
+        rows = info.json()["symbols"]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("Invalid contract list")
+        contracts = {s["symbol"]: s for s in rows
+                     if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT"}
+        perps = {sym: int(s.get("onboardDate") or 0) for sym, s in contracts.items() if s.get("status") == "TRADING"}
+    except Exception as exc:  # a discovery outage must not stop existing positions
+        client.issue(type(exc).__name__, "exchangeInfo")
     basket: Optional[Dict[str, Any]] = None  # fetched at most once per pass, only for a new forward trade
 
     source = spec.get("source", "upbit")
-    notices = await _notices(client) if source in {"upbit", "korea"} else []
+    client.phase = "notices"
+    notices = []
+    flags_before = state.get("bithumb_caution_flags")
+    if source in {"upbit", "korea"}:
+        try:
+            notices += await _notices(client)
+        except Exception as exc:
+            client.issue(type(exc).__name__, "upbit_notices")
     if source in {"bithumb", "korea"}:
-        notices += await _bithumb_notices(client, state, now)
+        try:
+            notices += await _bithumb_notices(client, state, now)
+        except Exception as exc:
+            client.issue(type(exc).__name__, "bithumb_notices")
+    # A partial pooled feed cannot establish which exchange designated first.
+    # Continue existing trades, but do not claim a new event from that partial view.
+    if perps is None or (source == "korea" and any(f["phase"] == "notices" for f in client.failures)):
+        notices = []
+        if flags_before is None:
+            state.pop("bithumb_caution_flags", None)
+        else:
+            state["bithumb_caution_flags"] = flags_before
+    client.phase = "universe"
     # oldest first (in UTC: Bithumb flags are stamped in UTC, notices in KST): the original
     # notice, or the first exchange to designate, must claim an event before its follow-ups do
     for notice in sorted(notices, key=_listed_at):
@@ -351,8 +448,13 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
                     claimed.setdefault("joint", {}).setdefault(_exchange(notice), at.isoformat())
                 continue  # a follow-up notice (changed start time, update) for an event already recorded
             symbol = next((s for s in (f"{ticker}USDT", f"1000{ticker}USDT") if 0 < perps.get(s, 0) < at.timestamp() * 1000), None)
-            if symbol and not await _spot_history_30d(client, ticker, day0_ms):
-                symbol = None  # outside the backtest universe: no Binance spot history before the notice
+            if symbol:
+                try:
+                    if not await _spot_history_30d(client, ticker, day0_ms):
+                        symbol = None  # outside the backtest universe
+                except Exception as exc:
+                    client.issue(type(exc).__name__, "spot_history")
+                    continue  # unavailable is not evidence that the coin has no history
             backfilled = at < started
             evidence: Dict[str, Any] = {
                 "version": signal_evidence.EVIDENCE_VERSION, "classifier_version": CLASSIFIER_VERSION,
@@ -379,8 +481,18 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
                 "evidence": evidence,
             }
 
+    if any(f["phase"] == "universe" for f in client.failures):
+        # A flag whose eligibility check failed must remain discoverable.
+        if flags_before is None:
+            state.pop("bithumb_caution_flags", None)
+        else:
+            state["bithumb_caution_flags"] = flags_before
+
     for key, trade in state["trades"].items():
-        if trade["status"] == "waiting_entry" and trade.get("symbol") and trade["symbol"] not in perps:
+        client.phase = "market_data"
+        if perps is None and trade["status"] == "waiting_entry":
+            continue  # a new entry still requires a current tradability check
+        if perps is not None and trade["status"] == "waiting_entry" and trade.get("symbol") and trade["symbol"] not in perps:
             trade["status"] = "no_perp"  # contract stopped trading before the entry close
         if trade["status"] in {"waiting_entry", "open"} and trade.get("symbol"):
             try:
@@ -396,14 +508,19 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
                 fr = await client.get(f"{FAPI}/fundingRate", params={"symbol": trade["symbol"], "startTime": trade["day0_ms"], "limit": 1000})
                 funding = fr.json() if fr.status_code == 200 else None
                 if not isinstance(funding, list):
+                    client.issue("Funding history unavailable", "fundingRate")
                     continue  # never book a missing funding history as zero funding
                 trade.update(evaluate_trade(bars, funding, trade["day0_ms"], now_ms), updated_at=now.isoformat())
             except Exception as exc:  # noqa: BLE001 - retried next pass
-                logger.debug(f"upbit caution tracker: {key} update failed: {exc}")
+                client.issue(type(exc).__name__, "trade_refresh")
+                logger.debug(f"upbit caution tracker: {key} update failed: {type(exc).__name__}")
+        client.phase = "evidence"
         if trade.get("symbol") and not trade.get("backfilled") and "evidence" in trade:
-            await _record_trade_evidence(client, trade, perps, now)
+            if perps is not None:
+                await _record_trade_evidence(client, trade, perps, now)
             if spec.get("hedged"):
                 await _settle_hedge(client, trade)
+        client.phase = "reason"
         if "reason" not in trade and llm_extract is not None:
             try:
                 body = await _notice_body(client, trade["notice_id"])
@@ -414,14 +531,22 @@ async def tick(client, *, llm_extract=None, state_path: Optional[Path] = None, s
             except Exception as exc:  # noqa: BLE001 - labelling is optional; retry next pass
                 logger.debug(f"upbit caution tracker: reason for {key} failed: {exc}")
 
+    client.phase = "risk_shadow"
     try:
         await event_risk_shadow.apply_to_tracker(client, state, risk_shadow_sources(state, strategy),
                                                 now, clock=_now)
     except Exception as exc:  # noqa: BLE001 - independent experiment never changes baseline behavior
         logger.debug(f"Korean event risk shadow failed: {exc}")
+    primary = [f for f in client.failures if f["phase"] not in {"evidence", "reason", "risk_shadow"}]
+    previous_health = state.get("collection_health") or {}
+    state["collection_health"] = {
+        "status": "degraded" if primary else "healthy", "last_attempt_at": now.isoformat(),
+        "last_success_at": previous_health.get("last_success_at") if primary else now.isoformat(),
+        "failures": client.failures, "retry_count": client.retries,
+    }
     state["updated_at"] = now.isoformat()
     retirement.register(state, spec["rule"], now.isoformat())
-    save_state(state, state_path)
+    await asyncio.to_thread(save_state, state, state_path)
     return summary(state, strategy)
 
 
@@ -479,13 +604,13 @@ async def _settle_hedge(client, trade: Dict[str, Any]) -> None:
         return
     entry_ms, exit_ms = int(trade["entry_at"]), int(trade["exit_at"])
     try:
-        leg = await signal_evidence.basket_return(client, symbols, entry_ms, exit_ms)
-        funding = await signal_evidence.basket_funding(client, symbols, entry_ms, exit_ms)
+        leg = await signal_evidence.matched_basket_settlement(client, symbols, entry_ms, exit_ms)
     except Exception as exc:  # noqa: BLE001 - retried next pass
         logger.debug(f"upbit hedged tracker: basket for {trade.get('ticker')} failed: {exc}")
         return
-    if leg is None or funding is None:
+    if leg is None:
         return  # too few legs resolved: retry next pass
+    funding = leg["funding_rate_sum"]
     basket_pct = leg["return_pct"] - funding * 100 - BASKET_FEE * 100
     trade["hedge"] = {**leg, "funding_pct": round(funding * 100, 4), "fee_pct": BASKET_FEE * 100,
                       "net_basket_pct": round(basket_pct, 3)}
@@ -514,9 +639,13 @@ def _by_exchange(done: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
     spec = STRATEGIES[strategy]
+    health = collection_health(state)
+    health_label = {"healthy": "运行中", "degraded": "采集/估值延迟", "stale": "更新已过期"}.get(
+        health.get("status"), "待健康检查")
     trades = list(state.get("trades", {}).values())
     forward = [t for t in trades if not t.get("backfilled") and not t.get("late") and t.get("symbol")]
     done = [t for t in forward if t.get("status") in {"closed", "stopped"}]
+    terminal_forward = len(done)
     if spec.get("hedged"):
         done = [t for t in done if t.get("hedged_return_pct") is not None]  # complete only once the basket settled
         counted = done
@@ -529,13 +658,16 @@ def summary(state: Dict[str, Any], strategy: str = "caution") -> Dict[str, Any]:
     return {
         "started_at": state.get("started_at"),
         "updated_at": state.get("updated_at"),
+        "collection_health": health,
+        "tracker_status_label": health_label,
         "trades_total": len(trades),
         "backfilled": sum(bool(t.get("backfilled")) for t in trades),
         "no_perp": sum(t.get("status") == "no_perp" for t in trades),
         "delisted": sum(t.get("status") == "delisted" for t in trades),
         "forward_waiting": sum(t.get("status") == "waiting_entry" for t in forward),
         "forward_open": sum(t.get("status") == "open" for t in forward),
-        "forward_completed": len(done),
+        "forward_completed": len(counted),
+        "completed_without_primary": terminal_forward - len(counted),
         "forward_mean_return_pct": round(float(np.mean(returns)), 2) if returns else None,
         "forward_win_rate": round(float(np.mean([r > 0 for r in returns])), 3) if returns else None,
         "forward_late": sum(bool(t.get("late") and t.get("symbol")) for t in trades),

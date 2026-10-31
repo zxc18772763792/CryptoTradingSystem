@@ -121,6 +121,210 @@ def test_ticker_parsing():
     assert uc.caution_tickers("에이(AAA) 거래지원 종료 안내") == []
 
 
+def test_transient_contract_timeout_retries_without_losing_the_tick(world, tmp_path, monkeypatch):
+    import httpx
+    monkeypatch.setattr(uc, "REQUEST_RETRY_DELAY_SEC", 0)
+    original = world.get
+    attempts = []
+
+    async def flaky(url, **kwargs):
+        if url.endswith("/exchangeInfo"):
+            attempts.append(url)
+            if len(attempts) == 1:
+                raise httpx.ConnectTimeout("")
+        return await original(url, **kwargs)
+
+    world.get = flaky
+    path = tmp_path / "retry.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    result = run(world, path, llm=None)
+    assert len(attempts) == 2
+    assert result["forward_waiting"] == 1
+    assert result["collection_health"]["status"] == "healthy"
+    assert result["collection_health"]["retry_count"] == 1
+
+
+def test_contract_outage_keeps_existing_positions_updating(world, tmp_path, monkeypatch):
+    import httpx
+    monkeypatch.setattr(uc, "REQUEST_RETRY_DELAY_SEC", 0)
+    path = tmp_path / "contracts.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    run(world, path, llm=None)
+    world.now = datetime(2026, 10, 6, 1, tzinfo=timezone.utc)
+    run(world, path, llm=None)
+    before = uc.load_state(path)
+    original = world.get
+
+    async def down(url, **kwargs):
+        if url.endswith("/exchangeInfo"):
+            raise httpx.ReadTimeout("")
+        return await original(url, **kwargs)
+
+    world.get = down
+    world.now = datetime(2026, 10, 7, 1, tzinfo=timezone.utc)
+    result = run(world, path, llm=None)
+    after = uc.load_state(path)
+    assert after["trades"]["AAA|7001"]["status"] == "open"
+    assert set(before["trades"]) == set(after["trades"])
+    assert result["collection_health"]["status"] == "degraded"
+    assert result["collection_health"]["last_success_at"] == before["collection_health"]["last_success_at"]
+    assert "ReadTimeout" in {f["error"] for f in result["collection_health"]["failures"]}
+    assert after["trades"]["AAA|7001"]["updated_at"] == world.now.isoformat()
+
+
+def test_contract_outage_does_not_open_waiting_trade_without_tradability_check(world, tmp_path, monkeypatch):
+    monkeypatch.setattr(uc, "REQUEST_RETRY_DELAY_SEC", 0)
+    path = tmp_path / "waiting.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    run(world, path, llm=None)
+    original = world.get
+
+    async def down(url, **kwargs):
+        if url.endswith("/exchangeInfo"):
+            raise ConnectionError()
+        return await original(url, **kwargs)
+
+    world.get = down
+    world.now = datetime(2026, 10, 6, 1, tzinfo=timezone.utc)
+    run(world, path, llm=None)
+    assert uc.load_state(path)["trades"]["AAA|7001"]["status"] == "waiting_entry"
+
+
+def test_failed_flag_qualification_keeps_baseline_for_recovery(world, tmp_path, monkeypatch):
+    monkeypatch.setattr(uc, "REQUEST_RETRY_DELAY_SEC", 0)
+    path = tmp_path / "flag.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}, "bithumb_caution_flags": []}, path)
+    world.bithumb_flags = {"AAA"}
+    original = world.get
+
+    async def down(url, **kwargs):
+        if url.startswith(uc.SPOT):
+            return _Resp({}, 503)
+        return await original(url, **kwargs)
+
+    world.get = down
+    _bithumb(world, path)
+    assert uc.load_state(path)["bithumb_caution_flags"] == []
+    world.get = original
+    _bithumb(world, path)
+    assert any(key.startswith("AAA|bt-flag") for key in uc.load_state(path)["trades"])
+
+
+def test_partial_pooled_feed_defers_new_events_but_updates_positions_and_recovers(world, tmp_path, monkeypatch):
+    import httpx
+    monkeypatch.setattr(uc, "REQUEST_RETRY_DELAY_SEC", 0)
+    path = tmp_path / "pooled.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}, "bithumb_caution_flags": []}, path)
+    _korea(world, path)
+    original = world.get
+
+    async def upbit_down(url, **kwargs):
+        if url == uc.UPBIT:
+            raise httpx.ConnectTimeout("")
+        return await original(url, **kwargs)
+
+    world.get = upbit_down
+    world.bithumb_flags = {"ZZZ"}
+    world.now = datetime(2026, 10, 6, 1, tzinfo=timezone.utc)
+    result = _korea(world, path)
+    state = uc.load_state(path)
+    assert state["trades"]["AAA|7001"]["status"] == "open"
+    assert not any("bt-flag" in key for key in state["trades"])
+    assert state["bithumb_caution_flags"] == []  # still catch the flag on recovery
+    assert result["collection_health"]["status"] == "degraded"
+    world.get = original
+    recovered = _korea(world, path)
+    assert any(key.startswith("ZZZ|bt-flag") for key in uc.load_state(path)["trades"])
+    assert recovered["collection_health"]["status"] == "healthy"
+    assert recovered["tracker_status_label"] == "运行中"
+
+
+def test_access_denial_is_visible_without_immediate_retry(world, tmp_path, monkeypatch):
+    monkeypatch.setattr(uc, "REQUEST_RETRY_DELAY_SEC", 0)
+    original = world.get
+    calls = []
+
+    async def denied(url, **kwargs):
+        if url == uc.UPBIT:
+            calls.append(url)
+            return _Resp({}, 429)
+        return await original(url, **kwargs)
+
+    world.get = denied
+    path = tmp_path / "denied.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    result = run(world, path, llm=None)
+    assert len(calls) == 1
+    assert result["collection_health"]["status"] == "degraded"
+    assert uc.load_state(path)["trades"] == {}
+
+
+def test_funding_failure_preserves_previous_result_and_is_reported(world, tmp_path, monkeypatch):
+    monkeypatch.setattr(uc, "REQUEST_RETRY_DELAY_SEC", 0)
+    path = tmp_path / "funding.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    run(world, path, llm=None)
+    world.now = datetime(2026, 10, 6, 1, tzinfo=timezone.utc)
+    run(world, path, llm=None)
+    before = uc.load_state(path)["trades"]["AAA|7001"]
+    original = world.get
+
+    async def no_funding(url, **kwargs):
+        if url.endswith("/fundingRate"):
+            return _Resp({}, 503)
+        return await original(url, **kwargs)
+
+    world.get = no_funding
+    world.now += timedelta(days=1)
+    result = run(world, path, llm=None)
+    after = uc.load_state(path)["trades"]["AAA|7001"]
+    assert after["return_pct"] == before["return_pct"]
+    assert after["funding_until"] == before["funding_until"]
+    assert result["collection_health"]["status"] == "degraded"
+
+
+def test_saved_healthy_status_becomes_stale_without_another_tick(world):
+    state = {"updated_at": (world.now - timedelta(hours=2)).isoformat(), "trades": {},
+             "collection_health": {"status": "healthy", "last_attempt_at": (world.now - timedelta(hours=2)).isoformat()}}
+    assert uc.summary(state)["tracker_status_label"] == "更新已过期"
+
+
+def test_spot_outage_defers_qualification_instead_of_recording_no_perp(world, tmp_path, monkeypatch):
+    monkeypatch.setattr(uc, "REQUEST_RETRY_DELAY_SEC", 0)
+    original = world.get
+
+    async def down(url, **kwargs):
+        if url.startswith(uc.SPOT):
+            return _Resp({}, 503)
+        return await original(url, **kwargs)
+
+    world.get = down
+    path = tmp_path / "spot.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    result = run(world, path, llm=None)
+    assert "AAA|7001" not in uc.load_state(path)["trades"]
+    assert result["collection_health"]["status"] == "degraded"
+    world.get = original
+    run(world, path, llm=None)
+    assert uc.load_state(path)["trades"]["AAA|7001"]["status"] == "waiting_entry"
+
+
+def test_malformed_notice_payload_is_not_a_healthy_empty_feed(world, tmp_path):
+    original = world.get
+
+    async def malformed(url, **kwargs):
+        if url == uc.UPBIT:
+            return _Resp({"data": {"notices": None}})
+        return await original(url, **kwargs)
+
+    world.get = malformed
+    path = tmp_path / "malformed.json"
+    uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)
+    result = run(world, path, llm=None)
+    assert result["collection_health"]["status"] == "degraded"
+    assert result["collection_health"]["last_success_at"] is None
+
+
 def test_lifecycle_backfill_and_no_perp(world, tmp_path):
     path = tmp_path / "state.json"
     uc.save_state({"started_at": "2026-10-01T00:00:00+00:00", "trades": {}}, path)

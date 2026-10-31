@@ -131,6 +131,64 @@ def test_worker_marks_persistent_lock_as_unhealthy(base, tmp_path, monkeypatch):
     assert json.loads((tmp_path / "runner.json").read_text(encoding="utf-8"))["enabled"] is False
 
 
+def test_worker_retries_transient_busy_without_waiting_a_full_collection_period(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "STATE_PATH", tmp_path / "runner.json")
+    monkeypatch.setattr(runner, "POLL_SECONDS", 300)
+    monkeypatch.setattr(runner, "BUSY_RETRY_SECONDS", .01)
+    monkeypatch.setattr(runner, "should_run", lambda *a, **k: "run")
+    calls = []
+
+    async def cycle(*a, **k):
+        calls.append(len(calls))
+        outcome = "busy" if len(calls) <= 2 else "ok"
+        return {"returncode": 1 if outcome == "busy" else 0, "outcome": outcome,
+                "error_type": "PermissionError" if outcome == "busy" else ""}
+
+    monkeypatch.setattr(runner, "run_cycle", cycle)
+
+    async def drive():
+        stop = asyncio.Event()
+
+        def heartbeat(ok):
+            if len(calls) == 3:
+                stop.set()
+
+        await asyncio.wait_for(runner.worker(stop, heartbeat=heartbeat), timeout=1)
+
+    asyncio.run(drive())
+    assert len(calls) == 3
+    state = json.loads((tmp_path / "runner.json").read_text())
+    assert state["last_outcome"] == "ok" and state["busy_streak"] == 0
+    assert state["next_check_seconds"] == 300
+
+
+def test_worker_limits_fast_busy_retries_and_cancellation_stops_the_wait(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "STATE_PATH", tmp_path / "runner.json")
+    monkeypatch.setattr(runner, "POLL_SECONDS", 300)
+    monkeypatch.setattr(runner, "BUSY_RETRY_SECONDS", .01)
+    monkeypatch.setattr(runner, "should_run", lambda *a, **k: "run")
+
+    async def busy(*a, **k):
+        return {"returncode": 1, "outcome": "busy", "error_type": "PermissionError"}
+
+    monkeypatch.setattr(runner, "run_cycle", busy)
+
+    async def drive():
+        stop = asyncio.Event()
+        states = []
+
+        def heartbeat(ok):
+            states.append(json.loads((tmp_path / "runner.json").read_text()))
+            if len(states) == 3:
+                stop.set()
+
+        await asyncio.wait_for(runner.worker(stop, heartbeat=heartbeat), timeout=1)
+        return states
+
+    states = asyncio.run(drive())
+    assert [s["next_check_seconds"] for s in states] == [.01, .01, 300]
+
+
 def test_cycle_wrapper_pages_funding_requests_without_changing_the_frozen_cli():
     import scripts.telegram_forward_cycle as wrapper
 

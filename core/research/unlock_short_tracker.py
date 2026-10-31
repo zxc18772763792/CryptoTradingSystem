@@ -170,6 +170,8 @@ async def _daily_bars(client, symbol: str, start: pd.Timestamp) -> pd.DataFrame:
     resp = await client.get(f"{FAPI}/klines", params={"symbol": symbol, "interval": "1d",
                                                        "startTime": int(start.timestamp() * 1000), "limit": 120})
     rows = _checked_json(resp)
+    from core.research.tracker_data_quality import validate_daily_path
+    validate_daily_path(rows, start_ms=int(start.timestamp() * 1000))
     frame = pd.DataFrame([[r[0], float(r[2]), float(r[4])] for r in rows or []], columns=["t", "high", "close"])
     frame.index = pd.to_datetime(frame.pop("t"), unit="ms", utc=True)
     return frame
@@ -178,8 +180,14 @@ async def _daily_bars(client, symbol: str, start: pd.Timestamp) -> pd.DataFrame:
 async def _funding(client, symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> float:
     resp = await client.get(f"{FAPI}/fundingRate", params={"symbol": symbol, "startTime": int(start.timestamp() * 1000),
                                                             "endTime": int(end.timestamp() * 1000), "limit": 1000})
-    rows = _checked_json(resp)
-    return float(sum(float(r.get("fundingRate") or 0) for r in rows if isinstance(r, dict)))
+    # A funding endpoint's 400 cannot prove zero payments for an existing leg.
+    # Unlike a missing price bar, it must prevent settlement and be retried.
+    if resp.status_code != 200:
+        resp.raise_for_status()
+        raise ValueError("funding_history_unavailable")
+    from core.research.tracker_data_quality import funding_rate_sum
+    return funding_rate_sum(resp.json(), int(start.timestamp() * 1000),
+                            int(end.timestamp() * 1000), include_start=True, symbol=symbol)
 
 
 def closed_close(bars: pd.DataFrame, day: pd.Timestamp, now: pd.Timestamp) -> Optional[float]:
@@ -271,6 +279,14 @@ async def tick(client, state_path: Optional[Path] = None, variant: str = "t30") 
     # 2) enter / manage / close
     for key, trade in state["trades"].items():
         if trade["status"] in {"closed", "stopped", "schedule_changed", "entry_failed"}:
+            hedge = trade.get("hedge_settlement") or {}
+            # Only newly versioned pending settlements are retryable. Never
+            # rebuild a pre-existing terminal financial record from today's data.
+            if hedge.get("version") == 2 and hedge.get("status") == "pending":
+                try:
+                    await _complete_hedge(client, trade, now)
+                except Exception as exc:
+                    logger.debug(f"unlock tracker: pending hedge failed for {key}: {type(exc).__name__}")
             continue
         try:
             await _update_trade(client, trade, universe, cliffs, now)
@@ -342,12 +358,50 @@ async def _close(client, trade, day, status, bars, stop_price: Optional[float] =
         return
     fund = await _funding(client, trade["symbol"], entry_day + DAY, day + DAY)
     short = -(exit_px / float(trade["entry_price"]) - 1) + fund - LEG_COST
-    legs = [r for r in [await _leg(client, sym, entry_day, day, +1) for sym in trade.get("basket") or []] if r is not None]
     trade.update(
         status=status, exit_day_actual=str(day.date()), exit_price=exit_px,
-        short_return_pct=round(short * 100, 3), funding_pct=round(fund * 100, 3), basket_n=len(legs),
-        hedged_return_pct=round((short + float(np.mean(legs))) * 100, 3) if len(legs) >= MIN_BASKET else None,
+        short_return_pct=round(short * 100, 3), funding_pct=round(fund * 100, 3), basket_n=0,
+        hedged_return_pct=None,
+        hedge_settlement={"version": 2, "status": "pending", "resolved": {},
+                          "short_return_pct_unrounded": short * 100},
     )
+    await _complete_hedge(client, trade, _now())
+
+
+async def _complete_hedge(client, trade, now) -> None:
+    """Complete the fixed historical exit's hedge, without re-opening the coin."""
+    pending = trade["hedge_settlement"]
+    if pending.get("version") != 2 or pending.get("status") != "pending":
+        return
+    entry_day = pd.Timestamp(trade["entry_day"], tz="UTC")
+    exit_day = pd.Timestamp(trade["exit_day_actual"], tz="UTC")
+    first_attempt = pd.Timestamp(pending.setdefault("first_attempt_at", now.isoformat()))
+    if now > first_attempt + 7 * DAY:
+        pending.update(status="unresolved", reason="hedge_data_unavailable_after_7days")
+        return
+    symbols = list(dict.fromkeys(trade.get("basket") or []))
+    if len(symbols) < MIN_BASKET:
+        pending.update(status="unresolved", reason="frozen_basket_below_minimum")
+        return
+    resolved = pending["resolved"]
+    issues = {}
+    for sym in symbols:
+        if sym in resolved:
+            continue
+        try:
+            value = await _leg(client, sym, entry_day, exit_day, +1)
+            if value is None or not math.isfinite(float(value)):
+                issues[sym] = "missing_or_invalid_hedge_return"
+            else:
+                resolved[sym] = float(value)
+        except Exception as exc:
+            issues[sym] = type(exc).__name__
+    pending.update(last_attempt_at=now.isoformat(), issues=issues,
+                   missing_symbols=[sym for sym in symbols if sym not in resolved])
+    trade["basket_n"] = len(resolved)
+    if len(resolved) >= MIN_BASKET:
+        trade["hedged_return_pct"] = round(pending["short_return_pct_unrounded"] + float(np.mean(list(resolved.values()))) * 100, 3)
+        pending.update(status="complete", partial=len(resolved) < len(symbols))
 
 
 def summary(state: Dict[str, Any], variant: str = "t30") -> Dict[str, Any]:
@@ -364,7 +418,9 @@ def summary(state: Dict[str, Any], variant: str = "t30") -> Dict[str, Any]:
         "late_trades": len(trades) - len(forward),
         "forward_scheduled": sum(t.get("status") == "scheduled" for t in forward),
         "forward_open": sum(t.get("status") == "open" for t in forward),
-        "forward_completed": len(done),
+        "forward_completed": len(counted),
+        "completed_without_primary": len(done) - len(counted),
+        "pending_hedge": sum((t.get("hedge_settlement") or {}).get("status") == "pending" for t in forward),
         "forward_schedule_changed": sum(t.get("status") == "schedule_changed" for t in done),
         "forward_mean_hedged_pct": round(float(np.mean(hedged)), 2) if hedged else None,
         "forward_win_rate": round(float(np.mean([h > 0 for h in hedged])), 3) if hedged else None,

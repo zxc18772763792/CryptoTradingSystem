@@ -432,6 +432,11 @@ def evaluate_rows(signals: list[dict], panels: dict, horizons=HORIZONS, window: 
                 status[(s["channel"], hours, "no_complete_price_path")] += 1
                 continue
             valid = np.isfinite(gross)
+            if s["venue"] == "futures":
+                if not np.isfinite(funding[pos]):
+                    status[(s["channel"], hours, "funding_unavailable")] += 1
+                    continue
+                valid &= np.isfinite(funding)
             if window == "pre":
                 idx = np.arange(max(0, pos - 30 * 24), max(0, pos - hours))
                 candidates = idx[valid[idx]]
@@ -440,8 +445,9 @@ def evaluate_rows(signals: list[dict], panels: dict, horizons=HORIZONS, window: 
             if len(candidates) < 50:
                 status[(s["channel"], hours, "null_sample_below_50")] += 1
                 continue
-            fund = float(funding[pos]) if np.isfinite(funding[pos]) else 0.0
-            null_values = gross[candidates] - BASE_COST + np.nan_to_num(funding[candidates])
+            fund = float(funding[pos]) if s["venue"] == "futures" else 0.0
+            null_funding = funding[candidates] if s["venue"] == "futures" else 0.0
+            null_values = np.maximum(-1.0, gross[candidates] - BASE_COST + null_funding)
             out.append({**s, "hours": hours, "entry_at": at, "gross": float(gross[pos]), "funding": fund,
                         "funding_missing": s["venue"] == "futures" and not np.isfinite(funding[pos]),
                         "liquidated": bool(gross[pos] <= -1.0),
@@ -522,11 +528,11 @@ def parse_plan(text: str) -> dict:
 
 
 def simulate_plan(panel, at: pd.Timestamp, side: int, tp1: float, sl: float, max_hours: int = 168,
-                  cost: float = .002) -> dict:
+                  cost: float = .002, *, funding_required: bool = True) -> dict:
     """Market entry at the hourly open `at`; exit at the first of TP1/stop on hourly high/low (stop first when
     both touch in one bar, gaps through the stop fill at the open), otherwise at the open after max_hours."""
     pos = panel.position(at)
-    if pos is None or pos + max_hours >= len(panel.open) or not np.isfinite(panel.open[pos]):
+    if pos is None or not np.isfinite(panel.open[pos]):
         return {"status": "no_complete_price_path"}
     entry = float(panel.open[pos])
     if not ((side > 0 and sl < entry < tp1) or (side < 0 and tp1 < entry < sl)):
@@ -534,6 +540,8 @@ def simulate_plan(panel, at: pd.Timestamp, side: int, tp1: float, sl: float, max
     if max(abs(tp1 / entry - 1), abs(sl / entry - 1)) > .5:
         return {"status": "implausible_levels"}
     for k in range(max_hours):
+        if pos + k >= len(panel.open):
+            return {"status": "no_complete_price_path"}
         o, hi, lo = panel.open[pos + k], panel.high[pos + k], panel.low[pos + k]
         if not (np.isfinite(o) and np.isfinite(hi) and np.isfinite(lo)):
             return {"status": "no_complete_price_path"}
@@ -546,8 +554,13 @@ def simulate_plan(panel, at: pd.Timestamp, side: int, tp1: float, sl: float, max
             exit_, reason, held = tp1, "tp1", k + 1
             break
     else:
+        if pos + max_hours >= len(panel.open) or not np.isfinite(panel.open[pos + max_hours]):
+            return {"status": "no_complete_price_path"}
         exit_, reason, held = float(panel.open[pos + max_hours]), "timeout", max_hours
-    funding = -side * float(np.nansum(panel.fund[pos + 1:pos + held])) if held > 1 else 0.0
+    charged = slice(pos + 1, pos + held)
+    if funding_required and (not np.all(panel.funding_known[charged]) or not np.all(np.isfinite(panel.fund[charged]))):
+        return {"status": "funding_unavailable"}
+    funding = -side * float(panel.fund[charged].sum()) if funding_required else 0.0
     gross = max(-1.0, side * (exit_ / entry - 1.0))
     return {"status": "ok", "exit_reason": reason, "held_hours": held, "gross": gross,
             "net": max(-1.0, gross - cost + funding)}
@@ -572,7 +585,8 @@ def plan_simulation(sealed: dict, histories: dict, panels: dict) -> list[dict]:
             if s["symbol"] in open_until and at < open_until[s["symbol"]]:
                 rows.append({**row, "status": "overlaps_open_position"})
                 continue
-            result = simulate_plan(panels[(s["symbol"], s["venue"])], at, s["side"], plan["tp1"], plan["sl"])
+            result = simulate_plan(panels[(s["symbol"], s["venue"])], at, s["side"], plan["tp1"], plan["sl"],
+                                   funding_required=s["venue"] == "futures")
             if result["status"] == "ok":
                 open_until[s["symbol"]] = at + pd.Timedelta(hours=result["held_hours"])
             rows.append({**row, "entry_at": str(at), **result})
@@ -656,6 +670,7 @@ def evaluate_study(study: Path, out: Path, root: Path = ROOT) -> dict:
     pd.DataFrame(cells).to_csv(out / "cells.csv", index=False, encoding="utf-8-sig")
     result = {
         "evaluated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "accounting_revision": "2026-10-25-audit: funded futures and null coverage required; equal collateral floor; no post-exit price requirement",
         "events_sha256": sha(sealed_path.read_bytes()), "script_sha256": sha(Path(__file__).read_bytes()),
         "local_data_last_bar": {f"{k[0]}:{k[1]}": str(p.index[-1]) for k, p in panels.items() if len(p.index)},
         "signals": {slug: dict(Counter(f"{s['group']}|{s['venue']}" for s in signals if s["channel"] == slug))

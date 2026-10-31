@@ -113,7 +113,7 @@ def synthetic_panel(opens, start="2026-01-01"):
     opens = np.asarray(opens, float)
     bars = pd.DataFrame({"open": opens, "high": opens * 1.001, "low": opens * .999, "close": opens, "volume": 1.},
                         index=index)
-    return SymbolPanel(bars, None)
+    return SymbolPanel(bars, pd.DataFrame({"funding_rate": 0.}, index=index))
 
 
 def sealed_with(text, available, side_symbol=("ETH", "futures"), late=False):
@@ -193,7 +193,7 @@ def test_plan_parser_reads_first_target_and_stop_but_not_percent_or_r_multiples(
 def plan_panel(opens, highs, lows):
     index = pd.date_range("2026-01-01", periods=len(opens), freq="h", tz="UTC")
     bars = pd.DataFrame({"open": opens, "high": highs, "low": lows, "close": opens, "volume": 1.}, index=index)
-    return SymbolPanel(bars, None)
+    return SymbolPanel(bars, pd.DataFrame({"funding_rate": 0.}, index=index))
 
 
 def test_plan_simulation_takes_stop_first_and_fills_gaps_at_the_open():

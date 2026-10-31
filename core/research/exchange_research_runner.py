@@ -24,6 +24,7 @@ from loguru import logger
 from core.research import (
     coinglass_composite_tracker,
     coinglass_daily_store,
+    coinglass_monthly_universe,
     coinglass_snapshot_archive,
     delist_risk,
     event_risk_monitor,
@@ -51,6 +52,7 @@ TRACKER_NAMES = {"listing_short": "新上市做空", "unlock_short": "大额解�
                  "announcement_short_delist": "币安下架公告后做空 4h",
                  "korea_caution_hedged": "韩国交易所警示后做空（Upbit + Bithumb 合并，对冲版）",
                  "coinglass_composite_7d": "Coinglass 七日合成组合",
+                 "coinglass_composite_7d_monthly_v1": "Coinglass 七日合成组合 · 月度换池 v1",
                  "coinglass_composite_7d_wide_eq": "Coinglass 七日合成组合 · 等权扩池",
                  "xs_reversal_liq_filter": "横截面反转 · 剔除爆仓异常（影子）"}
 ALERT_VERDICTS = {"retire", "confirmed"}
@@ -194,11 +196,16 @@ async def _run_job(name: str, interval_sec: float, now: float, force: bool, job)
     _last_run[name] = now
     started = time.perf_counter()
     try:
-        await job()
+        result = await job()
+        if isinstance(result, dict) and (result.get("collection_health") or {}).get("status") == "degraded":
+            _last_run[name] = now - interval_sec + min(interval_sec, 300)
+            _status[f"{name}_error"] = "Tracker source or valuation unavailable; retry within 5 minutes"
+            return
         _status.pop(f"{name}_error", None)
     except Exception as exc:
         _status[f"{name}_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
-        logger.warning(f"exchange research job {name} failed: {exc}")
+        _last_run[name] = now - interval_sec + min(interval_sec, 300)
+        logger.warning(f"exchange research job {name} failed: {type(exc).__name__}: {exc}")
     finally:
         _durations[name] = round(time.perf_counter() - started, 2)
         _status["durations_sec"] = dict(_durations)
@@ -230,26 +237,32 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         async def upbit_caution():
             _status["upbit_caution"] = await upbit_caution_tracker.tick(client, llm_extract=_llm_upbit_reason)
             await _verdict_alert("upbit_caution", _status["upbit_caution"])
+            return _status["upbit_caution"]
 
         async def upbit_caution_hedged():
             _status["upbit_caution_hedged"] = await upbit_caution_tracker.tick(client, strategy="caution_hedged")
             await _verdict_alert("upbit_caution_hedged", _status["upbit_caution_hedged"])
+            return _status["upbit_caution_hedged"]
 
         async def bithumb_caution():
             _status["bithumb_caution"] = await upbit_caution_tracker.tick(client, strategy="bithumb_caution")
             await _verdict_alert("bithumb_caution", _status["bithumb_caution"])
+            return _status["bithumb_caution"]
 
         async def bithumb_caution_hedged():
             _status["bithumb_caution_hedged"] = await upbit_caution_tracker.tick(client, strategy="bithumb_caution_hedged")
             await _verdict_alert("bithumb_caution_hedged", _status["bithumb_caution_hedged"])
+            return _status["bithumb_caution_hedged"]
 
         async def korea_caution_hedged():
             _status["korea_caution_hedged"] = await upbit_caution_tracker.tick(client, strategy="korea_caution_hedged")
             await _verdict_alert("korea_caution_hedged", _status["korea_caution_hedged"])
+            return _status["korea_caution_hedged"]
 
         async def upbit_krw_listing():
             _status["upbit_krw_listing"] = await upbit_caution_tracker.tick(client, strategy="krw_listing")
             await _verdict_alert("upbit_krw_listing", _status["upbit_krw_listing"])
+            return _status["upbit_krw_listing"]
 
         async def xs_reversal():
             _status["xs_reversal"] = await xs_reversal_tracker.tick(client)
@@ -280,6 +293,11 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _status["coinglass_composite_wide"] = await coinglass_composite_tracker.tick(client, variant="wide")
             await _verdict_alert("coinglass_composite_7d_wide_eq", _status["coinglass_composite_wide"])
 
+        async def coinglass_monthly():
+            _status["coinglass_monthly_universe"] = coinglass_monthly_universe.ensure_current()
+            _status["coinglass_composite_monthly"] = await coinglass_composite_tracker.tick(client, variant="monthly")
+            await _verdict_alert("coinglass_composite_7d_monthly_v1", _status["coinglass_composite_monthly"])
+
         async def delist():
             model = delist_risk.load_model()
             scored = await delist_risk.compute_live_scores(client, model)
@@ -303,6 +321,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("coinglass_snapshot", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_snapshot)
         await _run_job("coinglass_liq_map", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_liq_map)
         await _run_job("coinglass_net_position", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_net_position)
+        await _run_job("coinglass_composite_monthly", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_monthly)
         await _run_job("coinglass_daily_store", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_store)
         await _run_job("coinglass_composite", COINGLASS_SNAPSHOT_INTERVAL_SEC, now, force, coinglass_composite)
         # stopped 2026-10-25: opens no new book, but its open books still settle here

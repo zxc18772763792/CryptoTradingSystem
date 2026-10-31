@@ -47,6 +47,7 @@ file stays as the record. The daily store no longer keeps the 103 held-out coins
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,6 +58,7 @@ from loguru import logger
 
 from core.research import coinglass_daily_store as store
 from core.research import retirement
+from core.research.tracker_data_quality import positive_price
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "coinglass_composite" / "tracker.json"
@@ -79,6 +81,8 @@ BACKTEST_REFERENCE = ("2025-05..2026-10 out of sample, weights from 2024-01..202
                       "costs and Binance funding, positive in 5 of 7 quarters, -0.02%/book at 0.20% costs; the equal-weight "
                       "variant +0.18%, 5 of 7")
 WIDE_STATE_PATH = PROJECT_ROOT / "data" / "research" / "coinglass_composite_wide_eq" / "tracker.json"
+MONTHLY_STATE_PATH = PROJECT_ROOT / "data" / "research" / "coinglass_composite_monthly_v1" / "tracker.json"
+MONTHLY_REFERENCE = "月度换池 v1：独立前向检验，尚无该版本历史回测；不沿用原版收益参照"
 # corrected 2026-10-25: the +0.40% (+0.48% on the 103) that started this tracker came from log-return short legs
 WIDE_BACKTEST_REFERENCE = ("2025-05..2026-10, 234 coins (103 never seen by the weights), the training ICs' signs with equal "
                            "weight: -0.20% per 7-day book after 0.12% costs and Binance funding (-0.83% on the 103 alone), "
@@ -93,6 +97,8 @@ VARIANTS: Dict[str, Dict[str, Any]] = {
     "wide": {"state_path": WIDE_STATE_PATH, "rule": "coinglass_composite_7d_wide_eq", "reference": WIDE_BACKTEST_REFERENCE,
              "universe": lambda: store.wide_universe(), "books": (("main", SHADOW_WEIGHTS), ("shadow", WEIGHTS)),
              "stopped_at": WIDE_STOPPED_AT, "stop_reason": WIDE_STOP_REASON},
+    "monthly": {"state_path": MONTHLY_STATE_PATH, "rule": "coinglass_composite_7d_monthly_v1",
+                "reference": MONTHLY_REFERENCE, "books": (("main", WEIGHTS), ("shadow", SHADOW_WEIGHTS))},
 }
 
 
@@ -214,7 +220,8 @@ async def _funding(client, perp: str, lo_ms: int, hi_ms: int) -> Optional[float]
     resp = await client.get(f"{FAPI}/fundingRate", params={"symbol": perp, "startTime": lo_ms + 1, "endTime": hi_ms, "limit": 1000})
     if resp.status_code != 200 or not isinstance(resp.json(), list):
         return None
-    return sum(float(r["fundingRate"]) for r in resp.json() if lo_ms < int(r["fundingTime"]) <= hi_ms)
+    from core.research.tracker_data_quality import funding_rate_sum
+    return funding_rate_sum(resp.json(), lo_ms, hi_ms, symbol=perp)
 
 
 def _turnover(new: Tuple[List[str], List[str]], old: Optional[Dict[str, Any]]) -> float:
@@ -235,6 +242,11 @@ def form(state: Dict[str, Any], day: datetime, now: datetime, prices: Dict[str, 
     previous = state["books"].get((day - timedelta(days=HOLD_DAYS)).date().isoformat()) or {}
     for variant, weights in books:
         scores = composite_row(day_signals, weights)
+        # A malformed observation is not permission to change the ranked basket.
+        # Missing symbols retain the registered availability rule.
+        for perp in scores.index:
+            if prices.get(perp) is not None:
+                positive_price(prices[perp])
         scores = scores[[p for p in scores.index if prices.get(p)]]
         legs = books_from_scores(scores)
         if legs is None:
@@ -242,8 +254,8 @@ def form(state: Dict[str, Any], day: datetime, now: datetime, prices: Dict[str, 
             continue
         record[variant] = {
             "status": "open", "scored": int(len(scores)), "turnover": round(_turnover(legs, previous.get(variant)), 4),
-            "longs": {p: {"entry": prices[p], "score": round(float(scores[p]), 5)} for p in legs[0]},
-            "shorts": {p: {"entry": prices[p], "score": round(float(scores[p]), 5)} for p in legs[1]},
+            "longs": {p: {"entry": positive_price(prices[p]), "score": round(float(scores[p]), 5)} for p in legs[0]},
+            "shorts": {p: {"entry": positive_price(prices[p]), "score": round(float(scores[p]), 5)} for p in legs[1]},
         }
     return record
 
@@ -252,25 +264,56 @@ async def settle(client, record: Dict[str, Any], now: datetime, prices: Dict[str
     formed = datetime.fromisoformat(record["formed_at"])
     lo_ms, hi_ms = int(formed.timestamp() * 1000), int(now.timestamp() * 1000)
     overdue = now > formed + timedelta(days=HOLD_DAYS) + SETTLE_GRACE
-    funding_cache: Dict[str, Optional[float]] = {}
+    funding_cache: Dict[Tuple[str, int], Optional[float]] = {}
     for variant in ("main", "shadow"):
         book = record.get(variant) or {}
         if book.get("status") != "open":
             continue
         for side in ("longs", "shorts"):
             for perp, pos in book[side].items():
-                if pos.get("return") is not None or not prices.get(perp):
+                if pos.get("return") is not None:
                     continue
-                if perp not in funding_cache:
-                    funding_cache[perp] = await _funding(client, perp, lo_ms, hi_ms)
-                fund = funding_cache[perp]
+                try:
+                    entry_price = positive_price(pos.get("entry"))
+                    if pos.get("exit") is not None:
+                        positive_price(pos["exit"])
+                except ValueError:
+                    pos["settlement_issue"] = "invalid_position_price"
+                    continue
+                if pos.get("exit") is None:
+                    price = prices.get(perp)
+                    if price is None or not math.isfinite(float(price)) or float(price) <= 0:
+                        continue
+                    # Funding publication can lag. The price exit already
+                    # observed must not drift to tomorrow's quote on retry.
+                    pos.update(exit=float(price), exit_observed_at=now.isoformat(),
+                               funding_until_ms=hi_ms, settlement_version=2)
+                if pos.get("funding_until_ms") is None:
+                    pos["settlement_issue"] = "legacy_exit_time_unknown"
+                    continue
+                cutoff = int(pos["funding_until_ms"])
+                key = (perp, cutoff)
+                if key not in funding_cache:
+                    try:
+                        funding_cache[key] = await _funding(client, perp, lo_ms, cutoff)
+                    except Exception as exc:
+                        pos["settlement_issue"] = type(exc).__name__
+                        funding_cache[key] = None
+                fund = funding_cache[key]
                 if fund is None:
+                    pos.setdefault("settlement_issue", "funding_unavailable")
                     continue
-                ret = prices[perp] / pos["entry"] - 1.0
-                pos.update(exit=prices[perp], funding=round(fund, 8),
+                pos.pop("settlement_issue", None)
+                ret = positive_price(pos["exit"]) / entry_price - 1.0
+                pos.update(funding=round(fund, 8),
                            **{"return": round((ret - fund) if side == "longs" else (-ret + fund), 8)})
         pending = [p for side in ("longs", "shorts") for p in book[side].values() if p.get("return") is None]
         if pending and not overdue:
+            continue
+        if pending:
+            # Dropping a missing (often delisted) short reweights the survivors
+            # and can manufacture profit. Keep the incomplete book out of evidence.
+            book.update(status="unresolved", settled_at=now.isoformat(), missing_positions=len(pending))
             continue
         legs = [[p["return"] for p in book[side].values() if p.get("return") is not None] for side in ("longs", "shorts")]
         if not legs[0] or not legs[1]:
@@ -290,6 +333,15 @@ async def tick(client, *, variant: str = "main", state_path: Optional[Path] = No
     state = load_state(state_path)
     now = _now()
     retirement.register(state, spec["rule"], now.isoformat())
+    snapshot = None
+    if variant == "monthly":
+        from core.research import coinglass_monthly_universe as monthly
+        snapshot = monthly.load_snapshot(now)
+        state["current_universe"] = ({"id": snapshot["id"], "month": snapshot["month"],
+                                      "selected_at": snapshot["selected_at"], "as_of": snapshot["as_of"],
+                                      "coins": len(snapshot["members"]), "added": snapshot["added"],
+                                      "removed": snapshot["removed"]} if snapshot else None)
+        state["tracker_status_label"] = "月度换池 · 独立前向" if snapshot else "月度币池待生成 · 暂不入场"
     day = store.last_closed_day(now)
     key = day.date().isoformat()
     opens = day + timedelta(days=1)
@@ -300,7 +352,7 @@ async def tick(client, *, variant: str = "main", state_path: Optional[Path] = No
     if (key not in state["books"] and datetime.fromisoformat(state["started_at"]) <= opens
             and (stopped_at is None or opens < stopped_at)):
         coins: Dict[str, Dict[str, Any]] = {}
-        universe = spec["universe"]()
+        universe = sorted((snapshot or {}).get("members", {}).items()) if variant == "monthly" else spec["universe"]()
         for _, perp in universe:
             coin = store.load_coin(perp, store_root)
             if store.complete(coin, day):
@@ -315,6 +367,8 @@ async def tick(client, *, variant: str = "main", state_path: Optional[Path] = No
             try:
                 state["books"][key] = form(state, day, now, await _prices(client), coins, partial=share < READY_SHARE,
                                            books=spec["books"])
+                if variant == "monthly":
+                    state["books"][key]["universe"] = dict(state["current_universe"])
             except Exception as exc:  # noqa: BLE001 - retried next pass
                 logger.warning(f"coinglass composite: forming {key} failed: {exc}")
         save_state(state, state_path)
@@ -335,15 +389,21 @@ def summary(state: Dict[str, Any], variant: str = "main") -> Dict[str, Any]:
     out: Dict[str, Any] = {"started_at": state.get("started_at"), "updated_at": state.get("updated_at"),
                            "days_total": len(records), "missed": sum(r.get("status") == "missed" for r in records.values()),
                            "backtest_reference": spec["reference"], "hold_days": HOLD_DAYS}
+    if variant == "monthly":
+        out.update(current_universe=state.get("current_universe"),
+                   tracker_status_label=state.get("tracker_status_label", "月度币池待生成 · 暂不入场"))
     for book_variant in ("main", "shadow"):
         closed = [(day, r[book_variant]) for day, r in sorted(records.items())
-                  if (r.get(book_variant) or {}).get("status") == "closed"]
+                  if (r.get(book_variant) or {}).get("status") == "closed"
+                  and not (r.get(book_variant) or {}).get("missing_positions", 0)]
         returns = [float(b["net_pct"]) for _, b in closed]
         weeks = [pd.Timestamp(b["settled_at"]).isocalendar() for _, b in closed]
         clusters = [int(w[0]) * 100 + int(w[1]) for w in weeks]
         part = {
             "open": sum((r.get(book_variant) or {}).get("status") == "open" for r in records.values()),
             "completed": len(returns),
+            "unresolved": sum((r.get(book_variant) or {}).get("status") == "unresolved"
+                              or bool((r.get(book_variant) or {}).get("missing_positions", 0)) for r in records.values()),
             "mean_net_pct": round(float(np.mean(returns)), 3) if returns else None,
             "positive_share": round(float(np.mean([v > 0 for v in returns])), 3) if returns else None,
             "mean_long_leg_pct": round(float(np.mean([b["long_leg_pct"] for _, b in closed])), 3) if closed else None,

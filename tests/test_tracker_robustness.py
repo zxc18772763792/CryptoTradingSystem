@@ -186,6 +186,41 @@ def test_background_tick_never_overlaps(monkeypatch):
     assert len(calls) == 2
 
 
+def test_failed_slow_job_retries_in_five_minutes(monkeypatch):
+    monkeypatch.setattr(runner, "_last_run", {})
+    monkeypatch.setattr(runner, "_status", {})
+    calls = []
+
+    async def job():
+        calls.append(1)
+        if len(calls) == 1:
+            raise TimeoutError()
+
+    asyncio.run(runner._run_job("korea", 1800, 10000, False, job))
+    assert "TimeoutError" in runner._status["korea_error"]
+    asyncio.run(runner._run_job("korea", 1800, 10299, False, job))
+    assert len(calls) == 1
+    asyncio.run(runner._run_job("korea", 1800, 10300, False, job))
+    assert len(calls) == 2 and "korea_error" not in runner._status
+
+
+def test_partial_tracker_refresh_uses_retry_cadence_until_recovery(monkeypatch):
+    monkeypatch.setattr(runner, "_last_run", {})
+    monkeypatch.setattr(runner, "_status", {})
+    calls = []
+
+    async def job():
+        calls.append(1)
+        return {"collection_health": {"status": "degraded" if len(calls) == 1 else "healthy"}}
+
+    asyncio.run(runner._run_job("korea", 1800, 10000, False, job))
+    assert "korea_error" in runner._status
+    asyncio.run(runner._run_job("korea", 1800, 10300, False, job))
+    assert len(calls) == 2 and "korea_error" not in runner._status
+    asyncio.run(runner._run_job("korea", 1800, 10600, False, job))
+    assert len(calls) == 2  # successful jobs return to the normal 30-minute cadence
+
+
 def test_delist_scoring_refuses_a_half_fetched_universe(monkeypatch):
     symbols = [{"baseAsset": f"C{i}", "quoteAsset": "USDT", "status": "TRADING"} for i in range(10)]
 

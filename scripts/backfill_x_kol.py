@@ -63,6 +63,8 @@ def read_depth(client, handle: str, depth: int) -> list:
     """One handle, newest `depth` posts. Raises when Scweet answered an empty list with warnings."""
     scweet_logger = logging.getLogger("Scweet")
     for attempt in (1, 2, 3):
+        if attempt > 1:
+            x_pacing.reserve_requests(math.ceil(depth / POSTS_PER_PAGE) + 1, "backfill_retry")
         capture = _ScweetWarnings()
         scweet_logger.addHandler(capture)
         try:
@@ -77,7 +79,7 @@ def read_depth(client, handle: str, depth: int) -> list:
                 raise XRateLimited(code)
             return tweets
         if attempt < 3 and any("status=599" in m or "curl:" in m for m in capture.messages):
-            time.sleep(4.0 * attempt)  # a dropped connection never reached X
+            time.sleep(4.0 * attempt)
             continue
         raise RuntimeError("X request failed: " + capture.messages[0][:200])
     return []
@@ -102,6 +104,9 @@ def main() -> int:
         return 2
     if args.dry_run:
         return 0
+    if any(math.ceil(depth / POSTS_PER_PAGE) + 1 > x_pacing.WINDOW_MAX_REQUESTS for _, depth in plan):
+        print("Refusing: a single read exceeds the shared request window; use a smaller depth.", file=sys.stderr)
+        return 2
 
     ensure_proxy_env(settings)
     # Also validates the token and proxy settings the same way the news collector does.
@@ -113,8 +118,7 @@ def main() -> int:
             if index:
                 time.sleep(args.pause + random.uniform(0, 4))
             needed = math.ceil(depth / POSTS_PER_PAGE) + 1
-            x_pacing.wait_for_room(needed, announce=lambda m, h=handle: print(f"{h}: {m}", flush=True))
-            x_pacing.record(needed, "backfill")  # reserve before reading so other jobs see it
+            x_pacing.reserve_requests(needed, "backfill", announce=lambda m, h=handle: print(f"{h}: {m}", flush=True))
             try:
                 tweets = read_depth(client, handle, depth)
             except Exception as exc:  # noqa: BLE001 - classify, then decide whether to go on

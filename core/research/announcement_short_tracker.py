@@ -31,6 +31,7 @@ only marked seen. Nothing here places orders.
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -39,6 +40,7 @@ import numpy as np
 from loguru import logger
 
 from core.research import event_risk_shadow, exchange_notices, retirement, signal_evidence
+from core.research.tracker_data_quality import funding_rate_sum, positive_price, validate_stop_bar
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR = PROJECT_ROOT / "data" / "research" / "announcement_short"
@@ -118,7 +120,7 @@ async def _close_at(client, symbol: str, end_ms: int) -> Optional[float]:
     """Close of the 1m bar ending at end_ms."""
     resp = await client.get(f"{FAPI}/klines", params={"symbol": symbol, "interval": "1m", "startTime": end_ms - MIN_MS, "limit": 1})
     rows = resp.json() if resp.status_code == 200 else []
-    return float(rows[0][4]) if rows and int(rows[0][0]) == end_ms - MIN_MS else None
+    return positive_price(rows[0][4]) if rows and int(rows[0][0]) == end_ms - MIN_MS else None
 
 
 async def _open_trade(client, kind: str, token: str, article: Dict[str, Any], perps: Dict[str, Any], now: datetime) -> Dict[str, Any]:
@@ -139,7 +141,7 @@ async def _open_trade(client, kind: str, token: str, article: Dict[str, Any], pe
         return trade
     spec = KINDS[kind]
     entry_ms = int(now.timestamp() * 1000)
-    trade.update(symbol=symbol, status="open", entry_price=float(tick.json()["price"]), entry_ms=entry_ms,
+    trade.update(symbol=symbol, status="open", entry_price=positive_price(tick.json()["price"]), entry_ms=entry_ms,
                  exit_due_ms=entry_ms + spec["hold_min"] * MIN_MS, stop_pct=spec["stop"])
     evidence: Dict[str, Any] = {}
     try:
@@ -157,7 +159,7 @@ async def _open_trade(client, kind: str, token: str, article: Dict[str, Any], pe
 
 async def _settle(client, trade: Dict[str, Any], now: datetime) -> None:
     """Exit at the hold's end or the stop, from 1m bars; funding; basket over the same window."""
-    entry, entry_ms, due_ms = float(trade["entry_price"]), int(trade["entry_ms"]), int(trade["exit_due_ms"])
+    entry, entry_ms, due_ms = positive_price(trade["entry_price"]), int(trade["entry_ms"]), int(trade["exit_due_ms"])
     first_bar = (entry_ms // MIN_MS + 1) * MIN_MS  # bars fully after the entry moment
     resp = await client.get(f"{FAPI}/klines", params={"symbol": trade["symbol"], "interval": "1m",
                                                       "startTime": first_bar, "endTime": due_ms - 1, "limit": 1500})
@@ -166,8 +168,25 @@ async def _settle(client, trade: Dict[str, Any], now: datetime) -> None:
         return
     if resp.status_code != 200:
         return
-    bars = [[int(b[0]), float(b[2]), float(b[4])] for b in resp.json()]
+    rows = resp.json()
+    if not isinstance(rows, list):
+        raise ValueError("minute_bars_not_list")
+    for bar in rows:
+        validate_stop_bar(bar)
+        stamp = float(bar[0])
+        if not math.isfinite(stamp) or stamp != int(stamp) or int(stamp) % MIN_MS:
+            raise ValueError("invalid_minute_timestamp")
+        if not first_bar <= stamp < due_ms:
+            raise ValueError("minute_bar_outside_requested_window")
+    bars = [[int(b[0]), float(b[2]), float(b[4])] for b in rows]
     if not bars:
+        return
+    if [b[0] for b in bars] != list(range(first_bar, bars[-1][0] + MIN_MS, MIN_MS)):
+        # A missing minute may contain the stop. A later close cannot prove a
+        # profitable path; retry, then retain the unresolved observation.
+        trade["settlement_unavailable_reason"] = "incomplete_stop_bar_path"
+        if now.timestamp() * 1000 >= due_ms + 3 * DAY_MS:
+            trade.update(status="unresolved", settled_at=now.isoformat())
         return
     exit_px, exit_ms, status = None, None, "closed"
     for open_ms, high, _close in bars:
@@ -176,15 +195,20 @@ async def _settle(client, trade: Dict[str, Any], now: datetime) -> None:
             break
     if exit_px is None:
         if bars[-1][0] + MIN_MS < due_ms:
+            trade["settlement_unavailable_reason"] = "incomplete_stop_bar_tail"
             if now.timestamp() * 1000 < due_ms + 3 * DAY_MS:
-                return  # bars still missing; a contract gone for good settles on its last close below
+                return
+            # A missing tail can contain the stop: the last available close is
+            # not evidence of an executable exit. Never turn an outage into P&L.
+            trade.update(status="unresolved", settled_at=now.isoformat())
+            return
         exit_px, exit_ms = bars[-1][2], bars[-1][0] + MIN_MS
     fr = await client.get(f"{FAPI}/fundingRate", params={"symbol": trade["symbol"], "startTime": entry_ms + 1,
                                                          "endTime": exit_ms, "limit": 1000})
     rows = fr.json() if fr.status_code == 200 else None
     if not isinstance(rows, list):
         return  # never book missing funding as zero
-    funding = sum(float(r["fundingRate"]) for r in rows if entry_ms < int(r["fundingTime"]) <= exit_ms)
+    funding = funding_rate_sum(rows, entry_ms, exit_ms, symbol=trade["symbol"])
     ret = (entry - exit_px) / entry - COST + funding
     trade.update(status=status, exit_price=exit_px, exit_ms=exit_ms, funding=round(funding, 6),
                  return_pct=round(ret * 100, 3), settled_at=now.isoformat())
@@ -221,6 +245,15 @@ async def tick(client, *, state_dir: Optional[Path] = None) -> Dict[str, Any]:
             await event_risk_shadow.apply_to_tracker(client, state, risk_shadow_sources(state), _now(), clock=_now)
         except Exception as exc:
             logger.debug(f"announcement risk shadow unavailable: {exc}")
+        # Existing positions own their exit windows independently of the CMS.
+        # Persist their settlements before a notice-feed error can end this tick.
+        for trade in state["trades"].values():
+            if trade.get("status") == "open" and now.timestamp() * 1000 >= int(trade["exit_due_ms"]) + 2 * MIN_MS:
+                try:
+                    await _settle(client, trade, now)
+                except Exception as exc:  # noqa: BLE001 - retried next pass
+                    logger.debug(f"announcement short: settle {trade.get('token')} failed: {exc}")
+        state["updated_at"] = _now().isoformat()
         _save(base / KINDS[kind]["state_path"].name, state)
 
     articles = await _poll(client)
@@ -244,12 +277,6 @@ async def tick(client, *, state_dir: Optional[Path] = None) -> Dict[str, Any]:
 
     for kind, state in states.items():
         now = _now()
-        for trade in state["trades"].values():
-            if trade.get("status") == "open" and now.timestamp() * 1000 >= int(trade["exit_due_ms"]) + 2 * MIN_MS:
-                try:
-                    await _settle(client, trade, now)
-                except Exception as exc:  # noqa: BLE001 - retried next pass
-                    logger.debug(f"announcement short: settle {trade.get('token')} failed: {exc}")
         # Newly discovered signals can enter now, using new executable quotes.
         # Existing positions were already monitored at the start of this pass.
         if any(key not in state[event_risk_shadow.STATE_KEY]["trades"]

@@ -26,6 +26,8 @@ def _row(dataset: str, t: int) -> dict:
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
+    from core.research import coinglass_monthly_universe as monthly
+    monkeypatch.setattr(monthly, "SNAPSHOT_DIR", tmp_path / "monthly_universes")
     (tmp_path / "universe.json").write_text(json.dumps({"bases": ["AAA", "BBB", "NOPERP"]}), encoding="utf-8")
     (tmp_path / "perps.json").write_text(json.dumps({"AAA": "AAAUSDT", "BBB": "1000BBBUSDT"}), encoding="utf-8")
     monkeypatch.setattr(store, "UNIVERSE_PATH", tmp_path / "universe.json")
@@ -59,8 +61,10 @@ class Relay:
 
 
 def test_a_normal_day_asks_one_daily_bar_and_one_snapshot_per_coin():
-    coin = {dataset: [_row(dataset, D_MS - DAY_MS)] for dataset in ("oi", "funding", "liquidation", "taker")}
-    coin.update({dataset: [_row(dataset, D_MS)] for dataset in store.SNAPSHOT_AT_STAMP})  # yesterday's 00:00 snapshot
+    coin = {dataset: [_row(dataset, D_MS - k * DAY_MS) for k in range(60, 0, -1)]
+            for dataset in ("oi", "funding", "liquidation", "taker")}
+    coin.update({dataset: [_row(dataset, D_MS - k * DAY_MS) for k in range(59, -1, -1)]
+                 for dataset in store.SNAPSHOT_AT_STAMP})  # yesterday's 00:00 snapshot
     asks = {d: store.requests_for(coin, "AAA", "AAAUSDT", d, D) for d in store.DATASETS}
     assert [p["interval"] for p in (a[1] for a in asks["oi"])] == ["1d"]
     assert asks["oi"][0][1]["start_time"] == D_MS - DAY_MS + 1 and asks["oi"][0][1]["end_time"] == D_MS + DAY_MS - 1
@@ -69,6 +73,25 @@ def test_a_normal_day_asks_one_daily_bar_and_one_snapshot_per_coin():
     assert len(snapshot) == 1 and snapshot[0][1]["interval"] == "1h"
     assert snapshot[0][1]["start_time"] == D_MS + DAY_MS  # the 10-11 00:00 snapshot closes day 10-10
     assert snapshot[0][1]["symbol"] == "AAAUSDT" and snapshot[0][1]["exchange"] == "Binance"
+
+
+def test_a_fresh_last_stamp_does_not_hide_an_interior_gap_or_invalid_value():
+    rows = [_row("oi", D_MS - k * DAY_MS) for k in range(59, -1, -1)]
+    coin = {"oi": [r for r in rows if r["time"] != D_MS - 10 * DAY_MS]}
+    coin["oi"][20]["close"] = None
+    gaps = store.history_gaps(coin, "oi", D)
+    assert len(gaps) == 2 and not store.missing(coin, "oi", D)
+    asks = store.requests_for(coin, "AAA", "AAAUSDT", "oi", D)
+    assert asks[0][1]["start_time"] == min(gaps)
+
+
+def test_local_archive_seed_fills_history_without_replacing_current_observations(env):
+    raw = {"base": "AAA", "oi": [_row("oi", D_MS - k * DAY_MS) for k in range(59, -1, -1)]}
+    (env / "seed/AAAUSDT.json").write_text(json.dumps(raw), encoding="utf-8")
+    coin = {"oi": [{"time": D_MS, "close": "999"}]}
+    assert store.seed_history(coin, "AAA", "AAAUSDT", D)
+    assert not store.history_gaps(coin, "oi", D)
+    assert coin["oi"][-1]["close"] == "999"
 
 
 def test_seed_then_update_brings_every_coin_to_the_day(env):
@@ -211,3 +234,25 @@ def test_the_wide_coins_come_after_the_research_universe_and_seed_from_their_stu
         if name not in order:
             order.append(name)
     assert order == ["AAA", "BBB", "CCC"]  # the 131 first: their composite forms as early as before
+
+
+def test_new_monthly_members_restart_a_previously_completed_daily_pass(env, monkeypatch):
+    opens = D + timedelta(days=1)
+    store.save_status({"day": "2026-10-10", "completed_at": (opens + timedelta(hours=3)).isoformat(),
+                       "final": True, "universe_symbols": ["AAAUSDT"]})
+    monkeypatch.setattr("core.data.coinglass_client.coinglass_enabled", lambda: True)
+    monkeypatch.setattr(store, "update_universe", lambda: [("AAA", "AAAUSDT"), ("NEW", "NEWUSDT")])
+    seen = []
+
+    async def update(day):
+        seen.append(day)
+
+    monkeypatch.setattr(store, "update", update)
+
+    async def run():
+        result = store.ensure_current(opens + timedelta(hours=3, minutes=1))
+        await store._task
+        return result
+
+    assert asyncio.run(run())["status"] == "started" and seen == [D]
+    store._task = None

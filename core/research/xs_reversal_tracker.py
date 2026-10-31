@@ -290,7 +290,8 @@ async def _funding(client, symbol: str, lo_ms: int, hi_ms: int) -> Optional[floa
     resp = await client.get(f"{FAPI}/fundingRate", params={"symbol": symbol, "startTime": lo_ms + 1, "endTime": hi_ms, "limit": 1000})
     if resp.status_code != 200 or not isinstance(resp.json(), list):
         return None
-    return sum(float(r["fundingRate"]) for r in resp.json() if lo_ms < int(r["fundingTime"]) <= hi_ms)
+    from core.research.tracker_data_quality import funding_rate_sum
+    return funding_rate_sum(resp.json(), lo_ms, hi_ms, symbol=symbol)
 
 
 async def _settle(client, record: Dict[str, Any], now: datetime) -> None:
@@ -323,6 +324,12 @@ async def _settle(client, record: Dict[str, Any], now: datetime) -> None:
     overdue = now.timestamp() * 1000 > exit_close_ms + SETTLE_GRACE.total_seconds() * 1000
     if pending and not overdue:
         return
+    missing_main = sum(p.get("return") is None for side in ("longs", "shorts") for p in record[side].values())
+    if missing_main:
+        record.update(status="unresolved", settled_at=now.isoformat(), missing_positions=missing_main)
+        if shadow.get("status") == "open":
+            shadow["status"] = "unresolved"
+        return
     legs = []
     for side in ("longs", "shorts"):
         values = [p["return"] for p in record[side].values() if p.get("return") is not None]
@@ -338,7 +345,8 @@ async def _settle(client, record: Dict[str, Any], now: datetime) -> None:
     )
     if shadow.get("status") == "open":
         values = [p["return"] for p in shadow["longs"].values() if p.get("return") is not None]
-        if values:
+        shadow["missing_positions"] = len(shadow["longs"]) - len(values)
+        if values and not shadow["missing_positions"]:
             net = (float(np.mean(values)) + legs[1]) / 2 - ROUND_TRIP_COST
             shadow.update(status="closed", long_leg_pct=round(float(np.mean(values)) * 100, 4),
                           net_per_position_pct=round(net * 100, 4),
@@ -382,7 +390,8 @@ async def tick(client, state_path: Optional[Path] = None, universe_path: Optiona
 
 def summary(state: Dict[str, Any]) -> Dict[str, Any]:
     days = state.get("days", {})
-    counted = [d for d in days.values() if d.get("status") == "closed" and not d.get("late")]
+    counted = [d for d in days.values() if d.get("status") == "closed" and not d.get("late")
+               and not d.get("missing_positions", 0)]
     returns = [float(d["net_per_position_pct"]) for d in counted]
     rule = state.get("retirement_rule") or retirement.RULES["xs_reversal"]
     last = max(days) if days else None
@@ -394,6 +403,7 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "days_total": len(days),
         "forward_completed": len(returns),
         "forward_open": sum(d.get("status") == "open" for d in days.values()),
+        "unresolved": sum(d.get("status") == "unresolved" or bool(d.get("missing_positions", 0)) for d in days.values()),
         "late": sum(bool(d.get("late")) for d in days.values()),
         "missed": sum(d.get("status") == "missed" for d in days.values()),
         "forward_mean_net_pct": round(float(np.mean(returns)), 3) if returns else None,
@@ -410,7 +420,8 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def _liq_filter_summary(state: Dict[str, Any], counted: List[Dict[str, Any]], paired: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The shadow, judged on its daily difference from the main portfolio (both closed, not late)."""
-    shadow = [d["liq_filter"] for d in counted if (d.get("liq_filter") or {}).get("status") == "closed"]
+    shadow = [d["liq_filter"] for d in counted if (d.get("liq_filter") or {}).get("status") == "closed"
+              and not (d.get("liq_filter") or {}).get("missing_positions", 0)]
     diffs = [float(x["diff_pct"]) for x in shadow]
     rule = state.get("liq_filter_rule") or retirement.RULES["xs_reversal_liq_filter"]
     return {

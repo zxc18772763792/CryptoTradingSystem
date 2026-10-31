@@ -1,0 +1,55 @@
+.alastar-activity {
+    margin: 12px 0 16px;
+    padding: 0 16px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    background: rgba(10, 16, 24, .24);
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.alastar-activity[hidden] { display: none; }
+.alastar-activity-head, .alastar-activity-title, .alastar-counts { display: flex; align-items: center; }
+.alastar-activity-head { justify-content: space-between; gap: 16px; padding: 13px 0; flex-wrap: wrap; }
+.alastar-activity-title { gap: 10px; }
+.alastar-activity-title h4 { margin: 0; font-size: 15px; letter-spacing: .2px; }
+.alastar-subtitle, .alastar-counts { color: var(--text-sub); font-size: 12px; }
+.alastar-counts { gap: 18px; }
+.alastar-counts b { color: var(--text-main, #e6edf7); margin-left: 3px; font-variant-numeric: tabular-nums; }
+.alastar-counts .alastar-review, .alastar-counts .alastar-review b { color: var(--warning); }
+.alastar-status { display: inline-flex; align-items: center; gap: 5px; color: var(--warning); font-size: 11px; }
+.alastar-status::before { content: ''; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.alastar-status[data-health="healthy"] { color: var(--positive); }
+.alastar-plan { border-top: 1px solid var(--border-subtle); }
+.alastar-plan > summary { display: grid; grid-template-columns: 106px minmax(0, 1fr) 112px 8px; gap: 14px; align-items: center; padding: 12px 0; cursor: pointer; list-style: none; }
+.alastar-plan > summary::-webkit-details-marker, .alastar-more > summary::-webkit-details-marker { display: none; }
+.alastar-plan-asset { display: flex; flex-direction: column; gap: 3px; font-size: 13px; font-weight: 600; }
+.alastar-direction { color: var(--text-sub); font-size: 11px; font-weight: 400; }
+.alastar-direction[data-direction="long"] { color: var(--positive); }
+.alastar-direction[data-direction="short"] { color: var(--negative); }
+.alastar-plan-copy { color: var(--text-sub); font-size: 12px; line-height: 1.65; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.alastar-plan-meta { font-size: 11px; color: var(--text-sub); text-align: right; white-space: nowrap; line-height: 1.8; }
+.alastar-plan-meta time { display: block; opacity: .72; font-variant-numeric: tabular-nums; }
+.alastar-chevron { color: var(--text-sub); transition: transform .15s; }
+.alastar-plan[open] > summary .alastar-chevron { transform: rotate(90deg); }
+.alastar-evidence { padding: 0 0 12px 120px; font-size: 12px; line-height: 1.7; color: var(--text-sub); }
+.alastar-evidence > div { margin-top: 5px; }
+.alastar-activity-foot { position: relative; border-top: 1px solid var(--border-subtle); padding: 9px 0; font-size: 11px; color: var(--text-sub); }
+.alastar-activity-foot > span { position: absolute; top: 11px; left: 0; pointer-events: none; }
+.alastar-more > summary { cursor: pointer; text-align: right; list-style: none; }
+.alastar-more > summary span { display: inline-block; margin-left: 5px; }
+.alastar-more[open] > summary span { transform: rotate(90deg); }
+.alastar-history { max-height: 480px; overflow-y: auto; margin-top: 12px; padding-right: 5px; }
+.alastar-source-meta { line-height: 1.8; padding-bottom: 10px; }
+.alastar-empty { padding: 12px 0; color: var(--text-sub); font-size: 12px; }
+.alastar-impostor { display: inline-block; margin-right: 6px; padding: 0 5px; border: 1px solid currentColor; border-radius: 3px; color: var(--negative-soft); font-size: 10px; line-height: 15px; }
+.alastar-impostor-note { color: var(--negative-soft); line-height: 1.6; }
+@media (max-width: 680px) {
+    .alastar-activity { padding: 0 12px; }
+    .alastar-activity-head { gap: 8px; }
+    .alastar-counts { gap: 12px; }
+    .alastar-plan > summary { grid-template-columns: 65px minmax(0, 1fr) 8px; gap: 9px; }
+    .alastar-plan-meta { grid-column: 2; grid-row: 2; text-align: left; }
+    .alastar-plan-meta time { display: inline; margin-left: 7px; }
+    .alastar-chevron { grid-column: 3; grid-row: 1; }
+    .alastar-evidence { padding-left: 0; }
+}

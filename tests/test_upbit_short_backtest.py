@@ -17,8 +17,8 @@ def test_stopped_trade_excludes_later_funding():
                for i in range(1, 9)]
     ret, charged, stopped = score_short_trade(bars, funding, 0)
     assert stopped is True
-    assert charged == pytest.approx(0.01)
-    assert ret == pytest.approx((100 - 142.8) / 100 - 0.001 + 0.01)
+    assert charged == pytest.approx(0.0)  # the entry-boundary payment predates the new position
+    assert ret == pytest.approx((100 - 142.8) / 100 - 0.001)
 
 
 def test_missing_funding_and_daily_gap_are_unusable():

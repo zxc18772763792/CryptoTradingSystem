@@ -6806,8 +6806,9 @@ ${confirmHint}`,
 
   function renderCoinglassCompositeTracker(payload, variant = 'main') {
     const wide = variant === 'wide';
-    const panelId = wide ? 'ai-coinglass-composite-wide-tracker' : 'ai-coinglass-composite-tracker';
-    const anchor = (wide ? ['ai-coinglass-composite-tracker'] : ['ai-xs-reversal-tracker', 'ai-upbit-krw-listing-tracker', 'ai-supply-factor-tracker'])
+    const monthly = variant === 'monthly';
+    const panelId = monthly ? 'ai-coinglass-composite-monthly-tracker' : wide ? 'ai-coinglass-composite-wide-tracker' : 'ai-coinglass-composite-tracker';
+    const anchor = (monthly ? ['ai-coinglass-composite-wide-tracker', 'ai-coinglass-composite-tracker'] : wide ? ['ai-coinglass-composite-tracker'] : ['ai-xs-reversal-tracker', 'ai-upbit-krw-listing-tracker', 'ai-supply-factor-tracker'])
       .map((id) => document.getElementById(id)).find(Boolean);
     if (!anchor) return;
     let panel = document.getElementById(panelId);
@@ -6825,18 +6826,25 @@ ${confirmHint}`,
     const statusNames = { open: '持有中', closed: '已结算', too_few_coins: '币数不足', unresolved: '未能结算', missed: '错过' };
     const latest = s.latest_book;
     const names = (list) => (list || []).map((p) => esc(String(p).replace(/USDT$/, ''))).join('、') || '--';
-    const intro = wide
+    const intro = monthly
+      ? '每月1日北京时间08:00后，按本地至少120天已收盘小时线及币安仍在交易的USDT永续重新筛选币池，排除稳定币。沿用原版8个信号和IC权重，每天新开一期、多空各前后20%、持有7天；换池只影响新组合。'
+      : wide
       ? '同样 8 个信号只取方向、等权，用于 234 个币：原来的 131 个，加上币安成交额前 200 名里另外 103 个（包括 HYPE，这些币权重从没见过）。做多前五分之一、做空后五分之一，持有 7 天，扣成本和资金费。'
       : '每天用 8 个持仓类信号（爆仓、持仓量、资金费率、多空比、主动买卖）的合成分数，做多前五分之一、做空后五分之一，持有 7 天，扣成本和资金费。';
-    const powerNote = wide
+    const powerNote = monthly
+      ? '这是独立的前向版本，没有该版本回测收益参照；至少364期，按结算周分组，结果不并入原版。'
+      : wide
       ? '这个版本是看过次要结果后挑的，回测数字偏乐观。每期波动约 3.7%，即使优势和回测一样，跑满一年也只有约四成概率被确认。'
       : '利润很薄：每期波动约 3%，即使优势真实存在，跑满一年也只有约两成概率被确认，更可能看到的是"均值为正但不显著"。';
     const shadowName = wide ? '按训练期 IC 加权（原版权重）' : '只取方向、等权';
-    const dataNote = wide
+    const dataNote = monthly
+      ? '原版131个币优先更新，新币随后补齐；数据不足时等待或跳过，不补记历史交易'
+      : wide
       ? '每天约多 620 次 Coinglass 请求，原来的 131 个币先更新，所以扩池版大约 05:00（UTC）建仓，比原版晚约两小时'
       : '每天约 790 次 Coinglass 请求';
     panel.innerHTML = `
-      <h3 style="margin:0;">Coinglass 七日合成组合${wide ? ' · 等权扩池' : ''}（纸面）</h3>
+      <h3 style="margin:0;">Coinglass 七日合成组合${monthly ? ' · 月度换池 v1' : wide ? ' · 等权扩池' : ''}（纸面）</h3>
+      ${monthly ? `<div class="u-note">${esc(s.tracker_status_label || '')}${s.current_universe ? ` · 币池 ${esc(s.current_universe.month)} · ${Number(s.current_universe.coins)} 个币 · 新增 ${(s.current_universe.added || []).length} / 移出 ${(s.current_universe.removed || []).length}` : ''}</div>` : ''}
       <div style="margin-top:6px;color:var(--text-sub);">${intro}完成 ${Number(s.main?.completed || 0)} 期 · 单腿名义金额净收益 ${pct(s.main?.mean_net_pct, 3)}/期 · 多空总名义金额 ${pct(s.main?.mean_net_pct == null ? null : Number(s.main.mean_net_pct)/2, 3)}/期 · 正收益占比 ${s.main?.positive_share == null ? '--' : `${(Number(s.main.positive_share) * 100).toFixed(0)}%`} · 持有中 ${Number(s.main?.open || 0)} 期 · 错过 ${Number(s.missed || 0)} 天</div>
       ${trackerVerdictLine(s)}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${powerNote}影子（${shadowName}）：完成 ${Number(s.shadow?.completed || 0)} 期 · 均值 ${pct(s.shadow?.mean_net_pct, 3)}，只记录不判定。数据：${esc(store.day || '--')} 的日线${store.completed_at ? `已于 ${esc(fmtTs(new Date(store.completed_at)))} 更新完` : '更新中'}（${dataNote}）。纸面记录，不下单。</div>
@@ -6852,6 +6860,9 @@ ${confirmHint}`,
     } catch (err) { /* optional panel */ }
     try {
       renderCoinglassCompositeTracker(await aiApi('/coinglass-composite?variant=wide', { timeoutMs: 12000 }), 'wide');
+    } catch (err) { /* optional panel */ }
+    try {
+      renderCoinglassCompositeTracker(await aiApi('/coinglass-composite?variant=monthly', { timeoutMs: 12000 }), 'monthly');
     } catch (err) { /* optional panel */ }
     try {
       const attribution = await aiApi('/coinglass-attribution', { timeoutMs: 15000 });

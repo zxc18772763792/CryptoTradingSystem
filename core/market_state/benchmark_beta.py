@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from functools import lru_cache
 import math
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
 from config.settings import settings
-from core.data.kline_partitions import list_part_files, newest_first
+from core.data.kline_partitions import list_part_files, newest_first, part_read_lock
 from core.data.path_utils import candidate_symbol_dirs
 
 
@@ -84,6 +85,7 @@ def _load_close_series_cached(
     symbol: str,
     timeframe: str,
     lookback: int,
+    cache_epoch: int,
 ) -> pd.Series:
     root = Path(storage_root)
     frames: List[pd.DataFrame] = []
@@ -94,11 +96,13 @@ def _load_close_series_cached(
             frame = _read_parquet_tail(single, tail_rows=tail_rows)
             if not frame.empty:
                 frames.append(frame)
-        newest = newest_first(list_part_files(symbol_root / f"{timeframe}_parts"))[:12]
-        for part_path, _ in reversed(newest):
-            frame = _read_parquet_tail(part_path, tail_rows=tail_rows)
-            if not frame.empty:
-                frames.append(frame)
+        parts_dir = symbol_root / f"{timeframe}_parts"
+        with part_read_lock(parts_dir):
+            newest = newest_first(list_part_files(parts_dir))[:12]
+            for part_path, _ in reversed(newest):
+                frame = _read_parquet_tail(part_path, tail_rows=tail_rows)
+                if not frame.empty:
+                    frames.append(frame)
     if not frames:
         return pd.Series(dtype=float)
     df = pd.concat(frames).sort_index()
@@ -133,13 +137,17 @@ def resolve_benchmark_beta(
         }
 
     storage_root = str(Path(settings.DATA_STORAGE_PATH))
-    asset_close = _load_close_series_cached(storage_root, exchange_text, symbol_text, timeframe_text, int(lookback or 240))
+    # Bound staleness while sharing disk reads within a minute. Both legs use
+    # the same epoch even when a request crosses a clock boundary.
+    cache_epoch = int(time.monotonic() // 60)
+    asset_close = _load_close_series_cached(storage_root, exchange_text, symbol_text, timeframe_text, int(lookback or 240), cache_epoch)
     benchmark_close = _load_close_series_cached(
         storage_root,
         exchange_text,
         benchmark_text,
         timeframe_text,
         int(lookback or 240),
+        cache_epoch,
     )
     if asset_close.empty or benchmark_close.empty:
         return {

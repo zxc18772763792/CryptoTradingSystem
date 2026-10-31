@@ -16,7 +16,9 @@ from loguru import logger
 
 from config.settings import settings
 from core.data.data_storage import data_storage
-from core.data.kline_venue import connector_market_type, venue_matches_store
+from core.data.kline_venue import (
+    connector_market_type, exchange_market_type, market_data_store, venue_matches_store,
+)
 from core.exchanges.base_exchange import Kline
 from core.exchanges.exchange_manager import exchange_manager
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
@@ -85,10 +87,10 @@ _DEFAULT_LIVE_FETCH_BACKOFF_SEC = 30.0
 _CANONICAL_KLINE_LIMIT = 500
 _STRATEGY_CYCLE_TIMEOUT_SEC = 45.0
 _SIGNAL_NOTIFY_CALLBACK_TIMEOUT_SEC = 2.0
-# The public fallback reads USD-M perpetual bars; they feed strategies in
-# memory but never the spot store.
+# Public fallbacks follow the strategy's market type. Perpetual bars stay
+# in memory and never enter spot storage.
 _BINANCE_PUBLIC_KLINE_URL = "https://fapi.binance.com/fapi/v1/klines"
-_BINANCE_PUBLIC_KLINE_MARKET = "future"
+_BINANCE_PUBLIC_SPOT_KLINE_URL = "https://api.binance.com/api/v3/klines"
 _BINANCE_PUBLIC_KLINE_INTERVALS = {
     "1m",
     "3m",
@@ -570,7 +572,10 @@ class StrategyManager:
         # Cache key intentionally excludes ``limit``: strategies on the same
         # feed request different limits (min_length varies), so keying on limit
         # fragments the cache and forces a separate network pull per strategy.
-        cache_key = (exchange, symbol, timeframe)
+        connector = exchange_manager.get_exchange(exchange)
+        market_type = exchange_market_type(exchange, connector)
+        local_exchange = market_data_store(exchange, market_type)
+        cache_key = (local_exchange, symbol, timeframe)
         fetch_limit = max(int(limit), _CANONICAL_KLINE_LIMIT)
         now = time.monotonic()
         cached = self._market_data_cache.get(cache_key)
@@ -581,19 +586,18 @@ class StrategyManager:
                 return df_cached.tail(int(limit)).copy()
 
         local_df = await data_storage.load_klines_from_parquet(
-            exchange=exchange,
+            exchange=local_exchange,
             symbol=symbol,
             timeframe=timeframe,
         )
 
         df = local_df.copy() if not local_df.empty else pd.DataFrame()
-        connector = exchange_manager.get_exchange(exchange)
 
         # Always try pulling latest bars so live strategy sees recent market —
         # unless this feed is in failure backoff, in which case skip the live
         # fetch and serve local/cache data immediately instead of blocking the
         # whole strategy cycle for the full fetch timeout.
-        backoff_key = (str(exchange), str(symbol), str(timeframe))
+        backoff_key = (local_exchange, str(symbol), str(timeframe))
         backoff_until = self._live_fetch_backoff_until.get(backoff_key)
         in_backoff = backoff_until is not None and now < backoff_until
         if connector and not in_backoff:
@@ -637,6 +641,7 @@ class StrategyManager:
                     symbol=symbol,
                     timeframe=timeframe,
                     limit=fetch_limit,
+                    market_type=market_type,
                 )
                 if not fallback_df.empty:
                     await self._persist_new_market_data(
@@ -645,7 +650,7 @@ class StrategyManager:
                         timeframe=timeframe,
                         live_df=fallback_df,
                         existing_df=df,
-                        market_type=_BINANCE_PUBLIC_KLINE_MARKET,
+                        market_type=market_type,
                     )
                     df = fallback_df if df.empty else pd.concat([df, fallback_df])
                     df = df[~df.index.duplicated(keep="last")].sort_index()
@@ -660,6 +665,7 @@ class StrategyManager:
                     symbol=symbol,
                     timeframe=timeframe,
                     limit=fetch_limit,
+                    market_type=market_type,
                 )
                 if not fallback_df.empty:
                     await self._persist_new_market_data(
@@ -668,7 +674,7 @@ class StrategyManager:
                         timeframe=timeframe,
                         live_df=fallback_df,
                         existing_df=df,
-                        market_type=_BINANCE_PUBLIC_KLINE_MARKET,
+                        market_type=market_type,
                     )
                     df = fallback_df if df.empty else pd.concat([df, fallback_df])
                     df = df[~df.index.duplicated(keep="last")].sort_index()
@@ -678,7 +684,7 @@ class StrategyManager:
                 if fallback == exchange:
                     continue
                 df = await data_storage.load_klines_from_parquet(
-                    exchange=fallback,
+                    exchange=market_data_store(fallback, market_type),
                     symbol=symbol,
                     timeframe=timeframe,
                 )
@@ -810,6 +816,7 @@ class StrategyManager:
         symbol: str,
         timeframe: str,
         limit: int,
+        market_type: Optional[str] = None,
     ) -> pd.DataFrame:
         if str(exchange or "").strip().lower() != "binance":
             return pd.DataFrame()
@@ -821,13 +828,17 @@ class StrategyManager:
             return pd.DataFrame()
         req_limit = max(10, min(int(limit or _CANONICAL_KLINE_LIMIT), 1000))
         timeout_sec = max(4.0, min(12.0, float(self._live_fetch_timeout_sec or 8.0)))
+        if market_type is None:
+            market_type = exchange_market_type(exchange, exchange_manager.get_exchange(exchange))
+        store = market_data_store(exchange, market_type)
+        url = _BINANCE_PUBLIC_SPOT_KLINE_URL if store == "binance" else _BINANCE_PUBLIC_KLINE_URL
         try:
             async with httpx.AsyncClient(
                 timeout=timeout_sec,
                 verify=get_shared_ssl_context(),
             ) as client:
                 response = await client.get(
-                    _BINANCE_PUBLIC_KLINE_URL,
+                    url,
                     params={"symbol": clean_symbol, "interval": tf, "limit": req_limit},
                 )
                 response.raise_for_status()

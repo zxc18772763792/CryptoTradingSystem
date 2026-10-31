@@ -44,7 +44,9 @@ from core.ai.signal_aggregator import signal_aggregator
 from core.observability.decision_trace import DecisionTrace, append_gate
 from core.backtest.cost_models import dynamic_slippage_rate, microstructure_proxies
 from core.data import data_storage
-from core.data.kline_venue import connector_market_type, venue_matches_store
+from core.data.kline_venue import (
+    connector_market_type, exchange_market_type, market_data_store, venue_matches_store,
+)
 from core.exchanges.exchange_manager import exchange_manager
 from core.marketdata.runtime_price_provider import get_realtime_price
 from core.news.storage import db as news_db
@@ -814,8 +816,8 @@ class AutonomousTradingAgent:
         self._last_model_attempt_at: Optional[float] = None
         # Which endpoint model answered the latest provider call (primary vs backup can differ).
         self._last_answered_model: Optional[Dict[str, Any]] = None
-        # Model decisions keyed by (symbol, bar, position side), and the bar each symbol was entered in.
-        self._bar_decisions: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+        # Decisions are local to one feed and trading mode as well as symbol/bar/side.
+        self._bar_decisions: Dict[Tuple[str, ...], Dict[str, Any]] = {}
         self._entry_bars: Dict[str, str] = {}
         self._model_feedback_outage_started_at: Optional[float] = None
         self._model_feedback_failure_streak: int = 0
@@ -1380,6 +1382,10 @@ class AutonomousTradingAgent:
             "AI_AUTONOMOUS_AGENT_STRATEGY_NAME",
         }
         async with self._lock:
+            if any(self._get(name) != value for name, value in updates.items()):
+                # An answer from the previous model/account/risk configuration
+                # is no longer a decision under the newly requested settings.
+                self._bar_decisions.clear()
             self._override.update(updates)
             if scan_config_keys.intersection(updates):
                 self._last_symbol_scan = None
@@ -2318,8 +2324,10 @@ class AutonomousTradingAgent:
         skip_live_market = bool(cfg.get("_scan_skip_live_market"))
         light_symbol_scan = bool(cfg.get("_light_symbol_scan"))
         force_live_market = bool(cfg.get("_force_live_market"))
+        connector = exchange_manager.get_exchange(exchange)
+        local_exchange = market_data_store(exchange, exchange_market_type(exchange, connector))
         df = await data_storage.load_klines_from_parquet(
-            exchange=exchange,
+            exchange=local_exchange,
             symbol=symbol,
             timeframe=normalized_timeframe,
             start_time=start_time,
@@ -2342,7 +2350,6 @@ class AutonomousTradingAgent:
             local_missing_bar_count = _missing_market_bar_count(df.index, timeframe_sec)
         local_history_complete = bool(local_bar_count >= lookback and local_missing_bar_count == 0)
 
-        connector = exchange_manager.get_exchange(exchange)
         live_refresh_age_sec_default = max(
             float(timeframe_sec * (3 if light_symbol_scan else 2)),
             900.0 if light_symbol_scan else 600.0,
@@ -3837,13 +3844,18 @@ class AutonomousTradingAgent:
         market_structure = dict((context_payload or {}).get("market_structure") or {})
         return str(market_structure.get("last_bar_at") or "")
 
-    def _bar_cache_key(self, context_payload: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+    def _bar_cache_key(self, context_payload: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
         bar = self._decision_bar_key(context_payload)
         symbol = normalize_symbol((context_payload or {}).get("symbol"))
         if not bar or not symbol:
             return None
         side = str(((context_payload or {}).get("position") or {}).get("side") or "").strip().lower()
-        return (symbol, bar, side)
+        return (
+            symbol, bar, side,
+            str(context_payload.get("exchange") or "").strip().lower(),
+            str(context_payload.get("timeframe") or "").strip(),
+            str(context_payload.get("trading_mode") or "").strip().lower(),
+        )
 
     def _bar_cached_decision(self, context_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         key = self._bar_cache_key(context_payload)

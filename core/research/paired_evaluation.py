@@ -222,6 +222,9 @@ def evaluate_reversal_pairs(days: Mapping[str, Any], *, round_trip_cost_pct: flo
         if record.get("status") != "closed" or record.get("late") or record.get("backfilled"):
             exclusions["baseline_not_closed_or_not_forward"] += 1
             continue
+        if record.get("missing_positions", 0):
+            exclusions["baseline_incomplete_settlement"] += 1
+            continue
         baseline = _number(record.get("net_per_position_pct"))
         if baseline is None:
             exclusions["missing_baseline_return"] += 1
@@ -230,6 +233,9 @@ def evaluate_reversal_pairs(days: Mapping[str, Any], *, round_trip_cost_pct: flo
         shadow = record.get("liq_filter") or {}
         if shadow.get("status") != "closed" or shadow.get("late") or shadow.get("backfilled"):
             exclusions["shadow_not_closed_or_not_forward"] += 1
+            continue
+        if shadow.get("missing_positions", 0):
+            exclusions["shadow_incomplete_settlement"] += 1
             continue
         eligible_shadow += 1
         if shadow.get("date", day) != day or (shadow.get("entry_bar_ms") is not None and
@@ -303,6 +309,6 @@ def evaluate_reversal_pairs(days: Mapping[str, Any], *, round_trip_cost_pct: flo
             "limitations": ["A common day is one observation; positions and the two versions are not independent samples.",
                             "Nominal normal intervals ignore dependence and are descriptive only, especially for small samples.",
                             "Weekly and HAC intervals require at least 32 common days and eight calendar week groups; no strategy confirmation is inferred.",
-                            "Historical partial settlements remain ledger observations; missing legs are excluded from attribution, not silently invented.",
+                            "Historical settlements marked with missing positions are excluded; other missing leg evidence is explicitly flagged in attribution.",
                             "Quotes measure entry-price drift, not executable returns; current spread, depth and fills are unavailable.",
                             "Existing frozen retirement rules and all historical records remain separate and unchanged."]}

@@ -75,11 +75,14 @@ def _runner_state() -> Dict[str, Any]:
 
 
 def _book_row(name: str, book: Dict[str, Any]) -> Dict[str, Any]:
+    mature = int(book.get("mature_settled") or 0)
     return {"book": name, "label": BOOK_LABELS[name], "decisions": book.get("decisions", 0),
-            "mature_settled": book.get("mature_settled", 0), "pending": book.get("pending", 0),
-            "unavailable": book.get("unavailable", 0), "mean_net_pct": _pct(book.get("mean_net_per_notional")),
-            "mean_excess_pct": _pct(book.get("mean_excess_vs_same_entry_long")),
-            "win_rate": book.get("win_rate"), "status": book.get("status")}
+            "mature_settled": mature, "pending": book.get("pending", 0),
+            "unavailable": book.get("unavailable", 0),
+            "mean_net_pct": _pct(book.get("mean_net_per_notional")) if mature else None,
+            "mean_excess_pct": _pct(book.get("mean_excess_vs_same_entry_long")) if mature else None,
+            "mean_stress_pct": _pct(book.get("mean_net_stress_40bps")) if mature else None,
+            "win_rate": book.get("win_rate") if mature else None, "status": book.get("status")}
 
 
 def summary(kind: str, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -99,40 +102,59 @@ def summary(kind: str, now: Optional[datetime] = None) -> Dict[str, Any]:
     error = _read("last_error.json")
     error_after_success = bool(error) and (_utc(error.get("at")) or now) > (_utc(status.get("checked_at")) or datetime.min.replace(tzinfo=timezone.utc))
     runner = _runner_state()
-    fresh = checked_age is not None and checked_age <= FRESH_SECONDS
+    checked_at = _utc(status.get("checked_at"))
+    fresh = checked_age is not None and checked_age <= FRESH_SECONDS and checked_at <= now
     gap = bool(source.get("difference_gap")) or source.get("complete_batch") is False
     if not activation:
-        label = "未激活"
+        health_status, label = "inactive", "未激活"
     elif error_after_success:
-        label = "采集异常"
+        health_status, label = "collection_error", "采集异常"
+    elif checked_at and checked_at > now:
+        health_status, label = "coverage_unverified", "采集时间异常 · 覆盖待确认"
     elif not fresh:
+        health_status = "interrupted"
         label = "采集已中断" if checked_age is None else f"采集已中断 · 最近成功 {int(checked_age // 60)} 分钟前"
+    elif source.get("member") is False:
+        health_status, label = "inaccessible", "来源不可访问"
     elif gap:
-        label = "运行中 · 本轮有缺口"
+        health_status, label = "coverage_gap", "运行中 · 本轮有缺口"
+    elif (source.get("member") is not True or source.get("complete_batch") is not True
+          or not _utc(source.get("clean_since")) or _utc(source.get("clean_since")) > checked_at):
+        health_status, label = "coverage_unverified", "运行中 · 覆盖待确认"
     else:
-        label = "运行中 · 前向观察"
+        health_status, label = "healthy", "运行中 · 前向观察"
     decisions = sum(int(r["decisions"] or 0) for r in ledgers)
     reason = (f"{len(ledgers)} 本账本；已冻结 {decisions} 笔，主账本成熟 {n} 笔，至少 {MIN_MATURE_TRADES} 笔且满 8 个日历周才做描述性筛查。"
               "空样本不是 0% 收益；缺口窗口不补；promotion_allowed 恒为 false。")
-    return {
+    source_health = {"source": SOURCE_OF[kind], "status": health_status, "member": source.get("member"),
+                     "last_collection_at": source.get("last_collection_at"), "clean_since": source.get("clean_since"),
+                     "complete_batch": source.get("complete_batch"), "difference_gap": source.get("difference_gap")}
+    result = {
         "retirement": {"n": n, "min_n": MIN_MATURE_TRADES, "mean_pct": mean, "ci90_pct": None,
                        "verdict": "collecting", "label": "前向积累样本" if activation else "未激活", "reason": reason},
         "forward_win_rate": primary.get("win_rate"),
         "forward_open": sum(int(r["pending"] or 0) for r in ledgers),
         "started_at": activation.get("at"),
         "updated_at": status.get("checked_at"),
-        "runner_active": bool(activation) and fresh and not error_after_success,
+        "runner_active": bool(activation) and fresh and not error_after_success and source.get("member") is not False,
         "tracker_status_label": label,
         "paper_only": True,
-        "source_health": {"source": SOURCE_OF[kind], "member": source.get("member"),
-                          "last_collection_at": source.get("last_collection_at"),
-                          "clean_since": source.get("clean_since"), "difference_gap": source.get("difference_gap")},
+        "source_health": source_health,
         "ledgers": ledgers,
         "last_error": {"error_type": error.get("error_type"), "at": error.get("at"),
                        "retry_at": error.get("retry_at")} if error_after_success else None,
         "runner": {"enabled": runner.get("enabled"), "last_exit_code": runner.get("last_exit_code"),
                    "last_run_at": runner.get("last_run_at"), "last_outcome": runner.get("last_outcome")},
     }
+    if kind == "binance_chat":
+        from core.research.telegram_chat_sentiment import snapshot
+        result["chat_sentiment"] = snapshot(research_dir(), now=now, activation=activation, status=status, health=source_health)
+        profile = (_read("rolling_profile.json").get(SOURCE_OF[kind]) or {})
+        result["chat_sentiment"]["activity"] = {k: profile.get(k) for k in
+                                                ("messages", "text_messages", "authors", "directional_messages", "first", "last")}
+        from core.research.telegram_sentiment_observer import load_summary
+        result["chat_sentiment"]["event_time"] = load_summary(research_dir(), now=now, source_health=source_health)
+    return result
 
 
 def cryptoquant() -> Dict[str, Any]:

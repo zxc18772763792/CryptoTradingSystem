@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 from loguru import logger
 
 from core.research import event_risk_shadow, exchange_notices, retirement
+from core.research.tracker_data_quality import funding_rate_sum, validate_daily_path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "listing_short" / "tracker.json"
@@ -67,9 +68,11 @@ def save_state(state: Dict[str, Any], path: Path = STATE_PATH) -> None:
     tmp.replace(path)
 
 
-def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], now_ms: float) -> Dict[str, Any]:
+def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], now_ms: float,
+                   *, expected_start_ms: Optional[int] = None) -> Dict[str, Any]:
     """Apply the study rules to daily bars [[open_ms, open, high, low, close], ...]."""
     day = 86_400_000
+    validate_daily_path(bars, start_ms=expected_start_ms)
 
     def closed(i: int) -> bool:
         return len(bars) > i and bars[i][0] + day <= now_ms
@@ -91,7 +94,7 @@ def evaluate_trade(bars: List[List[float]], funding: List[Dict[str, Any]], now_m
             exit_px, exit_ms, out["status"] = bars[i][4], bars[i][0] + day, "closed"
     mark = exit_px if exit_px is not None else (last[4] if last else bars[ENTRY_BAR][4])
     until = exit_ms if exit_ms is not None else now_ms
-    fund = sum(float(f["fundingRate"]) for f in funding if entry_ms <= int(f["fundingTime"]) <= until)
+    fund = funding_rate_sum(funding, entry_ms, int(until), include_start=True)
     out.update(
         exit_price=exit_px, exit_at=exit_ms, funding=round(fund, 6),
         mark_price=mark,
@@ -210,7 +213,14 @@ async def tick(client, *, llm_extract=None, history: Optional[Dict[str, List[Dic
                     fr = await client.get(f"{FAPI}/fapi/v1/fundingRate", params={"symbol": perp["symbol"], "startTime": bars[0][0], "limit": 1000})
                     funding = fr.json() if fr.status_code == 200 else None
                 if isinstance(funding, list):  # a failed funding request retries next pass, never books zero funding
-                    trade.update(evaluate_trade(bars, funding, now.timestamp() * 1000), updated_at=now.isoformat())
+                    try:
+                        result = evaluate_trade(bars, funding, now.timestamp() * 1000,
+                                                expected_start_ms=int(perp["onboard_ms"]) // 86_400_000 * 86_400_000)
+                    except (ValueError, TypeError, KeyError) as exc:
+                        trade["market_data_issue"] = type(exc).__name__ + ":" + str(exc)[:100]
+                    else:
+                        trade.pop("market_data_issue", None)
+                        trade.update(result, updated_at=now.isoformat())
 
         if "tokenomics" not in trade and history is not None:
             article = find_listing_announcement(perp["base"], history, perp["onboard_ms"])
@@ -266,7 +276,8 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "trades_total": len(trades),
         "forward_trades": len(live),
         "event_risk_shadow": event_risk_shadow.summary(state.get(event_risk_shadow.STATE_KEY)),
-        "forward_completed": len(done),
+        "forward_completed": len(counted),
+        "completed_without_primary": len(done) - len(counted),
         "forward_open": sum(t.get("status") == "open" for t in live),
         "forward_mean_return_pct": round(sum(returns) / len(returns), 2) if returns else None,
         "forward_win_rate": round(sum(r > 0 for r in returns) / len(returns), 3) if returns else None,

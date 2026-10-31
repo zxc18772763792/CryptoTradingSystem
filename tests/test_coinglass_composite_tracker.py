@@ -215,3 +215,30 @@ def test_the_wide_tracker_judges_the_equal_weight_book_on_its_own_coins_state_an
     assert rule["min_n"] == 364 and rule["backtest_mean_pct"] == 0.40
     assert summary["backtest_reference"] == ct.WIDE_BACKTEST_REFERENCE
     assert not json.loads(world.state.read_text(encoding="utf-8"))["books"]  # the 131-coin tracker is untouched
+
+
+def test_monthly_books_use_their_snapshot_and_removed_coins_still_settle(world, monkeypatch, tmp_path):
+    from core.research import coinglass_monthly_universe as monthly
+    snapshot = {"id": "2025-07:test", "month": "2025-07", "selected_at": D.isoformat(),
+                "as_of": D.isoformat(), "members": dict(store.universe()), "added": [], "removed": []}
+    monkeypatch.setattr(monthly, "load_snapshot", lambda now=None: snapshot)
+    monthly_state = tmp_path / "monthly.json"
+    ct.save_state({"started_at": D.isoformat(), "books": {}}, monthly_state)
+    formed = D + timedelta(days=1, hours=3)
+    monkeypatch.setattr(ct, "_now", lambda: formed)
+    out = asyncio.run(ct.tick(world.binance, variant="monthly", state_path=monthly_state))
+    state = ct.load_state(monthly_state)
+    record = state["books"][D.date().isoformat()]
+    assert out["forward_open"] == 1 and out["current_universe"]["coins"] == 40
+    assert record["universe"]["id"] == "2025-07:test"
+    assert state["retirement_rule"]["backtest_mean_pct"] is None
+    assert not ct.load_state(world.state)["books"]
+    original_names = set(record["main"]["longs"]) | set(record["main"]["shorts"])
+    snapshot = {}  # next month's refresh unavailable; original positions must still settle
+    monkeypatch.setattr(ct, "_now", lambda: formed + timedelta(days=7, minutes=5))
+    out = asyncio.run(ct.tick(world.binance, variant="monthly", state_path=monthly_state))
+    settled = ct.load_state(monthly_state)["books"][D.date().isoformat()]
+    assert settled["main"]["status"] == "closed" and out["forward_completed"] == 1
+    assert set(settled["main"]["longs"]) | set(settled["main"]["shorts"]) == original_names
+    assert settled["universe"]["id"] == "2025-07:test"
+    assert "待生成" in out["tracker_status_label"]

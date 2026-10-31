@@ -37,8 +37,11 @@ MIN_COINS = 30
 COST_ROUND_TRIP = 0.0012
 RESID_FLOOR = 1e-6  # residual norm below this share of the feature's norm = no new information
 MAX_DONOR_HOPS = 40  # 2020 had ~50 live perps of 590: 40 random donors leave ~3% of those cells unfilled
-DEV_START, DEV_END = pd.Timestamp("2020-07-01"), pd.Timestamp("2023-12-31")
+DEV_START = pd.Timestamp("2020-07-01")
 HOLDOUT_START = pd.Timestamp("2024-01-01")
+# A development entry must finish its entire label before the holdout begins.
+# This also bounds the return summary and feedback shown to the research LLM.
+DEV_END = HOLDOUT_START - pd.Timedelta(days=HOLD_DAYS + 1)
 
 
 class EvalContext:

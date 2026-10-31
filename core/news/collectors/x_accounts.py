@@ -238,16 +238,6 @@ class XAccountsCollector(BaseNewsCollector):
             # An archive-only handle that is not archived would be read and silently thrown away.
             raise ValueError("x_accounts_archive_only_handles must be allowlisted and need x_accounts_archive: true")
 
-    @staticmethod
-    def _log_requests(tweets_read: int) -> None:
-        """Tell the batch jobs (backfill, growth tracker) how many requests this poll just used."""
-        try:
-            from core.news import x_pacing
-
-            x_pacing.record(max(1, -(-tweets_read // 20)), "live")
-        except Exception:  # noqa: BLE001 - bookkeeping must never stop news ingestion
-            logger.debug("could not write the X request ledger", exc_info=True)
-
     def _archive(self, handle: str, tweets: List[Any]) -> None:
         if not self.archive_enabled:
             return
@@ -306,6 +296,11 @@ class XAccountsCollector(BaseNewsCollector):
         attempt = 0
         while True:
             attempt += 1
+            from core.news import x_pacing
+
+            pause = x_pacing.try_reserve(max(1, -(-self.tweets_per_account // 20)), "live")
+            if pause > 0:
+                raise x_pacing.RequestWindowFull(pause + 1.)
             capture = _ScweetWarnings()
             scweet_logger.addHandler(capture)
             try:
@@ -320,7 +315,8 @@ class XAccountsCollector(BaseNewsCollector):
                     raise XRateLimited(code)
                 return tweets
             if attempt < 3 and any("status=599" in m or "curl:" in m for m in capture.messages):
-                # A connection dropped by the proxy / TLS never reached X and says nothing about the account.
+                # Retry transient proxy/TLS failures with a fresh reservation;
+                # a missing response cannot establish the remote request count.
                 time.sleep(3.0 * attempt)
                 continue
             raise RuntimeError("X request failed: " + self._scrub(capture.messages[0])[:200])
@@ -425,13 +421,17 @@ class XAccountsCollector(BaseNewsCollector):
                     reason = f"{type(exc).__name__}: {self._scrub(exc)}"
                     self.last_account_errors[handle] = reason
                     logger.warning("X account %s failed: %s", handle, reason)
+                    from core.news.x_pacing import RequestWindowFull
+
+                    if isinstance(exc, RequestWindowFull):
+                        self._pause("budget", exc.retry_after, reason)
+                        break
                     kind = _failure_kind(exc)
                     if kind == "other":
                         continue
                     self._pause(kind, _AUTH_PAUSE_SEC if kind == "auth" else _RATE_PAUSE_SEC, reason)
                     break
                 succeeded += 1
-                self._log_requests(len(tweets))
                 self._archive(handle, tweets)
                 if handle in self.archive_only_handles:
                     continue

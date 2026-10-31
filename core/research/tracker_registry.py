@@ -102,6 +102,11 @@ def _composite_wide() -> Dict[str, Any]:
     return m.summary(m.load_state(m.WIDE_STATE_PATH), "wide")
 
 
+def _composite_monthly() -> Dict[str, Any]:
+    from core.research import coinglass_composite_tracker as m
+    return m.summary(m.load_state(m.MONTHLY_STATE_PATH), "monthly")
+
+
 def _xs_liq_filter() -> Dict[str, Any]:
     from core.research import xs_reversal_tracker as m
     summary = m.summary(m.load_state())
@@ -180,6 +185,11 @@ TRACKERS: List[Dict[str, Any]] = [
      "rule_key": "coinglass_composite_7d",
      "rule": "8 个持仓类信号按训练期 IC 加权，每天建一份多空各五分之一、持有 7 天的组合，扣成本和资金费；利润薄，一年内约两成概率能确认",
      "load": _composite},
+    {"id": "coinglass_composite_7d_monthly_v1", "name": "Coinglass 七日合成组合 · 月度换池 v1", "group": "因子", "unit": "期",
+     "rule_key": "coinglass_composite_7d_monthly_v1",
+     "rule": "每月1日 UTC（北京时间08:00）重新筛选：本地≥120天已收盘小时线、币安仍在交易的USDT永续，排除稳定币；"
+             "8个信号沿用原版IC权重，多空各前后20%，每天一期、持有7天，扣成本及资金费。换池只影响新组合，独立账本与364期判定；无该版本回测参照。",
+     "load": _composite_monthly},
     {"id": "coinglass_composite_7d_wide_eq", "name": "Coinglass 七日合成组合 · 等权扩池", "group": "因子", "unit": "期",
      "rule_key": "coinglass_composite_7d_wide_eq",
      "rule": "234 个币（原 131 个加成交额前 200 里另外 103 个），8 个信号只取方向、等权，做多前五分之一、做空后五分之一，"
@@ -362,15 +372,24 @@ def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
         paired_evaluation=summary.get("paired_evaluation"),
         risk_shadow=summary.get("risk_shadow") or summary.get("event_risk_shadow"),
         tracker_status_label=summary.get("tracker_status_label"),
+        collection_health=summary.get("collection_health"),
         pending_review=summary.get("pending_review"),
         runner_active=summary.get("runner_active"),
         completed_without_primary=summary.get("completed_without_primary"),
         horizon_comparison=summary.get("horizon_comparison"),
         ledgers=summary.get("ledgers"),
+        source_health=summary.get("source_health"),
+        chat_sentiment=summary.get("chat_sentiment"),
+        current_universe=summary.get("current_universe"),
         gross_mean_pct=round(float(mean) / row["gross_notional_multiplier"], 4) if mean is not None else None,
     )
     if spec["id"] in ("alastar_fresh_call_1h_v2", "alastar_horizons_v3"):
         row["signal_intake"] = _signal_intake_status()
+    if spec["id"] == "alastar_horizons_v3":
+        from core.research.alastar_strategy_inbox import detail
+        inbox = detail()
+        # This is an observation inbox, not additional trades in the frozen book.
+        row["strategy_inbox"] = inbox
     try:
         row["open_marks"] = _open_marks(spec)
     except Exception:  # noqa: BLE001 - marks are a convenience

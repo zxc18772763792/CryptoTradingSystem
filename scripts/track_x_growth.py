@@ -61,8 +61,7 @@ class Budget:
     def take(self, requests: int, who: str = "tracker") -> None:
         if self.used + requests > self.cap:
             raise BudgetSpent(f"run cap of {self.cap} requests reached")
-        x_pacing.wait_for_room(requests, announce=lambda m: print(f"  {m}", flush=True))
-        x_pacing.record(requests, who)  # reserve before asking, so the other jobs see it
+        x_pacing.reserve_requests(requests, who, announce=lambda m: print(f"  {m}", flush=True))
         self.used += requests
 
 
@@ -80,9 +79,11 @@ def mention_counts(records: List[Dict[str, Any]], skip: set) -> Dict[str, int]:
     return counts
 
 
-def resolve_usernames(conn, client, names: List[str], now: datetime, mentions: Dict[str, int]) -> Dict[str, int]:
+def resolve_usernames(conn, client, names: List[str], now: datetime, mentions: Dict[str, int],
+                      *, on_retry: Optional[Callable[[], None]] = None) -> Dict[str, int]:
     """Look up one chunk of usernames. Found -> candidate plus first snapshot; not found -> missing; else retry."""
-    rows, messages = guarded_call(client, lambda: client.aget_user_info(users=names), debug=True)
+    rows, messages = guarded_call(client, lambda: client.aget_user_info(users=names), debug=True,
+                                 retry_requests=len(names), on_retry=on_retry)
     found = {str(r.get("username") or "").lower(): r for r in rows}
     result = {"resolved": 0, "missing": 0, "retry": 0, "new": 0}
     for name in names:
@@ -118,10 +119,11 @@ def seed_mentions(conn, client, budget: Budget, min_mentions: int, limit: int, n
         chunk = todo[start:start + USERNAME_CHUNK]
         try:
             budget.take(len(chunk))
+            part = resolve_usernames(conn, client, [n for n, _ in chunk], now, dict(chunk),
+                                     on_retry=lambda: budget.take(len(chunk)))
         except BudgetSpent:
             totals["stopped"] = "run cap reached"
             break
-        part = resolve_usernames(conn, client, [n for n, _ in chunk], now, dict(chunk))
         for key, value in part.items():
             totals[key] += value
         _pause(2.0)
@@ -133,10 +135,11 @@ def seed_search(conn, client, budget: Budget, pages: int, now: datetime) -> Dict
     for query in SEARCH_QUERIES:
         try:
             budget.take(pages)
+            rows, _ = guarded_call(client, lambda q=query: client.asearch_users(q, limit=20 * pages),
+                                   on_retry=lambda: budget.take(pages))
         except BudgetSpent:
             totals["stopped"] = "run cap reached"
             break
-        rows, _ = guarded_call(client, lambda q=query: client.asearch_users(q, limit=20 * pages))
         for record in rows:
             totals["new"] += int(x_growth.upsert_candidate(conn, record, f"search:{query}", now))
             x_growth.save_snapshot(conn, record, now)
@@ -147,10 +150,12 @@ def seed_search(conn, client, budget: Budget, pages: int, now: datetime) -> Dict
     return totals
 
 
-def refresh_usernames(conn, client, rows: List[tuple], now: datetime) -> Dict[str, int]:
+def refresh_usernames(conn, client, rows: List[tuple], now: datetime,
+                      *, on_retry: Optional[Callable[[], None]] = None) -> Dict[str, int]:
     """Snapshot accounts by username (one request each). Only a clear "not found" counts against an account."""
     names = [username for _, username in rows]
-    items, messages = guarded_call(client, lambda: client.aget_user_info(users=names), debug=True)
+    items, messages = guarded_call(client, lambda: client.aget_user_info(users=names), debug=True,
+                                   retry_requests=len(names), on_retry=on_retry)
     by_id = {str(r.get("user_id")): r for r in items}
     by_name = {str(r.get("username") or "").lower(): r for r in items}
     result = {"saved": 0, "gone": 0, "unanswered": 0}
@@ -187,7 +192,11 @@ def take_snapshots(conn, client, budget: Budget, now: datetime, force: bool = Fa
                 totals["stopped"] = "run cap reached"
                 return totals
             try:
-                rows, _ = guarded_call(client, lambda b=batch: client.aget_user_info(user_ids=b))
+                rows, _ = guarded_call(client, lambda b=batch: client.aget_user_info(user_ids=b),
+                                       on_retry=lambda: budget.take(1))
+            except BudgetSpent:
+                totals["stopped"] = "run cap reached"
+                return totals
             except Exception as exc:  # noqa: BLE001 - X refuses this lookup on some connections (HTTP 403)
                 if mode == "auto" and "id lookup" in str(exc) and "403" in str(exc):
                     x_growth.set_meta(conn, "id_lookup_blocked_until", (now + timedelta(hours=ID_BLOCK_HOURS)).isoformat())
@@ -215,10 +224,10 @@ def take_snapshots(conn, client, budget: Budget, now: datetime, force: bool = Fa
         chunk = stale[start:start + USERNAME_CHUNK]
         try:
             budget.take(len(chunk))
+            part = refresh_usernames(conn, client, chunk, now, on_retry=lambda: budget.take(len(chunk)))
         except BudgetSpent:
             totals["stopped"] = "run cap reached"
             break
-        part = refresh_usernames(conn, client, chunk, now)
         totals["saved"] += part["saved"]
         totals["gone"] += part["gone"]
         totals["unanswered"] = totals.get("unanswered", 0) + part["unanswered"]

@@ -33,26 +33,31 @@ DAY_MS = 86_400_000
 
 def score_short_trade(kl, fr, day0_ms):
     """Score one complete daily-bar window, charging funding only while open."""
-    if len(kl) < HOLD + 1 or any(int(kl[i][0]) != day0_ms + i * DAY_MS for i in range(HOLD + 1)):
+    if not kl or int(kl[0][0]) != day0_ms:
         raise ValueError("incomplete_daily_bars")
     if not fr:
         raise ValueError("missing_funding")
     entry_ms, planned_exit_ms = day0_ms + DAY_MS, day0_ms + (HOLD + 1) * DAY_MS
-    funding_times = sorted(int(f["fundingTime"]) for f in fr
-                           if entry_ms <= int(f["fundingTime"]) <= planned_exit_ms)
-    if (not funding_times or len(set(funding_times)) != len(funding_times)
-            or funding_times[0] - entry_ms > DAY_MS
-            or planned_exit_ms - funding_times[-1] > DAY_MS
-            or any(b - a > DAY_MS for a, b in zip(funding_times, funding_times[1:]))):
-        raise ValueError("incomplete_funding")
     entry = float(kl[0][4])
-    exit_px, exit_ms, stopped = float(kl[HOLD][4]), planned_exit_ms, False
-    for bar in kl[1:HOLD + 1]:
+    exit_px, exit_ms, stopped = None, planned_exit_ms, False
+    for k in range(1, HOLD + 1):
+        if k >= len(kl) or int(kl[k][0]) != day0_ms + k * DAY_MS:
+            raise ValueError("incomplete_daily_bars")
+        bar = kl[k]
         if float(bar[2]) >= entry * (1 + STOP):
             exit_px, exit_ms, stopped = entry * (1 + STOP) * (1 + SLIP), int(bar[0]) + DAY_MS, True
             break
+        if k == HOLD:
+            exit_px = float(bar[4])
+    funding_times = sorted(int(f["fundingTime"]) for f in fr
+                           if entry_ms < int(f["fundingTime"]) <= exit_ms)
+    if (not funding_times or len(set(funding_times)) != len(funding_times)
+            or funding_times[0] - entry_ms > DAY_MS
+            or exit_ms - funding_times[-1] > DAY_MS
+            or any(b - a > DAY_MS for a, b in zip(funding_times, funding_times[1:]))):
+        raise ValueError("incomplete_funding")
     funding = sum(float(f["fundingRate"]) for f in fr
-                  if entry_ms <= int(f["fundingTime"]) <= exit_ms)
+                  if entry_ms < int(f["fundingTime"]) <= exit_ms)
     return (entry - exit_px) / entry - FEE + funding, funding, stopped
 
 

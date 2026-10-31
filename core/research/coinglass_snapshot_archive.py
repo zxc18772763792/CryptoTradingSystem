@@ -34,11 +34,17 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import math
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
+from uuid import uuid4
 
 from loguru import logger
+
+from core.utils.file_lock import advisory_file_lock
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ROOT = PROJECT_ROOT / "data" / "research" / "coinglass_snapshots"
@@ -58,6 +64,35 @@ NET_POSITION_SEED_DIR = PROJECT_ROOT / "data" / "research" / "coinglass_wide" / 
 NET_POSITION_FIRST_DAY = datetime(2024, 1, 1, tzinfo=timezone.utc)  # a coin with no seed starts here
 NET_POSITION_FIELDS = ("time", "net_long_change", "net_short_change")
 DAY_MS = 86_400_000
+
+
+def _atomic_bytes(path: Path, raw: bytes, *, deadline: Optional[float] = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stage = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with stage.open("xb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if deadline is not None and time.monotonic() >= deadline:
+            raise asyncio.TimeoutError("Snapshot capture deadline elapsed before commit")
+        stage.replace(path)
+    finally:
+        stage.unlink(missing_ok=True)
+
+
+def _write_json(path: Path, value: Any) -> None:
+    _atomic_bytes(path, json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+
+
+def _commit_snapshot(path: Path, value: Any, *, deadline: Optional[float] = None) -> bool:
+    """Publish one immutable capture; a competing collector's first commit wins."""
+    raw = gzip.compress(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+    with advisory_file_lock(path):
+        if path.exists():
+            return False
+        _atomic_bytes(path, raw, deadline=deadline)
+    return True
 
 
 def _now() -> datetime:
@@ -93,6 +128,8 @@ async def _request(client, path: str, params: Dict[str, Any]) -> Any:
     else:
         raise RuntimeError("coinglass minute budget stayed full")
     payload = resp.get("payload") if isinstance(resp, dict) else None
+    if not isinstance(payload, dict):
+        raise ValueError(f"{path}: expected a response object")
     if isinstance(payload, dict) and str(payload.get("code")) not in {"0", "None"}:
         raise RelayRefused(f"{path} code {payload.get('code')}: {str(payload.get('msg'))[:80]}")
     return payload
@@ -104,16 +141,24 @@ async def _request_page(client, page: int) -> Any:
 
 async def _coins_markets(client) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    symbols: set[str] = set()
     for page in range(1, MAX_PAGES + 1):
         if page > 1:
             await asyncio.sleep(PAGE_SPACING_SEC)
         payload = await _request_page(client, page)
         data = payload.get("data") if isinstance(payload, dict) else None
-        items = [r for r in data if isinstance(r, dict)] if isinstance(data, list) else []
+        if not isinstance(data, list) or any(not isinstance(row, dict) or not isinstance(row.get("symbol"), str)
+                                             or not row["symbol"].strip() for row in data):
+            raise ValueError(f"coins-markets page {page}: invalid rows")
+        items = data
+        page_symbols = [row["symbol"].strip().upper() for row in items]
+        if len(set(page_symbols)) != len(page_symbols) or symbols.intersection(page_symbols):
+            raise ValueError(f"coins-markets page {page}: duplicate symbols across pages")
+        symbols.update(page_symbols)
         rows += items
         if len(items) < PER_PAGE:
-            break
-    return rows
+            return rows
+    raise ValueError("coins-markets pagination reached its limit without a final page")
 
 
 async def tick(now: Optional[datetime] = None, *, client=None, root: Path = ROOT) -> Dict[str, Any]:
@@ -125,22 +170,21 @@ async def tick(now: Optional[datetime] = None, *, client=None, root: Path = ROOT
     path = snapshot_path(slot, root)
     if path.exists():
         return {"status": "done", "slot": slot.isoformat(), "path": str(path)}
-    if client is None:
-        from core.data.coinglass_client import CoinglassClient, coinglass_enabled
+    deadline = time.monotonic() + (slot + SLOT_GRACE - now).total_seconds()
+    async with asyncio.timeout_at(deadline):
+        if client is None:
+            from core.data.coinglass_client import CoinglassClient, coinglass_enabled
 
-        if not coinglass_enabled():
-            return {"status": "disabled", "slot": slot.isoformat()}
-        async with CoinglassClient() as own:
-            rows = await _coins_markets(own)
-    else:
-        rows = await _coins_markets(client)
+            if not coinglass_enabled():
+                return {"status": "disabled", "slot": slot.isoformat()}
+            async with CoinglassClient() as own:
+                rows = await _coins_markets(own)
+        else:
+            rows = await _coins_markets(client)
     if not rows:
         raise RuntimeError("coins-markets returned no rows")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with gzip.open(tmp, "wt", encoding="utf-8") as fh:
-        json.dump({"slot": slot.isoformat(), "captured_at": _now().isoformat(), "rows": rows}, fh, ensure_ascii=False)
-    tmp.replace(path)
+    if not _commit_snapshot(path, {"slot": slot.isoformat(), "captured_at": _now().isoformat(), "rows": rows}, deadline=deadline):
+        return {"status": "done", "slot": slot.isoformat(), "path": str(path)}
     logger.info(f"coinglass snapshot {slot:%Y-%m-%d %H}:00: {len(rows)} coins")
     return {"status": "captured", "slot": slot.isoformat(), "coins": len(rows), "path": str(path)}
 
@@ -162,7 +206,10 @@ async def _fetch_maps(client, todo: List[str], maps: Dict[str, Any]) -> None:
         except RelayRefused as exc:  # e.g. a coin the relay does not cover: recorded, not asked again
             maps[base] = {"captured_at": _now().isoformat(), "error": str(exc)[:160]}
             continue
-        maps[base] = {"captured_at": _now().isoformat(), "data": (payload or {}).get("data")}
+        data = payload.get("data")
+        if not isinstance(data, (dict, list)) or not data:
+            raise ValueError(f"liquidation map for {base}: missing data")
+        maps[base] = {"captured_at": _now().isoformat(), "data": data}
 
 
 async def tick_liq_maps(now: Optional[datetime] = None, *, client=None, root: Path = ROOT,
@@ -192,15 +239,14 @@ async def tick_liq_maps(now: Optional[datetime] = None, *, client=None, root: Pa
             await _fetch_maps(client, todo, state["maps"])
     finally:  # keep what this pass fetched even when a 429 or a network error ends it early
         partial.parent.mkdir(parents=True, exist_ok=True)
-        partial.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        _write_json(partial, state)
     remaining = [b for b in bases if b not in state["maps"]]
     if remaining:
         return {"status": "collecting", "day": label, "done": len(state["maps"]), "remaining": len(remaining)}
-    tmp = final.with_suffix(".tmp")
-    with gzip.open(tmp, "wt", encoding="utf-8") as fh:
-        json.dump({**state, "completed_at": _now().isoformat()}, fh, ensure_ascii=False)
-    tmp.replace(final)
-    partial.unlink()
+    committed = _commit_snapshot(final, {**state, "completed_at": _now().isoformat()})
+    partial.unlink(missing_ok=True)
+    if not committed:
+        return {"status": "done", "day": label}
     refused = sum("error" in m for m in state["maps"].values())
     logger.info(f"coinglass liquidation maps {label}: {len(state['maps'])} coins, {refused} refused")
     return {"status": "captured", "day": label, "coins": len(state["maps"]), "refused": refused}
@@ -238,10 +284,24 @@ async def _fetch_net_positions(client, perp: str, archive: Dict[str, Any], need_
                              {"exchange": "Binance", "symbol": perp, "interval": "1d", "start_time": start,
                               "end_time": need_ms + DAY_MS - 1, "limit": 4500})
     data = (payload or {}).get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list):
+        raise ValueError(f"net-position for {perp}: expected rows")
     known = set(stamps)
-    new = [{k: r.get(k) for k in NET_POSITION_FIELDS} for r in data or []
-           if isinstance(r, dict) and r.get("time") is not None and int(r["time"]) not in known
-           and start <= int(r["time"]) <= need_ms]  # closed days only; a stored bar is never rewritten
+    by_time = {}
+    for row in data:
+        try:
+            stamp = int(row["time"])
+            if any(not math.isfinite(float(row[key])) for key in NET_POSITION_FIELDS[1:]):
+                raise ValueError
+            item = {key: row[key] for key in NET_POSITION_FIELDS}
+        except (TypeError, ValueError, KeyError, OverflowError):
+            raise ValueError(f"net-position for {perp}: invalid row") from None
+        if stamp in known or not start <= stamp <= need_ms:
+            continue
+        if stamp in by_time and by_time[stamp] != item:
+            raise ValueError(f"net-position for {perp}: conflicting duplicate row")
+        by_time[stamp] = item
+    new = list(by_time.values())  # closed days only; a stored bar is never rewritten
     archive["rows"] = sorted(archive["rows"] + new, key=lambda r: int(r["time"]))
     archive["updated_at"] = _now().isoformat()
     return len(new)
@@ -258,12 +318,13 @@ async def tick_net_positions(now: Optional[datetime] = None, *, client=None, roo
     label = f"{day:%Y-%m-%d}"
     need_ms = int(day.timestamp() * 1000)
     coins = net_position_coins() if coins is None else coins
+    wanted = set(perp for _, perp in coins)
     status_path = root / "_status.json"
     status = json.loads(status_path.read_text(encoding="utf-8")) if status_path.exists() else {}
     if status.get("day") != label:
         status = {"day": label, "done": [], "refused": {}, "new_bars": 0}
-    if len(status["done"]) >= len(coins):
-        return {"status": "done", "day": label, "coins": len(coins), "refused": len(status["refused"])}
+    if wanted.issubset(status["done"]):
+        return {"status": "done", "day": label, "coins": len(wanted), "refused": len(wanted.intersection(status["refused"]))}
     todo = [perp for _, perp in coins if perp not in status["done"]][:NET_POSITION_BATCH]
 
     async def run(cg) -> None:
@@ -276,7 +337,7 @@ async def tick_net_positions(now: Optional[datetime] = None, *, client=None, roo
             except RelayRefused as exc:  # no such series for this coin: recorded, not asked again today
                 status["refused"][perp] = str(exc)[:120]
             root.mkdir(parents=True, exist_ok=True)
-            _net_position_file(perp, root).write_text(json.dumps(archive, ensure_ascii=False), encoding="utf-8")
+            _write_json(_net_position_file(perp, root), archive)
             status["done"].append(perp)
 
     try:
@@ -292,14 +353,14 @@ async def tick_net_positions(now: Optional[datetime] = None, *, client=None, roo
     finally:  # keep the coins this pass finished even when a 429 or a network error ends it early
         status["checked_at"] = _now().isoformat()
         root.mkdir(parents=True, exist_ok=True)
-        status_path.write_text(json.dumps(status, ensure_ascii=False, indent=1), encoding="utf-8")
-    remaining = len(coins) - len(status["done"])
+        _write_json(status_path, status)
+    remaining = len(wanted.difference(status["done"]))
     if remaining:
-        return {"status": "collecting", "day": label, "done": len(status["done"]), "remaining": remaining}
+        return {"status": "collecting", "day": label, "done": len(wanted.intersection(status["done"])), "remaining": remaining}
     logger.info(f"coinglass net position {label}: {len(coins)} coins, {status['new_bars']} new bars, "
                 f"{len(status['refused'])} refused")
-    return {"status": "captured", "day": label, "coins": len(coins), "new_bars": status["new_bars"],
-            "refused": len(status["refused"])}
+    return {"status": "captured", "day": label, "coins": len(wanted), "new_bars": status["new_bars"],
+            "refused": len(wanted.intersection(status["refused"]))}
 
 
 def iter_snapshots(root: Path = ROOT) -> Iterator[Tuple[str, str, List[Dict[str, Any]]]]:

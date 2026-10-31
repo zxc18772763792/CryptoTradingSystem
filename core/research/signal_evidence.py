@@ -122,11 +122,14 @@ async def basket_return(client, symbols: List[str], entry_ms: int, exit_ms: int)
         bars = resp.json()
         if len(bars) != days + 1 or int(bars[0][0]) != entry_ms - DAY_MS or int(bars[-1][0]) != exit_ms - DAY_MS:
             continue
-        moves.append(float(bars[-1][4]) / float(bars[0][4]) - 1.0)
+        from core.research.tracker_data_quality import positive_price
+        moves.append(positive_price(bars[-1][4]) / positive_price(bars[0][4]) - 1.0)
     if not moves or len(moves) * 2 < len(symbols):  # at least half the basket must resolve
         return None
     # mean = what an equal-weight long earns; median = the typical coin (one +100% leg moves the mean a lot)
-    return {"return_pct": round(sum(moves) / len(moves) * 100, 3), "median_return_pct": round(median(moves) * 100, 3),
+    return {"return_pct": round(sum(moves) / len(moves) * 100, 3),
+            "return_pct_unrounded": sum(moves) / len(moves) * 100,
+            "median_return_pct": round(median(moves) * 100, 3),
             "legs": len(moves), "basket": len(symbols)}
 
 
@@ -139,7 +142,39 @@ async def basket_funding(client, symbols: List[str], entry_ms: int, exit_ms: int
         rows = resp.json() if resp.status_code == 200 else None
         if not isinstance(rows, list):
             continue
-        paid.append(sum(float(r["fundingRate"]) for r in rows if entry_ms < int(r["fundingTime"]) <= exit_ms))
+        from core.research.tracker_data_quality import funding_rate_sum
+        paid.append(funding_rate_sum(rows, entry_ms, exit_ms, symbol=symbol))
     if not paid or len(paid) * 2 < len(symbols):
         return None
     return sum(paid) / len(paid)
+
+
+async def matched_basket_settlement(client, symbols: List[str], entry_ms: int,
+                                    exit_ms: int) -> Optional[Dict[str, Any]]:
+    """Use exactly the same resolved constituents for price and funding.
+
+    Preserve the existing >= half-basket quorum, but never subtract funding
+    averaged over a different survivor set. Partial coverage is explicit.
+    """
+    symbols = list(dict.fromkeys(symbols))
+    resolved, missing, moves, paid = [], [], [], []
+    for symbol in symbols:
+        try:
+            price = await basket_return(client, [symbol], entry_ms, exit_ms)
+            fund = await basket_funding(client, [symbol], entry_ms, exit_ms) if price is not None else None
+        except Exception:  # per-leg unavailability cannot fabricate a resolved member
+            price, fund = None, None
+        if price is None or fund is None:
+            missing.append(symbol)
+            continue
+        resolved.append(symbol)
+        moves.append(float(price.get("return_pct_unrounded", price["return_pct"])))
+        paid.append(fund)
+    if not resolved or len(resolved) * 2 < len(symbols):
+        return None
+    return {"return_pct": round(sum(moves) / len(moves), 3),
+            "median_return_pct": round(median(moves), 3),
+            "legs": len(resolved), "basket": len(symbols),
+            "resolved_symbols": resolved, "missing_symbols": missing,
+            "partial": bool(missing), "funding_rate_sum": sum(paid) / len(paid),
+            "settlement_method": "matched_price_and_funding_members_v1"}

@@ -2,6 +2,7 @@ import asyncio
 import importlib
 import time
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pandas as pd
@@ -127,7 +128,8 @@ def test_load_market_data_timeout_uses_binance_public_fallback_without_persistin
             AsyncMock(return_value=local_df),
         )
         monkeypatch.setattr(module.data_storage, "save_klines_to_parquet", save_mock)
-        monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda exchange: object())
+        monkeypatch.setattr(module.exchange_manager, "get_exchange", lambda exchange: SimpleNamespace(
+            config=SimpleNamespace(default_type="future")))
         monkeypatch.setattr(
             manager,
             "_load_live_market_data",

@@ -132,11 +132,18 @@ def build_events(records: Iterable[Dict[str, Any]], available: Dict[str, str]) -
         if not coins:
             continue
         created = pd.Timestamp(rec["created_at"]).tz_convert("UTC")
+        observed = None
+        if rec.get("first_seen_at"):
+            try:
+                observed = pd.Timestamp(rec["first_seen_at"]).tz_convert("UTC")
+            except (TypeError, ValueError):
+                pass
         sign = direction(text)
         for coin in coins:
             events.append({
                 "handle": handle, "tweet_id": rec["tweet_id"], "created": created, "coin": coin, "dir": sign,
                 "n_coins": len(coins), "provenance": rec.get("provenance"),
+                "observed_at": observed,
                 "entry": created.floor("h") + pd.Timedelta(hours=1),
             })
     events.sort(key=lambda e: (e["created"], e["handle"], e["coin"]))

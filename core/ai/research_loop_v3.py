@@ -35,6 +35,8 @@ from uuid import uuid4
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 
+from core.utils.file_lock import advisory_file_lock
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_PATH = PROJECT_ROOT / "data" / "research" / "ai" / "research_loop_v3.json"
 LOCK_PATH = PROJECT_ROOT / "data" / "research" / "ai" / "research_loop_v3.lock"
@@ -101,12 +103,14 @@ def load_state(path: Optional[Path] = None) -> Dict[str, Any]:
 def update_state(change: Callable[[Dict[str, Any]], None], path: Optional[Path] = None) -> Dict[str, Any]:
     """Read, change and atomically write the state; each side changes only the keys it owns."""
     path = path or STATE_PATH
-    state = load_state(path)
-    change(state)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1, allow_nan=False, default=str), encoding="utf-8")
-    tmp.replace(path)
+    # Atomic replacement alone cannot stop the web configuration writer and
+    # research child from overwriting one another's read/modify/write updates.
+    with advisory_file_lock(path):
+        state = load_state(path)
+        change(state)
+        tmp = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1, allow_nan=False, default=str), encoding="utf-8")
+        tmp.replace(path)
     return state
 
 
@@ -160,9 +164,21 @@ def build_prompt(state: Dict[str, Any], panel, cfg: ResearchLoopV3Config) -> str
 
     ledger = sorted(state["ledger"].values(), key=lambda e: e.get("evaluated_at", ""))
     dev_keys = ("ic", "z", "resid_ic", "resid_z", "nearest_factor", "nearest_factor_corr", "net_per_book", "coverage")
+
+    def development_feedback(entry):
+        dev = entry.get("dev") or {}
+        bounds = dev.get("period") or []
+        try:
+            safe = len(bounds) == 2 and datetime.fromisoformat(str(bounds[1])).date() <= DEV_END.date()
+        except (TypeError, ValueError):
+            safe = False
+        # Old ledger entries can contain the pre-purge final-week labels. Keep
+        # their formulas for de-duplication, but never feed those outcomes back.
+        return {k: dev.get(k) for k in dev_keys} if safe else {}
+
     feedback = [
         {"name": e["name"], "direction": e["direction"], "expr": e["expr"],
-         "dev": {k: (e.get("dev") or {}).get(k) for k in dev_keys}}
+         "dev": development_feedback(e)}
         for e in ledger[-FEEDBACK_ROWS:]
     ]
     return json.dumps(
@@ -295,7 +311,13 @@ def observe_forward(ctx, cfg: ResearchLoopV3Config, log: Callable[[str], None] =
         return
     results = {}
     for item in pending:
-        start = pd.Timestamp(item.get("frozen_panel_end") or item["frozen_at"][:10]) + pd.Timedelta(days=1)
+        frozen_day = pd.Timestamp(item["frozen_at"])
+        if frozen_day.tzinfo is not None:
+            frozen_day = frozen_day.tz_convert("UTC").tz_localize(None)
+        panel_end = pd.Timestamp(item.get("frozen_panel_end") or frozen_day)
+        if panel_end.tzinfo is not None:
+            panel_end = panel_end.tz_convert("UTC").tz_localize(None)
+        start = max(frozen_day.normalize(), panel_end.normalize()) + pd.Timedelta(days=1)
         end = ctx.dates[(ctx.label_ok.sum(axis=1) >= 30)].max()
         days = int((end - start).days) + 1
         if days < cfg.forward_min_days:
@@ -303,6 +325,13 @@ def observe_forward(ctx, cfg: ResearchLoopV3Config, log: Callable[[str], None] =
             continue
         fctx = EvalContext(ctx.panel, periods={"forward": (start, end)})
         forward = evaluate(item, fctx, n_perm=cfg.n_perm)["forward"]
+        scored_days = int(forward.get("days") or 0)
+        if forward.get("status") != "ok" or scored_days < cfg.forward_min_days:
+            results[item["fingerprint"]] = {
+                "forward_note": f"等待前向有效样本：{scored_days}/{cfg.forward_min_days} 天",
+                "forward": forward,
+            }
+            continue
         passed = (forward.get("z") or -99) >= 1.645 and (forward.get("net_per_book") or 0) > 0
         results[item["fingerprint"]] = {
             "forward": forward, "status": "forward_passed" if passed else "forward_failed",

@@ -74,10 +74,12 @@ class SymbolPanel:
             rates = funding["funding_rate"].astype(float)
             hours = rates.index.floor("h")
             # Settlement at hh:00:00.00x is paid by a position opened at that open.
-            series = rates.groupby(hours).sum().reindex(self.index)
-            self.fund = np.nan_to_num(series.to_numpy(float))
+            finite_rates = rates.where(np.isfinite(rates))
+            series = finite_rates.groupby(hours).sum(min_count=1).reindex(self.index)
+            self.fund = np.nan_to_num(series.to_numpy(float), posinf=0.0, neginf=0.0)
             first, last = rates.index.min().floor("h"), rates.index.max().floor("h")
             self.funding_known = (self.index >= first) & (self.index <= last)
+            self.funding_known &= ~self.index.isin(hours[~np.isfinite(rates)])
 
     def position(self, at: pd.Timestamp) -> int | None:
         if len(self.index) == 0 or at < self.index[0] or at > self.index[-1]:
@@ -108,7 +110,10 @@ class SymbolPanel:
         raw = np.maximum(-1.0, raw)
         gross[:n - hours] = np.where(window_ok, raw, np.nan)
         paid = cum_f[hours:n] - cum_f[:n - hours]
-        known = self.funding_known[:n - hours] & self.funding_known[hours - 1:n - 1]
+        # An explicit invalid settlement anywhere in the hold is unknown, even
+        # when the window's two endpoints have valid funding records.
+        known_sum = np.concatenate([[0], np.cumsum(self.funding_known, dtype=int)])
+        known = known_sum[hours:n] - known_sum[:n - hours] == hours
         funding[:n - hours] = np.where(window_ok & known, -side * paid, np.nan)
         return gross, funding
 

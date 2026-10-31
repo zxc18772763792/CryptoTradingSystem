@@ -6481,6 +6481,14 @@ async def get_alastar_signal_intake():
     return await asyncio.to_thread(detail)
 
 
+@router.get("/alastar-strategy-inbox")
+async def get_alastar_strategy_inbox():
+    """Source-separated strategy observations; never execution instructions."""
+    from core.research.alastar_strategy_inbox import detail
+
+    return await asyncio.to_thread(detail)
+
+
 @router.get("/alastar-horizons")
 async def get_alastar_horizon_tracker():
     """Independent paired horizon journal; same signal, one entry and five exits."""
@@ -6532,6 +6540,7 @@ async def get_coinglass_composite_tracker(variant: str = "main"):
         return {**{k: book.get(k) for k in keep}, "longs": sorted(book.get("longs") or {}), "shorts": sorted(book.get("shorts") or {})}
 
     books = [{"day": day, "status": record.get("status"), "formed_at": record.get("formed_at"), "partial": record.get("partial"),
+              "universe": record.get("universe"),
               "main": brief(record.get("main") or {}), "shadow": brief(record.get("shadow") or {})}
              for day, record in sorted(state.get("books", {}).items(), reverse=True)[:30]]
     return {"summary": tracker.summary(state, variant), "books": books, "store": await asyncio.to_thread(store.load_status)}

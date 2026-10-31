@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import re
 from calendar import monthrange
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -211,6 +212,25 @@ def series_lock_target(parts_dir: Path) -> Path:
     """Path whose ``.lock`` sibling serializes month/year writes in one parts directory."""
 
     return Path(parts_dir) / SERIES_LOCK_NAME
+
+
+@contextmanager
+def part_read_lock(parts_dir: Path) -> Iterator[None]:
+    """Keep a period reader's file list valid until its reads finish.
+
+    Consolidation and day absorption replace period files and then remove old
+    paths. Atomic file replacement alone cannot protect a multi-file reader
+    from silently skipping those removed paths. Seconds have no such moves.
+    """
+    parts_dir = Path(parts_dir)
+    timeframe = parts_dir.name.removesuffix("_parts")
+    if not parts_dir.is_dir() or partition_granularity(timeframe) == DAY:
+        yield
+        return
+    from core.data.parquet_lock import parquet_partition_lock
+
+    with parquet_partition_lock(series_lock_target(parts_dir)):
+        yield
 
 
 def series_locks_for(paths: Iterable[Path]) -> List[Path]:

@@ -36,6 +36,7 @@ from core.data.kline_partitions import (
     list_part_files,
     newest_first,
     overlapping_part_files,
+    part_read_lock,
     partition_granularity,
     partition_stems,
     read_order,
@@ -528,7 +529,8 @@ def _save_period_parts(parts_dir: Path, df: pd.DataFrame, granularity: str) -> L
                     else:
                         remaining.attrs = dict(pack.attrs)
                         write_parquet_atomic(remaining, pack_path)
-                    written.append(pack_path)
+                    # Incoming bars live in target. The pack is cleanup only
+                    # and may now be gone; never return it as the saved file.
                 for day_path, _ in absorbed:
                     if day_path is not None:
                         day_path.unlink()
@@ -689,7 +691,7 @@ class DataStorage:
         """Load klines from parquet file and/or partitioned parquet directory."""
         start_time = _normalize_parquet_boundary(start_time)
         end_time = _normalize_parquet_boundary(end_time)
-        def _load_sync() -> pd.DataFrame:
+        def _read_sync() -> pd.DataFrame:
             frames: List[pd.DataFrame] = []
             # Concatenated in this order. Part rows are arranged as the daily
             # layout concatenated them, so the unstable sort below resolves
@@ -781,6 +783,12 @@ class DataStorage:
 
             return df
 
+        def _load_sync() -> pd.DataFrame:
+            with ExitStack() as locks:
+                for root in sorted(candidate_symbol_dirs(self.storage_path, exchange, symbol)):
+                    locks.enter_context(part_read_lock(root / f"{timeframe}_parts"))
+                return _read_sync()
+
         return await asyncio.to_thread(_load_sync)
 
     async def get_latest_kline_timestamp(
@@ -791,7 +799,7 @@ class DataStorage:
     ) -> Optional[datetime]:
         """Return the newest local bar timestamp without loading bar history."""
 
-        def _latest_sync() -> Optional[datetime]:
+        def _read_latest_sync() -> Optional[datetime]:
             candidates: List[datetime] = []
             for symbol_root in candidate_symbol_dirs(self.storage_path, exchange, symbol):
                 legacy_path = symbol_root / f"{timeframe}.parquet"
@@ -818,6 +826,12 @@ class DataStorage:
                 if newest_part is not None:
                     candidates.append(newest_part)
             return max(candidates) if candidates else None
+
+        def _latest_sync() -> Optional[datetime]:
+            with ExitStack() as locks:
+                for root in sorted(candidate_symbol_dirs(self.storage_path, exchange, symbol)):
+                    locks.enter_context(part_read_lock(root / f"{timeframe}_parts"))
+                return _read_latest_sync()
 
         return await asyncio.to_thread(_latest_sync)
 

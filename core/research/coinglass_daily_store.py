@@ -25,7 +25,9 @@ that tracker stopped opening books; their files stay where they are.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -113,7 +115,10 @@ def wide_universe() -> List[Tuple[str, str]]:
 
 def update_universe() -> List[Tuple[str, str]]:
     """The coins the daily update keeps current, the research universe first."""
-    return wide_universe() if WIDE_COINS else universe()
+    from core.research import coinglass_monthly_universe as monthly
+    known = wide_universe() if WIDE_COINS else universe()
+    seen = {perp for _, perp in known}
+    return known + [(base, perp) for base, perp in monthly.members() if perp not in seen]
 
 
 def coin_path(perp: str, root: Optional[Path] = None) -> Path:
@@ -170,6 +175,66 @@ def missing(coin: Dict[str, Any], dataset: str, day: datetime) -> bool:
     return not rows or int(rows[-1]["time"]) < needed_stamp(dataset, day)
 
 
+def valid_history_row(dataset: str, row: Dict[str, Any]) -> bool:
+    def number(key):
+        try:
+            value = float(row[key])
+            return value if math.isfinite(value) else None
+        except (KeyError, TypeError, ValueError):
+            return None
+    if dataset in {"oi", "funding"}:
+        value = number("close")
+        return value is not None and (dataset == "funding" or value > 0)
+    if dataset in SNAPSHOT_AT_STAMP:
+        prefix = "global_account" if dataset == "global_ratio" else "top_position"
+        long, short = number(prefix + "_long_percent"), number(prefix + "_short_percent")
+        ratio = number(prefix + "_long_short_ratio")
+        return (long is not None and short is not None and long > 0 and short > 0) or (ratio is not None and ratio > 0)
+    return all(number(field) is not None and number(field) >= 0 for field in DATASETS[dataset][2])
+
+
+def history_gaps(coin: Dict[str, Any], dataset: str, day: datetime) -> List[int]:
+    """All absent or invalid daily observations in the retained 60-day window.
+
+    Independent of the frozen tracker's latest-day availability predicate.
+    A current last timestamp alone does not prove a complete signal history.
+    """
+    end = needed_stamp(dataset, day)
+    valid = {int(r["time"]) for r in coin.get(dataset) or []
+             if r.get("time") is not None and valid_history_row(dataset, r)}
+    return [t for t in range(end - (KEEP_DAYS - 1) * DAY_MS, end + 1, DAY_MS) if t not in valid]
+
+
+def seed_history(coin: Dict[str, Any], base: str, perp: str, day: datetime) -> bool:
+    """Reuse exact-compatible local study/archive bars before any new request."""
+    sources = [SEED_DIR / f"{perp}.json", WIDE_SEED_DIR / f"{perp}.json",
+               PROJECT_ROOT / "data/research/coinglass_history/raw" / f"{perp}.json.gz"]
+    changed = False
+    for path in sources:
+        if not path.exists():
+            continue
+        opener = gzip.open if path.suffix == ".gz" else open
+        try:
+            with opener(path, "rt", encoding="utf-8") as stream:
+                raw = json.load(stream)
+        except (OSError, ValueError) as exc:
+            logger.warning(f"coinglass daily store: cannot seed {perp} from {path.name}: {type(exc).__name__}")
+            continue
+        name = raw.get("coin") or raw.get("base")
+        if name and name != base:
+            continue
+        datasets = raw.get("datasets", raw)
+        for dataset in DATASETS:
+            gaps = set(history_gaps(coin, dataset, day))
+            key = "top_position" if dataset == "top_ratio" and "top_position" in datasets else dataset
+            rows = [r for r in datasets.get(key, []) if r.get("time") is not None
+                    and int(r["time"]) in gaps and valid_history_row(dataset, r)]
+            if rows:
+                merge(coin, dataset, rows, needed_stamp(dataset, day))
+                changed = True
+    return changed
+
+
 def requests_for(coin: Dict[str, Any], base: str, perp: str, dataset: str, day: datetime) -> List[Tuple[str, Dict[str, Any]]]:
     """What to ask for one coin and dataset: closed daily bars after the last stored one, plus
     (snapshot series) the hourly bar stamped D+1 00:00."""
@@ -179,11 +244,14 @@ def requests_for(coin: Dict[str, Any], base: str, perp: str, dataset: str, day: 
         params["exchange_list"] = EXCHANGES
     rows = coin.get(dataset) or []
     last = int(rows[-1]["time"]) if rows else _ms(day) - (KEEP_DAYS + 1) * DAY_MS  # empty: the whole window
+    gaps = history_gaps(coin, dataset, day)
+    if gaps:
+        last = min(last, gaps[0] - 1)
     out: List[Tuple[str, Dict[str, Any]]] = []
     if last < _ms(day):  # closed daily bars up to D
         out.append((path, {**params, "interval": "1d", "start_time": last + 1, "end_time": _ms(day) + DAY_MS - 1,
                            "limit": KEEP_DAYS + 5}))
-    if dataset in SNAPSHOT_AT_STAMP and (not rows or int(rows[-1]["time"]) < needed_stamp(dataset, day)):
+    if dataset in SNAPSHOT_AT_STAMP and needed_stamp(dataset, day) in gaps:
         stamp = needed_stamp(dataset, day)
         out.append((path, {**params, "interval": "1h", "start_time": stamp, "end_time": stamp + HOUR_MS - 1, "limit": 2}))
     return out
@@ -246,13 +314,16 @@ async def update(day: datetime, *, client=None, root: Optional[Path] = None, sta
               "refused": [], "errors": []}
     save_status(status, status_path)
     last_call = [0.0]
+    # Freeze this pass's work list even if a monthly snapshot arrives mid-pass.
+    coins = update_universe()
+    status["universe_symbols"] = [perp for _, perp in coins]
 
     async def run(cg) -> None:
-        for base, perp in update_universe():
+        for base, perp in coins:
             coin = load_coin(perp, root) or {"base": base, "perp": perp}
-            changed = False
+            changed = seed_history(coin, base, perp, day) if any(history_gaps(coin, d, day) for d in DATASETS) else False
             for dataset in DATASETS:
-                if not missing(coin, dataset, day):
+                if not history_gaps(coin, dataset, day):
                     continue
                 for path, params in requests_for(coin, coin.get("base") or base, perp, dataset, day):
                     try:
@@ -276,8 +347,9 @@ async def update(day: datetime, *, client=None, root: Optional[Path] = None, sta
     else:
         await run(client)
     status["completed_at"] = _now().isoformat()
-    coins = update_universe()
     status["complete_coins"] = sum(complete(load_coin(perp, root), day) for _, perp in coins)
+    status["history_complete_coins"] = sum(not any(history_gaps(load_coin(perp, root), d, day) for d in DATASETS)
+                                           for _, perp in coins)
     status["universe_coins"] = len(coins)
     # final: nothing more will be asked today, so the trackers can stop waiting
     status["final"] = (status["complete_coins"] >= status["universe_coins"] or attempt >= MAX_ATTEMPTS
@@ -302,13 +374,16 @@ def ensure_current(now: Optional[datetime] = None) -> Dict[str, Any]:
     if _task is not None and not _task.done():
         return {"status": "updating", **{k: status.get(k) for k in ("day", "requests", "started_at")}}
     if status.get("day") == f"{day:%Y-%m-%d}" and status.get("completed_at"):
-        if status.get("final"):
+        desired = [perp for _, perp in update_universe()]
+        changed = (status["universe_symbols"] != desired if "universe_symbols" in status
+                   else status.get("universe_coins", len(desired)) != len(desired))
+        if status.get("final") and not changed:
             return {"status": "current", **{k: status.get(k) for k in ("day", "complete_coins", "completed_at")}}
         if now >= day + timedelta(days=1) + RETRY_UNTIL:  # out of time for another pass
             status["final"] = True
             save_status(status)
             return {"status": "current", **{k: status.get(k) for k in ("day", "complete_coins", "completed_at")}}
-        if now - datetime.fromisoformat(status["completed_at"]) < RETRY_GAP:
+        if not changed and now - datetime.fromisoformat(status["completed_at"]) < RETRY_GAP:
             return {"status": "waiting_retry", **{k: status.get(k) for k in ("day", "complete_coins", "completed_at")}}
     if now - (day + timedelta(days=1)) < START_AFTER:
         return {"status": "waiting", "day": f"{day:%Y-%m-%d}"}

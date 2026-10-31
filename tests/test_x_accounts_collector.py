@@ -333,7 +333,9 @@ def test_archive_only_handles_must_be_allowlisted_and_archived():
 def test_each_poll_is_logged_in_the_shared_request_ledger(tmp_path):
     from core.news import x_pacing
 
-    collector = _collector(FakeClient({"alpha": [_tweet(i) for i in range(1, 26)], "beta": []}))
+    collector = _collector(FakeClient({"alpha": [_tweet(i) for i in range(1, 26)], "beta": []}),
+                           x_accounts_tweets_per_account=40)
     collector.pull_latest()
-    # 25 posts -> 2 pages for alpha, a quiet beta still cost 1 request
-    assert x_pacing.recent_total(path=tmp_path / "ledger" / "request_ledger.jsonl") == 3
+    # Reserve the requested two pages for each account before reading. A quiet
+    # account does not refund room whose actual remote usage cannot be proven.
+    assert x_pacing.recent_total(path=tmp_path / "ledger" / "request_ledger.jsonl") == 4

@@ -55,6 +55,17 @@ def store_market_type(exchange: str) -> str:
     return "future" if str(exchange or "").strip().lower().endswith("_futures") else SPOT
 
 
+def market_data_store(exchange: str, market_type: Any) -> str:
+    """Local OHLCV namespace for a feed, including reads used as a fallback."""
+    market = normalize_market_type(market_type) or SPOT
+    base = str(exchange or "").strip().lower().removesuffix("_futures")
+    if market in _DERIVATIVE_TYPES:
+        return f"{base}_futures"
+    if market in {SPOT, "margin"}:
+        return base
+    raise KlineVenueError(f"Unsupported kline market type: {market}")
+
+
 def venue_matches_store(exchange: str, market_type: Any) -> bool:
     market = normalize_market_type(market_type) or SPOT
     if store_market_type(exchange) == SPOT:

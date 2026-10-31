@@ -28,3 +28,24 @@ def test_warm_shared_ssl_context_returns_same_instance(monkeypatch):
     monkeypatch.setattr(shared_ssl, "_SHARED_CONTEXT", None)
     warmed = asyncio.run(shared_ssl.warm_shared_ssl_context())
     assert warmed is shared_ssl.get_shared_ssl_context()
+
+
+def test_bundled_roots_work_with_empty_platform_store_and_verification_stays_enabled(monkeypatch):
+    monkeypatch.setattr(shared_ssl, "_SHARED_CONTEXT", None)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    assert context.cert_store_stats()["x509_ca"] == 0
+    monkeypatch.setattr(shared_ssl.ssl, "create_default_context", lambda: context)
+    result = shared_ssl.get_shared_ssl_context()
+    assert result.cert_store_stats()["x509_ca"] > 0
+    assert result.verify_mode == ssl.CERT_REQUIRED
+    assert result.check_hostname is True
+
+
+def test_platform_roots_are_retained_when_bundle_is_added(monkeypatch):
+    monkeypatch.setattr(shared_ssl, "_SHARED_CONTEXT", None)
+    context = ssl.create_default_context()
+    roots = set(context.get_ca_certs(binary_form=True))
+    monkeypatch.setattr(shared_ssl.ssl, "create_default_context", lambda: context)
+    result = shared_ssl.get_shared_ssl_context()
+    assert roots <= set(result.get_ca_certs(binary_form=True))
+    assert result.verify_mode == ssl.CERT_REQUIRED and result.check_hostname

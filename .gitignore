@@ -114,3 +114,17 @@ reports/team_bugfix_20261023/*.xml
 reports/telegram_live_research_20261024/*.json
 reports/telegram_signal_study_20261020/artifact.json
 reports/telegram_text_20261023/*.json
+
+# Generated receipts and source-data staging for the October maintenance runs.
+# Keep the accompanying reports, reproduction scripts and curated figures.
+reports/change_audit_20261028/*.json
+reports/change_audit_20261028/*.xml
+reports/change_audit_20261028_round2/*.json
+reports/change_audit_20261028_round2/*.xml
+reports/october_audit_20261025/*.json
+reports/october_audit_20261025/*.xml
+reports/coinglass_monthly_data_20261031/*.json
+reports/coinglass_monthly_data_20261031/staged_daily/
+reports/telegram_kol_continuation_20261027/*.json
+reports/telegram_kol_continuation_20261027/*.html
+reports/telegram_new_kols_recheck_20261025/*.json

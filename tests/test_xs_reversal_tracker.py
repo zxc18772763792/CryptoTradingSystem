@@ -155,13 +155,15 @@ def test_missed_morning_and_mid_day_start(ex, tmp_path):
     assert json.loads(fresh.read_text(encoding="utf-8"))["days"] == {}  # first day starts tomorrow, not "missed"
 
 
-def test_delisted_position_is_dropped_after_the_grace_period(ex):
+def test_delisted_position_makes_the_book_unresolved(ex):
     ex.run()
     ex.gone = {"C39USDT"}
     ex.now = D0 + timedelta(days=1, hours=1, minutes=10)
     ex.run()
     day = json.loads(ex.state.read_text(encoding="utf-8"))["days"]["2026-10-05"]
-    assert day["status"] == "closed" and day["missing_positions"] == 1  # a vanished contract does not block settlement
+    assert day["status"] == "unresolved" and day["missing_positions"] == 1
+    assert "net_per_position_pct" not in day  # never reweight a book by dropping its vanished position
+    assert ex.run()["forward_completed"] == 0
     assert day["longs"]["C39USDT"]["gone"] is True
 
 

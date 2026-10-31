@@ -57,7 +57,8 @@ def make_client(daily_limit: int = DAILY_LIMIT) -> Any:
 
 
 def guarded_call(client: Any, factory: Callable[[], Any], *, debug: bool = False, retries: int = 2,
-                 sleep: Callable[[float], None] = time.sleep) -> Tuple[Any, List[str]]:
+                 sleep: Callable[[float], None] = time.sleep, retry_requests: int = 1,
+                 on_retry: Optional[Callable[[], None]] = None) -> Tuple[Any, List[str]]:
     """Run one Scweet coroutine; return (rows, every message it logged).
 
     An empty answer is believed only when Scweet logged no problem and the state file records no
@@ -87,7 +88,15 @@ def guarded_call(client: Any, factory: Callable[[], Any], *, debug: bool = False
             raise DailyBudgetSpent(problems[0][:200])
         if problems:
             if attempt <= retries and any(t in m for m in problems for t in TRANSIENT):
-                sleep(4.0 * attempt)  # a dropped connection never reached X
+                # A missing response does not prove the remote saw no request.
+                # Retry only after reserving another attempt, including its run cap.
+                if on_retry is not None:
+                    on_retry()
+                else:
+                    from core.news.x_pacing import reserve_requests
+
+                    reserve_requests(retry_requests, "batch_retry")
+                sleep(4.0 * attempt)
                 continue
             raise RuntimeError("X request failed: " + problems[0][:200])
         code: Optional[int] = refusal_code(client)

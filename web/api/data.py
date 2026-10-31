@@ -38,7 +38,7 @@ from core.data import (
     download_binance_1s_daily_archive,
 )
 from core.data.data_storage import _normalize_parquet_frame_index, _parquet_max_timestamp
-from core.data.kline_partitions import DAY, list_part_files, newest_first, stem_period
+from core.data.kline_partitions import DAY, list_part_files, newest_first, part_read_lock, stem_period
 from core.data.kline_venue import SPOT, exchange_market_type, require_store_venue
 from core.exchanges import Kline
 from core.data.alpha_market_data import (
@@ -3444,21 +3444,23 @@ def _latest_partition_end_time(exchange: str, symbol: str, timeframe: str) -> Op
     """Midnight after the newest stored partition day (a day file's name, else a month/year file's last bar)."""
     for sym_dir in candidate_symbol_dirs(Path(settings.DATA_STORAGE_PATH), exchange, symbol):
         newest: Optional[datetime] = None
-        for path, last_day in newest_first(list_part_files(sym_dir / f"{timeframe}_parts")):
-            period = stem_period(path.stem)
-            if period is None or (newest is not None and last_day < newest.date()):
-                break
-            if period[2] == DAY:
-                day = datetime.combine(period[0], datetime.min.time())
-            else:
-                try:
-                    latest = _parquet_max_timestamp(path)
-                except Exception:
-                    continue
-                if latest is None:
-                    continue
-                day = datetime.combine(latest.date(), datetime.min.time())
-            newest = day if newest is None else max(newest, day)
+        parts_dir = sym_dir / f"{timeframe}_parts"
+        with part_read_lock(parts_dir):
+            for path, last_day in newest_first(list_part_files(parts_dir)):
+                period = stem_period(path.stem)
+                if period is None or (newest is not None and last_day < newest.date()):
+                    break
+                if period[2] == DAY:
+                    day = datetime.combine(period[0], datetime.min.time())
+                else:
+                    try:
+                        latest = _parquet_max_timestamp(path)
+                    except Exception:
+                        continue
+                    if latest is None:
+                        continue
+                    day = datetime.combine(latest.date(), datetime.min.time())
+                newest = day if newest is None else max(newest, day)
         if newest is not None:
             return newest + timedelta(days=1)
     return None

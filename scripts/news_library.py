@@ -10,13 +10,19 @@ import os
 import sqlite3
 import sys
 import uuid
+import importlib.util
 from collections import Counter
 from datetime import datetime,timezone
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from core.research.news_structure import Extractor,LibraryWriter,SCHEMA,VERSION,digest,utc,read_only,units,COMPILED
+# Load this standard-library-only module without initializing the research
+# package, whose __init__ imports strategy and trading configuration helpers.
+_spec=importlib.util.spec_from_file_location('cts_news_structure_rules',ROOT/'core/research/news_structure.py')
+_rules=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(_rules)
+Extractor,LibraryWriter,SCHEMA,VERSION=_rules.Extractor,_rules.LibraryWriter,_rules.SCHEMA,_rules.VERSION
+digest,utc,read_only,units,COMPILED=_rules.digest,_rules.utc,_rules.read_only,_rules.units,_rules.COMPILED
 
 def dump(path,value):
     with path.open('x',encoding='utf-8') as stream:json.dump(value,stream,indent=2,ensure_ascii=False,allow_nan=False)

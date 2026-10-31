@@ -27,6 +27,8 @@ from core.research.telegram_forward_tracker import DEFAULT_DIR, ROOT, research_d
 SCRIPT = ROOT / "scripts" / "telegram_forward_cycle.py"
 STATE_PATH = ROOT / "runtime" / "telegram_forward_runner.json"
 POLL_SECONDS = 300
+BUSY_RETRY_SECONDS = 15
+MAX_FAST_BUSY_RETRIES = 2
 SKIP_IF_SUCCESS_WITHIN = 120
 CYCLE_TIMEOUT_SECONDS = 420
 
@@ -98,6 +100,15 @@ def _classify(returncode: int, output: str) -> str:
     return "failed"
 
 
+async def _stop_cycle(proc) -> None:
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass  # exited between the timeout/cancellation and termination
+    # Drain PIPE output while reaping: wait() alone can hang on a full pipe.
+    await proc.communicate()
+
+
 async def run_cycle(base: Optional[Path] = None) -> Dict[str, Any]:
     base = base or research_dir()
     command = [sys.executable, str(SCRIPT), "cycle"]
@@ -110,11 +121,10 @@ async def run_cycle(base: Optional[Path] = None) -> Dict[str, Any]:
     try:
         raw, _ = await asyncio.wait_for(proc.communicate(), timeout=CYCLE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        await _stop_cycle(proc)
         return {"returncode": -1, "outcome": "timeout", "error_type": "timeout"}
     except asyncio.CancelledError:
-        proc.kill()
+        await _stop_cycle(proc)
         raise
     text = (raw or b"").decode("utf-8", "replace")
     return {"returncode": proc.returncode, "outcome": _classify(proc.returncode, text),
@@ -126,6 +136,7 @@ async def worker(stop_event: asyncio.Event, heartbeat: Optional[Callable[[bool],
     _write_state(state)
     try:
         while not stop_event.is_set():
+            delay = POLL_SECONDS
             verdict = should_run()
             if verdict == "run":
                 result = await run_cycle()
@@ -135,14 +146,20 @@ async def worker(stop_event: asyncio.Event, heartbeat: Optional[Callable[[bool],
                 # A held lock is normal for a tick or two; a lock that never frees (or a missing
                 # authorization record, which raises the same error type) must show as unhealthy.
                 ok = result["outcome"] in ("ok", "cooldown") or (result["outcome"] == "busy" and busy < 3)
+                # HUB shares reader.lock. A short-lived collision should not
+                # cost another whole 5-minute chat delta. Each child has exited
+                # and released its locks before this bounded, cancellable wait.
+                if result["outcome"] == "busy" and busy <= MAX_FAST_BUSY_RETRIES:
+                    delay = min(POLL_SECONDS, BUSY_RETRY_SECONDS)
             else:
                 state.update(last_skip_at=_now().isoformat(), last_outcome=verdict)
                 ok = verdict != "not_activated"
+            state["next_check_seconds"] = delay
             _write_state(state)
             if heartbeat:
                 heartbeat(ok)
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=POLL_SECONDS)
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
             except asyncio.TimeoutError:
                 pass
     finally:

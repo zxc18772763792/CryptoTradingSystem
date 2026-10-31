@@ -125,7 +125,10 @@ class _FakeClient:
                 {"symbol": "GOLDUSDT", "baseAsset": "GOLD", "contractType": "PERPETUAL", "quoteAsset": "USDT", "underlyingType": "INDEX", "onboardDate": self.now_ms - 5 * DAY},
             ]})
         if url.endswith("/klines"):
-            return _Resp([[params["startTime"] + (i + 1) * DAY, "1", "1", "1", "0.7" if i > 2 else "1"] for i in range(18)])
+            # Binance daily bars open at UTC midnight even when the contract
+            # onboard timestamp and the request start have a time of day.
+            first = (int(params["startTime"]) // DAY + 1) * DAY
+            return _Resp([[first + i * DAY, "1", "1", "1", "0.7" if i > 2 else "1"] for i in range(18)])
         if url.endswith("/fundingRate"):
             return _Resp([])
         if "article/detail" in url:

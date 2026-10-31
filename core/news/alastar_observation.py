@@ -237,7 +237,7 @@ def _bundle_runs(path: Path) -> Iterator[tuple[int, bytes]]:
             yield number, raw
 
 
-def _committed_runs(output: Path) -> Iterator[tuple[int, bytes]]:
+def _committed_runs(output: Path, *, channel: str = CHANNEL) -> Iterator[tuple[int, bytes]]:
     """Every committed run in sequence order, merged from gzip bundles and single run files.
 
     A run present in both (a crash between writing a bundle and deleting its files) must be
@@ -248,7 +248,15 @@ def _committed_runs(output: Path) -> Iterator[tuple[int, bytes]]:
         if not _RUN_FILE.fullmatch(path.name):
             raise RuntimeError("Unexpected file name in runs/; preserve files for manual review")
         files[int(path.stem)] = path
-    bundles = sorted((output / RUN_BUNDLES).glob("*.jsonl.gz")) if (output / RUN_BUNDLES).exists() else []
+    # A bundle is committed only when its manifest is published. A crash before
+    # that point leaves an orphan which may overlap a later retry's bundle.
+    bundles = []
+    for entry in _manifest(output, channel)["bundles"]:
+        if entry.get("file"):
+            path = output / entry["file"]
+            if _digest(path.read_bytes()) != entry["sha256"]:
+                raise RuntimeError("Archive run bundle is invalid: manifest hash/chain mismatch; preserve files for manual review")
+            bundles.append(path)
     bundled = (item for bundle in bundles for item in _bundle_runs(bundle))
     numbers = sorted(files)
     index = 0
@@ -304,7 +312,7 @@ def _load_runs(output: Path, *, verify_full: bool = False, channel: str = CHANNE
     else:
         # Missing/corrupt projections are disposable. Verify every committed
         # run when reconstructing, including a missing sequence in the middle.
-        source = _committed_runs(output)
+        source = _committed_runs(output, channel=channel)
     checked_evidence: set[str] = set()
     for number, raw in source:
         run = json.loads(raw)
@@ -416,7 +424,7 @@ def receipt_latency(output: Path | str = DEFAULT_OUTPUT, *, now: datetime | str 
     with _archive_lock(output):
         run_count, state, last_hash = _load_runs(output, verify_full=True, channel=channel)
         live_times = []
-        for _, raw in _committed_runs(output):
+        for _, raw in _committed_runs(output, channel=channel):
             run = json.loads(raw)
             if run["mode"] == "live_public_preview":
                 live_times.append(_utc(run["observed_at_utc"]))
@@ -549,12 +557,17 @@ def compact_runs(output: Path | str = DEFAULT_OUTPUT, *, channel: str = CHANNEL,
     deleted, and the manifest records progress, so a crash leaves at worst byte-identical
     duplicates that replay accepts and the next call removes. Returns what was (or would be) done.
     """
+    if (isinstance(keep_recent, bool) or not isinstance(keep_recent, int) or keep_recent < 1
+            or isinstance(min_batch, bool) or not isinstance(min_batch, int) or min_batch < 1
+            or isinstance(max_batch, bool) or not isinstance(max_batch, int) or max_batch < min_batch
+            or min_age < timedelta(0)):
+        raise ValueError("Compaction must keep its checkpoint tail and use positive, ordered batch sizes and a nonnegative age")
     output = Path(output).resolve()
     channel = _channel(channel)
     current = _utc(now or datetime.now(timezone.utc))
     with _archive_lock(output):
         manifest = _manifest(output, channel)
-        count, _, _ = _load_runs(output, channel=channel)
+        count, state, last_hash = _load_runs(output, channel=channel)
         bundles = manifest["bundles"]
         if bundles and not bundles[-1]["files_removed"] and not dry_run:
             # Finish an interrupted deletion: only files whose bytes the bundle already holds.
@@ -588,6 +601,9 @@ def compact_runs(output: Path | str = DEFAULT_OUTPUT, *, channel: str = CHANNEL,
             return {**result, "packed": 0, "reason": "fewer old runs than one batch"}
         if dry_run:
             return {**result, "would_pack_through": last}
+        # A raw run can commit just before its checkpoint write fails. Advance
+        # the derived checkpoint before deleting the old checkpoint's tail.
+        _projections(output, count, state, last_hash, channel)
         entry = {"first_sequence": start, "last_sequence": last, "runs": len(chosen), "kept_with_revisions": kept,
                  "created_at_utc": current.isoformat(), "files_removed": False, "file": None}
         if chosen:

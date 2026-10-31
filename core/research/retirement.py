@@ -96,6 +96,8 @@ RULES: Dict[str, Dict[str, Any]] = {
     # Corrected 2026-10-25: the study booked log-return legs; with arithmetic short legs, as the tracker
     # books them, the mean is +0.10. The rule stays as registered.
     "coinglass_composite_7d": {"min_n": 364, "unit": "book", "backtest_mean_pct": 0.174},
+    # Independent monthly universe: no historical backtest, so no decay benchmark.
+    "coinglass_composite_7d_monthly_v1": {"min_n": 364, "unit": "book", "backtest_mean_pct": None},
     # added 2026-10-11 with the reversal tracker's liquidation-shock shadow, before its first day.
     # Unit: shadow minus main net per position per day; mean from the same study's C1 replay with
     # complete funding.
@@ -159,7 +161,8 @@ def verdict(returns_pct: Sequence[float], rule: Dict[str, Any],
             lower, upper = mean - half, mean + half
     out["mean_pct"] = round(mean, 2)
     out["ci90_pct"] = [round(lower, 2), round(upper, 2)] if lower is not None else None
-    decay_bar = float(rule["backtest_mean_pct"]) * float(rule.get("decay_fraction", DECAY_FRACTION))
+    reference = rule.get("backtest_mean_pct")
+    decay_bar = float(reference) * float(rule.get("decay_fraction", DECAY_FRACTION)) if reference is not None else None
 
     if n < max(3, min_n // 2):
         pass
@@ -170,7 +173,7 @@ def verdict(returns_pct: Sequence[float], rule: Dict[str, Any],
                    reason=f"未满 {min_n} 个样本" + ("，均值为负" if mean < 0 else ""))
     elif mean <= 0:
         out.update(verdict="retire", reason=f"满 {min_n} 个样本后均值不为正")
-    elif upper is not None and upper < decay_bar:
+    elif upper is not None and decay_bar is not None and upper < decay_bar:
         out.update(verdict="retire", reason=f"90% 区间上沿低于回测均值的 {int(DECAY_FRACTION * 100)}%：优势已衰减")
     elif lower is not None and lower > 0:
         out.update(verdict="confirmed", reason="90% 区间下沿高于 0")

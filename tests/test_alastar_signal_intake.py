@@ -98,6 +98,21 @@ def test_non_signals_record_reason_without_entering_inbox(configured, kind):
     assert len(calls) == 1
 
 
+def test_prompt_revision_is_recorded_without_reinterpreting_old_terminal_decisions(configured):
+    runner, _, _, calls, result = configured
+    result.update(classification='conditional', events=[])
+    tick(runner)
+    state = intake.read_state(runner.output)
+    original = deepcopy(state['items'])
+    state['prompt_sha256'] = intake.PREVIOUS_PROMPT_SHA
+    runner.save(state)
+    updated = tick(runner)
+    assert updated['items'] == original and len(calls) == 1
+    migration, = updated['interpretation_revisions']
+    assert migration['from_sha256'] == intake.PREVIOUS_PROMPT_SHA
+    assert migration['to_sha256'] == intake.PROMPT_SHA
+
+
 @pytest.mark.parametrize('change', [
     {'symbol': 'ETHUSDT'}, {'symbol': '../BTCUSDT'}, {'direction': True}, {'direction': 0},
     {'confidence': True}, {'confidence': float('nan')}, {'confidence': .64}, {'confidence': 1.1},
