@@ -96,3 +96,8 @@ def test_marketable_limit_with_stop_already_passed_is_stale():
     # "long at 68,050 support" posted while the market trades 66,756: fills at the market, below its own stop
     plan, why = B.levels_to_plan(trade({"e": [68050], "sl_abs": 500, "tp_abs": [500]}), 66756.0, 1.0)
     assert plan is None and why == "stale_stop_passed"
+
+
+def test_tp1_only_variant_closes_everything_at_the_first_target():
+    plan, _ = B.levels_to_plan(trade({"e": "m", "tp": [101, 102, 103], "sl": 98, "tp1_only": True}), 100.0, 1.0)
+    assert plan.targets == [101] and plan.weights == [1.0]

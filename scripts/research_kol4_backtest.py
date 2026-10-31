@@ -279,8 +279,12 @@ def levels_to_plan(t: dict, ref: float, mult: float) -> tuple[E.Plan | None, str
     # a limit already through the market fills at the market: judge the stop from there (post-freeze fix)
     if legs and any(side * (ref - x) < 0 for x in legs) and stop is not None and side * (ref - stop) <= 0:
         return None, "stale_stop_passed"
+    if lv.get("tp1_only") and targets:  # improvement variant: the whole position exits at TP1
+        targets = targets[:1]
     n = len(targets)
-    if lv.get("tp1_close_frac") and n >= 1:
+    if lv.get("tp1_only") and n:
+        weights = [1.0]
+    elif lv.get("tp1_close_frac") and n >= 1:
         f = float(lv["tp1_close_frac"])
         weights = [f] + [(1 - f) / (n - 1)] * (n - 1) if n > 1 else [1.0]
     elif lv.get("tp_open") and n:
@@ -661,12 +665,90 @@ def cmd_extras(_a) -> None:
     print("claims", len(out["claims"]))
 
 
+def _perm_p(a: pd.Series, b: pd.Series, reps: int = 10000, seed: int = 5) -> float | None:
+    """Two-sided permutation p for mean(a) - mean(b)."""
+    if len(a) < 3 or len(b) < 3:
+        return None
+    rng = np.random.default_rng(seed)
+    pool, na, obs = np.concatenate([a.to_numpy(), b.to_numpy()]), len(a), abs(a.mean() - b.mean())
+    hits = sum(abs(x[:na].mean() - x[na:].mean()) >= obs for x in (rng.permutation(pool) for _ in range(reps)))
+    return (hits + 1) / (reps + 1)
+
+
+def cmd_improve(_a) -> None:
+    """Pre-declared variants (backtest/improve_declared.json): run-up filter, break-even after TP1, TP1 only."""
+    import copy
+    data = E.read_json(BT / "trades_pre_price.json")
+    res = E.read_json(BT / "results.json")
+    trades = {(t["channel"], str(t["id"]), t["symbol"], t["side"]): t for t in data["trades"]}
+    rows = []
+    for rec in res["rows"]:
+        if rec["group"] != "main":
+            continue
+        t = trades[(rec["channel"], str(rec["id"]), rec["symbol"], rec["side"])]
+        a, c = rec.get("A") or {}, rec.get("C") or {}
+        native = c.get("native") or a.get("native")
+        if not native or (a.get("ret_on_filled") is None and c.get("r24h") is None):
+            continue
+        try:
+            pm = E.pre_move(native, {"published_at": t["published_at"], "side": t["side"]})
+        except Exception:
+            pm = None
+        row = {"channel": t["channel"], "id": t["id"], "symbol": t["symbol"], "activation": t["activation"],
+               "pre_move_30m": pm, "A": a.get("ret_on_filled"), "C24": c.get("r24h"), "C7": c.get("r7d")}
+        if a.get("ret_on_filled") is not None:
+            for name in ("be_after_tp1", "tp1_only"):
+                u = copy.deepcopy(t)
+                u["lv"][name] = True
+                row[name] = simulate(u, "A").get("ret_on_filled")
+        rows.append(row)
+    df = pd.DataFrame(rows)
+    df["week"] = pd.to_datetime(df["activation"]).dt.tz_convert(None).dt.to_period("W").astype(str)
+    cells = []
+    for ch, g in df.groupby("channel"):
+        g = g.sort_values("activation")
+        for name in ("be_after_tp1", "tp1_only"):
+            d = g[g["A"].notna() & g[name].notna()]
+            if len(d) < 5:
+                continue
+            diff = (d[name] - d["A"]).astype(float).reset_index(drop=True)
+            half = len(diff) // 2
+            cells.append({"cell": f"{ch}|{name}-A", "n": len(diff), "mean": float(diff.mean()),
+                          "first_half": float(diff.iloc[:half].mean()), "second_half": float(diff.iloc[half:].mean()),
+                          "variant_mean": float(d[name].mean()), "p": E.block_p(diff, d["week"].reset_index(drop=True))})
+        for metric in ("A", "C24", "C7"):
+            d = g[g[metric].notna()]
+            skip = d["pre_move_30m"].fillna(0) >= 0.01
+            kept, gone = d.loc[~skip, metric].astype(float), d.loc[skip, metric].astype(float)
+            if len(gone) == 0:
+                continue
+            kh = kept.reset_index(drop=True)
+            half = len(kh) // 2
+            cells.append({"cell": f"{ch}|skip_runup|{metric}", "n": len(kept), "skipped": int(len(gone)),
+                          "mean": float(kept.mean()), "all_mean": float(d[metric].mean()),
+                          "skipped_mean": float(gone.mean()), "first_half": float(kh.iloc[:half].mean()),
+                          "second_half": float(kh.iloc[half:].mean()), "p": _perm_p(kept, gone)})
+    ps = sorted([(c["p"], i) for i, c in enumerate(cells) if c.get("p") is not None])
+    m, q_prev = len(ps), 1.0
+    for rank, (pv, i) in reversed(list(enumerate(ps, 1))):
+        q_prev = min(q_prev, pv * m / rank)
+        cells[i]["q"] = q_prev
+    E.write_json(BT / "improve.json", {"declared_sha256": sha((BT / "improve_declared.json").read_bytes()),
+                                       "rows": rows, "cells": cells})
+    show = pd.DataFrame(cells)
+    for col in ("mean", "all_mean", "skipped_mean", "variant_mean", "first_half", "second_half"):
+        if col in show:
+            show[col] = (show[col].astype(float) * 100).round(2)
+    pd.set_option("display.width", 250)
+    print(show.to_string())
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["build", "freeze", "simulate", "nulls", "report", "extras"])
+    ap.add_argument("cmd", choices=["build", "freeze", "simulate", "nulls", "report", "extras", "improve"])
     a = ap.parse_args()
     {"build": cmd_build, "freeze": cmd_freeze, "simulate": cmd_simulate, "nulls": cmd_nulls, "report": cmd_report,
-     "extras": cmd_extras}[a.cmd](a)
+     "extras": cmd_extras, "improve": cmd_improve}[a.cmd](a)
 
 
 if __name__ == "__main__":
