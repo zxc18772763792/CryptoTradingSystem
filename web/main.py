@@ -2236,6 +2236,12 @@ async def _hub_runup_ledger_worker(stop_event: asyncio.Event) -> None:
     await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("hub_runup_ledger", success=ok))
 
 
+async def _korea_frozen_skip_worker(stop_event: asyncio.Event) -> None:
+    from core.research.korea_frozen_skip_ledger import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("korea_frozen_skip", success=ok))
+
+
 async def _alastartrader1_ledger_worker(stop_event: asyncio.Event) -> None:
     from core.research.alastartrader1_ledger import worker
 
@@ -2315,6 +2321,12 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             # Idles until hub_runup_filter_v1 is activated; then a child-process cycle every 30 s
             # (Telethon read under reader.lock + settlement). Paper ledger only, never orders.
             "factory": lambda stop_event: _hub_runup_ledger_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "korea_frozen_skip": {
+            # Idles until korea_frozen_skip_v1 is activated; then a cycle every 15 minutes that reads the
+            # korea_caution_hedged tracker file (never writes it). Paper ledger only, never orders.
+            "factory": lambda stop_event: _korea_frozen_skip_worker(stop_event),
             "restart_on_failure": True,
         },
         "next10xgem1_fade_v1_settle": {

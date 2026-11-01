@@ -63,6 +63,11 @@ def _hub_runup() -> Dict[str, Any]:
     return registry_summary()
 
 
+def _korea_frozen_skip() -> Dict[str, Any]:
+    from core.research.korea_frozen_skip_ledger import registry_summary
+    return registry_summary()
+
+
 def _telegram_binance_chat() -> Dict[str, Any]:
     from core.research.telegram_forward_tracker import binance_chat
     return binance_chat()
@@ -199,6 +204,12 @@ TRACKERS: List[Dict[str, Any]] = [
      "unit": "笔", "rule_key": "korea_caution_hedged",
      "rule": "Upbit 或 Bithumb 交易警示当日收盘做空永续 7 天 + 等额做多成交额前 30 篮子；同一币 7 天内只开一笔，先警示的交易所开仓",
      "load": _korean("korea_caution_hedged")},
+    {"id": "korea_frozen_skip_v1", "name": "韩国警示做空 · 跳过充提双停（影子）", "group": "韩国交易所",
+     "unit": "批", "rule_key": "korea_frozen_skip_v1",
+     "rule": "合并版韩国警示做空的每笔前向交易，入场收盘前读 Upbit 警示公告正文与 Bithumb 公开钱包状态；"
+             "公告写明充提已停，或 Bithumb 该币全部网络充提关闭持续≥60分钟（全市场关闭≤2%才算有效快照），就跳过记 0%。"
+             "收益直接取原版账本的对冲结算，两本只差被跳过的单。10 个被跳过批次或满一年复核。仅纸面。",
+     "load": _korea_frozen_skip},
     {"id": "upbit_caution", "name": "Upbit 警示后做空", "group": "韩国交易所", "unit": "笔", "rule_key": "upbit_caution",
      "rule": "交易警示当日收盘做空币安永续 7 天，+40% 止损", "load": _korean("caution")},
     {"id": "upbit_caution_hedged", "name": "Upbit 警示后做空 · 对冲版", "group": "韩国交易所", "unit": "笔",
@@ -231,6 +242,8 @@ def _open_marks(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
                  "strategy_net_pct": None, "scope": "short_price_only", "scope_label": "空头价格毛收益，未含资金费/成本/对冲",
                  "price_at": t.get("mark_price_at"), "price_basis": "最近完整日收盘", "is_partial": True} for t in trades
                 if t.get("status") == "open" and not t.get("late")]
+    if tid == "korea_frozen_skip_v1":
+        return []  # an overlay of korea_caution_hedged: its open trades are marked on that row
     if tid.startswith(("upbit_", "bithumb_", "korea_")):
         from core.research import upbit_caution_tracker as m
         strategy = {"upbit_caution": "caution", "upbit_caution_hedged": "caution_hedged", "upbit_krw_listing": "krw_listing",
@@ -276,6 +289,13 @@ def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
         return {"metric_kind": "excess_return", "metric_label": "相对同币零分布超额", "metric_unit_label": "百分点/笔",
                 "return_basis": "single_leg_notional", "basis_label": "该笔入场名义本金；超额非账户收益",
                 "gross_notional_multiplier": 1, "cost_scope": "主统计双方均扣20bps、均忽略资金费；实际含资金费收益另列",
+                "is_paper": True}
+    if tid == "korea_frozen_skip_v1":
+        return {"metric_kind": "paired_increment", "metric_label": "每个被跳过批次规避的收益（过滤后−原版）",
+                "metric_unit_label": "百分点/批", "return_basis": "single_leg_notional",
+                "basis_label": "单腿名义金额（空币＋等额做多篮子）；正数表示跳过的单本来会亏",
+                "gross_notional_multiplier": 2,
+                "cost_scope": "原版账本的对冲结算（含双方手续费与资金费）；不过滤与过滤后两本及普通空头参照另列。样本为空时为空，不是0%",
                 "is_paper": True}
     if tid == "hub_runup_filter_v1":
         return {"metric_kind": "excess_return", "metric_label": "相对入场后30天同币同几何均值超额", "metric_unit_label": "百分点/笔",

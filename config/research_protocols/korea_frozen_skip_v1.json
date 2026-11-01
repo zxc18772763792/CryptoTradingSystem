@@ -1,0 +1,78 @@
+{
+  "protocol_id": "korea_frozen_skip_v1",
+  "registered_on": "2026-11-01",
+  "hypothesis": "In the pooled Korean caution short (korea_caution_hedged), the trades taken while the coin's Korean wallets are suspended in both directions (deposits and withdrawals) lose on average; skipping them improves the book. A skip is a flat position (0%), so the filtered book differs from the baseline only by the skipped trades.",
+  "development_evidence": {
+    "doc": "docs/INIT_SQUEEZE_ACTORS_2026-10-31.md",
+    "sample": "38 Upbit caution events (2022-11 to 2026-10) with a 7-day plain short return from data/research/korea_composite_20261029/run_04/event_matrix.csv and a readable Upbit designation notice body",
+    "text_rule": "wallet_rule_v2 below (the first, looser pattern also matched the section heading '입출금 일시 중단 안내' in two deposit-only notices, RESOLV 2026-03-23 and KERNEL 2026-04-20; it was corrected by reading those notices, after the returns were already known)",
+    "both_suspended": {"events": 11, "mean_7d_short_pct": -7.17, "median_pct": -3.57, "win_rate": 0.36, "worst_pct": -43.08},
+    "rest": {"events": 27, "mean_7d_short_pct": 7.49},
+    "one_sided_permutation_p": 0.008,
+    "without_INIT_and_INJ": "the other 9 both-suspended events average about -0.2%: the evidence is mostly two tail losses (INIT -43%, INJ -34%), so the expected benefit is tail avoidance rather than a steady edge",
+    "status": "post hoc split found while investigating the INIT loss; the pooled forward ledger had 6 settled trades (INIT among them). This ledger is its first independent test. The plain short returns above are not the hedged returns this ledger is judged on."
+  },
+  "source": {
+    "tracker": "korea_caution_hedged (core/research/upbit_caution_tracker.py, state data/research/korea_caution_hedged/tracker.json)",
+    "access": "read-only: the overlay never writes the baseline file or changes its trades, statistics or retirement",
+    "eligible": "a source trade with a perpetual symbol, not backfilled, not late, discovered by the source at or after this ledger's activation, and not present in the source file at activation",
+    "entry": "the source's entry close: 00:00 UTC after the designation's UTC day (day0 + 1 day)",
+    "returns": "the source's own settled figures: hedged_return_pct (primary; short coin + long frozen top-30 basket, fees and funding) and return_pct (plain short, reference)"
+  },
+  "evidence": {
+    "window": "observations from the first cycle that sees the source trade until the entry close; anything received at or after the entry close is ignored",
+    "cadence_seconds": 900,
+    "upbit_notice_arm": {
+      "list": "GET api-manager.upbit.com/api/v1/announcements?os=web&page=1..2&per_page=20&category=trade",
+      "match": "title designates a caution item ('유의 종목 지정', not '지정 해제') and names the coin in parentheses (same rule as the baseline's caution_tickers); first_listed_at between day0 - 7 days and the entry close",
+      "body": "GET announcements/{id}; HTML tags and &nbsp; removed, whitespace collapsed; each notice is classified once, from the first body received",
+      "wallet_rule_v2": [
+        "입출금\\s*서비스(?:는|가|이)?\\s*(?:이미\\s*)?(?:일시\\s*)?(?:중단|정지)",
+        "입출금(?:은|이)\\s*(?:모두\\s*)?(?:일시\\s*)?(?:중단|정지)",
+        "(?<!입)출금\\s*(?:지원\\s*|서비스\\s*)?(?:중단|차단|정지)\\s*시점"
+      ],
+      "hit": "any matched notice whose body matches any wallet_rule_v2 pattern"
+    },
+    "bithumb_wallet_arm": {
+      "endpoint": "GET api.bithumb.com/public/assetsstatus/multichain/ALL (Bithumb notice bodies are behind bot protection and cannot be read)",
+      "coin_closed": "every listed network of the coin has deposit_status 0 and withdrawal_status 0",
+      "valid_snapshot": "at most 2% of listed currencies are closed in both directions (on 2026-10-31 15:05 UTC a maintenance window showed 29 of 523, BTC and ETH included; on 2026-11-01 only CORE and INIT)",
+      "hit": "a run of valid snapshots showing the coin closed whose first and last are at least 60 minutes apart; a valid snapshot showing it open (or not listed) ends the run; failed or invalid snapshots neither extend nor end it"
+    }
+  },
+  "decision": {
+    "time": "the entry close; the decision uses only observations received before it and is journaled at the first cycle after it",
+    "skip": "upbit_notice_arm hit or bithumb_wallet_arm hit (the arm is recorded)",
+    "keep": "otherwise, including when sources failed: the filter acts only on evidence it holds; evidence coverage is reported",
+    "late": "no observation before the entry close (for example the web service was down): excluded from both books"
+  },
+  "books": {
+    "baseline": "every decided (keep or skip) source trade with a settled hedged return",
+    "filtered": "the same trades; a skipped trade counts 0%",
+    "void": "source trade ends no_perp, delisted, missing, or settled without a hedged return: excluded from both books"
+  },
+  "analysis": {
+    "unit": "episode = settled trades sharing an entry close and an action (keep or skip); episode return = mean hedged return of its trades",
+    "primary": "mean hedged return of skipped episodes versus kept episodes; the filter helps when skipped < kept and skipped < 0",
+    "test": "one-sided permutation of the episode labels (10,000 draws, numpy default_rng seed 20261101), statistic mean(kept) - mean(skipped)",
+    "review": "at 10 settled skipped episodes, or 365 days after activation, whichever first; before that the summary is descriptive only and no p-value is shown",
+    "verdict": {
+      "supported": "skipped mean < 0, skipped mean < kept mean, and p <= 0.10",
+      "rejected": "skipped mean >= kept mean",
+      "inconclusive": "otherwise",
+      "insufficient": "fewer than 5 settled skipped episodes (or no kept episode) at the review"
+    },
+    "reported": "per-book mean, worst trade, stop count (-40% stops), skips by arm, evidence coverage, plain-short reference",
+    "no_tuning": "no change of patterns, thresholds, cadence or window after activation; a change needs a new protocol id and directory"
+  },
+  "limits": [
+    "Rare events: the development sample had 11 in four years of Upbit notices; the pooled ledger may need about a year to reach the review.",
+    "Upbit wallet status is only read from notice text (its wallet API needs an account key); a freeze announced in a separate notice without wording in the designation notice is missed by the Upbit arm.",
+    "Bithumb notice text is unreadable; the Bithumb arm relies on a public status endpoint that has shown maintenance-wide closures.",
+    "The source tracker's own rules (entry, stop, basket, dedupe) are inherited; if it stops creating trades, this ledger stops receiving events."
+  ],
+  "integrity": {
+    "journal": "data/research/korea_frozen_skip_v1/journal.jsonl, append-only and hash-chained; each record carries the SHA-256 of this file and core/research/korea_frozen_skip_ledger.py; any change stops the journal",
+    "paper_only": "records only; never places or proposes orders"
+  }
+}

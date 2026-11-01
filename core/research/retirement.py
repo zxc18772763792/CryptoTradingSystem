@@ -60,6 +60,10 @@ RULES: Dict[str, Dict[str, Any]] = {
     # HUB as-written with the run-up filter: protocol-owned (hub_runup_filter_v1), 80-event futility / 160-event review.
     "hub_runup_filter_v1": {"min_n": 160, "unit": "trade", "backtest_mean_pct": None,
                             "decision_engine": "hub_runup_filter_v1", "futility_n": 80, "diagnostic_only": True},
+    # Korean caution short skipping both-direction wallet freezes: protocol-owned (korea_frozen_skip_v1),
+    # review at 10 settled skipped episodes or one year; unit = skipped episode.
+    "korea_frozen_skip_v1": {"min_n": 10, "unit": "skipped_episode", "backtest_mean_pct": None,
+                             "decision_engine": "korea_frozen_skip_v1", "diagnostic_only": True},
     "telegram_cryptoquant_24h": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,
                                  "decision_engine": "telegram_forward_protocol", "diagnostic_only": True},
     "telegram_binance_chat_sentiment": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,
