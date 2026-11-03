@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.requests import Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -2710,6 +2711,19 @@ app.add_middleware(
 )
 app.add_middleware(GZipMiddleware, minimum_size=1000, compresslevel=5)
 
+_allowed_hosts: List[str] = []
+try:
+    raw = list(getattr(settings, "WEB_ALLOWED_HOSTS", []) or [])
+    _allowed_hosts = [str(h).strip().lower() for h in raw if str(h).strip() and str(h).strip() != "*"]
+except Exception:
+    _allowed_hosts = []
+if not _allowed_hosts:
+    _allowed_hosts = ["127.0.0.1", "localhost"]
+
+# Added last so it runs first: a DNS-rebinding page reaches this loopback server
+# with its own domain in Host, and must not get to the unauthenticated GET routes.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=_allowed_hosts)
+
 
 @app.middleware("http")
 async def _sliding_local_ui_session(request: Request, call_next):
@@ -3175,6 +3189,13 @@ async def readyz_check():
             checks["exchanges"] = "no connected exchanges"
         else:
             checks["exchanges"] = connected_list
+        registered = getattr(exchange_manager, "get_all_exchanges", None)
+        registered_names = list((registered() or {}).keys()) if callable(registered) else []
+        disconnected = sorted(str(n) for n in registered_names if n not in connected_list)
+        if disconnected:
+            # Informational only: Gate alone can still serve, but a primary exchange that
+            # keeps failing to connect must be visible here instead of a silent "ready".
+            checks["exchanges_disconnected"] = disconnected
     except Exception as exc:
         overall_ready = False
         checks["exchanges"] = f"error: {exc}"

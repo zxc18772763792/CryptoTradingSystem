@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from core.ops.service import auth as ops_auth_module
 from web import main as web_main
@@ -1083,6 +1084,42 @@ def test_cors_does_not_allow_wildcard_with_credentials():
     assert cors.kwargs["allow_credentials"] is True
     assert cors.kwargs["allow_origins"] != ["*"]
     assert "*" not in cors.kwargs["allow_origins"]
+
+
+@pytest.mark.parametrize(
+    ("base_url", "status"),
+    [
+        ("http://127.0.0.1:8000", 200),
+        ("http://localhost:8000", 200),
+        ("http://rebind.attacker.example:8000", 400),
+        ("http://192.168.1.20:8000", 400),
+    ],
+)
+def test_host_header_allowlist_blocks_dns_rebinding(base_url, status):
+    from fastapi.testclient import TestClient
+
+    trusted = next(m for m in web_main.app.user_middleware if m.cls is TrustedHostMiddleware)
+    assert "*" not in trusted.kwargs["allowed_hosts"]
+    # Without the context manager TestClient skips the lifespan, so nothing starts.
+    response = TestClient(web_main.app, base_url=base_url).get("/livez")
+    assert response.status_code == status
+
+
+def test_readyz_lists_registered_exchange_that_is_disconnected(monkeypatch):
+    connectors = {
+        "gate": SimpleNamespace(is_connected=True),
+        "binance": SimpleNamespace(is_connected=False),
+    }
+    monkeypatch.setattr(web_main.exchange_manager, "get_all_exchanges", lambda: connectors)
+    monkeypatch.setattr(web_main.exchange_manager, "get_exchange", lambda name: connectors.get(name))
+    monkeypatch.setattr(web_main.strategy_manager, "is_running", True, raising=False)
+    monkeypatch.setattr(web_main, "_runtime_readiness_snapshot", lambda app: (True, {}))
+
+    body = asyncio.run(web_main.readyz_check())
+
+    assert body["status"] == "ready"
+    assert body["checks"]["exchanges"] == ["gate"]
+    assert body["checks"]["exchanges_disconnected"] == ["binance"]
 
 
 def test_websocket_rejects_non_loopback_without_credentials(monkeypatch):

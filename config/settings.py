@@ -347,6 +347,8 @@ class Settings(BaseSettings):
         "http://localhost:8000",
         "http://127.0.0.1:8000",
     ]
+    # Host header allowlist (DNS-rebinding guard); hostnames only, no port, never "*"
+    WEB_ALLOWED_HOSTS: List[str] = ["127.0.0.1", "localhost"]
 
     # Notification
     TELEGRAM_BOT_TOKEN: Optional[str] = None

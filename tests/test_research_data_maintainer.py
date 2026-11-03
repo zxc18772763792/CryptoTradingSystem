@@ -171,3 +171,33 @@ def test_daily_refresh_caps_overlap_and_uses_metadata_latest(monkeypatch):
         <= requested_start
         <= latest - pd.Timedelta(days=3) + pd.Timedelta(seconds=1)
     )
+
+
+def test_top100_spot_symbol_loader_requests_spot_exchange_info_only(monkeypatch):
+    module = _load_top100_module()
+    called = []
+
+    class RecordingBinance(module.ccxt.binance):
+        def publicGetExchangeInfo(self, params={}):
+            called.append("spot")
+            return {"symbols": []}
+
+        def fapiPublicGetExchangeInfo(self, params={}):
+            called.append("linear")
+            return {"symbols": []}
+
+        def dapiPublicGetExchangeInfo(self, params={}):
+            called.append("inverse")
+            return {"symbols": []}
+
+        def sapiGetCapitalConfigGetall(self, params={}):
+            called.append("currencies")
+            return []
+
+    monkeypatch.setattr(module.ccxt, "binance", RecordingBinance)
+    monkeypatch.setattr(module, "_proxy_mapping", lambda: {})
+
+    _exchange, symbols = module._load_binance_spot_usdt_symbols()
+
+    assert called == ["spot"]
+    assert symbols == set()

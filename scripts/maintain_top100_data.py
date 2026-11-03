@@ -95,7 +95,9 @@ def _load_binance_spot_usdt_symbols() -> Tuple[ccxt.binance, set[str]]:
     exchange = ccxt.binance(
         {
             "enableRateLimit": True,
-            "options": {"defaultType": "spot"},
+            # Spot list only: ccxt otherwise also pulls fapi/dapi exchangeInfo, and one
+            # flaky derivatives endpoint fails the whole load.
+            "options": {"defaultType": "spot", "fetchMarkets": {"types": ["spot"]}, "fetchMargins": False},
             "timeout": 30000,
             "proxies": proxies,
         }

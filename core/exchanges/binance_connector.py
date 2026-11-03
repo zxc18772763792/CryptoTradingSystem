@@ -198,6 +198,13 @@ class BinanceConnector(BaseExchange):
                 "defaultType": self.config.default_type,
                 "recvWindow": 59000,
                 "adjustForTimeDifference": True,
+                # load_markets is all-or-nothing: only request what the connector uses.
+                # Spot + USD-M cover balances, positions and the futures symbol map;
+                # coin-M (dapi) and the private sapi currency/margin lists are unused.
+                # Without fetchCurrencies ccxt derives currencies from the markets.
+                "fetchMarkets": {"types": ["spot", "linear"]},
+                "fetchCurrencies": False,
+                "fetchMargins": False,
             },
         }
 

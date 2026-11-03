@@ -8,6 +8,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import ccxt.async_support as ccxt_async
 import pytest
 
 from config.exchanges import ExchangeConfig, ExchangeType
@@ -173,6 +174,45 @@ class TestBinanceConnector:
         assert order.side == OrderSide.BUY
         assert order.type == OrderType.LIMIT
         assert order.status == OrderStatus.OPEN
+
+    def test_load_markets_requests_only_spot_and_usdm(self):
+        config = ExchangeConfig(
+            name="binance",
+            exchange_type=ExchangeType.CEX,
+            api_key="test_key",
+            api_secret="test_secret",
+            default_type="future",
+        )
+        client = ccxt_async.binance(BinanceConnector(config)._build_client_config())
+        called = []
+
+        def endpoint(name):
+            async def _call(params={}):
+                called.append(name)
+                return {"symbols": []} if name.endswith("ExchangeInfo") else []
+
+            return _call
+
+        for name in (
+            "publicGetExchangeInfo",
+            "fapiPublicGetExchangeInfo",
+            "dapiPublicGetExchangeInfo",
+            "sapiGetCapitalConfigGetall",
+            "sapiGetMarginAllPairs",
+            "sapiGetMarginIsolatedAllPairs",
+        ):
+            setattr(client, name, endpoint(name))
+        client.load_time_difference = AsyncMock(return_value=0)
+
+        async def _run():
+            try:
+                await client.load_markets()
+            finally:
+                await client.close()
+
+        asyncio.run(_run())
+
+        assert sorted(called) == ["fapiPublicGetExchangeInfo", "publicGetExchangeInfo"]
 
     def test_get_ticker_auto_reconnects_when_client_missing(self, connector, monkeypatch):
         class FakeClient:
