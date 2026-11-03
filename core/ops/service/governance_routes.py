@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import ValidationError
 
 from core.audit.ops_audit import ops_audit_scope
 from core.ops.service import api as ops_api
@@ -217,6 +218,15 @@ async def governance_risk_approve_change(request: Request, request_id: str):
     return ops_api._ok(result)
 
 
+def _toggle_payload(cfg: dict):
+    try:
+        return ops_api.RiskConfigPayload.model_validate(cfg)
+    except ValidationError:
+        # A legacy invalid limit must not block reduce_only/kill_switch. It is
+        # carried over unchanged, scores as no change, and the gate fails closed on it.
+        return ops_api.RiskConfigPayload.model_construct(**cfg)
+
+
 @router.post("/governance/risk/set_reduce_only")
 async def governance_set_reduce_only(request: Request, payload: ops_api.GovernanceRiskToggleRequest):
     auth = get_request_auth(request)
@@ -226,12 +236,15 @@ async def governance_set_reduce_only(request: Request, payload: ops_api.Governan
     cfg["reduce_only"] = bool(payload.enabled)
     result = await ops_api.governance_request_risk_change(
         identity=identity,
-        proposed_config=ops_api.RiskConfigPayload.model_validate(cfg),
+        proposed_config=_toggle_payload(cfg),
         reason=payload.reason or ("set reduce_only" if payload.enabled else "unset reduce_only"),
     )
-    runtime = getattr(request.app.state, "governance_runtime", {}) or {}
-    runtime["reduce_only"] = bool(payload.enabled)
-    request.app.state.governance_runtime = runtime
+    if result.get("status") == "applied":
+        # A relaxation waits for approval; mirror only what actually took effect.
+        runtime = getattr(request.app.state, "governance_runtime", {}) or {}
+        runtime["reduce_only"] = bool(payload.enabled)
+        runtime["risk_config_version"] = result.get("proposed_version")
+        request.app.state.governance_runtime = runtime
     return ops_api._ok(result)
 
 
@@ -244,12 +257,15 @@ async def governance_set_kill_switch(request: Request, payload: ops_api.Governan
     cfg["kill_switch"] = bool(payload.enabled)
     result = await ops_api.governance_request_risk_change(
         identity=identity,
-        proposed_config=ops_api.RiskConfigPayload.model_validate(cfg),
+        proposed_config=_toggle_payload(cfg),
         reason=payload.reason or ("set kill_switch" if payload.enabled else "unset kill_switch"),
     )
-    runtime = getattr(request.app.state, "governance_runtime", {}) or {}
-    runtime["kill_switch"] = bool(payload.enabled)
-    request.app.state.governance_runtime = runtime
+    if result.get("status") == "applied":
+        # A relaxation waits for approval; mirror only what actually took effect.
+        runtime = getattr(request.app.state, "governance_runtime", {}) or {}
+        runtime["kill_switch"] = bool(payload.enabled)
+        runtime["risk_config_version"] = result.get("proposed_version")
+        request.app.state.governance_runtime = runtime
     return ops_api._ok(result)
 
 

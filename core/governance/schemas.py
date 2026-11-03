@@ -25,12 +25,14 @@ class StrategySpecPayload(BaseModel):
 
 
 class RiskConfigPayload(BaseModel):
-    max_leverage: float = 3.0
-    max_position_notional_pct: float = 0.1
-    max_trade_risk_pct: float = 0.02
-    max_daily_drawdown_pct: float = 0.02
-    spread_limit_bps: float = 25.0
-    data_staleness_limit_ms: int = 60_000
+    # Limits must be finite and positive: a NaN limit never compares true and a
+    # zero used to fall back to the looser default, so both silently opened a gate.
+    max_leverage: float = Field(3.0, gt=0, allow_inf_nan=False)
+    max_position_notional_pct: float = Field(0.1, gt=0, le=1, allow_inf_nan=False)
+    max_trade_risk_pct: float = Field(0.02, gt=0, le=1, allow_inf_nan=False)
+    max_daily_drawdown_pct: float = Field(0.02, gt=0, le=1, allow_inf_nan=False)
+    spread_limit_bps: float = Field(25.0, gt=0, allow_inf_nan=False)
+    data_staleness_limit_ms: int = Field(60_000, gt=0)
     allowed_symbols: List[str] = Field(default_factory=list)
     allowed_timeframes: List[str] = Field(default_factory=list)
     reduce_only: bool = False

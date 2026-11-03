@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import secrets
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -131,20 +132,58 @@ def _is_list_expanded(base: Any, proposed: Any) -> bool:
     return bool(left) and (not right or bool(right - left))
 
 
+_RISK_LIMIT_WEIGHTS: List[Tuple[str, float]] = [
+    ("max_leverage", 2.0),
+    ("max_position_notional_pct", 2.0),
+    ("max_trade_risk_pct", 2.0),
+    ("max_daily_drawdown_pct", 1.5),
+    ("spread_limit_bps", 1.0),
+    ("data_staleness_limit_ms", 1.0),
+]
+
+
+def _positive_limit(value: Any) -> Optional[float]:
+    """Return a usable (finite, positive) limit, else None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def _same_limit(left: Any, right: Any) -> bool:
+    # NaN != NaN: an unchanged legacy value must not count as a new change.
+    if left == right:
+        return True
+    try:
+        return math.isnan(float(left)) and math.isnan(float(right))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _reject_invalid_limit_changes(base: Dict[str, Any], proposed: Dict[str, Any]) -> None:
+    invalid = [
+        key
+        for key, _weight in _RISK_LIMIT_WEIGHTS
+        if key in proposed
+        and not _same_limit(base.get(key), proposed.get(key))
+        and _positive_limit(proposed.get(key)) is None
+    ]
+    if invalid:
+        raise HTTPException(status_code=422, detail=f"risk limits must be finite and positive: {invalid}")
+
+
 def _risk_delta_score(base: Dict[str, Any], proposed: Dict[str, Any]) -> float:
     score = 0.0
-    rules: List[Tuple[str, float]] = [
-        ("max_leverage", 2.0),
-        ("max_position_notional_pct", 2.0),
-        ("max_trade_risk_pct", 2.0),
-        ("max_daily_drawdown_pct", 1.5),
-        ("spread_limit_bps", 1.0),
-        ("data_staleness_limit_ms", 1.0),
-    ]
-    for key, weight in rules:
-        a = float(base.get(key, 0.0) or 0.0)
-        b = float(proposed.get(key, 0.0) or 0.0)
-        if b > a:
+    for key, weight in _RISK_LIMIT_WEIGHTS:
+        if _same_limit(base.get(key), proposed.get(key)):
+            continue
+        a = _positive_limit(base.get(key)) or 0.0
+        b = _positive_limit(proposed.get(key))
+        # An unusable limit disables its gate, so it never counts as a reduction.
+        if b is None or b > a:
             score += weight
     for key in ("kill_switch", "reduce_only"):
         if bool(base.get(key, False)) and not bool(proposed.get(key, False)):
@@ -234,14 +273,19 @@ async def _activate_risk_config(
         session.add(row)
         await session.commit()
 
-    # runtime risk manager sync (existing keys only)
-    risk_manager.update_parameters(
-        {
-            "max_position_size": float(config.get("max_position_notional_pct", risk_manager.max_position_size)),
-            "max_daily_loss_ratio": float(config.get("max_daily_drawdown_pct", risk_manager.max_daily_loss_ratio)),
-            "max_leverage": float(config.get("max_leverage", risk_manager.max_leverage)),
-        }
-    )
+    # runtime risk manager sync (existing keys only). Callers reject invalid
+    # changed limits before the commit; an unchanged legacy value is skipped
+    # here so update_parameters cannot raise after the config is already active.
+    runtime_updates: Dict[str, float] = {}
+    for runtime_key, config_key in (
+        ("max_position_size", "max_position_notional_pct"),
+        ("max_daily_loss_ratio", "max_daily_drawdown_pct"),
+        ("max_leverage", "max_leverage"),
+    ):
+        value = _positive_limit(config.get(config_key))
+        if value is not None:
+            runtime_updates[runtime_key] = value
+    risk_manager.update_parameters(runtime_updates)
     # Governance is an independent gate in the decision engine. Applying its
     # config must never reset the daily-loss halt, PNL baseline or grace period.
     risk_manager._governance_kill_switch = bool(config.get("kill_switch", False))
@@ -256,6 +300,7 @@ async def request_risk_change(
     current = await get_active_risk_config()
     base_cfg = dict(current.get("config") or {})
     next_cfg = proposed_config.model_dump()
+    _reject_invalid_limit_changes(base_cfg, next_cfg)
     diff = _diff_dict(base_cfg, next_cfg)
     score = _risk_delta_score(base_cfg, next_cfg)
     increase = _is_increase_risk(base_cfg, next_cfg)
@@ -334,6 +379,8 @@ async def approve_risk_change(identity: GovernanceIdentity, request_id: str) -> 
         for key, patch in diff.items():
             if isinstance(patch, dict):
                 proposed_cfg[key] = patch.get("to")
+        # Requests stored before limits were validated may still carry NaN or 0.
+        _reject_invalid_limit_changes(base_cfg, proposed_cfg)
 
         activated = await _activate_risk_config(
             base_version=int(current.get("version") or 1),

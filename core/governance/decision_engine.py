@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -10,6 +11,24 @@ from sqlalchemy import select
 from config.database import RiskConfig, async_session_maker
 from config.settings import settings
 from core.governance.audit import GovernanceAuditEvent, new_trace_id, write_audit
+
+
+def _cfg_limit(cfg: Dict[str, Any], key: str, default: float) -> float:
+    """Read a governance limit; only a missing key falls back to the default.
+
+    A NaN limit never compares true and a zero used to become the looser
+    default, so an unusable stored value now fails closed (0 allows nothing).
+    """
+    value = cfg.get(key)
+    if value is None:
+        return float(default)
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
 
 
 @dataclass
@@ -73,7 +92,7 @@ class DecisionEngine:
         report = _risk_manager().get_risk_report()
         equity = dict(report.get("equity") or {})
         daily_pnl_ratio = float(equity.get("daily_pnl_ratio", 0.0) or 0.0)
-        dd_limit = abs(float(cfg.get("max_daily_drawdown_pct", 0.02) or 0.02))
+        dd_limit = _cfg_limit(cfg, "max_daily_drawdown_pct", 0.02)
         return daily_pnl_ratio <= -dd_limit
 
     @staticmethod
@@ -127,22 +146,22 @@ class DecisionEngine:
             blocked_reason = "kill_switch_enabled"
         elif bool(cfg.get("reduce_only", False)) and not allow_close:
             blocked_reason = "reduce_only_enabled"
-        elif leverage > float(cfg.get("max_leverage", 3.0) or 3.0) and not allow_close:
+        elif leverage > _cfg_limit(cfg, "max_leverage", 3.0) and not allow_close:
             # Closing/exit orders must always be allowed to reduce existing
             # exposure even if upstream pre-checks (e.g. position close after
             # a leverage cap reduction) would otherwise be blocked. The
             # leverage cap will still bite on any *fresh* entry below.
             blocked_reason = "max_leverage_exceeded"
-        elif account_equity > 0 and order_value > account_equity * float(cfg.get("max_position_notional_pct", 0.1) or 0.1) and not allow_close:
+        elif account_equity > 0 and order_value > account_equity * _cfg_limit(cfg, "max_position_notional_pct", 0.1) and not allow_close:
             blocked_reason = "max_position_notional_pct_exceeded"
-        elif account_equity > 0 and order_value > account_equity * float(cfg.get("max_trade_risk_pct", 0.1) or 0.1) and not allow_close:
+        elif account_equity > 0 and order_value > account_equity * _cfg_limit(cfg, "max_trade_risk_pct", 0.1) and not allow_close:
             blocked_reason = "max_trade_risk_pct_exceeded"
-        elif spread_bps is not None and spread_bps > float(cfg.get("spread_limit_bps", 25.0) or 25.0) and not allow_close:
+        elif spread_bps is not None and spread_bps > _cfg_limit(cfg, "spread_limit_bps", 25.0) and not allow_close:
             blocked_reason = "spread_limit_exceeded"
         elif self._daily_drawdown_blocked(cfg) and not allow_close:
             blocked_reason = "max_daily_drawdown_reached"
         else:
-            max_staleness = int(cfg.get("data_staleness_limit_ms", 60_000) or 60_000)
+            max_staleness = _cfg_limit(cfg, "data_staleness_limit_ms", 60_000)
             if signal_ts is not None:
                 if signal_ts.tzinfo is None:
                     signal_ts = signal_ts.replace(tzinfo=timezone.utc)

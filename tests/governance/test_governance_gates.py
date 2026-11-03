@@ -4,6 +4,10 @@ import asyncio
 import secrets
 from datetime import datetime, timedelta, timezone
 
+import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
+
 from config.settings import settings
 from config.database import init_db
 from core.governance.decision_engine import decision_engine
@@ -11,6 +15,7 @@ from core.governance.rbac import GovernanceIdentity
 from core.governance.schemas import RiskConfigPayload
 from core.governance.service import (
     _activate_risk_config,
+    _risk_delta_score,
     ensure_risk_config_initialized,
     propose_strategy,
     request_risk_change,
@@ -384,3 +389,127 @@ def test_live_transition_requires_dual_approval():
     assert first_live["status"] == "paper"
     assert "RISK_OWNER" in first_live.get("pending_approvals", [])
     assert second_live["status"] == "live"
+
+
+_VALID_LIMITS = {
+    "max_leverage": 2.0,
+    "max_position_notional_pct": 0.05,
+    "max_trade_risk_pct": 0.02,
+    "max_daily_drawdown_pct": 0.01,
+    "spread_limit_bps": 25.0,
+    "data_staleness_limit_ms": 60_000,
+}
+
+
+@pytest.mark.parametrize("key", sorted(_VALID_LIMITS))
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0, -1])
+def test_risk_config_payload_rejects_unusable_limits(key, bad):
+    with pytest.raises(ValidationError):
+        RiskConfigPayload(**{**_VALID_LIMITS, key: bad})
+
+
+@pytest.mark.parametrize("key", sorted(_VALID_LIMITS))
+@pytest.mark.parametrize("bad", [float("nan"), 0.0, None])
+def test_unusable_limit_never_scores_as_risk_reduction(key, bad):
+    base = dict(_VALID_LIMITS)
+    proposed = {**base, key: bad}
+    assert _risk_delta_score(base, proposed) > 0
+    # The same legacy value on both sides is not a new change.
+    assert _risk_delta_score(proposed, dict(proposed)) == 0
+
+
+@pytest.mark.parametrize(
+    ("key", "bad", "reason"),
+    [
+        ("max_leverage", float("nan"), "max_leverage_exceeded"),
+        ("max_leverage", 0.0, "max_leverage_exceeded"),
+        ("max_position_notional_pct", 0.0, "max_position_notional_pct_exceeded"),
+        ("max_position_notional_pct", float("nan"), "max_position_notional_pct_exceeded"),
+    ],
+)
+def test_decision_gate_fails_closed_on_unusable_limit(monkeypatch, key, bad, reason):
+    monkeypatch.setattr(settings, "GOVERNANCE_ENABLED", True)
+
+    async def _mock_cfg():
+        cfg = {
+            "kill_switch": False,
+            "reduce_only": False,
+            "max_leverage": 10.0,
+            "max_position_notional_pct": 1.0,
+            "max_trade_risk_pct": 1.0,
+            "max_daily_drawdown_pct": 1.0,
+            "spread_limit_bps": 1000.0,
+            "data_staleness_limit_ms": 60_000,
+            "allowed_symbols": [],
+            "allowed_timeframes": [],
+        }
+        cfg[key] = bad
+        return cfg
+
+    monkeypatch.setattr(decision_engine, "_load_active_risk_config", _mock_cfg)
+
+    async def _run():
+        return await decision_engine.evaluate_order_intent(
+            symbol="BTC/USDT",
+            side="buy",
+            leverage=1.0,
+            order_value=100.0,
+            account_equity=10000.0,
+            signal_ts=datetime.now(timezone.utc),
+            allow_close=False,
+            spread_bps=5.0,
+            timeframe="1m",
+        )
+
+    out = asyncio.run(_run())
+    assert out.allowed is False
+    assert out.reason == reason
+
+
+def test_request_risk_change_rejects_unvalidated_invalid_limit(monkeypatch):
+    async def _mock_current():
+        return {"version": 3, "config": dict(_VALID_LIMITS), "is_active": True}
+
+    monkeypatch.setattr("core.governance.service.get_active_risk_config", _mock_current)
+    proposed = RiskConfigPayload.model_construct(**{**_VALID_LIMITS, "max_leverage": float("nan")})
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(
+            request_risk_change(
+                identity=GovernanceIdentity(actor="ops_user", role="OPERATOR"),
+                proposed_config=proposed,
+                reason="nan leverage",
+            )
+        )
+    assert exc.value.status_code == 422
+
+
+def test_kill_switch_still_applies_over_unchanged_legacy_invalid_limit(monkeypatch):
+    legacy = {**_VALID_LIMITS, "max_leverage": float("nan"), "kill_switch": False, "reduce_only": False}
+
+    async def _mock_current():
+        return {"version": 3, "config": dict(legacy), "is_active": True}
+
+    async def _run():
+        await init_db()
+        monkeypatch.setattr("core.governance.service.get_active_risk_config", _mock_current)
+        original_kill = risk_manager._governance_kill_switch
+        original_leverage = risk_manager.max_leverage
+        original_limits = (risk_manager.max_position_size, risk_manager.max_daily_loss_ratio)
+        try:
+            result = await request_risk_change(
+                identity=GovernanceIdentity(actor="ops_user", role="OPERATOR"),
+                proposed_config=RiskConfigPayload.model_construct(**{**legacy, "kill_switch": True}),
+                reason="emergency stop",
+            )
+            return result, risk_manager._governance_kill_switch, risk_manager.max_leverage, original_leverage
+        finally:
+            risk_manager._governance_kill_switch = original_kill
+            risk_manager.max_position_size, risk_manager.max_daily_loss_ratio = original_limits
+
+    result, kill_switch, leverage_after, leverage_before = asyncio.run(_run())
+    assert result["status"] == "applied"
+    assert result["risk_delta_score"] == 0
+    assert kill_switch is True
+    # The NaN limit is skipped instead of reaching the runtime risk manager.
+    assert leverage_after == leverage_before
