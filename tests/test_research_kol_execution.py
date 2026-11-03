@@ -176,3 +176,38 @@ def test_channel_templates():
                        "text": "LONG - $CLO 0.07$\n\nUse 5x Maximum Leverage\n\nTake Profit 1-  0.08$\n"
                                "Take Profit 2 - 0.10$\nTake Profit 3 - 0.12$\n\nStop lose : 0.05$"})
     assert (z.symbol, z.side, z.legs, z.targets, z.stop, z.leverage) == ("CLO", 1, [0.07], [0.08, 0.1, 0.12], 0.05, 5.0)
+
+
+def _hourly(rows, start="2026-01-01 06:00"):
+    return pd.DataFrame(rows, columns=["open", "high", "low", "close"],
+                        index=pd.date_range(start, periods=len(rows), freq="1h"))
+
+
+FUND_08 = pd.Series([0.01], index=[pd.Timestamp("2026-01-01 08:00")])
+
+
+def test_funding_settles_when_expiry_is_the_next_open():
+    start = pd.Timestamp("2026-01-01 06:00")
+    eng = Engine(Plan(1, True, [], [], [], None, False), start, pd.Timestamp("2026-01-01 09:00"),
+                 start + pd.Timedelta(hours=1), funding_series=FUND_08)
+    eng.run(_hourly([[100, 100, 100, 100]] * 4), pd.Timedelta(hours=1))
+    assert eng.exit_reason == "expiry"
+    assert eng.funding_paid == pytest.approx(0.01)
+
+
+def test_funding_settles_when_target_fills_inside_the_funding_bar():
+    start = pd.Timestamp("2026-01-01 06:00")
+    eng = Engine(Plan(1, True, [], [105], [1.0], 90, False), start, start + pd.Timedelta(days=1),
+                 start + pd.Timedelta(hours=1), funding_series=FUND_08)
+    eng.run(_hourly([[100, 100, 100, 100], [100, 100, 100, 100], [100, 106, 100, 105]]), pd.Timedelta(hours=1))
+    assert eng.exit_reason == "tp1"
+    assert eng.funding_paid == pytest.approx(0.01)
+
+
+def test_funding_at_the_expiry_open_is_not_owed():
+    start = pd.Timestamp("2026-01-01 06:00")
+    eng = Engine(Plan(1, True, [], [], [], None, False), start, pd.Timestamp("2026-01-01 08:00"),
+                 start + pd.Timedelta(hours=1), funding_series=FUND_08)
+    eng.run(_hourly([[100, 100, 100, 100]] * 3), pd.Timedelta(hours=1))
+    assert eng.exit_reason == "expiry"
+    assert eng.funding_paid == 0.0

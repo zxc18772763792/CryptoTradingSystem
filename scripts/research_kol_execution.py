@@ -664,7 +664,10 @@ class Engine:
         return self._beyond(bar.high if (self.p.side > 0) == favorable else bar.low, level, favorable)
 
     def _apply_funding(self, t_end):
-        while self._next_fund < len(self.fund) and self.fund.index[self._next_fund] < t_end:
+        # Settle through the open of bar t_end (funding times are floored to the minute): a position
+        # still open at a settlement owes it even if it closes inside that bar or expires at the
+        # next open. The frozen copy in core/research/kol_bracket_engine.py keeps "<" by design.
+        while self._next_fund < len(self.fund) and self.fund.index[self._next_fund] <= t_end:
             ft = self.fund.index[self._next_fund]
             if self.qty > 0 and ft > self.act and self.last_close is not None:
                 paid = self.p.side * float(self.fund.iloc[self._next_fund]) * self.qty * (self.last_close / self.avg)
