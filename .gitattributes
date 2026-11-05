@@ -10,6 +10,10 @@ core/research/alastartrader1_ledger.py -text
 # hash-pinned by the next10xgem1_fade_24h_v2 paper ledger (stored as written: LF)
 config/research_protocols/next10xgem1_fade_24h_v2.json -text
 
+# hash-pinned by the unlock_t7_big_v1 paper overlay (stored as written: LF)
+config/research_protocols/unlock_t7_big_v1.json -text
+core/research/unlock_t7_big_ledger.py -text
+
 # hash-pinned by the korea_frozen_skip_v1 paper overlay (stored as written: LF)
 config/research_protocols/korea_frozen_skip_v1.json -text
 core/research/korea_frozen_skip_ledger.py -text

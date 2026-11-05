@@ -32,6 +32,7 @@ from core.research import (
     listing_short_tracker,
     supply_factor_tracker,
     unlock_short_tracker,
+    unlock_t7_big_ledger,
     upbit_caution_tracker,
     xs_reversal_tracker,
 )
@@ -230,6 +231,10 @@ async def tick(force: bool = False) -> Dict[str, Any]:
             _status["unlock_tracker_t7"] = await unlock_short_tracker.tick(client, variant="t7")
             await _verdict_alert("unlock_short_t7", _status["unlock_tracker_t7"])
 
+        async def unlock_t7_big():
+            # reads the t-7 tracker's file only: no network, and it idles until activated
+            _status["unlock_t7_big"] = await unlock_t7_big_ledger.tick()
+
         async def supply():
             _status["supply_factor"] = await supply_factor_tracker.tick(client)
             await _verdict_alert("supply_factor", _status["supply_factor"])
@@ -311,6 +316,7 @@ async def tick(force: bool = False) -> Dict[str, Any]:
         await _run_job("tracker", TRACKER_INTERVAL_SEC, now, force, listing)
         await _run_job("unlock", UNLOCK_INTERVAL_SEC, now, force, unlock)
         await _run_job("unlock_t7", UNLOCK_INTERVAL_SEC, now, force, unlock_t7)
+        await _run_job("unlock_t7_big", TRACKER_INTERVAL_SEC, now, force, unlock_t7_big)
         await _run_job("supply", UNLOCK_INTERVAL_SEC, now, force, supply)
         await _run_job("upbit", UPBIT_INTERVAL_SEC, now, force, upbit_caution)
         await _run_job("upbit_krw_listing", UPBIT_INTERVAL_SEC, now, force, upbit_krw_listing)

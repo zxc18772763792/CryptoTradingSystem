@@ -1,0 +1,78 @@
+{
+  "protocol_id": "unlock_t7_big_v1",
+  "registered_on": "2026-11-05",
+  "hypothesis": "In the t-7 unlock short (unlock_short_t7), trades on cliffs of at least 10% of unlocked supply earn a positive hedged return and earn more than trades on 5-10% cliffs. The source's 5% threshold dilutes the rule.",
+  "parameters": {
+    "big_min_size_pct": 10.0,
+    "small_min_size_pct": 5.0,
+    "review_big_batches": 30,
+    "review_after_days": 548,
+    "min_big_batches": 15,
+    "min_small_batches": 10,
+    "permutations": 10000,
+    "seed": 20261105,
+    "alpha": 0.10
+  },
+  "development_evidence": {
+    "file": "data/research/unlock_t7_big_v1/development_t7_5_stop40.csv, column basket_hedged: a rerun of scripts/unlock_short_backtest.py --min-size 5 --entry -7 --exit -1 --stop 0.4 made on 2026-11-05 from the study's cached bars",
+    "file_sha256": "4e7c1f9dfc1e52962093c700fd6821b683529122e14123ca5fa95c23b662d6ff",
+    "stale_file_warning": "data/research/unlock_study/short_backtest_-7_-1_5.csv has the same name pattern but was left by a run with a 20% stop (no unstopped trade moved more than 19.9% against the short); it is not this rule and was not used",
+    "matches_source_reference": "all 252 hedged trades: +3.56%, win 71%, which is the +3.6% / 71% the source tracker registered for this rule",
+    "sample": "273 trades on unlocks from 2022-12 to 2026-08, of which 252 (from 2023) have a hedged return; the study's basket has a median of 30 coins, the forward tracker's about 120",
+    "big": {"trades": 99, "trade_mean_pct": 5.85, "median_pct": 5.07, "win_rate": 0.77, "worst_pct": -51.8, "stops": 3, "batches": 93, "batch_mean_pct": 5.74, "by_year_pct": {"2023": 10.23, "2024": 2.02, "2025": 5.81, "2026": 8.18}},
+    "small": {"trades": 153, "trade_mean_pct": 2.08, "median_pct": 3.26, "win_rate": 0.67, "worst_pct": -46.1, "stops": 7, "batches": 137, "batch_mean_pct": 2.35, "by_year_pct": {"2023": 7.23, "2024": 2.29, "2025": 0.87, "2026": 1.84}},
+    "by_size_pct": {"5-7": 1.99, "7-10": 2.20, "10-20": 6.35, "above_20": 5.26},
+    "shape": "a step at 10%, not a gradient: 10-20% is above 20%+, and the small book is weaker but still positive. The 2026-11-05 review's replay with no stop and a 126-coin basket showed 0.42 / 2.42 / 5.85 / 7.06 and -0.90 for small cliffs in 2026; those figures depend on that accounting and are not the rule tested here.",
+    "in_sample_tests": {"sign_flip_p": 0.0001, "big_vs_small_p": 0.0169},
+    "matched_control": "data/research/unlock_study/matched_events.csv, event minus same-calendar same-age coin without an unlock, last 7 days before the unlock: >= 10% -9.15% (71 events), 5-10% -1.16% (115 events)",
+    "threshold_origin": "10% is the unlock study's original cliff threshold and the t-30 tracker's rule since 2026-09-27; it was not picked from the size buckets above. The split itself was proposed after the buckets were seen.",
+    "already_seen_and_excluded": "forward trades of the source that entered before activation are development data: NOM +10.09, APR +38.80 (big); CARV -4.99, H -1.28, GUN -1.50 (small); late 2Z +16.25, late GUN +1.49",
+    "status": "post hoc. This ledger is the first independent test."
+  },
+  "source": {
+    "tracker": "unlock_short_t7 (core/research/unlock_short_tracker.py variant t7, state data/research/unlock_short_t7/tracker.json)",
+    "access": "read-only: the overlay never writes the source file or changes its trades, statistics or retirement",
+    "eligible": "a source trade with a symbol and an exit day, not late, size_pct at least 5, whose entry close is after this ledger's activation. A trade the source discovered before activation is eligible if it has not entered yet: its outcome was unknown at registration.",
+    "entry_close": "00:00 UTC after the source's entry_day; the source enters at that close, 7 days before the unlock, and exits at the close 1 day before it",
+    "returns": "the source's own settled figures: hedged_return_pct (primary; short coin + long frozen basket of coins with no cliff within 45 days, 0.2% per leg, real funding, +40% stop on daily highs) and short_return_pct (reference)"
+  },
+  "books": {
+    "big": "size_pct >= 10",
+    "small": "5 <= size_pct < 10",
+    "assignment": "by the size_pct the source stored when it discovered the trade, which it never updates; recorded in the journal at the first cycle that sees the trade and never changed. A later schedule revision does not move a trade between books.",
+    "counted": "closed, stopped and schedule_changed trades with a hedged return (schedule_changed must be counted, not hidden: the backtest could not see revisions)",
+    "void": "source trade missing, late, entry_failed, or settled with an unresolved hedge: excluded from both books and reported",
+    "waiting": "a settled trade whose hedge is still pending is not an outcome yet"
+  },
+  "analysis": {
+    "unit": "batch = trades of one book sharing an entry day; batch return = mean hedged return of its trades; a batch counts once every trade in it has an outcome",
+    "primary": "mean hedged return of big batches",
+    "tests": {
+      "absolute": "one-sided sign-flip test of the big batches (statistic: mean; 10,000 draws)",
+      "dose": "one-sided permutation of the batch labels (statistic: mean(big) - mean(small); 10,000 draws)",
+      "rng": "numpy default_rng, the seed in parameters, a fresh generator for each test"
+    },
+    "review": "one review, journaled once and then frozen: at the first cycle with 30 complete big batches, or 548 days (18 months) after activation, whichever first. By count it uses the first 30 complete big batches in entry-day order and the complete small batches entered on or before the last of them; by time it uses all complete batches. Before the review the summary is descriptive only and shows no p-value.",
+    "verdict": {
+      "supported": "big mean > 0, big mean > small mean, and both p <= 0.10",
+      "rejected": "big mean <= 0 or big mean <= small mean",
+      "inconclusive": "otherwise",
+      "insufficient": "fewer than 15 big or fewer than 10 small batches at the review"
+    },
+    "expected_power": "resampling the development batches at 30 big and 30 small: if history holds, about 48% supported and 14% rejected (absolute test passes about 86%, dose test about 48%); if the big mean halves, about 13% supported and 47% rejected; with no edge, about 6% supported and 65% rejected. 'Inconclusive' is a likely result, mostly because of the dose test.",
+    "pace": "the development data has 38 big and 52 small batches in its last 12 months, so 30 big batches would take about 10 months",
+    "reported": "per-book batch and trade means, positive batches, worst trade, stop and schedule_changed counts, short-leg reference, void count, trades recorded after their entry close",
+    "no_tuning": "no change of thresholds, unit, review or tests after activation; a change needs a new protocol id and directory"
+  },
+  "limits": [
+    "The development data covers tokens still listed by DefiLlama and Binance when the study ran, and uses the schedule as known then. Survivorship and later schedule revisions can flatter it.",
+    "Tokens repeat, especially in the small book (GUN and H vest monthly). Batches of one token are not independent evidence about that size class.",
+    "A cliff size can be revised after discovery; the book stays. A big trade revised to 5-10% stays open and stays big, because the source closes a trade as schedule_changed only below its own 5% threshold or when the date moves more than 3 days.",
+    "All rules of the source tracker are inherited (entry, stop, basket, costs). If the source's code changes or it stops creating trades, this ledger follows it; the activation record stores the source module's SHA-256 so a change can be seen.",
+    "Paper returns at daily closes: no check of borrow availability, order-book depth or a real account's drawdown."
+  ],
+  "integrity": {
+    "journal": "data/research/unlock_t7_big_v1/journal.jsonl, append-only and hash-chained; each record carries the SHA-256 of this file and core/research/unlock_t7_big_ledger.py; any change stops the journal",
+    "paper_only": "records only; never places or proposes orders"
+  }
+}

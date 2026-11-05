@@ -68,6 +68,11 @@ def _korea_frozen_skip() -> Dict[str, Any]:
     return registry_summary()
 
 
+def _unlock_t7_big() -> Dict[str, Any]:
+    from core.research.unlock_t7_big_ledger import registry_summary
+    return registry_summary()
+
+
 def _telegram_binance_chat() -> Dict[str, Any]:
     from core.research.telegram_forward_tracker import binance_chat
     return binance_chat()
@@ -178,6 +183,11 @@ TRACKERS: List[Dict[str, Any]] = [
      "rule": "≥10% 悬崖解锁前 30 天做空永续、前 1 天平仓，篮子对冲，+40% 止损", "load": _unlock("t30")},
     {"id": "unlock_short_t7", "name": "解锁前最后一周做空 · t−7", "group": "解锁", "unit": "笔", "rule_key": "unlock_short_t7",
      "rule": "≥5% 悬崖解锁前 7 天做空、前 1 天平仓，篮子对冲（影子版本）", "load": _unlock("t7")},
+    {"id": "unlock_t7_big_v1", "name": "解锁前最后一周做空 · 只看 ≥10%（影子）", "group": "解锁", "unit": "批",
+     "rule_key": "unlock_t7_big_v1",
+     "rule": "t−7 账本激活后入场的前向交易，按发现时记录的解锁规模分成 ≥10% 和 5–10% 两本，收益直接取原账本的对冲结算，"
+             "同一入场日合成一批。主数字是 ≥10% 的批次均值；满 30 个 ≥10% 批次或 18 个月复核一次。仅纸面。",
+     "load": _unlock_t7_big},
     {"id": "supply_factor", "name": "供给通胀因子", "group": "因子", "unit": "月", "rule_key": "supply_factor",
      "rule": "每月按未来 90 天新增供给排序，多低空高三分位，持有 30 天", "load": _supply},
     {"id": "xs_reversal", "name": "日线横截面反转", "group": "因子", "unit": "天", "rule_key": "xs_reversal",

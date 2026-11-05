@@ -30,6 +30,7 @@ EVIDENCE = {
     "telegram_binance_chat_sentiment": "docs/TELEGRAM_AGENT_HANDOFF.md",
     "unlock_short": "docs/UNLOCK_EVENT_STUDY_2026-09-27.md",
     "unlock_short_t7": "docs/UNLOCK_EVENT_STUDY_2026-09-27.md",
+    "unlock_t7_big_v1": "docs/UNLOCK_T7_BIG_LEDGER.md",
     "supply_factor": "docs/LLM_TRADING_RESEARCH_ROUND5_2026-09-27.md",
     "xs_reversal": "docs/AGENT_ML_BIAS_2026-09-30.md, scripts/xs_reversal_backtest.py",
     "xs_reversal_liq_filter": "docs/COINGLASS_COMBINATION_STUDY_2026-10-11.md（C1）",
