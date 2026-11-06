@@ -35,8 +35,9 @@ class GateConnector(BaseExchange):
 
     async def connect(self) -> bool:
         try:
-            proxy_url = str(self.config.proxy or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
-            if proxy_url and not self.config.proxy and bypasses_proxy(_GATE_API_URL):
+            explicit_proxy = str(self.config.proxy or settings.GATE_PROXY or "").strip()
+            proxy_url = explicit_proxy or str(settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
+            if proxy_url and not explicit_proxy and bypasses_proxy(_GATE_API_URL):
                 proxy_url = None  # Gate answers direct from here; keep it off the metered proxy
             self._client = ccxt.gate(
                 {
@@ -51,6 +52,8 @@ class GateConnector(BaseExchange):
             )
 
             if proxy_url:
+                # ccxt.async_support does not use requests' ``proxies`` mapping.
+                self._client.aiohttp_proxy = proxy_url
                 self._client.proxies = {
                     "http": proxy_url,
                     "https": settings.HTTPS_PROXY or proxy_url,

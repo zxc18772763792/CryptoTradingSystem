@@ -56,6 +56,11 @@ MAX_ATTEMPTS = 3  # passes a day: a coin still incomplete (error, or a bar Coing
 RETRY_UNTIL = timedelta(hours=10)
 RETRY_GAP = timedelta(minutes=20)
 EXCHANGES = "Binance,OKX,Bybit"
+# The relay indexes these USD flow series by the actual contract base. Its
+# Binance catalog identifies 1000XECUSDT as base_asset=1000XEC; asking XEC
+# returns an empty history. OI/funding retain their existing XEC coin key.
+# Do not generalize this to other 1000x contracts: their provider grouping differs.
+FLOW_SYMBOL_ALIASES = {("XEC", "1000XECUSDT"): "1000XEC"}
 # dataset -> (path, keyed by base or by Binance pair, fields kept)
 DATASETS: Dict[str, Tuple[str, str, Tuple[str, ...]]] = {
     "oi": ("/api/futures/open-interest/aggregated-history", "base", ("close",)),
@@ -242,6 +247,7 @@ def requests_for(coin: Dict[str, Any], base: str, perp: str, dataset: str, day: 
     params: Dict[str, Any] = {"symbol": base} if keyed == "base" else {"symbol": perp, "exchange": "Binance"}
     if dataset in {"liquidation", "taker"}:
         params["exchange_list"] = EXCHANGES
+        params["symbol"] = FLOW_SYMBOL_ALIASES.get((base, perp), base)
     rows = coin.get(dataset) or []
     last = int(rows[-1]["time"]) if rows else _ms(day) - (KEEP_DAYS + 1) * DAY_MS  # empty: the whole window
     gaps = history_gaps(coin, dataset, day)

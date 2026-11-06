@@ -149,6 +149,10 @@ class Settings(BaseSettings):
     NEWS_LLM_BACKUP_MODEL: str = ""
     NEWS_LLM_FORCE_CHAT_COMPLETIONS: bool = False
 
+    # ML voting may be explicitly held off after a failed quality-gate evaluation.
+    ML_SIGNAL_ENABLED: bool = True
+    ML_SIGNAL_DISABLED_REASON: str = ""
+
     # Storage
     DATABASE_URL: str = Field(default_factory=_default_database_url)
     NEWS_DATABASE_URL: str = Field(default_factory=_default_news_database_url)
@@ -157,6 +161,8 @@ class Settings(BaseSettings):
     # Network proxy
     HTTP_PROXY: Optional[str] = None
     HTTPS_PROXY: Optional[str] = None
+    # An explicit Gate route overrides the global bypass list for its authenticated client.
+    GATE_PROXY: str = ""
     # Upstreams reachable without the proxy (comma list, domain suffixes), merged into NO_PROXY at
     # startup; its own name so an inherited NO_PROXY cannot shadow it. See core/utils/proxy_env.py.
     PROXY_BYPASS_HOSTS: Optional[str] = None

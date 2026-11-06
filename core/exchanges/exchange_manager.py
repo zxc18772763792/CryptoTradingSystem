@@ -338,6 +338,10 @@ class ExchangeManager:
     def get_all_exchanges(self) -> Dict[str, BaseExchange]:
         return self._exchanges
 
+    def get_intended_exchange_names(self, account_id: Optional[str] = None) -> List[str]:
+        """Actual initialization targets, including connectors that failed to connect."""
+        return sorted(self._intended.get(self._normalize_account_id(account_id), set()))
+
     def get_connected_exchanges(self, account_id: Optional[str] = None) -> List[str]:
         store = self._target_store(account_id)
         return [name for name, exchange in store.items() if exchange.is_connected]

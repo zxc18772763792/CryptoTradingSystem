@@ -46,6 +46,7 @@ class OKXConnector(BaseExchange):
     def _apply_proxy(self, client: Any) -> None:
         proxy_url = str(self.config.proxy or settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
         if proxy_url:
+            client.aiohttp_proxy = proxy_url
             client.proxies = {
                 "http": proxy_url,
                 "https": settings.HTTPS_PROXY or proxy_url,

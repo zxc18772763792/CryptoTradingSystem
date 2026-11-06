@@ -1423,6 +1423,8 @@ async def diagnostics(request: Request) -> Dict[str, Any]:
         backend_diag = dict(await _backend_call(backend, "diagnostics", request=request) or {})
     except Exception:
         backend_diag = {}
+    from core.ai.signal_aggregator import signal_aggregator
+    signal_runtime = signal_aggregator.ml_runtime_status()
     return {
         "ok": True,
         "backend": _backend_name(backend),
@@ -1433,6 +1435,7 @@ async def diagnostics(request: Request) -> Dict[str, Any]:
         "recent_jobs": jobs[:10],
         "state_keys": sorted(k for k in vars(state).keys() if k.startswith("ml_")),
         "backend_diagnostics": backend_diag,
+        "signal_runtime": signal_runtime,
     }
 
 

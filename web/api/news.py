@@ -83,6 +83,7 @@ _NEWS_HEALTH_REFRESH_TASK: Optional[asyncio.Task] = None
 _NEWS_PROCESS_CACHE_TTL_SEC = 30.0
 _NEWS_PROCESS_CACHE_AT = 0.0
 _NEWS_PROCESS_CACHE_PAYLOAD: Dict[str, Any] = {}
+_NEWS_PROCESS_SCAN_TASK: Optional[asyncio.Task] = None
 _NEWS_DB_SNAPSHOT_CACHE_TTL_SEC = 4.0
 _NEWS_DB_SNAPSHOT_CACHE_AT = 0.0
 _NEWS_DB_SNAPSHOT_CACHE_PAYLOAD: Dict[str, Any] = {}
@@ -310,7 +311,7 @@ def _scan_external_news_processes() -> Dict[str, Any]:
     try:
         if sys.platform.startswith("win"):
             command = (
-                "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | "
+                "Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR Name='pythonw.exe'\" -ErrorAction SilentlyContinue | "
                 "Where-Object { "
                 "$n=[string]$_.Name; "
                 "if ($n -and $n.ToLowerInvariant() -notin @('python.exe','pythonw.exe')) { return $false }; "
@@ -320,15 +321,16 @@ def _scan_external_news_processes() -> Dict[str, Any]:
                 f"return $lower.Contains('{worker_token}') -or $lower.Contains('{llm_token}') "
                 "} | Select-Object ProcessId, CommandLine | ConvertTo-Json -Compress"
             )
+            snapshot["detector"] = "powershell:Get-CimInstance"
             proc = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=2,
+                timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            snapshot["detector"] = "powershell:Get-CimInstance"
             if proc.returncode != 0:
                 snapshot["error"] = (proc.stderr or proc.stdout or f"exit={proc.returncode}").strip()[:240] or None
                 return snapshot
@@ -361,6 +363,9 @@ def _scan_external_news_processes() -> Dict[str, Any]:
                 pid_text = parts[0]
                 command_line = parts[1] if len(parts) > 1 else ""
                 rows.append({"ProcessId": pid_text, "CommandLine": command_line})
+    except subprocess.TimeoutExpired:
+        snapshot["error"] = "process scan timed out"
+        return snapshot
     except Exception as exc:
         snapshot["error"] = str(exc)[:240]
         return snapshot
@@ -390,16 +395,38 @@ def _scan_external_news_processes() -> Dict[str, Any]:
     return snapshot
 
 
+def _schedule_news_process_scan() -> Optional[asyncio.Task]:
+    global _NEWS_PROCESS_SCAN_TASK
+    if _NEWS_PROCESS_SCAN_TASK is not None and not _NEWS_PROCESS_SCAN_TASK.done():
+        return _NEWS_PROCESS_SCAN_TASK
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    _NEWS_PROCESS_SCAN_TASK = loop.create_task(asyncio.to_thread(
+        _external_news_process_snapshot, allow_initial_scan=True))
+    return _NEWS_PROCESS_SCAN_TASK
+
+
 def _external_news_process_snapshot(*, allow_initial_scan: bool = False) -> Dict[str, Any]:
     global _NEWS_PROCESS_CACHE_AT, _NEWS_PROCESS_CACHE_PAYLOAD
     now = time.monotonic()
     if _NEWS_PROCESS_CACHE_PAYLOAD and (now - _NEWS_PROCESS_CACHE_AT) <= _NEWS_PROCESS_CACHE_TTL_SEC:
         return dict(_NEWS_PROCESS_CACHE_PAYLOAD)
+    if not allow_initial_scan and sys.platform.startswith("win"):
+        _schedule_news_process_scan()
+    if not allow_initial_scan and _NEWS_PROCESS_SCAN_TASK is not None and not _NEWS_PROCESS_SCAN_TASK.done():
+        return {**(_NEWS_PROCESS_CACHE_PAYLOAD or {
+            "worker_running": False, "llm_running": False, "worker_pids": [], "llm_pids": [], "error": None}),
+            "detector": "refreshing"}
     if (
         not allow_initial_scan
-        and not _NEWS_PROCESS_CACHE_PAYLOAD
         and sys.platform.startswith("win")
     ):
+        # Cache refreshes run only through the async priming path. Never put a
+        # slow PowerShell startup on an HTTP event loop, including after expiry.
+        if _NEWS_PROCESS_CACHE_PAYLOAD:
+            return {**_NEWS_PROCESS_CACHE_PAYLOAD, "stale_cache": True}
         return {
             "worker_running": False,
             "llm_running": False,
@@ -409,9 +436,22 @@ def _external_news_process_snapshot(*, allow_initial_scan: bool = False) -> Dict
             "error": None,
         }
     payload = _scan_external_news_processes()
-    _NEWS_PROCESS_CACHE_AT = now
+    _NEWS_PROCESS_CACHE_AT = time.monotonic()
     _NEWS_PROCESS_CACHE_PAYLOAD = dict(payload)
     return dict(payload)
+
+
+async def _prime_news_process_snapshot() -> None:
+    """Explicit worker-status requests initialize the Windows process cache off-loop."""
+    if _NEWS_PROCESS_CACHE_PAYLOAD and time.monotonic() - _NEWS_PROCESS_CACHE_AT <= _NEWS_PROCESS_CACHE_TTL_SEC:
+        return
+    task = _schedule_news_process_scan()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+    except Exception:
+        # The scan has a bounded subprocess timeout; a later poll can use its
+        # completed cache without blocking the HTTP event loop.
+        pass
 
 
 def _invalidate_news_process_cache() -> None:
@@ -3101,6 +3141,7 @@ async def worker_status(request: Request) -> Dict[str, Any]:
         if cached:
             return cached
 
+    await _prime_news_process_snapshot()
     payload = {
         "timestamp": _now_utc().isoformat(),
         "latest_result": pull_store.get("latest"),

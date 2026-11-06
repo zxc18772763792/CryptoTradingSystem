@@ -2831,7 +2831,9 @@ async def get_status():
     if _status_cache_payload is not None and (now_mono - _status_cache_at) <= _STATUS_CACHE_TTL_SEC:
         return _status_cache_payload
     try:
-        exchange_targets = ["gate", "binance", "okx"]
+        exchange_catalog = ["gate", "binance", "okx"]
+        intended_names = getattr(exchange_manager, "get_intended_exchange_names", None)
+        exchange_targets = list(intended_names()) if callable(intended_names) else list(exchange_catalog)
         exchange_default_type: Dict[str, str] = {}
         exchange_status = {
             name: bool(getattr(exchange_manager.get_exchange(name), "is_connected", False))
@@ -2888,6 +2890,8 @@ async def get_status():
             "exchange_count": len(connected),
             "total_exchange_count": len(exchange_targets),
             "exchange_targets": exchange_targets,
+            "exchange_catalog": exchange_catalog,
+            "exchange_not_enabled": [name for name in exchange_catalog if name not in exchange_targets],
             "exchange_status": exchange_status,
             "exchange_default_type": exchange_default_type,
             "market_ws": _market_ws_status_snapshot(),

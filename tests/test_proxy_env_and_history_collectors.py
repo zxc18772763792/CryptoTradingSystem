@@ -72,6 +72,7 @@ def test_gate_connects_direct_when_no_proxy_lists_it(monkeypatch):
     monkeypatch.setattr(gate_connector.ccxt, "gate", _FakeGate)
     monkeypatch.setattr(gate_connector.settings, "HTTP_PROXY", "http://127.0.0.1:7890")
     monkeypatch.setattr(gate_connector.settings, "HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setattr(gate_connector.settings, "GATE_PROXY", "")  # a local route would override the bypass
     _clear(monkeypatch)
     monkeypatch.setenv("NO_PROXY", "gateio.ws")
 

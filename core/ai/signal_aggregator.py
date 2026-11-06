@@ -84,19 +84,35 @@ class SignalAggregator:
         high_confidence_threshold: float = 0.70,
         signal_since_minutes: int = 240,
         signal_cfg: Optional[Dict[str, Any]] = None,
+        ml_enabled: bool = True,
+        ml_disabled_reason: str = "",
     ):
         self._high_conf_threshold = float(high_confidence_threshold)
         self._signal_since_minutes = int(signal_since_minutes)
         self._signal_cfg: Dict[str, Any] = signal_cfg or {}
         self._risk_gate = RiskGate()
+        self._ml_enabled = bool(ml_enabled)
+        self._ml_disabled_reason = str(ml_disabled_reason or "disabled_by_configuration")
 
         # Lazy-load the ML model
         path = str(ml_model_path or _DEFAULT_ML_MODEL_PATH)
-        self._ml_model = MLSignalModel.load_from_path(path)
+        if self._ml_enabled:
+            self._ml_model = MLSignalModel.load_from_path(path)
+        else:
+            self._ml_model = MLSignalModel(path)
+            self._ml_model.load_error = self._ml_disabled_reason
+            logger.info("SignalAggregator: ML voting intentionally disabled: {}", self._ml_disabled_reason)
         if not self._ml_model.is_loaded():
             logger.info(
                 "SignalAggregator: ML model not available – ML weight will be zero"
             )
+
+    def ml_runtime_status(self) -> Dict[str, Any]:
+        loaded = self._ml_model.is_loaded()
+        return {"enabled": self._ml_enabled, "loaded": loaded,
+                "state": "disabled" if not self._ml_enabled else "ready" if loaded else "blocked",
+                "effective_weight": self.WEIGHTS["ml"] if loaded and self._ml_enabled else 0.0,
+                "reason": self._ml_disabled_reason if not self._ml_enabled else getattr(self._ml_model, "load_error", "")}
 
     # ------------------------------------------------------------------
     # Public API
@@ -166,7 +182,10 @@ class SignalAggregator:
 
         # ---- 2. ML signal ----
         ml_reason = ""
-        if include_ml:
+        if not self._ml_enabled:
+            ml_direction, ml_conf, ml_available = "FLAT", 0.0, False
+            ml_reason = self._ml_disabled_reason
+        elif include_ml:
             ml_direction, ml_conf = self._get_ml_signal(symbol, market_data)
             ml_available = bool(self._ml_model.is_loaded() and has_market_data)
             if not ml_available:
@@ -187,15 +206,15 @@ class SignalAggregator:
             "weight": self.WEIGHTS["ml"],
             "effective_weight": round(ml_effective_weight, 6),
             "available": ml_available,
-            "status": self._component_status(direction=ml_direction, confidence=ml_conf, available=ml_available),
+            "status": "disabled" if not self._ml_enabled else self._component_status(direction=ml_direction, confidence=ml_conf, available=ml_available),
             "reason": ml_reason,
         }
         append_gate(
             trace,
             code="component_ml",
             label="ML component",
-            status="pass" if ml_available else ("skip" if not include_ml else "degraded"),
-            severity=1 if include_ml and not ml_available else 0,
+            status="pass" if ml_available else ("skip" if not include_ml or not self._ml_enabled else "degraded"),
+            severity=1 if include_ml and self._ml_enabled and not ml_available else 0,
             input_value={"direction": ml_direction, "confidence": round(ml_conf, 6)},
             threshold={"configured_weight": self.WEIGHTS["ml"], "effective_weight": round(ml_effective_weight, 6)},
             reason=ml_reason or "component available",
@@ -625,4 +644,6 @@ class SignalAggregator:
 # ---------------------------------------------------------------------------
 
 _ml_path = os.getenv("ML_SIGNAL_MODEL_PATH", _DEFAULT_ML_MODEL_PATH)
-signal_aggregator = SignalAggregator(ml_model_path=_ml_path)
+signal_aggregator = SignalAggregator(
+    ml_model_path=_ml_path, ml_enabled=settings.ML_SIGNAL_ENABLED,
+    ml_disabled_reason=settings.ML_SIGNAL_DISABLED_REASON)
