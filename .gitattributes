@@ -14,6 +14,10 @@ config/research_protocols/next10xgem1_fade_24h_v2.json -text
 config/research_protocols/unlock_t7_big_v1.json -text
 core/research/unlock_t7_big_ledger.py -text
 
+# hash-pinned by the event_short_preclose_v1 paper ledger (stored as written: LF)
+config/research_protocols/event_short_preclose_v1.json -text
+core/research/event_short_preclose_ledger.py -text
+
 # hash-pinned by the korea_frozen_skip_v1 paper overlay (stored as written: LF)
 config/research_protocols/korea_frozen_skip_v1.json -text
 core/research/korea_frozen_skip_ledger.py -text

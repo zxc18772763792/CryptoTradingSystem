@@ -73,6 +73,11 @@ def _unlock_t7_big() -> Dict[str, Any]:
     return registry_summary()
 
 
+def _event_short_preclose() -> Dict[str, Any]:
+    from core.research.event_short_preclose_ledger import registry_summary
+    return registry_summary()
+
+
 def _telegram_binance_chat() -> Dict[str, Any]:
     from core.research.telegram_forward_tracker import binance_chat
     return binance_chat()
@@ -188,6 +193,11 @@ TRACKERS: List[Dict[str, Any]] = [
      "rule": "t−7 账本激活后入场的前向交易，按发现时记录的解锁规模分成 ≥10% 和 5–10% 两本，收益直接取原账本的对冲结算，"
              "同一入场日合成一批。主数字是 ≥10% 的批次均值；满 30 个 ≥10% 批次或 18 个月复核一次。仅纸面。",
      "load": _unlock_t7_big},
+    {"id": "event_short_preclose_v1", "name": "事件做空账本 · 收盘前入场（影子）", "group": "解锁", "unit": "批",
+     "rule_key": "event_short_preclose_v1",
+     "rule": "≥10% 解锁（t−7 到 t−1）和 Upbit 韩元上币（当天到 7 天后）：23:55 UTC 按买一价做空，等额按卖一价做多成交额前 30 的永续，"
+             "资金费、1 万美元订单的冲击成本都自己结算，不取原账本的收益。同一入场日合成一批；满 30 批或 12 个月判一次。仅纸面。",
+     "load": _event_short_preclose},
     {"id": "supply_factor", "name": "供给通胀因子", "group": "因子", "unit": "月", "rule_key": "supply_factor",
      "rule": "每月按未来 90 天新增供给排序，多低空高三分位，持有 30 天", "load": _supply},
     {"id": "xs_reversal", "name": "日线横截面反转", "group": "因子", "unit": "天", "rule_key": "xs_reversal",
@@ -306,6 +316,12 @@ def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
                 "basis_label": "单腿名义金额（空币＋等额做多篮子）；正数表示跳过的单本来会亏",
                 "gross_notional_multiplier": 2,
                 "cost_scope": "原版账本的对冲结算（含双方手续费与资金费）；不过滤与过滤后两本及普通空头参照另列。样本为空时为空，不是0%",
+                "is_paper": True}
+    if tid == "event_short_preclose_v1":
+        return {"metric_kind": "net_return", "metric_label": "入场日批次的净收益", "metric_unit_label": "%/批",
+                "return_basis": "single_leg_notional", "basis_label": "单腿名义金额（空币＋等额做多前 30 篮子）",
+                "gross_notional_multiplier": 2,
+                "cost_scope": "23:55 UTC 买一卖一成交；币腿往返20bps、篮子往返10bps，另记1万美元订单的平方根冲击，含实际资金费。篮子成员封顶版与各事件流另列。样本为空时为空，不是0%",
                 "is_paper": True}
     if tid == "hub_runup_filter_v1":
         return {"metric_kind": "excess_return", "metric_label": "相对入场后30天同币同几何均值超额", "metric_unit_label": "百分点/笔",

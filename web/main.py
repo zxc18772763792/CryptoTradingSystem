@@ -2243,6 +2243,12 @@ async def _korea_frozen_skip_worker(stop_event: asyncio.Event) -> None:
     await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("korea_frozen_skip", success=ok))
 
 
+async def _event_short_preclose_worker(stop_event: asyncio.Event) -> None:
+    from core.research.event_short_preclose_ledger import worker
+
+    await worker(stop_event, heartbeat=lambda ok: _touch_runtime_task("event_short_preclose", success=ok))
+
+
 async def _alastartrader1_ledger_worker(stop_event: asyncio.Event) -> None:
     from core.research.alastartrader1_ledger import worker
 
@@ -2328,6 +2334,12 @@ def _build_runtime_task_factories(app: FastAPI) -> Dict[str, Dict[str, Any]]:
             # Idles until korea_frozen_skip_v1 is activated; then a cycle every 15 minutes that reads the
             # korea_caution_hedged tracker file (never writes it). Paper ledger only, never orders.
             "factory": lambda stop_event: _korea_frozen_skip_worker(stop_event),
+            "restart_on_failure": True,
+        },
+        "event_short_preclose": {
+            # Idles until event_short_preclose_v1 is activated; then a pass every 15 minutes and every 20 s from 23:55 to
+            # 23:59:30 UTC, when it reads real books. It only reads its two source tracker files. Paper ledger, never orders.
+            "factory": lambda stop_event: _event_short_preclose_worker(stop_event),
             "restart_on_failure": True,
         },
         "next10xgem1_fade_v1_settle": {

@@ -68,6 +68,10 @@ RULES: Dict[str, Dict[str, Any]] = {
     # batches or 18 months; the mean is the development batch mean of that book, shown for reference only.
     "unlock_t7_big_v1": {"min_n": 30, "unit": "batch", "backtest_mean_pct": 5.74,
                          "decision_engine": "unlock_t7_big_v1", "diagnostic_only": True},
+    # >=10% unlocks and Upbit KRW listings, shorted before the close with a top-30 long: protocol-owned
+    # (event_short_preclose_v1), one review at 30 complete batches or 12 months; the mean is the reference's batch mean.
+    "event_short_preclose_v1": {"min_n": 30, "unit": "batch", "backtest_mean_pct": 6.3,
+                                "decision_engine": "event_short_preclose_v1", "diagnostic_only": True},
     "telegram_cryptoquant_24h": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,
                                  "decision_engine": "telegram_forward_protocol", "diagnostic_only": True},
     "telegram_binance_chat_sentiment": {"min_n": 100, "unit": "trade", "backtest_mean_pct": None,
