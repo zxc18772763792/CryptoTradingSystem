@@ -89,6 +89,20 @@ async def collect_with_retry(store, *, historical=False):
 
 cli.collect = collect_with_retry
 
+# News failover may use another model; forward research must keep the model in
+# activation.json. Both classification and semantic review share this child-
+# scoped adapter. The frozen CLI, prompts and implementation hash stay intact.
+_original_label = cli.label
+
+
+async def label_with_frozen_classifier(store, *, historical=False):
+    from scripts.telegram_classifier_transport import label_with_protocol_client
+
+    return await label_with_protocol_client(_original_label, store, historical=historical)
+
+
+cli.label = label_with_frozen_classifier
+
 # Keep the frozen decision/settlement implementation unchanged. Refresh only
 # its derived readout, under the same study lock and inside this child process.
 _original_dispatch = cli.dispatch

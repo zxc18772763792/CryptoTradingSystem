@@ -83,6 +83,8 @@ Codex 本聊天心跳自动化 **`telegram` 已于2026-10-24按用户要求删�
 
 ### 应先读取哪些文件
 
+2026-11-05 增加协议限定分类路由：既有非冻结入口 `scripts/telegram_forward_cycle.py` 在独立 cycle 子进程内调用 `scripts/telegram_classifier_transport.py`，只使用 activation 中的分类模型，禁止通用新闻客户端切换到不同模型；分类与语义复核均校验。没有改写冻结代码、提示词或实施指纹。派生诊断见 `classifier_transport_status.json`，修复说明及实际调度验收见 [分类路由修复](TELEGRAM_CLASSIFIER_ROUTING_FIX_2026-11-05.md)。网络/模型真正不可用仍按失败处理，不能仅凭一次成功称持续覆盖。
+
 2026-10-29用户要求继续修复并重启服务后，公开行情wrapper新增独立传输层：`scripts/telegram_market_transport.py`。它保持原官方端点、明确配置的原代理与TLS校验，复用连接，传输/部分5xx最多尝试3次；拒绝与限流不重试、不切换出口。公开响应、UTC接收时间和SHA存入`data/research/telegram_market_transport/`。冻结CLI/核心/桥接器/规则的字节、激活及协议指纹均未替换。兼容记录与受管重启验证见[本轮修复](TRACKER_REPAIR_RESTART_2026-10-29.md)。运行结果仍以新的`forward_status.json`和runner为准，不能只凭源码变更称已恢复。
 
 同轮验证又确认Telegram偶发 `IncompleteReadError`。兼容wrapper对临时断连/超时最多重连一次，沿用同一DPAPI会话并始终持原study/reader锁；旧client已finally断开后才重连。已收到的片段及first_received保留，完整性与冻结仍由原函数判断。认证/身份错误、FloodWait、拒绝和锁不重试，历史模式不重放。无正文恢复记录单独保存在`data/research/telegram_transport_recovery/`，不能把重连当新授权或新登录。
