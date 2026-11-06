@@ -128,3 +128,17 @@ reports/coinglass_monthly_data_20261031/staged_daily/
 reports/telegram_kol_continuation_20261027/*.json
 reports/telegram_kol_continuation_20261027/*.html
 reports/telegram_new_kols_recheck_20261025/*.json
+
+# Local-only working notes from the 2026-11-02 security audit.
+reports/audit_20261102/
+
+# Generated receipts for the November tracker audits stay local. Keep the notes
+# and reproduction scripts.
+reports/tracker_data_audit_20261105/**/*.json
+reports/tracker_data_audit_20261106_0215/**/*.json
+reports/tracker_progress_20261104/*.json
+reports/tracker_progress_20261104/*.html
+reports/tracker_readiness_20261103/*.json
+reports/tracker_readiness_20261103/*.html
+reports/tracker_repair_20261105/**/*.json
+reports/tracker_web_check_20261106_0842/
