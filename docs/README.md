@@ -1,0 +1,206 @@
+# 文档索引
+
+这里按主题列出 `docs/` 下的所有文档。新增文档时，在对应主题下加一行。
+
+文档都放在同一层，不要移动或改名：代码注释和测试按路径引用它们，其中几个账本模块被哈希锁定，改一个字节就会停账。
+
+带日期的文档是当时的记录，后来的研究可能更正了其中的结论。判断现状时，先看同主题最新的文档和网页上的研究跟踪器。
+
+## 入口、运维与交接
+
+- [Changelog (Governance + AI Decision Integration)](CHANGELOG.md)
+- [未提交改动整理与验证（2026-10-31）](CHANGE_CONSOLIDATION_2026-10-31.md)
+- [组合 / 单策略熔断运行手册 (Phase 4.2)](CIRCUIT_BREAKER_RUNBOOK_2026-05-20.md)
+- [Coinglass 数据目录（中转站 vip2.coinglass.site）](COINGLASS_DATA_CATALOG.md)
+- [Governance Guide](GOVERNANCE.md)
+- [AI Research + Decision Integration Survey](INTEGRATION.md)
+- [本地数据总览（2026-10-13；10/24 增补第六节）](LOCAL_DATA_INVENTORY.md)
+- [本地工作记忆](LOCAL_WORKSPACE_MEMORY.md)
+- [重启维护交接（2026-10-24）](MAINTENANCE_HANDOFF_2026-10-24.md)
+- [外部接口线路与代理分流（2026-10-09）](NETWORK_ROUTES_2026-10-09.md)
+- [本地新闻结构化研究库](NEWS_RESEARCH_LIBRARY.md)
+- [Paper Longrun Burn-In Checklist](PAPER_LONGRUN_BURNIN_CHECKLIST.md)
+- [Paper Longrun Runbook](PAPER_LONGRUN_RUNBOOK.md)
+- [Polymarket Live CLOB Setup](POLYMARKET_LIVE_CLOB_SETUP.md)
+- [Repository Overview](REPOSITORY_OVERVIEW.md)
+- [Telegram 本机接入：后续 agent 交接](TELEGRAM_AGENT_HANDOFF.md)
+- [X（Twitter）采集与 KOL 研究：给后续 agent 的交接](X_AGENT_HANDOFF.md)
+- [Web 控制台统一风格指南](web-style-guide.md)
+
+## 跟踪器与纸面账本
+
+- [研究跟踪器一览（2026-10-24 13:52 北京时间）](RESEARCH_TRACKERS_2026-10-24.md)
+- [研究跟踪器一览（2026-10-18 19:53 北京时间）](RESEARCH_TRACKERS_2026-10-18.md)
+- [研究跟踪器一览（2026-10-14 23:38 北京时间）](RESEARCH_TRACKERS_2026-10-14.md)
+- [研究跟踪器一览（2026-10-13 13:43 北京时间）](RESEARCH_TRACKERS_2026-10-13.md)
+- [@alastartrader1（冒充号）· 按原文执行纸面账本（alastartrader1_as_written_v1）](ALASTARTRADER1_LEDGER.md)
+- [Coinglass 七日组合可执行性核查 · 2026-11-05](COINGLASS_EXECUTION_FEASIBILITY_2026-11-05.md)
+- [Coinglass 研究的前向跟踪上线（2026-10-11）](COINGLASS_FORWARD_TRACKERS_2026-10-11.md)
+- [Coinglass 七日合成组合 · 月度换池 v1](COINGLASS_MONTHLY_UNIVERSE_V1_2026-10-31.md)
+- [CryptoQuant Alert · BTC 交易所流向影子账本](CRYPTOQUANT_ALERT_SHADOW.md)
+- [事件做空账本 · 收盘前入场（event_short_preclose_v1）](EVENT_SHORT_PRECLOSE_LEDGER.md)
+- [HUB 过滤追涨单 · 前向纸面账本（hub_runup_filter_v1）](HUB_RUNUP_LEDGER.md)
+- [韩国事件跟踪器请求与健康状态修复（2026-10-27）](KOREAN_TRACKER_RELIABILITY_2026-10-27.md)
+- [韩国警示做空 · 跳过充提双停（影子账本 korea_frozen_skip_v1）](KOREA_FROZEN_SKIP_LEDGER.md)
+- [next10xgem1 喊单反向 · 做空 24h 纸面跟踪（next10xgem1_fade_24h_v1）](NEXT10XGEM1_FADE_TRACKER.md)
+- [研究跟踪器改进（2026-10-20）](RESEARCH_TRACKER_IMPROVEMENTS_2026-10-20.md)
+- [跟踪器复审、价格校验与重启（2026-10-29晚）](TRACKER_FOLLOWUP_AUDIT_2026-10-29.md)
+- [跟踪器修复与受管重启 · 2026-10-29](TRACKER_REPAIR_RESTART_2026-10-29.md)
+- [跟踪器策略与实现审查 · 2026-10-29](TRACKER_STRATEGY_AUDIT_2026-10-29.md)
+- [解锁前一周做空 · ≥10% 对 5–10%（影子账本 unlock_t7_big_v1）](UNLOCK_T7_BIG_LEDGER.md)
+- [X KOL 关注量跟踪器（阶段 0：只记录，不交易）](X_KOL_GROWTH_TRACKER.md)
+
+## 事件与公告研究
+
+- [公告后分钟到小时级做空（2026-10-06 / 10-07）](ANNOUNCEMENT_INTRADAY_2026-10-07.md)
+- [INIT 案例：韩国警示做空加入链上过滤的可行性](INIT_ONCHAIN_STRATEGY_RESEARCH_2026-10-29.md)
+- [INIT 警示后上涨：消息、仓位与专项预警](INIT_RALLY_INVESTIGATION_2026-10-29.md)
+- [INIT 逼空：谁在推（2026-10-31）](INIT_SQUEEZE_ACTORS_2026-10-31.md)
+- [韩国交易所警示做空合并跟踪、分组置信区间、横截面反转能测什么（2026-10-11）](KOREA_CAUTION_POOLED_2026-10-11.md)
+- [韩国警示与其他信息组合：本轮研究结论](KOREA_COMPOSITE_RESEARCH_2026-10-29.md)
+- [韩国因子策略：统一研究入口与候选方案](KOREA_FACTOR_STRATEGY_REVIEW_2026-10-29.md)
+- [韩国警示组合续研：消息退出的跨案例核验](KOREA_NEWS_EXIT_VALIDATION_2026-10-29.md)
+- [扩充公告类消息源：Bithumb 警示与币安监控标签（2026-10-06）](NOTICE_SOURCES_2026-10-06.md)
+- [代币解锁事件研究（2026-09-27）](UNLOCK_EVENT_STUDY_2026-09-27.md)
+- [Upbit 警示后做空：对冲版（2026-10-04）](UPBIT_CAUTION_HEDGED_2026-10-04.md)
+
+## Coinglass 与持仓数据研究
+
+- [Coinglass 信号的组合、多因子与过滤检验（2026-10-11）](COINGLASS_COMBINATION_STUDY_2026-10-11.md)
+- [还没用过的 Coinglass 数据：新信号检验（2026-10-12）](COINGLASS_NEW_SIGNALS_STUDY_2026-10-12.md)
+- [Coinglass 衍生品数据能否预测山寨币之后几天的涨跌（2026-10-11）](COINGLASS_POSITIONING_STUDY_2026-10-11.md)
+- [Coinglass 七日合成组合 · 扩池检验（2026-10-12）](COINGLASS_WIDE_STUDY_2026-10-12.md)
+- [多空持仓比（LSR 类数据）有没有横截面预测力（2026-10-09）](LSR_POSITIONING_STUDY_2026-10-09.md)
+
+## 大模型研究与研究循环
+
+- [如何用好大模型做预测（2026-09-25）](LLM_FORECASTING_RESEARCH_2026-09-25.md)
+- [大模型交易：第二轮研究（2026-09-25）](LLM_TRADING_RESEARCH_ROUND2_2026-09-25.md)
+- [大模型交易：第三轮研究——结构性事件（2026-09-26）](LLM_TRADING_RESEARCH_ROUND3_2026-09-26.md)
+- [大模型交易：第四轮研究（2026-09-27）](LLM_TRADING_RESEARCH_ROUND4_2026-09-27.md)
+- [大模型交易：第五轮研究——代币供给通胀因子（2026-09-27）](LLM_TRADING_RESEARCH_ROUND5_2026-09-27.md)
+- [大模型交易研究 第六轮：用大模型读文档，扩大供给因子覆盖面（2026-09-27）](LLM_TRADING_RESEARCH_ROUND6_2026-09-27.md)
+- [大模型交易研究 第七轮：韩国交易所公告、黑客事件、协议收入动量（2026-09-28）](LLM_TRADING_RESEARCH_ROUND7_2026-09-28.md)
+- [研究循环 v2：大模型提出周度横截面特征（2026-09-26）](RESEARCH_LOOP_V2.md)
+- [研究循环 v3：大模型在全量本地数据上提出因子（2026-10-18）](RESEARCH_LOOP_V3.md)
+- [自主研究闭环](autonomous_research_loop.md)
+
+## Telegram、X 与 KOL 研究
+
+- [Alastar 跟踪器显示复查（2026-10-29）](ALASTAR_DISPLAY_REPAIR_2026-10-29.md)
+- [Alastar 多周期观察v3](ALASTAR_HORIZON_V3.md)
+- [Alastar 策略接入复查与修复（2026-10-28）](ALASTAR_INTAKE_REPAIR_2026-10-28.md)
+- [Alastar 延后续研交接（2026-10-21）](ALASTAR_NEXT_SESSION.md)
+- [Alastar first-observation research archive](ALASTAR_OBSERVATION_ARCHIVE.md)
+- [Alastar v2 本地模拟登记与运行门槛](ALASTAR_PAPER_V2.md)
+- [Alastar 本地研究总入口](ALASTAR_RESEARCH_INDEX.md)
+- [Alastar 广义信息与多周期响应研究](ALASTAR_RESPONSE_RESEARCH.md)
+- [Alastar 信号接入与付费范围核查（2026-10-23）](ALASTAR_SIGNAL_ACCESS_20261023.md)
+- [Alastar 策略研究与尝试台账](ALASTAR_STRATEGY_EXPERIMENTS.md)
+- [SafeW 默认通知会话接入试验](SAFEW_MESSAGE_ACCESS_2026-10-30.md)
+- [Alastar Trades 消息接入](TELEGRAM_ALASTAR_INGESTION.md)
+- [Telegram 跟踪器分类路由修复 · 2026-11-05](TELEGRAM_CLASSIFIER_ROUTING_FIX_2026-11-05.md)
+- [四个 Telegram 频道逐条整合回测（2026-10-31）](TELEGRAM_KOL4_INTEGRATED_BACKTEST_20261031.md)
+- [Telegram KOL 信号按原文规则执行回测（2026-10-28，10-30 修复与改进研究）](TELEGRAM_KOL_EXECUTION_BACKTEST_20261028.md)
+- [Telegram KOL 继续研究（2026-10-27）](TELEGRAM_KOL_FOLLOWUP_20261027.md)
+- [Telegram 新关注 KOL：资金费修正后的复算（2026-10-25）](TELEGRAM_NEW_KOLS_RECHECK_20261025.md)
+- [10/25 新关注的四个 Telegram KOL 频道：喊单解析与事件研究](TELEGRAM_NEW_KOLS_RESEARCH_20261025.md)
+- [反向做空 next10xgem1 喊单：入场、离场与止损的深入检验（2026-10-26）](TELEGRAM_NEXT10XGEM1_FADE_STUDY_20261026.md)
+- [Telegram 三来源实时接入研究](TELEGRAM_REALTIME_ACCESS_20261024.md)
+- [X（Twitter）白名单账号接入](X_ACCOUNTS_INGESTION.md)
+- [X KOL 信号研究协议（2026-10-25 冻结，先于任何收益计算）](X_KOL_RESEARCH_PROTOCOL.md)
+- [X KOL 信号研究结果（2026-10-25）](X_KOL_RESEARCH_RESULTS_2026-10-25.md)
+
+## 币安中文群研究
+
+- [消息活跃度：新增日期与预测增量检验（2026-11-01）](BINANCE_CHAT_ACTIVITY_FOLLOWUP_2026-11-01.md)
+- [币安中文群：消息数、行情与时刻（2026-10-31）](BINANCE_CHAT_ACTIVITY_MARKET_2026-10-31.md)
+- [币安中文群情绪指标优化](BINANCE_CHAT_SENTIMENT_2026-10-31.md)
+- [币安中文群条数情绪：历史回放（2026-10-31）](BINANCE_CHAT_SENTIMENT_BACKTEST_2026-10-31.md)
+- [币安中文群情绪：方法研究与条数版前向跟踪](BINANCE_CHAT_SENTIMENT_RESEARCH_2026-10-31.md)
+
+## 山寨雷达与埋伏策略
+
+- [Binance Alpha 新币起飞模型：可行性调研（2026-09-06）](ALPHA_NEWCOIN_FEASIBILITY_2026-09-06.md)
+- [山寨币下跌趋势反弹做空策略（2026-05-24，文件编码已损坏）](ALTCOIN_DOWNTREND_BOUNCE_SHORT_STRATEGY_2026-05-24.md)
+- [山寨雷达 — 代码架构与地图](ALTCOIN_RADAR_ARCHITECTURE.md)
+- [山寨雷达页排查报告（功能逻辑梳理 + Bug 清单）](ALTCOIN_RADAR_AUDIT_2026-07-19.md)
+- [山寨雷达数据完整性修复整理](ALTCOIN_RADAR_DATA_INTEGRITY_FIX_2026-06-16.md)
+- [山寨雷达增强执行方案 v2](ALTCOIN_RADAR_ENHANCEMENT_EXECUTION_PLAN_2026-04-20.md)
+- [山寨雷达页 v1 方案](ALTCOIN_RADAR_IMPLEMENTATION_PLAN_2026-04-18.md)
+- [山寨雷达：功能检查、精简方案、策略复核（2026-10-24）](ALTCOIN_RADAR_REVIEW_2026-10-24.md)
+- [山寨雷达状态语义整理与展示层归一化建议](ALTCOIN_RADAR_STATUS_TAXONOMY_REFACTOR_PROPOSAL_2026-05-20.md)
+- [Altcoin Radar — Layout & Content-Logic Fix Plan](ALTCOIN_RADAR_UX_FIX_2026-05-18.md)
+- [OI/市值 埋伏策略族（A/B/C）回测验证报告](AMBUSH_MODES_BACKTEST_REPORT_2026-07-18.md)
+- [OI/市值 埋伏策略族（A/B/C）设计文档](OI_MCAP_AMBUSH_STRATEGY_FAMILY_2026-07-18.md)
+- [链上数据源调研：持仓集中度 + 解锁日历](ONCHAIN_DATA_SOURCE_RESEARCH_2026-07-19.md)
+
+## 策略、因子与回测
+
+- [Backtest Acceleration Rollback Guide (2026-05-20)](BACKTEST_ACCELERATION_ROLLBACK.md)
+- [Backtest Page Bug Fix Plan (2026-06-08)](BACKTEST_PAGE_BUG_FIX_PLAN_2026-06-08.md)
+- [Backtest Performance Acceleration Plan (2026-05-20)](BACKTEST_PERFORMANCE_ACCELERATION_PLAN_2026-05-20.md)
+- [Crypto 交易策略调研与策略库缺口清单](CRYPTO_STRATEGY_GAP_RESEARCH_2026-05-20.md)
+- [退出逻辑全面改造方案 (Exit Logic Overhaul)](EXIT_LOGIC_OVERHAUL_PLAN_2026-05-20.md)
+- [Factor and Strategy Extension Documentation](FACTOR_STRATEGY_EXTENSION.md)
+- [Intraday Cross-Section Strategy Pack](INTRADAY_CROSS_SECTION_STRATEGIES_2026-05-24.md)
+- [小资金、无延时优势条件下的三类 Crypto 策略设计](LOW_LATENCY_SMALL_CAP_STRATEGY_DESIGN_2026-05-20.md)
+- [Phase 3 · 成本悲观度核实 + 边际敏感性(独立任务)](PHASE3_COST_REALISM_PLAN_2026-05-20.md)
+- [Phase 4.2 · 组合/单策略回撤熔断接入执行链路(独立任务)](PHASE4_2_PORTFOLIO_DRAWDOWN_KILLSWITCH_PLAN_2026-05-20.md)
+- [Phase 5 · 纸盘→实盘对账闸门(独立任务)](PHASE5_PAPER_LIVE_RECONCILIATION_PLAN_2026-05-20.md)
+- [Second-Round Diverse Cross-Section Strategy Pack](SECOND_ROUND_INTRADAY_CROSS_SECTION_STRATEGIES_2026-05-25.md)
+- [稳定盈利导向 · 系统改进计划 (2026-05-20)](STABILITY_PROFITABILITY_IMPROVEMENT_PLAN_2026-05-20.md)
+- [更优策略探索报告（三方向检验）](STRATEGY_EXPLORATION_2026-07-19.md)
+- [策略再探索：现有候选的证据边界（2026-09-29）](STRATEGY_EXPLORATION_2026-09-29.md)
+- [Strategy Logic and Performance Review - 2026-05-25](STRATEGY_LOGIC_AND_PERFORMANCE_REVIEW_2026-05-25.md)
+- [当前回测逻辑说明（crypto_trading_system）](backtest_logic_current.md)
+- [因子计算公式说明（当前仓库实现）](factor_formulas.md)
+- [第二轮非重复因子挖掘：20个新因子](second_round_top20_diverse_factors.md)
+
+## 代码审计
+
+- [全项目代码审计报告](CODE_AUDIT_2026-05-18.md)
+- [代码审计报告 — 2026-05-19](CODE_AUDIT_2026-05-19.md)
+- [每日代码审计报告 — 2026-05-21](CODE_AUDIT_2026-05-21.md)
+- [每日代码审计报告 — 2026-05-27](CODE_AUDIT_2026-05-27.md)
+- [每日代码审计报告 — 2026-05-29](CODE_AUDIT_2026-05-29.md)
+- [每日代码审计报告 — 2026-06-07](CODE_AUDIT_2026-06-07.md)
+- [每日代码审计报告 — 2026-06-08](CODE_AUDIT_2026-06-08.md)
+- [每日代码审计报告 — 2026-06-09](CODE_AUDIT_2026-06-09.md)
+- [每日代码审计报告 — 2026-06-10](CODE_AUDIT_2026-06-10.md)
+- [每日代码审计报告 — 2026-06-11](CODE_AUDIT_2026-06-11.md)
+- [Code Audit - 2026-07-05](CODE_AUDIT_2026-07-05.md)
+- [团队深度代码审计报告 — 2026-05-29（运行时稳定性 / 流畅度 / 实时性）](CODE_AUDIT_TEAM_2026-05-29.md)
+- [每日代码审查报告](CODE_REVIEW_2026-05-19.md)
+- [代码与运行审计（2026-09-29）](FULL_CODE_AUDIT_2026-09-29.md)
+- [代码全面审查改进文档](IMPROVEMENT_PLAN_2026-05-23.md)
+- [中英文混杂与乱码审计报告（2026-05-28）](LANGUAGE_MIX_AUDIT_2026-05-28.md)
+- [系统健康度审计 — 待修补清单](SYSTEM_HEALTH_AUDIT_2026-05-24.md)
+- [Code Review Report — 2026-05-26](code_review_20260526.md)
+
+## 系统设计与修复记录
+
+- [自治代理纸面亏损分析与修复（2026-10-09）](AGENT_LOSS_ANALYSIS_2026-10-09.md)
+- [代理"99% 买入"的根因与修复（2026-09-30）](AGENT_ML_BIAS_2026-09-30.md)
+- [AI 研究记录与调度修复](AI_RESEARCH_INTEGRITY_REPAIR_2026-09-08.md)
+- [AI 研究页面重设计方案](AI_RESEARCH_PAGE_REDESIGN_PLAN_2026-09-08.md)
+- [套利页风控台落盘与实施计划](ARBITRAGE_RISK_CONSOLE_PLAN_2026-04-18.md)
+- [CoinGlass + Keystone 升级实施计划（补强版）](COINGLASS_KEYSTONE_EXECUTION_PLAN_2026-04-18.md)
+- [CoinGlass Optional Market Data Implementation Guide](COINGLASS_OPTIONAL_MARKET_DATA_IMPLEMENTATION_GUIDE_2026-05-17.md)
+- [CoinGlass 信号增强落地计划](COINGLASS_SIGNAL_ENHANCEMENT_PLAN_2026-04-18.md)
+- [crypto_trading conda 环境与服务运行状态排查（2026-05-23，文件编码已损坏）](CONDA_ENV_RUNTIME_DIAGNOSIS_2026-05-23.md)
+- [K 线分区合并：按天文件 → 按月/按年文件（2026-10-26）](KLINE_PARTS_CONSOLIDATION_2026-10-26.md)
+- [现货 K 线库里混进 U 本位永续价格（2026-10-27）](KLINE_VENUE_POLLUTION_2026-10-27.md)
+- [本地 K 线库体检与补齐（2026-10-12）](LOCAL_KLINE_STORE_AUDIT_2026-10-12.md)
+- [Market Data WS Upgrade Plan - 2026-05-29](MARKET_DATA_WS_UPGRADE_PLAN_2026-05-29.md)
+- [Operating Reality Layer — Continuation: Loop Closure](OPERATING_REALITY_LAYER_CONTINUATION_2026-05-17.md)
+- [Operating Reality Layer Execution Plan](OPERATING_REALITY_LAYER_PLAN_2026-05-17.md)
+- [Paper / Live 串号修复执行计划](PAPER_LIVE_ISOLATION_FIX_PLAN_2026-05-24.md)
+- [研究数据审计（2026-09-29）](RESEARCH_DATA_AUDIT_2026-09-29.md)
+- [Research Workbench — Layout & Content-Logic Fix Plan](RESEARCH_WORKBENCH_UX_FIX_2026-05-18.md)
+- [Strategy Signal Clock Fix Plan](STRATEGY_SIGNAL_CLOCK_FIX_2026-05-18.md)
+- [模块化适配层设计文档（适配当前 `crypto_trading_system`）](architecture_adapters.md)
+- [免费数据源扩展计划（2026-03-09）](data_onchain.txt)
+- [Exit Refactor Report](legacy/report_exit_refactor.md)
+- [开源组件选型与嫁接建议（面向 `crypto_trading_system`）](open_source_reference.md)
+- [AI研究→决策一条龙 — 最小改动实施计划](plans/AI_RESEARCH_DECISION_PIPELINE_PLAN.md)

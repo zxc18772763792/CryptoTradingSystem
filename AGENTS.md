@@ -125,19 +125,25 @@ painful. Do not "helpfully" add them back; see the note in `requirements.txt`.
 core/          engine. trading/ execution/ risk/ (money path), ai/ ml/ research/,
                data/ marketdata/ realtime/, news/, governance/ (RBAC), audit/,
                monitoring/ observability/, backtest/, exchanges/ exchange_adapters/
-web/           FastAPI app. main.py = entrypoint; api/ = 252 routes; static/, templates/
+web/           FastAPI app. main.py = entrypoint; api/ = ~290 routes; static/, templates/
 strategies/    strategy implementations
 scripts/       operational + analysis scripts; setup_local_env.ps1, web.ps1 live here
-tests/         ~2280 tests
+tests/         ~4700 tests
 config/        settings + env plumbing
-docs/          architecture notes
+docs/          notes and research write-ups; start at docs/README.md
+reports/       research and audit notes; generated data stays local
+models/        canonical ML model; saved training runs stay local
+prediction_markets/  optional prediction-market integration
 runtime/       pid/state files (gitignored) — stale pids here mean a hard kill
 logs/          uvicorn_web_*.out.log / .err.log, web_supervisor.log
 ```
 
 Largest modules, if you are looking for where logic lives (or what needs splitting):
-`web/api/trading.py` (~9.9k lines), `web/api/data.py` (~7.2k),
-`core/trading/execution_engine.py` (~6.9k).
+`web/api/trading.py` (~9.9k lines), `web/api/data.py` (~7.4k),
+`core/trading/execution_engine.py` (~7.0k).
+
+Do not move or rename files under `scripts/` or `docs/` to tidy them. Windows scheduled
+tasks and tests call them by path, and hash-pinned ledger modules name them in comments.
 
 ## 8. Git — read before any push
 
@@ -157,7 +163,7 @@ Largest modules, if you are looking for where logic lives (or what needs splitti
 ## 9. Secrets
 
 Real keys live in `.env` / `.env.local` / `keys.txt` — all gitignored, none ever
-committed (verified across full history). `.env.example` documents the ~166 settings
+committed (verified across full history). `.env.example` documents the ~240 settings
 with placeholders only; when adding a setting, add it there **with a placeholder**,
 never with a real value.
 
@@ -179,14 +185,12 @@ or treat the notification Bot Token as user access. Check current collector lock
 before using the same session concurrently. Historical text and forward observations
 have different availability times; preserve the frozen research protocol.
 
-## 12. Reboot maintenance checkpoint
+## 12. Scheduled work
 
-Before resuming the October 24 maintenance work, read
+The Codex Telegram heartbeat has been deleted; do not recreate it. Existing Windows logon
+and scheduled tasks keep their configuration, and jobs should not be restarted merely to
+check on them. The October 24 reboot is finished; its record is in
 [docs/MAINTENANCE_HANDOFF_2026-10-24.md](docs/MAINTENANCE_HANDOFF_2026-10-24.md).
-The user requested a stop for a manual reboot. Check the recorded timestamp and
-current processes; do not restart jobs merely to verify this handoff. The Codex
-Telegram heartbeat has been deleted; do not recreate it. Existing Windows logon/scheduled tasks keep
-their configuration. Preserve local uncommitted changes and research artifacts.
 
 ## 13. X (Twitter) collection
 

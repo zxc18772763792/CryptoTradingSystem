@@ -136,7 +136,7 @@ def test_repo_root_junk_removed(removed):
 @pytest.mark.parametrize("relocated", [
     "scripts/legacy/fix_mojibake.py",
     "docs/legacy/report_exit_refactor.md",
-    "docs/plans/CLAUDE.md",
+    "docs/plans/AI_RESEARCH_DECISION_PIPELINE_PLAN.md",
 ])
 def test_legacy_files_relocated(relocated):
     assert (REPO_ROOT / relocated).exists(), f"{relocated!r} should exist"

@@ -23,12 +23,14 @@ The current repository is organized for local development first: source code and
 - `strategies/`: strategy implementations grouped by style
 - `scripts/`: startup helpers, self-checks, data download, and research utilities
 - `tests/`: web, ops, governance, and prediction-market coverage
-- `docs/`: architecture notes, governance docs, integration plans, and changelog
+- `docs/`: architecture notes, research write-ups, governance docs, and changelog ([index](docs/README.md))
+- `reports/`: research and audit notes with their reproduction scripts; generated data stays local
+- `models/`: canonical ML signal model; saved training runs stay local
 - `prediction_markets/`: optional prediction-market integrations and workers
 
 See [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md) for a more detailed guide.
 
-Local operations: [startup and shutdown](STARTUP.md), [maintenance handoff, 2026-10-24](docs/MAINTENANCE_HANDOFF_2026-10-24.md), and [Telegram agent handoff](docs/TELEGRAM_AGENT_HANDOFF.md).
+Local operations: [startup and shutdown](STARTUP.md) and [Telegram agent handoff](docs/TELEGRAM_AGENT_HANDOFF.md).
 
 ## Quick Start
 
@@ -68,7 +70,7 @@ python scripts/selfcheck_opennews.py --strict
 
 News LLM enrichment is configured separately from the trading AI paths with `NEWS_LLM_*` variables. The managed local profile can use an OpenAI-compatible relay by setting `NEWS_LLM_BASE_URL`, `NEWS_LLM_MODEL`, and `NEWS_LLM_FORCE_CHAT_COMPLETIONS=true`.
 
-AI research planning, live-decision review, and the autonomous agent use the shared `OPENAI_*` provider chain. The local default profile uses `https://nowcoding.ai/v1` with `gpt-5.5` as primary and `https://fast.vpsairobot.com` with `gpt-5.5` as the backup Responses-compatible source.
+AI research planning, live-decision review, and the autonomous agent use the shared `OPENAI_*` provider chain. Endpoints and model names are local configuration: set them in `.env.local`. `data/ai_runtime_config.json`, when present, overrides the environment for live-decision routing.
 
 ### 3. Start the web application
 
@@ -262,6 +264,7 @@ See [SECURITY.md](SECURITY.md) for the full pre-push checklist and incident resp
 
 - [STARTUP.md](STARTUP.md): single-script startup/status/stop reference for new sessions, including one-click and autonomous-agent startup rules
 - [SECURITY.md](SECURITY.md): secret management and safe sharing rules
+- [docs/README.md](docs/README.md): index of every document, by topic
 - [docs/REPOSITORY_OVERVIEW.md](docs/REPOSITORY_OVERVIEW.md): directory-by-directory repository guide
 - [docs/PAPER_LONGRUN_RUNBOOK.md](docs/PAPER_LONGRUN_RUNBOOK.md): paper long-run startup/stop/restart/selfcheck runbook
 - [docs/PAPER_LONGRUN_BURNIN_CHECKLIST.md](docs/PAPER_LONGRUN_BURNIN_CHECKLIST.md): burn-in checklist for long-run readiness

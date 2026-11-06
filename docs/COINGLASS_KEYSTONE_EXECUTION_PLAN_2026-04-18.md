@@ -65,11 +65,11 @@
 关键锚点如下：
 
 1. 配置入口：
-   [config/settings.py](/E:/9_Crypto/crypto_trading_system/config/settings.py:1)
+   [config/settings.py](../config/settings.py#L1)
 2. 后台 premium worker 管理：
-   [web/main.py](/E:/9_Crypto/crypto_trading_system/web/main.py:889)
+   [web/main.py](../web/main.py#L889)
 3. 现有数据汇总与 overview API：
-   [web/api/data.py](/E:/9_Crypto/crypto_trading_system/web/api/data.py:237)
+   [web/api/data.py](../web/api/data.py#L237)
 
 扩展方向需要兼容以下现有能力：
 

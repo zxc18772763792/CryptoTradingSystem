@@ -35,15 +35,24 @@ This document explains how the repository is organized today and which directori
   Automated coverage for web routes, ops behavior, governance flows, prediction-market logic, and strategy/runtime integration points.
 
 - `docs/`
-  Longer-form reference material including architecture notes, governance docs, integration plans, and the changelog.
+  Longer-form reference material including architecture notes, research write-ups, governance docs, and the changelog. [README.md](README.md) lists every document by topic.
+
+- `reports/`
+  Research and audit notes with their reproduction scripts. Generated data under it stays local through `.gitignore`.
+
+- `models/`
+  The canonical ML signal model and its manifest. Saved training runs under `models/ml_signal_xgb/` stay local.
 
 ## Key Entry Points
 
 - `web.bat`
   The only user-facing Windows-friendly entry point for one-click startup, status, and stop operations. Running it with no args starts the web app, the news worker, and the news LLM worker, and opens the browser.
 
+- `scripts/web.ps1`
+  PowerShell command router behind `web.bat`.
+
 - `scripts/start_web_ps.ps1`
-  PowerShell launcher used by the batch wrapper and useful for passing worker or analytics-history flags.
+  Transcript wrapper for startup logs, called by the router.
 
 - `web/main.py`
   FastAPI application startup, background task registration, route mounting, websocket wiring, and runtime snapshot publication.
@@ -67,8 +76,8 @@ The following directories are part of local operation and should not be committe
 - `output/`
   Generated outputs and local worker results.
 
-- `.playwright-cli/`, `test-results/`, `.pytest_tmp/`
-  Browser automation artifacts and temporary test state.
+- `tmp/`, `.bench/`, `.playwright-cli/`, `test-results/`, `.pytest_tmp/`
+  Scratch files, benchmark output, browser automation artifacts, and temporary test state. `scripts/cleanup_repo.ps1 -DryRun` shows what the cleanup script would remove.
 
 ## Suggested Reading Order
 

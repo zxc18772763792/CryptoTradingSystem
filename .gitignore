@@ -6,6 +6,7 @@ __pycache__/
 # Test/cache artifacts
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
 .coverage.*
 htmlcov/

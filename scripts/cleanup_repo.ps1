@@ -227,6 +227,7 @@ Get-ChildItem -Path . -Recurse -Force -File -Include "*.pyc", "*.pyo" -ErrorActi
 @(
     ".pytest_cache",
     ".mypy_cache",
+    ".ruff_cache",
     ".pytest_tmp",
     ".playwright-cli",
     "MagicMock",
