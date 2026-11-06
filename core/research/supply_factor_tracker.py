@@ -33,6 +33,7 @@ import httpx
 from loguru import logger
 
 from core.research import retirement
+from core.research.tracker_data_quality import positive_price
 from core.research.xs_evaluation import spearman
 from core.research import unlock_short_tracker as ut
 from core.research.unlock_events import LLAMA_DATASETS, entry_price, entry_ticker, unlocked_series
@@ -42,7 +43,7 @@ STATE_PATH = PROJECT_ROOT / "data" / "research" / "supply_factor" / "tracker.jso
 SPOT = "https://api.binance.com/api/v3"
 HORIZON_DAYS, HOLD_DAYS, MONTH_COST = 90, 30, 0.004
 MIN_TOKENS = 12
-CLOSE_GRACE_DAYS = 5  # after this, close with the exit prices that exist (true delistings)
+CLOSE_GRACE_DAYS = 5  # after this, any partial spread is retained for diagnosis only
 BACKTEST_REFERENCE = "long low / short high supply-growth terciles, 30d: +2.6%/month, 76% of months positive, IC<0 in 33/42 months"
 DAY = pd.Timedelta(days=1)
 
@@ -88,7 +89,16 @@ def assign_legs(growth: Dict[str, float]) -> Dict[str, List[str]]:
 async def _spot_universe(client) -> Dict[str, Dict[str, Any]]:
     index = await ut._cached_json(client, f"{LLAMA_DATASETS}/emissionsIndex", ut.CACHE_DIR / "emissions_index.json", ut.INDEX_TTL_SEC)
     index = index["data"] if isinstance(index, dict) else index
-    prices = {p["symbol"]: float(p["price"]) for p in (await client.get(f"{SPOT}/ticker/price")).json()}
+    metadata = await client.get(f"{SPOT}/exchangeInfo")
+    metadata.raise_for_status()
+    symbols = metadata.json()["symbols"]
+    if not isinstance(symbols, list) or not symbols:
+        raise ValueError("missing_spot_exchange_info")
+    trading = {s["symbol"] for s in symbols
+               if s["quoteAsset"] == "USDT" and s["status"] == "TRADING" and s["isSpotTradingAllowed"]}
+    price_response = await client.get(f"{SPOT}/ticker/price")
+    price_response.raise_for_status()
+    prices = {p["symbol"]: positive_price(p["price"]) for p in price_response.json() if p["symbol"] in trading}
     out: Dict[str, Dict[str, Any]] = {}
     for entry in index:
         ticker, llama_px = entry_ticker(entry), entry_price(entry)
@@ -110,7 +120,7 @@ async def _close_on(client, symbol: str, day: pd.Timestamp, now: pd.Timestamp) -
     rows = ut._checked_json(resp)
     if not isinstance(rows, list) or not rows or pd.Timestamp(rows[0][0], unit="ms", tz="UTC") != day:
         return None
-    return float(rows[0][4])
+    return positive_price(rows[0][4])
 
 
 async def _universe_growth(client, day: pd.Timestamp):
@@ -193,11 +203,13 @@ async def _close_month(client, month: Dict[str, Any], now: pd.Timestamp) -> None
                     if not give_up:
                         return
                     row["exit"] = None
-            if row["exit"]:  # a pair delisted mid-month has no exit close and is dropped, as in the backtest
+            if row["exit"]:
                 rets[leg].append(row["exit"] / row["entry"] - 1)
     if not rets["long"] or not rets["short"]:
         if give_up:  # a whole leg without exit prices: record it and stop polling
             month["status"] = "unresolved"
+        return
+    if not give_up and any(len(rets[leg]) != len(month[leg]) for leg in rets):
         return
     spread = float(np.mean(rets["long"]) - np.mean(rets["short"]) - MONTH_COST)
     month.update(status="closed", long_return_pct=round(float(np.mean(rets["long"])) * 100, 3),
@@ -332,10 +344,26 @@ def weekly_ic_summary(state: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def missing_month_positions(month: Dict[str, Any]) -> List[str]:
+    """Diagnose incomplete legacy and new baskets without changing their ledgers."""
+    fields = ("entry",) if month.get("status") == "open" else ("entry", "exit")
+    missing = []
+    for leg in ("long", "short"):
+        for ticker, position in month[leg].items():
+            try:
+                for field in fields:
+                    positive_price(position.get(field))
+            except ValueError:
+                missing.append(ticker)
+    return sorted(set(missing))
+
+
 def summary(state: Dict[str, Any]) -> Dict[str, Any]:
     months = list(state.get("months", {}).values())
     forward = [m for m in months if not m.get("backfill")]
-    done = [m for m in forward if m.get("status") == "closed"]
+    closed = [m for m in forward if m.get("status") == "closed"]
+    done = [m for m in closed if not missing_month_positions(m)]
+    incomplete = len(closed) - len(done) + sum(m.get("status") == "unresolved" for m in forward)
     spreads = [float(m["spread_pct"]) for m in done]
     return {
         "started_at": state.get("started_at"),
@@ -343,6 +371,7 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "months_total": len(months),
         "months_missed_snapshot": sum(m.get("backfill_reason") == "schedule_not_captured_before_entry_close" for m in months),
         "forward_open": sum(m.get("status") == "open" for m in forward),
+        "forward_incomplete": incomplete,
         "forward_completed": len(done),
         "forward_mean_spread_pct": round(float(np.mean(spreads)), 2) if spreads else None,
         "forward_positive_months": round(float(np.mean([s > 0 for s in spreads])), 3) if spreads else None,

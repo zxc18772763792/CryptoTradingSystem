@@ -45,6 +45,7 @@ class World:
     def __init__(self):
         self.tokens = [f"T{i}" for i in range(12)]
         self.reverse_schedule = False
+        self.break_symbols = set()
 
     def price(self, token, day):
         i = int(token[1:])
@@ -62,6 +63,11 @@ class World:
             return _Resp(_schedule(1000.0 * i))
         if url.endswith("/ticker/price"):
             return _Resp([{"symbol": f"{t}USDT", "price": "1.0"} for t in self.tokens])
+        if url.endswith("/exchangeInfo"):
+            return _Resp({"symbols": [
+                {"symbol": f"{t}USDT", "quoteAsset": "USDT", "isSpotTradingAllowed": True,
+                 "status": "BREAK" if t in self.break_symbols else "TRADING"} for t in self.tokens
+            ]})
         if url.endswith("/klines"):
             day = pd.Timestamp(params["startTime"], unit="ms", tz="UTC")
             token = params["symbol"][:-4]
@@ -99,6 +105,23 @@ def test_month_opens_after_first_close_then_settles_with_the_spread(world, tmp_p
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["retirement_rule"]["min_n"] == 12  # rule registered on the first tick, before any result
     assert summary["retirement"]["verdict"] == "collecting" and summary["retirement"]["n"] == 1
+
+
+def test_delisted_symbol_with_a_ticker_quote_is_excluded(world):
+    world.break_symbols.add("T0")
+    universe = asyncio.run(sf._spot_universe(world))
+    assert set(universe) == set(world.tokens) - {"T0"}
+
+
+def test_incomplete_legacy_month_does_not_count_as_complete():
+    month = {"status": "closed", "spread_pct": 7.12, "backfill": False,
+             "long": {"ACX": {"entry": None}, "A": {"entry": 1, "exit": 1}},
+             "short": {"B": {"entry": 1, "exit": 0.9}}}
+    summary = sf.summary({"months": {"2026-10-01": month}})
+    assert sf.missing_month_positions(month) == ["ACX"]
+    assert summary["forward_completed"] == summary["retirement"]["n"] == 0
+    assert summary["forward_incomplete"] == 1 and summary["forward_mean_spread_pct"] is None
+    assert month["spread_pct"] == 7.12
 
 
 def test_month_without_preclose_schedule_is_excluded_from_forward(world, tmp_path):

@@ -120,6 +120,8 @@ class _WeekWorld:
             return base._Resp(base._schedule(1000.0 * i))
         if url.endswith("/ticker/price"):
             return base._Resp([{"symbol": f"{t}USDT", "price": "1.0"} for t in self.tokens])
+        if url.endswith("/exchangeInfo"):
+            return await base.World().get(url, params)
         if url.endswith("/klines"):
             day = pd.Timestamp(params["startTime"], unit="ms", tz="UTC")
             return base._Resp([[int(day.timestamp() * 1000), "0", "0", "0", str(self.price(params["symbol"][:-4], day))]])

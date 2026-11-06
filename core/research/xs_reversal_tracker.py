@@ -56,10 +56,10 @@ ROUND_TRIP_COST = 0.0015   # per position
 FORMATION_WINDOW = timedelta(minutes=30)
 SETTLE_GRACE = timedelta(days=3)  # after this, settle without positions whose exit never arrived
 HOUR_MS = 3_600_000
-# corrected 2026-10-11: funding had been missing for 96 of the 131 perps (+0.057% before); the registered
-# retirement rule keeps its 0.057 (rules are frozen at registration)
-BACKTEST_REFERENCE = ("586 days 2025-02..2026-09, ~127 coins, 12 per side: net +0.052%/position/day after 0.15% "
-                      "costs and funding, 90% CI [-0.052, +0.159], 10/20 months positive (not significant)")
+# The registered threshold remains in retirement.py and in each ledger's frozen rule.
+BACKTEST_REFERENCE = ("原历史基准未复现。2025-02-22 至 2026-10-10 的历史归档毛收益为 +0.212%/天，"
+                      "现存币安永续和现货数据重放均为负。原注册净收益 +0.057%/天仅作为规则存档。")
+LIQ_BACKTEST_REFERENCE = "历史回放的 +0.031 个百分点/天依赖同一批旧 K 线，基准待复核。"
 LIQ_EXCHANGES = ("Binance", "OKX", "Bybit")
 LIQ_PRIOR_DAYS, LIQ_MIN_PRIOR = 30, 20
 LIQ_FLAG_SHARE = 0.2  # the top fifth of the day's liquidation shocks leaves the long candidates
@@ -412,6 +412,8 @@ def summary(state: Dict[str, Any]) -> Dict[str, Any]:
         "last_day_status": days[last].get("status") if last else None,
         "last_day_legs": {"longs": sorted(days[last].get("longs") or {}), "shorts": sorted(days[last].get("shorts") or {})} if last else None,
         "backtest_reference": BACKTEST_REFERENCE,
+        "backtest_display_mean_pct": None,
+        "backtest_reference_note": BACKTEST_REFERENCE,
         "retirement": retirement.verdict(returns, rule),
         "liq_filter": _liq_filter_summary(state, counted, paired),
         "paired_evaluation": paired,
@@ -431,6 +433,8 @@ def _liq_filter_summary(state: Dict[str, Any], counted: List[Dict[str, Any]], pa
         "flagged_per_day": round(float(np.mean([len(x.get("flagged") or []) for x in shadow])), 1) if shadow else None,
         "no_data_days": sum((d.get("liq_filter") or {}).get("status") == "no_data" for d in counted),
         "forward_open": sum((d.get("liq_filter") or {}).get("status") == "open" for d in (state.get("days") or {}).values()),
+        "backtest_display_mean_pct": None,
+        "backtest_reference_note": LIQ_BACKTEST_REFERENCE,
         "retirement": retirement.verdict(diffs, rule),
         "paired_evaluation": paired if paired is not None else evaluate_reversal_pairs(state.get("days") or {}, round_trip_cost_pct=ROUND_TRIP_COST * 100),
     }

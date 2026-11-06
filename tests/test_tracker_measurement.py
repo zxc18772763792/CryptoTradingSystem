@@ -24,6 +24,22 @@ def ledger_summary(mean=4., n=2):
             'forward_open': 1, 'updated_at': '2026-10-20T05:00:00+00:00'}
 
 
+def test_revised_reference_does_not_change_registered_tracker_thresholds(monkeypatch):
+    from core.research import coinglass_composite_tracker as coinglass
+
+    monkeypatch.setattr(registry, '_open_marks', lambda spec: [])
+    for tracker_id, summary, corrected, registered in (
+        ('coinglass_composite_7d', coinglass.summary({}), 0.10, 0.174),
+        ('coinglass_composite_7d_wide_eq', coinglass.summary({}, 'wide'), -0.20, 0.40),
+        ('xs_reversal', reversal.summary({}), None, 0.057),
+    ):
+        row = registry.tracker_row(spec_for(tracker_id, lambda: summary))
+        assert row['backtest_mean_pct'] == corrected
+        assert row['registered_backtest_mean_pct'] == registered
+        assert row['backtest_reference_note']
+        assert registry.retirement.RULES[tracker_id]['backtest_mean_pct'] == registered
+
+
 def test_alastar_uses_frozen_protocol_verdict_and_keeps_excess_separate(monkeypatch):
     monkeypatch.setattr(registry, '_open_marks', lambda spec: [])
     source = {'retirement': {'n': 0, 'min_n': 66, 'mean_pct': None, 'ci90_pct': None,

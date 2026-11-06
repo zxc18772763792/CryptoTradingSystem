@@ -129,6 +129,8 @@ def _xs_liq_filter() -> Dict[str, Any]:
     return {"retirement": shadow.get("retirement"), "started_at": summary.get("started_at"),
             "updated_at": summary.get("updated_at"), "forward_completed": shadow.get("completed"),
             "forward_open": shadow.get("forward_open"), "actual_mean_pct": shadow.get("mean_net_pct"),
+            "backtest_display_mean_pct": shadow.get("backtest_display_mean_pct"),
+            "backtest_reference_note": shadow.get("backtest_reference_note"),
             "paired_evaluation": summary.get("paired_evaluation") or shadow.get("paired_evaluation")}
 
 
@@ -201,14 +203,14 @@ TRACKERS: List[Dict[str, Any]] = [
     {"id": "supply_factor", "name": "供给通胀因子", "group": "因子", "unit": "月", "rule_key": "supply_factor",
      "rule": "每月按未来 90 天新增供给排序，多低空高三分位，持有 30 天", "load": _supply},
     {"id": "xs_reversal", "name": "日线横截面反转", "group": "因子", "unit": "天", "rule_key": "xs_reversal",
-     "rule": "每天 00:00 UTC 做多跌离均线最深 10%、做空最高 10%，持有 24h。回测仅 +0.057%/天，180 天测不出：只能发现明显亏损，"
-             "或远好于回测（约 +0.3%/天以上）", "load": _xs_reversal},
+     "rule": "每天 00:00 UTC 做多跌离均线最深 10%、做空最高 10%，持有 24h，按冻结的 180 天规则记录前向表现",
+     "load": _xs_reversal},
     {"id": "xs_reversal_liq_filter", "name": "日线横截面反转 · 剔除爆仓异常（影子）", "group": "因子", "unit": "天",
      "rule_key": "xs_reversal_liq_filter",
      "rule": "同横截面反转，多头候选剔除当天爆仓异常前 20%；判定看和原版每天的收益差", "load": _xs_liq_filter},
     {"id": "coinglass_composite_7d", "name": "Coinglass 七日合成组合", "group": "因子", "unit": "期",
      "rule_key": "coinglass_composite_7d",
-     "rule": "8 个持仓类信号按训练期 IC 加权，每天建一份多空各五分之一、持有 7 天的组合，扣成本和资金费；利润薄，一年内约两成概率能确认",
+     "rule": "8 个持仓类信号按训练期 IC 加权，每天建一份多空各五分之一、持有 7 天的组合，扣成本和资金费",
      "load": _composite},
     {"id": "coinglass_composite_7d_monthly_v1", "name": "Coinglass 七日合成组合 · 月度换池 v1", "group": "因子", "unit": "期",
      "rule_key": "coinglass_composite_7d_monthly_v1",
@@ -353,15 +355,21 @@ def measurement(spec: Dict[str, Any]) -> Dict[str, Any]:
                 "cost_scope": "往返20bps及实际资金费；另记40bps压力成本。无成熟样本时为空，不是0%", "is_paper": True}
     paired = tid == "xs_reversal_liq_filter"
     gross = tid.startswith("xs_reversal")
+    coinglass = tid.startswith("coinglass_")
     two_legs = tid.startswith(("unlock_", "coinglass_")) or "hedged" in tid or tid == "supply_factor"
     multiplier = 1 if gross or not two_legs else 2
+    cost_scope = "跟踪器设定交易成本及已记录资金费"
+    if tid == "supply_factor":
+        cost_scope = "固定交易成本；未计借币可得性及借币成本"
+    elif coinglass:
+        cost_scope = "按换手估算交易成本；资金费按费率累加，未按结算标记价折算现金流"
     return {"metric_kind": "paired_increment" if paired else "net_return",
-            "metric_label": "同日配对增益" if paired else "净收益",
+            "metric_label": "同日配对增益" if paired else ("纸面净收益" if coinglass else "净收益"),
             "metric_unit_label": "百分点/天" if paired else f"%/{spec['unit']}",
             "return_basis": "total_gross_notional" if gross else "single_leg_notional",
             "basis_label": "多空总名义金额" if gross else ("单腿名义金额（多空各一份）" if two_legs else "空头入场名义金额"),
             "gross_notional_multiplier": multiplier,
-            "cost_scope": "固定交易成本；未计借币可得性及借币成本" if tid == "supply_factor" else "跟踪器设定交易成本及已记录资金费",
+            "cost_scope": cost_scope,
             "is_paper": True}
 
 
@@ -394,6 +402,10 @@ def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - one broken tracker must not blank the table
         row["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         return row
+    if "backtest_display_mean_pct" in summary:
+        row["registered_backtest_mean_pct"] = row["backtest_mean_pct"]
+        row["backtest_mean_pct"] = summary["backtest_display_mean_pct"]
+        row["backtest_reference_note"] = summary["backtest_reference_note"]
     verdict = summary.get("retirement") or {}
     n = int(verdict.get("n") or 0)
     mean = verdict.get("mean_pct")
@@ -410,6 +422,7 @@ def tracker_row(spec: Dict[str, Any]) -> Dict[str, Any]:
         win_rate=_first(summary, "forward_win_rate", "forward_positive_days", "forward_positive_months"),
         hedged_mean_pct=_first(summary, "forward_hedged_mean_return_pct"),
         open=_first(summary, "forward_open"),
+        incomplete=summary.get("forward_incomplete"),
         waiting=_first(summary, "forward_waiting", "forward_scheduled"),
         late=_first(summary, "forward_late", "late", "late_trades"),
         started_at=summary.get("started_at"),

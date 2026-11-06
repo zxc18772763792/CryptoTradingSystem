@@ -6525,14 +6525,14 @@ ${confirmHint}`,
   }
 
   // Pre-registered retirement verdict (core/research/retirement.py), shown on every paper-tracker card.
-  function trackerVerdictLine(s) {
+  function trackerVerdictLine(s, groupDescription = '同一公告或同一天入场算一组', hasReference = true) {
     const r = s?.retirement;
     if (!r) return '';
     const colors = { retire: 'var(--negative)', watch: 'var(--warning)', confirmed: 'var(--positive)', on_track: 'var(--positive)', collecting: 'var(--text-faint)' };
-    const groups = r.clusters == null ? '' : `（同一公告或同一天入场算一组，共 ${Number(r.clusters)} 组）`;
+    const groups = r.clusters == null ? '' : `（${groupDescription}，共 ${Number(r.clusters)} 组）`;
     const ci = Array.isArray(r.ci90_pct) ? ` · 90% 区间 [${r.ci90_pct[0]}, ${r.ci90_pct[1]}]%${groups}`
-      : (r.clusters === 1 && Number(r.n) >= 2 ? ' · 样本同属 1 组（同一公告或同一天），暂不计算区间' : '');
-    return `<div style="margin-top:4px;">退役判定：<b style="color:${colors[r.verdict] || 'var(--text-sub)'};">${esc(r.label || r.verdict || '--')}</b> · ${esc(r.reason || '')} · 前向 ${Number(r.n || 0)}/${Number(r.min_n || 0)} ${({ month: '个月', day: '天', book: '期', week: '周' })[r.unit] || '笔'}${ci}<span class="u-note">（规则在首个前向结果前登记：满样本后均值≤0、90% 区间上沿&lt;0 或低于回测均值 1/4 即退役）</span></div>`;
+      : (r.clusters === 1 && Number(r.n) >= 2 ? ` · 样本同属 1 组${groups}，暂不计算区间` : '');
+    return `<div style="margin-top:4px;">退役判定：<b style="color:${colors[r.verdict] || 'var(--text-sub)'};">${esc(r.label || r.verdict || '--')}</b> · ${esc(r.reason || '')} · 前向 ${Number(r.n || 0)}/${Number(r.min_n || 0)} ${({ month: '个月', day: '天', book: '期', week: '周' })[r.unit] || '笔'}${ci}<span class="u-note">（规则在首个前向结果前登记：满样本后均值≤0、90% 区间上沿&lt;0${hasReference ? ' 或低于原注册回测均值 1/4' : ''}即退役）</span></div>`;
   }
 
   function renderListingShortTracker(payload) {
@@ -6622,7 +6622,7 @@ ${confirmHint}`,
     const names = (leg) => Object.keys(leg || {}).map((t) => esc(t)).join('、');
     panel.innerHTML = `
       <h3 style="margin:0;">供给通胀因子 · 月度多空纸面跟踪</h3>
-      <div style="margin-top:6px;color:var(--text-sub);">前向：持有中 ${Number(s.forward_open || 0)} · 完成 ${Number(s.forward_completed || 0)} 个月 · 平均多空差 ${pct(s.forward_mean_spread_pct)}/月 · 正收益月份 ${s.forward_positive_months == null ? '--' : `${(Number(s.forward_positive_months) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '不足 12 个月，暂不评估'}</div>
+      <div style="margin-top:6px;color:var(--text-sub);">前向：持有中 ${Number(s.forward_open || 0)} · 完整结算 ${Number(s.forward_completed || 0)} 个月${s.forward_incomplete ? ` · 排除缺仓 ${Number(s.forward_incomplete)} 个月` : ''} · 平均多空差 ${pct(s.forward_mean_spread_pct)}/月 · 正收益月份 ${s.forward_positive_months == null ? '--' : `${(Number(s.forward_positive_months) * 100).toFixed(0)}%`} · ${s.evaluation_ready ? '样本已够，可评估' : '不足 12 个月，暂不评估'}</div>
       ${trackerVerdictLine(s)}
       ${(() => {
         const w = s.weekly_ic || {};
@@ -6631,7 +6631,11 @@ ${confirmHint}`,
       })()}
       <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。每月初按排期未来 90 天新增供给排序，做多最低三分之一、做空最高三分之一，持有 30 天，扣 0.4% 成本。纸面记录，不下单；启动前开始的月份标为"回填"，不计入前向统计。</div>
       ${months.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>调仓日</th><th>状态</th><th>多空差</th><th>多头</th><th>空头</th><th>做多（低供给）</th><th>做空（高供给）</th><th></th></tr></thead><tbody>
-        ${months.map((m) => `<tr><td>${esc(m.rebalance_day)}</td><td>${m.status === 'closed' ? '已结算' : m.status === 'unresolved' ? '无法结算' : '持有中'}</td><td style="color:${Number(m.spread_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.spread_pct)}</td><td>${pct(m.long_return_pct)}</td><td>${pct(m.short_return_pct)}</td><td title="${names(m.long)}">${Object.keys(m.long || {}).length} 个</td><td title="${names(m.short)}">${Object.keys(m.short || {}).length} 个</td><td>${m.backfill ? '回填' : ''}</td></tr>`).join('')}
+        ${months.map((m) => {
+          const missing = m.missing_positions || [];
+          const status = m.status === 'closed' ? (missing.length ? '缺仓结算 · 仅供诊断' : '已结算') : m.status === 'unresolved' ? '无法结算' : (missing.length ? '持有中 · 缺入场价' : '持有中');
+          return `<tr><td>${esc(m.rebalance_day)}</td><td title="${esc(missing.join('、'))}">${status}</td><td style="color:${Number(m.spread_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.spread_pct)}</td><td>${pct(m.long_return_pct)}</td><td>${pct(m.short_return_pct)}</td><td title="${names(m.long)}">${Object.keys(m.long || {}).length} 个</td><td title="${names(m.short)}">${Object.keys(m.short || {}).length} 个</td><td>${m.backfill ? '回填' : ''}</td></tr>`;
+        }).join('')}
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；每月 1 日收盘后建仓。</div>'}`;
   }
 
@@ -6762,9 +6766,9 @@ ${confirmHint}`,
       <h3 style="margin:0;">日线横截面反转（纸面）</h3>
       <div style="margin-top:6px;color:var(--text-sub);">每天 00:00 UTC 按 1h 均线偏离排序：做多跌得最深的 10%、做空涨得最多的 10%，持有 24 小时。前向完成 ${Number(s.forward_completed || 0)} 天 · 每仓净值均值 ${pct(s.forward_mean_net_pct, 3)} · 正收益天数 ${s.forward_positive_days == null ? '--' : `${(Number(s.forward_positive_days) * 100).toFixed(0)}%`} · 晚到 ${Number(s.late || 0)} · 错过 ${Number(s.missed || 0)} · 币池 ${Number(s.universe_size || 0)}</div>
       ${trackerVerdictLine(s)}
-      ${s.liq_filter ? `<div class="u-note" style="margin-top:4px;">影子 · 剔除爆仓异常：完成 ${Number(s.liq_filter.completed || 0)} 天 · 自身净收益 ${pct(s.liq_filter.mean_net_pct, 3)}/天 · 相对同日原版增益 ${pct(s.liq_filter.mean_diff_pct, 3).replace('%', ' 个百分点')}/天 · 每天约剔除 ${s.liq_filter.flagged_per_day ?? '--'} 个 · 判定：${esc(s.liq_filter.retirement?.label || '--')}（${esc(s.liq_filter.retirement?.reason || '')}）。只在多头候选里剔除当天爆仓异常前 20% 的币，空头不变；回放 596 天平均每天多 +0.031 个百分点，区间含 0，要靠前向确认。</div>` : ''}
+      ${s.liq_filter ? `<div class="u-note" style="margin-top:4px;">影子 · 剔除爆仓异常：完成 ${Number(s.liq_filter.completed || 0)} 天 · 自身净收益 ${pct(s.liq_filter.mean_net_pct, 3)}/天 · 相对同日原版增益 ${pct(s.liq_filter.mean_diff_pct, 3).replace('%', ' 个百分点')}/天 · 每天约剔除 ${s.liq_filter.flagged_per_day ?? '--'} 个 · 判定：${esc(s.liq_filter.retirement?.label || '--')}（${esc(s.liq_filter.retirement?.reason || '')}）。只在多头候选里剔除当天爆仓异常前 20% 的币，空头不变。${esc(s.liq_filter.backtest_reference_note || '')}</div>` : ''}
       ${window.ResearchTrackerDiagnostics?.paired(s.paired_evaluation) || ''}
-      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。日波动约 1.5%，回测均值仅 +0.057%/天，180 天远远测不出这么小的优势（以 80% 把握确认需要约 12 年）。它只能发现两种情况：明显在亏（约 −0.2%/天以下会提前判退役），或远好于回测（约 +0.3%/天以上才有把握确认）。注意：即使真实优势和回测一样，满 180 天时也有约 30% 的概率因均值≤0 被判退役。</div>
+      <div class="u-note" style="margin-top:4px;">${esc(s.backtest_reference || '--')}</div>
       ${days.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>日期</th><th>状态</th><th>币数/每边</th><th>多头腿</th><th>空头腿</th><th>每仓净值</th><th></th></tr></thead><tbody>
         ${days.slice(0, 20).map((d) => `<tr><td>${esc(d.day)}</td><td>${esc(statusNames[d.status] || d.status || '--')}</td><td>${d.coins ?? '--'} / ${d.per_side || '--'}</td><td>${pct(d.long_leg_pct)}</td><td>${pct(d.short_leg_pct)}</td><td style="color:${Number(d.net_per_position_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(d.net_per_position_pct, 3)}</td><td>${d.late ? '晚到' : ''}${d.missing_positions ? ` 缺 ${Number(d.missing_positions)}` : ''}</td></tr>`).join('')}
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；调度器在每天 00:00 UTC 后的第一个检查建仓。</div>'}`;
@@ -6834,22 +6838,22 @@ ${confirmHint}`,
     const powerNote = monthly
       ? '这是独立的前向版本，没有该版本回测收益参照；至少364期，按结算周分组，结果不并入原版。'
       : wide
-      ? '这个版本是看过次要结果后挑的，回测数字偏乐观。每期波动约 3.7%，即使优势和回测一样，跑满一年也只有约四成概率被确认。'
-      : '利润很薄：每期波动约 3%，即使优势真实存在，跑满一年也只有约两成概率被确认，更可能看到的是"均值为正但不显著"。';
+      ? '该版本已停用。此前的正回测来自对数空头收益记账错误。'
+      : '每天新建的七日组合相互重叠，区间按结算周分组。';
     const shadowName = wide ? '按训练期 IC 加权（原版权重）' : '只取方向、等权';
     const dataNote = monthly
       ? '原版131个币优先更新，新币随后补齐；数据不足时等待或跳过，不补记历史交易'
       : wide
-      ? '每天约多 620 次 Coinglass 请求，原来的 131 个币先更新，所以扩池版大约 05:00（UTC）建仓，比原版晚约两小时'
+      ? '扩池采集和建仓已停用'
       : '每天约 790 次 Coinglass 请求';
     panel.innerHTML = `
       <h3 style="margin:0;">Coinglass 七日合成组合${monthly ? ' · 月度换池 v1' : wide ? ' · 等权扩池' : ''}（纸面）</h3>
-      ${monthly ? `<div class="u-note">${esc(s.tracker_status_label || '')}${s.current_universe ? ` · 币池 ${esc(s.current_universe.month)} · ${Number(s.current_universe.coins)} 个币 · 新增 ${(s.current_universe.added || []).length} / 移出 ${(s.current_universe.removed || []).length}` : ''}</div>` : ''}
-      <div style="margin-top:6px;color:var(--text-sub);">${intro}完成 ${Number(s.main?.completed || 0)} 期 · 单腿名义金额净收益 ${pct(s.main?.mean_net_pct, 3)}/期 · 多空总名义金额 ${pct(s.main?.mean_net_pct == null ? null : Number(s.main.mean_net_pct)/2, 3)}/期 · 正收益占比 ${s.main?.positive_share == null ? '--' : `${(Number(s.main.positive_share) * 100).toFixed(0)}%`} · 持有中 ${Number(s.main?.open || 0)} 期 · 错过 ${Number(s.missed || 0)} 天</div>
-      ${trackerVerdictLine(s)}
-      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${powerNote}影子（${shadowName}）：完成 ${Number(s.shadow?.completed || 0)} 期 · 均值 ${pct(s.shadow?.mean_net_pct, 3)}，只记录不判定。数据：${esc(store.day || '--')} 的日线${store.completed_at ? `已于 ${esc(fmtTs(new Date(store.completed_at)))} 更新完` : '更新中'}（${dataNote}）。纸面记录，不下单。</div>
+      ${s.tracker_status_label ? `<div class="u-note">${esc(s.tracker_status_label)}${s.current_universe ? ` · 币池 ${esc(s.current_universe.month)} · ${Number(s.current_universe.coins)} 个币 · 新增 ${(s.current_universe.added || []).length} / 移出 ${(s.current_universe.removed || []).length}` : ''}</div>` : ''}
+      <div style="margin-top:6px;color:var(--text-sub);">${intro}完成 ${Number(s.main?.completed || 0)} 期 · 单腿名义金额净收益 ${pct(s.main?.mean_net_pct, 3)}/期 · 多空总名义金额 ${pct(s.main?.mean_net_pct == null ? null : Number(s.main.mean_net_pct)/2, 3)}/期 · 正收益占比 ${s.main?.positive_share == null ? '--' : `${(Number(s.main.positive_share) * 100).toFixed(0)}%`} · 持有中 ${Number(s.main?.open || 0)} 期${s.main?.unresolved ? ` · 未能结算 ${Number(s.main.unresolved)} 期` : ''} · 错过 ${Number(s.missed || 0)} 天</div>
+      ${trackerVerdictLine(s, '按结算周分组', !monthly)}
+      <div class="u-note" style="margin-top:4px;">回测参照：${esc(s.backtest_reference || '--')}。${powerNote}影子（${shadowName}）：完成 ${Number(s.shadow?.completed || 0)} 期 · 均值 ${pct(s.shadow?.mean_net_pct, 3)}，只记录不判定。数据：${esc(store.day || '--')} 的日线${store.completed_at ? `已于 ${esc(fmtTs(new Date(store.completed_at)))} 更新完` : '更新中'}（${dataNote}）。纸面收益按换手估算成本，资金费率直接累加。</div>
       ${latest ? `<div class="u-note" style="margin-top:4px;">最新一期（${esc(latest.day)}）多头：${names(latest.longs)}；空头：${names(latest.shorts)}</div>` : ''}
-      ${books.length ? `<div style="overflow-x:auto;margin-top:8px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>数据日</th><th>建仓时间</th><th>状态</th><th>多头腿</th><th>空头腿</th><th>成本</th><th>净值</th><th>影子净值</th></tr></thead><tbody>
+      ${books.length ? `<div class="u-note" style="margin-top:8px;">最近 ${Math.min(books.length, 20)} 期记录，上方均值取全部完整结算期。</div><div style="overflow-x:auto;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>数据日</th><th>建仓时间</th><th>状态</th><th>多头腿</th><th>空头腿</th><th>成本</th><th>纸面净收益</th><th>影子净收益</th></tr></thead><tbody>
         ${books.slice(0, 20).map((b) => { const m = b.main || {}; return `<tr><td>${esc(b.day)}</td><td>${esc(b.formed_at ? fmtTs(new Date(b.formed_at)) : '--')}</td><td>${esc(statusNames[m.status || b.status] || m.status || b.status || '--')}${b.partial ? ' 部分' : ''}</td><td>${pct(m.long_leg_pct)}</td><td>${pct(m.short_leg_pct)}</td><td>${pct(m.cost_pct, 3)}</td><td style="color:${Number(m.net_pct) >= 0 ? 'var(--positive)' : 'var(--negative)'};">${pct(m.net_pct)}</td><td>${pct(b.shadow?.net_pct)}</td></tr>`; }).join('')}
       </tbody></table></div>` : '<div class="u-note" style="margin-top:6px;">尚无记录；每天 00:15（UTC）起更新数据，更新完建仓。</div>'}`;
   }

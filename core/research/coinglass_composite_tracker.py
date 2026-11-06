@@ -93,8 +93,10 @@ WIDE_STOP_REASON = ("2026-10-25 停用：上线依据 +0.40%/期 来自对数收
 # tracker -> its state, universe, rule and books: the judged book is "main", the other one its shadow
 VARIANTS: Dict[str, Dict[str, Any]] = {
     "main": {"state_path": STATE_PATH, "rule": "coinglass_composite_7d", "reference": BACKTEST_REFERENCE,
+             "reference_mean_pct": 0.10,
              "universe": lambda: store.universe(), "books": (("main", WEIGHTS), ("shadow", SHADOW_WEIGHTS))},
     "wide": {"state_path": WIDE_STATE_PATH, "rule": "coinglass_composite_7d_wide_eq", "reference": WIDE_BACKTEST_REFERENCE,
+             "reference_mean_pct": -0.20,
              "universe": lambda: store.wide_universe(), "books": (("main", SHADOW_WEIGHTS), ("shadow", WEIGHTS)),
              "stopped_at": WIDE_STOPPED_AT, "stop_reason": WIDE_STOP_REASON},
     "monthly": {"state_path": MONTHLY_STATE_PATH, "rule": "coinglass_composite_7d_monthly_v1",
@@ -389,6 +391,9 @@ def summary(state: Dict[str, Any], variant: str = "main") -> Dict[str, Any]:
     out: Dict[str, Any] = {"started_at": state.get("started_at"), "updated_at": state.get("updated_at"),
                            "days_total": len(records), "missed": sum(r.get("status") == "missed" for r in records.values()),
                            "backtest_reference": spec["reference"], "hold_days": HOLD_DAYS}
+    if "reference_mean_pct" in spec:
+        out["backtest_display_mean_pct"] = spec["reference_mean_pct"]
+        out["backtest_reference_note"] = "历史回测已按算术空头收益重算，退役规则仍使用原注册参照。"
     if variant == "monthly":
         out.update(current_universe=state.get("current_universe"),
                    tracker_status_label=state.get("tracker_status_label", "月度币池待生成 · 暂不入场"))

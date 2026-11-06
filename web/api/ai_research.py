@@ -6561,7 +6561,9 @@ async def get_supply_factor_tracker():
 
     state = await asyncio.to_thread(supply_factor_tracker.load_state)
     months = sorted(state.get("months", {}).values(), key=lambda m: m.get("rebalance_day") or "", reverse=True)
-    return {"summary": supply_factor_tracker.summary(state), "months": months[:24]}
+    return {"summary": supply_factor_tracker.summary(state),
+            "months": [{**m, "missing_positions": supply_factor_tracker.missing_month_positions(m)}
+                       for m in months[:24]]}
 
 
 @router.get("/upbit-caution")
