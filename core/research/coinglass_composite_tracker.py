@@ -46,6 +46,7 @@ file stays as the record. The daily store no longer keeps the 103 held-out coins
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from datetime import datetime, timedelta, timezone
@@ -328,17 +329,28 @@ async def settle(client, record: Dict[str, Any], now: datetime, prices: Dict[str
                     net_pct=round((long_leg + short_leg - cost) * 100, 4), missing_positions=len(pending))
 
 
+def _complete_coins(universe: List[Tuple[str, str]], day: datetime, store_root: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+    coins: Dict[str, Dict[str, Any]] = {}
+    for _, perp in universe:
+        coin = store.load_coin(perp, store_root)
+        if store.complete(coin, day):
+            coins[perp] = coin
+    return coins
+
+
 async def tick(client, *, variant: str = "main", state_path: Optional[Path] = None, store_root: Optional[Path] = None,
                status_path: Optional[Path] = None) -> Dict[str, Any]:
+    # The file reads, the book's computation and the saves can take seconds: they run in threads so they do
+    # not hold the event loop. Jobs of the research runner run one at a time, so nothing else touches ``state``.
     spec = VARIANTS[variant]
     state_path = state_path or spec["state_path"]
-    state = load_state(state_path)
+    state = await asyncio.to_thread(load_state, state_path)
     now = _now()
     retirement.register(state, spec["rule"], now.isoformat())
     snapshot = None
     if variant == "monthly":
         from core.research import coinglass_monthly_universe as monthly
-        snapshot = monthly.load_snapshot(now)
+        snapshot = await asyncio.to_thread(monthly.load_snapshot, now)
         state["current_universe"] = ({"id": snapshot["id"], "month": snapshot["month"],
                                       "selected_at": snapshot["selected_at"], "as_of": snapshot["as_of"],
                                       "coins": len(snapshot["members"]), "added": snapshot["added"],
@@ -353,27 +365,25 @@ async def tick(client, *, variant: str = "main", state_path: Optional[Path] = No
     # a day's book only when the tracker was already running as the day opened, and not after it stopped
     if (key not in state["books"] and datetime.fromisoformat(state["started_at"]) <= opens
             and (stopped_at is None or opens < stopped_at)):
-        coins: Dict[str, Dict[str, Any]] = {}
-        universe = sorted((snapshot or {}).get("members", {}).items()) if variant == "monthly" else spec["universe"]()
-        for _, perp in universe:
-            coin = store.load_coin(perp, store_root)
-            if store.complete(coin, day):
-                coins[perp] = coin
+        universe = (sorted((snapshot or {}).get("members", {}).items()) if variant == "monthly"
+                    else await asyncio.to_thread(spec["universe"]))
+        coins = await asyncio.to_thread(_complete_coins, universe, day, store_root)
         share = len(coins) / max(1, len(universe))
-        status = store.load_status(status_path)
+        status = await asyncio.to_thread(store.load_status, status_path)
         finished = status.get("day") == key and bool(status.get("final"))  # no more passes coming today
         deadline = opens + FORM_DEADLINE
         if now > deadline + LATE_GRACE:
             state["books"][key] = {"status": "missed", "checked_at": now.isoformat(), "coins": len(coins)}
         elif share >= READY_SHARE or (finished and len(coins) >= MIN_COINS) or (now > deadline and len(coins) >= MIN_COINS):
             try:
-                state["books"][key] = form(state, day, now, await _prices(client), coins, partial=share < READY_SHARE,
-                                           books=spec["books"])
+                prices = await _prices(client)
+                state["books"][key] = await asyncio.to_thread(form, state, day, now, prices, coins,
+                                                              partial=share < READY_SHARE, books=spec["books"])
                 if variant == "monthly":
                     state["books"][key]["universe"] = dict(state["current_universe"])
             except Exception as exc:  # noqa: BLE001 - retried next pass
                 logger.warning(f"coinglass composite: forming {key} failed: {exc}")
-        save_state(state, state_path)
+        await asyncio.to_thread(save_state, state, state_path)
     due = [r for r in state["books"].values() if any((r.get(v) or {}).get("status") == "open" for v in ("main", "shadow"))
            and now >= datetime.fromisoformat(r["formed_at"]) + timedelta(days=HOLD_DAYS)]
     if due:
@@ -381,7 +391,7 @@ async def tick(client, *, variant: str = "main", state_path: Optional[Path] = No
         for record in due:
             await settle(client, record, now, prices)
     state["updated_at"] = now.isoformat()
-    save_state(state, state_path)
+    await asyncio.to_thread(save_state, state, state_path)
     return summary(state, variant)
 
 

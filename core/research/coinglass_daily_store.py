@@ -314,20 +314,24 @@ async def update(day: datetime, *, client=None, root: Optional[Path] = None, sta
     """Bring every coin up to day D. Resumable: each coin is saved as soon as it is done."""
     from core.data.coinglass_client import CoinglassClient
 
-    previous = load_status(status_path)
+    # Coin files are read and written once per coin, and each can take seconds on the data drive:
+    # that runs in threads so it does not hold the event loop. Only this coroutine touches the data.
+    previous = await asyncio.to_thread(load_status, status_path)
     attempt = int(previous.get("attempt") or 0) + 1 if previous.get("day") == f"{day:%Y-%m-%d}" else 1
     status = {"day": f"{day:%Y-%m-%d}", "attempt": attempt, "started_at": _now().isoformat(), "requests": 0,
               "refused": [], "errors": []}
-    save_status(status, status_path)
+    await asyncio.to_thread(save_status, status, status_path)
     last_call = [0.0]
     # Freeze this pass's work list even if a monthly snapshot arrives mid-pass.
-    coins = update_universe()
+    coins = await asyncio.to_thread(update_universe)
     status["universe_symbols"] = [perp for _, perp in coins]
 
     async def run(cg) -> None:
         for base, perp in coins:
-            coin = load_coin(perp, root) or {"base": base, "perp": perp}
-            changed = seed_history(coin, base, perp, day) if any(history_gaps(coin, d, day) for d in DATASETS) else False
+            coin = await asyncio.to_thread(load_coin, perp, root) or {"base": base, "perp": perp}
+            changed = False
+            if any(history_gaps(coin, d, day) for d in DATASETS):
+                changed = await asyncio.to_thread(seed_history, coin, base, perp, day)
             for dataset in DATASETS:
                 if not history_gaps(coin, dataset, day):
                     continue
@@ -344,8 +348,16 @@ async def update(day: datetime, *, client=None, root: Optional[Path] = None, sta
                     merge(coin, dataset, rows, needed_stamp(dataset, day))
                     changed = True
             if changed:
-                save_coin(perp, coin, root)
-            save_status(status, status_path)
+                await asyncio.to_thread(save_coin, perp, coin, root)
+            await asyncio.to_thread(save_status, status, status_path)
+
+    def coin_counts() -> Tuple[int, int]:
+        complete_coins = history_complete = 0
+        for _, perp in coins:
+            coin = load_coin(perp, root)
+            complete_coins += complete(coin, day)
+            history_complete += not any(history_gaps(coin, d, day) for d in DATASETS)
+        return complete_coins, history_complete
 
     if client is None:
         async with CoinglassClient() as own:
@@ -353,14 +365,12 @@ async def update(day: datetime, *, client=None, root: Optional[Path] = None, sta
     else:
         await run(client)
     status["completed_at"] = _now().isoformat()
-    status["complete_coins"] = sum(complete(load_coin(perp, root), day) for _, perp in coins)
-    status["history_complete_coins"] = sum(not any(history_gaps(load_coin(perp, root), d, day) for d in DATASETS)
-                                           for _, perp in coins)
+    status["complete_coins"], status["history_complete_coins"] = await asyncio.to_thread(coin_counts)
     status["universe_coins"] = len(coins)
     # final: nothing more will be asked today, so the trackers can stop waiting
     status["final"] = (status["complete_coins"] >= status["universe_coins"] or attempt >= MAX_ATTEMPTS
                        or _now() >= day + timedelta(days=1) + RETRY_UNTIL)
-    save_status(status, status_path)
+    await asyncio.to_thread(save_status, status, status_path)
     logger.info(f"coinglass daily store: day {status['day']} {status['complete_coins']} coins complete, "
                 f"{status['requests']} requests, {len(status['refused'])} refused, {len(status['errors'])} errors")
     return status

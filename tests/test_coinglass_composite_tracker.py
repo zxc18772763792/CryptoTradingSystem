@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
@@ -242,3 +243,23 @@ def test_monthly_books_use_their_snapshot_and_removed_coins_still_settle(world, 
     assert set(settled["main"]["longs"]) | set(settled["main"]["shorts"]) == original_names
     assert settled["universe"]["id"] == "2025-07:test"
     assert "待生成" in out["tracker_status_label"]
+
+
+def test_tick_reads_coins_forms_and_saves_off_the_event_loop(world, monkeypatch):
+    loop_thread = threading.get_ident()
+    seen = {}
+
+    def recorded(owner, name):
+        function = getattr(owner, name)
+
+        def wrapper(*args, **kwargs):
+            seen.setdefault(name, set()).add(threading.get_ident())
+            return function(*args, **kwargs)
+
+        monkeypatch.setattr(owner, name, wrapper)
+
+    for owner, name in ((store, "load_coin"), (store, "load_status"), (ct, "form"), (ct, "save_state"), (ct, "load_state")):
+        recorded(owner, name)
+    world.run(D + timedelta(days=1, hours=3))
+    assert set(seen) == {"load_coin", "load_status", "form", "save_state", "load_state"}
+    assert all(loop_thread not in threads for threads in seen.values())

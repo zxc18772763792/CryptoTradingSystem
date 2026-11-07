@@ -146,6 +146,10 @@ class Interpreter:
     def save(self, state):
         _atomic_bytes(self.output/'state.json', _json_bytes(state))
 
+    def review_queue(self):
+        path = self.archive/'candidate_review_queue.json'
+        return json.loads(path.read_bytes())['candidates'] if path.exists() else []
+
     def current(self, candidate):
         with _archive_lock(self.archive):
             _, messages, _ = _load_runs(self.archive, verify_full=True)
@@ -240,8 +244,10 @@ class Interpreter:
         return pub <= received <= at and ceil5(at+timedelta(seconds=60)) <= pub+timedelta(minutes=30)
 
     async def tick(self):
+        # Polled every few seconds, and each save or receipt check can take seconds on the data drive:
+        # those run in a thread so they do not hold the event loop. Only this coroutine touches ``state``.
         with _archive_lock(self.output/'pass'):
-            state = read_state(self.output)
+            state = await asyncio.to_thread(read_state, self.output)
             state.setdefault('enabled_at_utc', now_utc().isoformat())
             previous_prompt = state.get('prompt_sha256')
             if previous_prompt and previous_prompt != PROMPT_SHA:
@@ -251,9 +257,8 @@ class Interpreter:
                     'scope': 'New undecided posts only; existing evidence and terminal decisions retained'})
             state.update(last_started_at_utc=now_utc().isoformat(), prompt_sha256=PROMPT_SHA,
                          process_id=os.getpid(), paper_only=True)
-            self.save(state)
-            path = self.archive/'candidate_review_queue.json'
-            candidates = json.loads(path.read_bytes())['candidates'] if path.exists() else []
+            await asyncio.to_thread(self.save, state)
+            candidates = await asyncio.to_thread(self.review_queue)
             if not isinstance(candidates, list) or len(candidates) > 5000:
                 raise ValueError('Invalid review queue')
             current_keys = {candidate['message_key'] for candidate in candidates}
@@ -296,12 +301,12 @@ class Interpreter:
                         self.retire_legacy(candidate, destinations)
                         item['status'] = 'expired'
                         continue
-                    if not self.current(candidate):
+                    if not await asyncio.to_thread(self.current, candidate):
                         item['status'] = 'revised'
                         continue
                     handled += 1
                     item.update(status='processing', last_attempt_at_utc=now_utc().isoformat(), attempts=item.get('attempts', 0)+1)
-                    self.save(state)
+                    await asyncio.to_thread(self.save, state)
                     evidence_path = self.output/'evidence'/f'{digest(key.encode())}_{candidate["revision_sha256"]}.json'
                     if evidence_path.exists():
                         evidence = json.loads(evidence_path.read_bytes())
@@ -320,7 +325,7 @@ class Interpreter:
                                 evidence_file=str(evidence_path.relative_to(self.output)))
                     if not self.timely(candidate):
                         item['status'] = 'expired'
-                    elif not self.current(candidate):
+                    elif not await asyncio.to_thread(self.current, candidate):
                         item['status'] = 'revised'
                     elif not result['events']:
                         item['status'] = 'non_signal'
@@ -347,7 +352,7 @@ class Interpreter:
                                     if committed is None:
                                         raise
                             self.remember(candidate, book, committed, item)
-                            self.save(state)
+                            await asyncio.to_thread(self.save, state)
                         applied = item.get('freeze_receipts', {})
                         complete = destinations and all(str(b.output) in applied for b, _ in destinations)
                         item.update(status='label_frozen' if complete else 'expired' if destinations else 'no_active_unfrozen_book',
@@ -356,13 +361,13 @@ class Interpreter:
                     # Transport exceptions may contain credentials or request bodies.
                     item.update(status='retry_pending', error_type=type(exc).__name__)
                     state['last_error'] = type(exc).__name__
-                self.save(state)
+                await asyncio.to_thread(self.save, state)
             # A transport/delivery failure is unresolved throughout its retry
             # cooldown; an idle poll must not report it as recovered.
             state['last_error'] = next((i.get('error_type', 'RuntimeError') for i in state['items'].values()
                                         if i.get('status') == 'retry_pending'), None)
             state['last_tick_at_utc'] = now_utc().isoformat()
-            self.save(state)
+            await asyncio.to_thread(self.save, state)
             return state
 
 
@@ -390,19 +395,19 @@ async def worker(stop_event, heartbeat=None):
                     if env_bool('ALASTAR_AUTO_INTERPRETATION_ENABLED', True):
                         state = await interpreter.tick()
                         state['continuous_runner'] = True
-                        interpreter.save(state)
+                        await asyncio.to_thread(interpreter.save, state)
                         if heartbeat:
                             heartbeat(state.get('last_error') is None)
                     else:
-                        state = read_state(interpreter.output)
+                        state = await asyncio.to_thread(read_state, interpreter.output)
                         state.update(continuous_runner=False, disabled_at_utc=now_utc().isoformat())
-                        interpreter.save(state)
+                        await asyncio.to_thread(interpreter.save, state)
                         if heartbeat:
                             heartbeat(False)
                 except Exception as exc:
-                    state = read_state()
+                    state = await asyncio.to_thread(read_state)
                     state.update(last_error=type(exc).__name__, continuous_runner=False)
-                    interpreter.save(state)
+                    await asyncio.to_thread(interpreter.save, state)
                     if heartbeat:
                         heartbeat(False)
                 try:

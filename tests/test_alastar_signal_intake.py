@@ -2,6 +2,7 @@ import asyncio
 from copy import deepcopy
 from datetime import timedelta
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -455,3 +456,24 @@ def test_revised_candidate_removed_from_queue_clears_pending_error_without_losin
     assert state['last_error'] is None and 'error_type' not in item
     tick(runner)
     assert len(calls) == 1
+
+
+def test_tick_keeps_its_slow_disk_work_off_the_event_loop(configured, monkeypatch):
+    runner, journal, clock, calls, _ = configured
+    loop_thread = threading.get_ident()
+    seen = {}
+
+    def recorded(name, function):
+        def wrapper(*args, **kwargs):
+            seen.setdefault(name, set()).add(threading.get_ident())
+            return function(*args, **kwargs)
+        return wrapper
+
+    runner.save = recorded('save', runner.save)
+    runner.current = recorded('current', runner.current)
+    runner.review_queue = recorded('review_queue', runner.review_queue)
+    monkeypatch.setattr(intake, 'read_state', recorded('read_state', intake.read_state))
+    state = tick(runner)
+    assert state['items']['telegram:alastartrades:1']['status'] == 'label_frozen'
+    assert set(seen) == {'save', 'current', 'review_queue', 'read_state'}
+    assert all(loop_thread not in threads for threads in seen.values())

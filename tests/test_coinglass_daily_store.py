@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -256,3 +257,24 @@ def test_new_monthly_members_restart_a_previously_completed_daily_pass(env, monk
 
     assert asyncio.run(run())["status"] == "started" and seen == [D]
     store._task = None
+
+
+def test_update_reads_and_writes_coin_files_off_the_event_loop(env, monkeypatch):
+    loop_thread = threading.get_ident()
+    seen = {}
+
+    def recorded(name):
+        function = getattr(store, name)
+
+        def wrapper(*args, **kwargs):
+            seen.setdefault(name, set()).add(threading.get_ident())
+            return function(*args, **kwargs)
+
+        monkeypatch.setattr(store, name, wrapper)
+
+    for name in ("load_status", "save_status", "update_universe", "load_coin", "seed_history", "save_coin"):
+        recorded(name)
+    status = asyncio.run(store.update(D, client=Relay()))
+    assert status["complete_coins"] == 2 and status["history_complete_coins"] == 2
+    assert set(seen) == {"load_status", "save_status", "update_universe", "load_coin", "seed_history", "save_coin"}
+    assert all(loop_thread not in threads for threads in seen.values())
