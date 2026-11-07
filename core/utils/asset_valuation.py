@@ -28,6 +28,16 @@ def _extract_market_symbols(connector: Any) -> Optional[Set[str]]:
     return None
 
 
+async def _spot_only_last_price(connector: Any, symbol: str, timeout_sec: float) -> Optional[float]:
+    """None unless the connector says this coin can only be priced from its spot ticker."""
+    if getattr(type(connector), "get_spot_only_last_price", None) is None:
+        return None
+    try:
+        return await asyncio.wait_for(connector.get_spot_only_last_price(symbol), timeout=max(0.1, float(timeout_sec)))
+    except Exception:
+        return 0.0
+
+
 async def _fetch_last_price(
     connector: Any,
     symbol: str,
@@ -45,6 +55,11 @@ async def _fetch_last_price(
     if market_symbols is not None and key not in market_symbols:
         price_cache[key] = 0.0
         return 0.0
+
+    spot_only = await _spot_only_last_price(connector, key, timeout_sec)
+    if spot_only is not None:
+        price_cache[key] = spot_only
+        return spot_only
 
     try:
         exchange_name = str(

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import ccxt.async_support as ccxt
 from loguru import logger
@@ -33,23 +33,29 @@ class GateConnector(BaseExchange):
     def __init__(self, config: ExchangeConfig):
         super().__init__(config)
 
+    def _client_config(self) -> Dict[str, Any]:
+        return {
+            "apiKey": self.config.api_key or settings.GATE_API_KEY,
+            "secret": self.config.api_secret or settings.GATE_API_SECRET,
+            "enableRateLimit": self.config.enable_rate_limit,
+            "rateLimit": self.config.rate_limit,
+            "timeout": self.config.timeout,
+            "sandbox": self.config.sandbox,
+            "defaultType": self.config.default_type,
+            # load_markets is all-or-nothing: only request what this connector uses, spot and swap.
+            # Delivery contracts, options and the public currency list are unused and kept failing the
+            # whole connection; without fetchCurrencies ccxt derives currencies from the markets.
+            "options": {"fetchMarkets": {"types": ["spot", "swap"]}},
+            "has": {"fetchCurrencies": False},
+        }
+
     async def connect(self) -> bool:
         try:
             explicit_proxy = str(self.config.proxy or settings.GATE_PROXY or "").strip()
             proxy_url = explicit_proxy or str(settings.HTTP_PROXY or settings.HTTPS_PROXY or "").strip() or None
             if proxy_url and not explicit_proxy and bypasses_proxy(_GATE_API_URL):
                 proxy_url = None  # Gate answers direct from here; keep it off the metered proxy
-            self._client = ccxt.gate(
-                {
-                    "apiKey": self.config.api_key or settings.GATE_API_KEY,
-                    "secret": self.config.api_secret or settings.GATE_API_SECRET,
-                    "enableRateLimit": self.config.enable_rate_limit,
-                    "rateLimit": self.config.rate_limit,
-                    "timeout": self.config.timeout,
-                    "sandbox": self.config.sandbox,
-                    "defaultType": self.config.default_type,
-                }
-            )
+            self._client = ccxt.gate(self._client_config())
 
             if proxy_url:
                 # ccxt.async_support does not use requests' ``proxies`` mapping.

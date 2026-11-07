@@ -288,6 +288,31 @@ class BinanceConnector(BaseExchange):
                 await _close_client_safely(client)
         logger.info(f"[{self.name}] Disconnected")
 
+    async def get_spot_only_last_price(self, symbol: str) -> Optional[float]:
+        """Last price of a coin that trades only on spot while this client defaults to futures.
+
+        In ``future`` mode ccxt's ``market()`` redirects BASE/QUOTE to BASE/QUOTE:QUOTE and raises BadSymbol when no
+        such perpetual exists, even though the spot market is loaded, so these balances were valued at zero.
+        ``get_ticker`` stays futures-only on purpose: trading code must not get a spot price for a perpetual symbol.
+        Returns None whenever the normal ticker path applies.
+        """
+        default_type = self.config.default_type
+        if str(default_type or "").lower() not in ("future", "swap"):
+            return None
+        markets = getattr(self._client, "markets", None)
+        market = markets.get(symbol) if isinstance(markets, dict) else None
+        if not isinstance(market, dict) or not market.get("spot"):
+            return None
+        if _resolve_futures_symbol(symbol, default_type, markets) != symbol or f"{symbol}:{market.get('quote')}" in markets:
+            return None
+        try:
+            self._raise_if_throttled("get_spot_only_last_price")
+            response = await self._client.publicGetTickerPrice({"symbol": market["id"]})
+            self._clear_throttle()
+            return float(response["price"])
+        except Exception as e:
+            self._handle_error(e, f"get_spot_only_last_price({symbol})")
+
     async def get_ticker(self, symbol: str) -> Ticker:
         try:
             self._raise_if_throttled("get_ticker")

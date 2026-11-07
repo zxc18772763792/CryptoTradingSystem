@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from config.settings import settings
 from core.ai.ml_signal import MLSignalModel, build_feature_frame
 from core.strategies.strategy_base import Signal, SignalType, StrategyBase
 
@@ -51,10 +52,14 @@ class MLXGBoostStrategy(StrategyBase):
         if params:
             default_params.update(params)
         super().__init__(name, default_params)
-        self._model = MLSignalModel.load_from_path(
-            str(self.params.get("model_path") or default_params["model_path"]),
-            threshold=float(self.params.get("threshold", 0.55)),
-        )
+        model_path = str(self.params.get("model_path") or default_params["model_path"])
+        threshold = float(self.params.get("threshold", 0.55))
+        if settings.ML_SIGNAL_ENABLED or (params or {}).get("model_path"):
+            self._model = MLSignalModel.load_from_path(model_path, threshold=threshold)
+        else:
+            # ML is held off: skip the blocking load, which every strategy-catalog request would otherwise repeat.
+            self._model = MLSignalModel(model_path, threshold=threshold)
+            self._model.load_error = str(settings.ML_SIGNAL_DISABLED_REASON or "disabled_by_configuration")
         self._last_bias: Dict[str, int] = {}
 
     def generate_signals(self, data: pd.DataFrame) -> List[Signal]:
