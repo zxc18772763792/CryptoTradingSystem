@@ -108,7 +108,8 @@ class TestSharedHelperParity:
     the timezone bug in one path but not the other."""
 
     @pytest.fixture(scope="class")
-    def trading_helper(self):
+    @classmethod
+    def trading_helper(cls):
         try:
             from web.api.trading import _to_utc_iso
             return _to_utc_iso
@@ -116,7 +117,8 @@ class TestSharedHelperParity:
             pytest.skip(f"web.api.trading not importable in test env: {exc}")
 
     @pytest.fixture(scope="class")
-    def backtest_helper(self):
+    @classmethod
+    def backtest_helper(cls):
         try:
             from web.api.backtest import _to_utc_iso
             return _to_utc_iso
