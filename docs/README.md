@@ -42,6 +42,7 @@
 - [HUB 过滤追涨单 · 前向纸面账本（hub_runup_filter_v1）](HUB_RUNUP_LEDGER.md)
 - [韩国事件跟踪器请求与健康状态修复（2026-10-27）](KOREAN_TRACKER_RELIABILITY_2026-10-27.md)
 - [韩国警示做空 · 跳过充提双停（影子账本 korea_frozen_skip_v1）](KOREA_FROZEN_SKIP_LEDGER.md)
+- [账本日志断尾修复](LEDGER_JOURNAL_REPAIR.md)
 - [next10xgem1 喊单反向 · 做空 24h 纸面跟踪（next10xgem1_fade_24h_v1）](NEXT10XGEM1_FADE_TRACKER.md)
 - [研究跟踪器改进（2026-10-20）](RESEARCH_TRACKER_IMPROVEMENTS_2026-10-20.md)
 - [跟踪器复审、价格校验与重启（2026-10-29晚）](TRACKER_FOLLOWUP_AUDIT_2026-10-29.md)
