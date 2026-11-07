@@ -1,5 +1,7 @@
 ﻿# Core Dependencies
-ccxt>=4.4,<5
+# Held below 4.5.88: from there defaultType "future" no longer means the perpetual, so with
+# BINANCE_DEFAULT_TYPE=future plain symbols resolve to spot, for quotes and orders alike.
+ccxt>=4.5.87,<4.5.88
 pandas>=2.2,<3
 numpy>=1.26,<2
 python-dotenv>=1.0,<2

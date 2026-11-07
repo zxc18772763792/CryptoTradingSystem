@@ -63,6 +63,11 @@ conda install -n crypto_trading -c conda-forge <pkg> "numpy=1.26.*" "pandas=2.3.
 Re-stating the three pins holds the ABI steady while the solver works. Pure-Python
 packages (jinja2, web3, requests…) are fine via `pip`.
 
+`ccxt` is held at 4.5.87 in `requirements.txt` on purpose. From 4.5.88 `defaultType: future`
+no longer means the perpetual, so with `BINANCE_DEFAULT_TYPE=future` plain symbols such as
+`SOL/USDT` resolve to spot, for quotes and orders alike, and mocked tests do not notice. Moving
+past it needs `swap` in place of `future` and a review of its own.
+
 ## 4. Running the app
 
 ```powershell

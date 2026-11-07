@@ -59,6 +59,14 @@ def test_ccxt_cannot_resolve_a_spot_only_coin_in_futures_mode():
     _run(connector, AsyncMock())
 
 
+def test_futures_mode_still_resolves_plain_symbols_to_the_perpetual():
+    """ccxt 4.5.88 made defaultType "future" stop meaning the perpetual: SOL/USDT would become spot, in quotes and
+    orders alike, and mocked connector tests would not notice. requirements.txt stays below it for this reason."""
+    connector = _connector()
+    assert connector._client.market("SOL/USDT")["symbol"] == "SOL/USDT:USDT"
+    _run(connector, AsyncMock())
+
+
 def test_spot_only_coin_is_priced_from_the_spot_ticker_in_futures_mode():
     connector = _connector()
     assert _run(connector, lambda: connector.get_spot_only_last_price("LUNA/USDT")) == 0.25
