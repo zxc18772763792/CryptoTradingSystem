@@ -163,9 +163,9 @@ tasks and tests call them by path, and hash-pinned ledger modules name them in c
 ## 9. Secrets
 
 Real keys live in `.env` / `.env.local` / `keys.txt` — all gitignored, none ever
-committed (verified across full history). `.env.example` documents the ~240 settings
-with placeholders only; when adding a setting, add it there **with a placeholder**,
-never with a real value.
+committed (verified across full history). `.env.example` documents most of the ~240
+settings in `config/settings.py` (about 50 are not listed yet), with placeholders only;
+when adding a setting, add it there **with a placeholder**, never with a real value.
 
 ## 10. Playwright
 
