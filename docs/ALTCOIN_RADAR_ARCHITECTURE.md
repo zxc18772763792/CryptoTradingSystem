@@ -42,7 +42,8 @@
 - `alerts.py` — `POST`/`DELETE /alerts/preset`。
 - `universe.py` — `GET /radar/watchlist`(+`POST`/`DELETE`)、`GET /radar/universe`、`GET /radar/collector`。
 - `pump.py` — `GET /radar/pump-watchlist` + `POST .../refresh`(**周度模型名单**,读 latest.json,refresh 触发子进程)。
-- `signals.py` — `GET /radar/lsr-crowding`、`GET /radar/kol-consensus`。
+- `signals.py` — `GET /radar/lsr-crowding`、`GET /radar/kol-consensus`(页面已不再调用)。
+- `risk.py` — `GET /radar/risk-meter`(一周风险读数,计算在 `core/research/altcoin_risk_meter.py`,直接读本地日线,线程内计算,缓存 6 小时)。
 
 扫描主入口 `GET /radar/scan`:宇宙解析(scope) → 缓存(单飞) → `_compute_scan_payload`
 (本地 K 线 + coins-markets 快照 + 因子/相关性/微结构/衍生品) → `build_altcoin_rows` →
@@ -76,8 +77,8 @@ mode 过滤 → 排序 → 限量。缓存 key = exchange+tf+宇宙哈希+mode+v
 ### 前端 — `web/static/js/altcoin_radar.js`（~2.6k 行）+ `web/templates/index.html`
 - 主列顺序:**本周起飞候选(头牌)** → 大盘 KOL 共识条 → LSR 拥挤度卡 → 摘要/元信息 → 现在在动的(实时扫描) → 检视器。
 - 竞态守卫(scanSeq/detailSeq)、失败保留上一版、后台刷新轮询。
-- `loadAltcoinRadarTabData` 进 tab 时拉:pump-watchlist / kol-consensus / lsr-crowding / 实时 scan。
-- 改 JS/CSS 必须 bump `web/asset_versions.py`(缓存清除);当前 altcoin_radar.js v29。
+- `loadAltcoinRadarTabData` 进 tab 时拉:pump-watchlist / risk-meter / 实时 scan。
+- 改 JS/CSS 必须 bump `web/asset_versions.py`(缓存清除)。
 
 ## 3. 数据来源与依赖
 

@@ -12,6 +12,7 @@ the test suite depend on. The real logic lives in the submodules:
   universe — /radar/watchlist, /radar/universe, /radar/collector
   pump     — /radar/pump-watchlist
   signals  — /radar/lsr-crowding, /radar/kol-consensus
+  risk     — /radar/risk-meter
 
 Tests monkeypatch names at their owning submodule (e.g.
 ``altcoin_api.scan._resolve_universe``, ``altcoin_api.detail.get_onchain_overview``).
@@ -138,5 +139,7 @@ router.include_router(universe.router)
 # --- feature route clusters (own sub-routers, merged into the package router) ---
 from . import pump as pump  # noqa: E402
 from . import signals as signals  # noqa: E402
+from . import risk as risk  # noqa: E402
 router.include_router(pump.router)
 router.include_router(signals.router)
+router.include_router(risk.router)

@@ -60,6 +60,8 @@
   // A cold scan takes 16-60s and a forced one ~57s; the old 60s limit tripped on both.
   const SCAN_TIMEOUT_MS = 120000;
   const FORCE_SCAN_TIMEOUT_MS = 180000;
+  const RISK_METER_TIMEOUT_MS = 120000;
+  const RISK_METER_REFRESH_MS = 3600000;
 
   const PRESET_BY_KIND = {
     anomaly: '点火预警',
@@ -103,6 +105,8 @@
     researchProposalInFlight: new Set(),
     preferencesLoaded: false,
     savedControls: {},
+    riskMeter: null,
+    riskMeterLoadedAt: 0,
   };
 
   function q(id) {
@@ -904,6 +908,101 @@
     return display && display !== symbol ? `${display} · ${symbol}` : symbol;
   }
 
+  // One-week risk reading: how often coins as volatile as this one touched a level, over
+  // the past year. It measures how wild a coin is and says nothing about direction.
+  function riskReadingFor(symbol) {
+    const meter = state.riskMeter;
+    if (!meter?.available) return null;
+    const base = String(symbol || '').split('/')[0].trim().toUpperCase();
+    const reading = meter.symbols?.[base];
+    const level = reading && (meter.calibration || []).find((row) => row.decile === reading.decile);
+    if (!level) return null;
+    const group = (meter.groups || []).find((item) => item.key === level.group);
+    const tone = level.group === 'hottest' ? 'danger' : level.group === 'hot' ? 'control' : 'muted';
+    return { ...reading, level, tone, label: group?.label || '--' };
+  }
+
+  function wholePercent(rate) {
+    // A rounded "0%" would read as "cannot happen"; it only means rare in the past year.
+    const value = toNumber(rate, 0);
+    return value < 0.005 ? '<1%' : `${Math.round(value * 100)}%`;
+  }
+
+  function riskPercentile(reading) {
+    return Math.max(1, Math.round(toNumber(reading?.pct, 0) * 100));
+  }
+
+  function riskChip(symbol) {
+    const reading = riskReadingFor(symbol);
+    if (!reading) return '';
+    const up = wholePercent(reading.level.up40);
+    const down = wholePercent(reading.level.dn30);
+    const title = `${reading.label}：14 天波动率约为币池第 ${riskPercentile(reading)} 百分位。过去一年同档币一周内碰到 +40% 的比例 ${up}，碰到 −30% 的比例 ${down}。只表示风险，不判断方向。`;
+    return `<div class="altcoin-radar-risk-line"><span class="altcoin-radar-tag altcoin-radar-risk-chip" data-tone="${reading.tone}" title="${escapeHtml(title)}">${escapeHtml(reading.label)} ↑${up} ↓${down}</span></div>`;
+  }
+
+  function renderRiskLegend() {
+    const legend = q('altcoin-radar-risk-legend');
+    if (!legend) return;
+    const meter = state.riskMeter;
+    legend.classList.toggle('is-hidden', !meter?.available);
+    if (!meter?.available) return;
+    legend.dataset.tone = meter.stale ? 'warn' : 'neutral';
+    legend.textContent = `币名下的 ↑ / ↓：过去一年同档波动的币，一周内碰到 +40% / −30% 的比例。只表示风险，不判断方向。数据截至 ${meter.as_of}${meter.stale ? '（已过期）' : ''}。`;
+  }
+
+  function renderRiskPanel(symbol) {
+    const body = q('altcoin-radar-risk-body');
+    if (!body) return;
+    const meter = state.riskMeter;
+    if (!meter?.available) {
+      body.textContent = state.riskMeterLoadedAt ? '风险读数暂不可用' : '等待加载...';
+      return;
+    }
+    const reading = riskReadingFor(symbol);
+    if (!reading) {
+      body.textContent = '这个币没有币安永续日线，无法给出读数。';
+      return;
+    }
+    const { level } = reading;
+    const method = meter.method || {};
+    const leverageRows = (meter.leverages || [])
+      .map((lev) => `<tr><td>${toNumber(lev, 0)}×</td><td>${wholePercent(level.long?.[lev])}</td><td>${wholePercent(level.short?.[lev])}</td></tr>`)
+      .join('');
+    body.innerHTML = `
+      <div class="altcoin-radar-risk-head">
+        <span class="altcoin-radar-tag" data-tone="${reading.tone}">${escapeHtml(reading.label)}</span>
+        <span>14 天高低价波动率 ${(toNumber(reading.vol14, 0) * 100).toFixed(1)}%，约为币池第 ${riskPercentile(reading)} 百分位${reading.in_universe ? '' : '（不在流动性前 150，按币池尺度估算）'}</span>
+      </div>
+      <div class="altcoin-radar-score-strip">
+        <div class="altcoin-radar-score-pill"><span>一周碰到 +40%</span><strong>${wholePercent(level.up40)}</strong></div>
+        <div class="altcoin-radar-score-pill"><span>一周碰到 −30%</span><strong>${wholePercent(level.dn30)}</strong></div>
+      </div>
+      <table class="altcoin-radar-risk-table">
+        <caption>一周内逆向波动达到 1/杠杆 的比例</caption>
+        <thead><tr><th>杠杆</th><th>做多</th><th>做空</th></tr></thead>
+        <tbody>${leverageRows}</tbody>
+      </table>
+      <p class="altcoin-radar-risk-note">只表示风险，不判断方向。比例来自同档币 ${escapeHtml(String(method.calibration_from || '--'))} 至 ${escapeHtml(String(method.calibration_to || '--'))} 的表现，数据截至 ${escapeHtml(String(meter.as_of || '--'))}${meter.stale ? '（已过期）' : ''}。杠杆未含维持保证金和资金费，真实爆仓线更近。大跌周所有币一起碰线，单周可能远高于平均；行情变热时最疯一档会偏低几个百分点。</p>
+    `;
+  }
+
+  async function loadRiskMeter(force = false) {
+    const recent = Date.now() - state.riskMeterLoadedAt < RISK_METER_REFRESH_MS;
+    if (!force && state.riskMeter?.available && recent) return;
+    try {
+      // The first build reads every local daily file; the board does not wait for it.
+      state.riskMeter = await requireApi()('/altcoin/radar/risk-meter', { timeoutMs: RISK_METER_TIMEOUT_MS });
+    } catch (error) {
+      console.warn('loadRiskMeter failed', error?.message || error);
+    }
+    state.riskMeterLoadedAt = Date.now();
+    renderRiskLegend();
+    if (state.pumpWatchlist) renderPumpWatchlist(state.pumpWatchlist);
+    if (state.scan) renderRanking(state.scan.rows || []);
+    if (state.selectedSymbol) renderRiskPanel(state.selectedSymbol);
+  }
+
   function renderRanking(rows) {
     const tbody = q('altcoin-radar-ranking-body');
     if (!tbody) return;
@@ -940,6 +1039,7 @@
               <div class="altcoin-radar-symbol-cell">
                 <div class="altcoin-radar-symbol-main">${escapeHtml(symbolLabel || '--')}</div>
                 <div class="altcoin-radar-symbol-sub">${escapeHtml(stateText)}</div>
+                ${riskChip(symbol)}
                 ${extraTags.length ? `<div class="altcoin-radar-tag-row">${renderTagRow(extraTags)}</div>` : ''}
               </div>
             </td>
@@ -1102,6 +1202,7 @@
       .join('');
 
     renderSparkline(detailPayload?.sparkline || selected.sparkline || []);
+    renderRiskPanel(selected.symbol);
 
     const actionPlan = detailPayload?.action_plan || {};
     const actionItems = [];
@@ -1824,7 +1925,7 @@
         return [
           '<tr>',
           `<td>${toNumber(row.rank, 0)}</td>`,
-          `<td><strong>${escapeHtml(String(row.base || ''))}</strong>${row.exchange_notice ? ` <span class="altcoin-radar-tag" style="color:${row.exchange_notice === 'monitoring_tag' ? 'var(--warning)' : 'var(--negative)'};" title="Binance 公告">${row.exchange_notice === 'monitoring_tag' ? '监控标签' : '下架公告'}</span>` : ''}${row.delist_risk_flagged ? ` <span class="altcoin-radar-tag" style="color:var(--warning);" title="下架风险分位 ${(Number(row.delist_risk_percentile) * 100).toFixed(0)}%：成交量低、走弱、深度回撤的币被下架概率约为平均的 5 倍；仅提示，约 9/10 被标记的币 60 天内不会被下架">高下架风险</span>` : ''}</td>`,
+          `<td><strong>${escapeHtml(String(row.base || ''))}</strong>${row.exchange_notice ? ` <span class="altcoin-radar-tag" style="color:${row.exchange_notice === 'monitoring_tag' ? 'var(--warning)' : 'var(--negative)'};" title="Binance 公告">${row.exchange_notice === 'monitoring_tag' ? '监控标签' : '下架公告'}</span>` : ''}${row.delist_risk_flagged ? ` <span class="altcoin-radar-tag" style="color:var(--warning);" title="下架风险分位 ${(Number(row.delist_risk_percentile) * 100).toFixed(0)}%：成交量低、走弱、深度回撤的币被下架概率约为平均的 5 倍；仅提示，约 9/10 被标记的币 60 天内不会被下架">高下架风险</span>` : ''}${riskChip(row.base)}</td>`,
           `<td>${toNumber(row.score, 0).toFixed(3)}</td>`,
           `<td>${escapeHtml(drivers || '--')}</td>`,
           `<td>${fmtPumpMcap(row.mcap_usd)}</td>`,
@@ -1916,6 +2017,7 @@
   async function loadAltcoinRadarTabData(force = false) {
     bindAltcoinRadarPage();
     loadPumpWatchlist().catch(() => {});
+    loadRiskMeter(force).catch(() => {});
     const universePromise = loadUniverseOptions(force).catch((error) => {
       console.warn('loadAltcoinRadarTabData universe bootstrap failed', error?.message || error);
     });

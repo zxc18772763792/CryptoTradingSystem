@@ -19370,5 +19370,92 @@ body.app-page #altcoin-radar .altcoin-radar-inspector-actions select {
 
 body.app-page #altcoin-radar .altcoin-radar-inspector-shell {
     display: grid;
+    /* Panels hide their overflow, so plain auto rows get squeezed to fit and cut the content off with no scrollbar. */
+    grid-auto-rows: max-content;
+    align-content: start;
     gap: 10px;
+}
+
+/* One-week risk reading: a chip under the coin name in both tables, one legend line, one inspector panel. */
+body.app-page #altcoin-radar .altcoin-radar-risk-legend {
+    flex: 1 1 100%;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-faint);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-legend.is-hidden {
+    display: none;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-legend[data-tone="warn"] {
+    color: var(--warning-soft);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-line {
+    margin-top: 3px;
+    line-height: 1;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-chip {
+    padding: 1px 6px;
+    font-size: 10px;
+    line-height: 1.5;
+    white-space: nowrap;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-body {
+    display: grid;
+    gap: 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-sub);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-table caption {
+    margin-bottom: 4px;
+    font-size: 11px;
+    text-align: left;
+    color: var(--text-faint);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-table th,
+body.app-page #altcoin-radar .altcoin-radar-risk-table td {
+    padding: 3px 6px;
+    text-align: right;
+    border-bottom: 1px solid rgba(var(--line-rgb), 0.3);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-table th {
+    font-weight: 600;
+    color: var(--text-sub);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-table td {
+    color: var(--text-main);
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-table th:first-child,
+body.app-page #altcoin-radar .altcoin-radar-risk-table td:first-child {
+    text-align: left;
+}
+
+body.app-page #altcoin-radar .altcoin-radar-risk-note {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-faint);
 }

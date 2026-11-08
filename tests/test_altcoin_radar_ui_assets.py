@@ -216,6 +216,37 @@ def test_altcoin_radar_page_drops_the_removed_controls_and_cards():
         assert dead_class not in style_css, dead_class
 
 
+def test_altcoin_radar_shows_the_one_week_risk_reading():
+    template_source = _read("web/templates/index.html")
+    radar_block = template_source.split('id="altcoin-radar"', 1)[1].split('id="arbitrage"', 1)[0]
+    radar_js = _read("web/static/js/altcoin_radar.js")
+    style_css = _read("web/static/css/style.css")
+
+    assert 'id="altcoin-radar-risk-legend"' in radar_block
+    assert 'id="altcoin-radar-risk-body"' in radar_block
+    assert "一周风险读数" in radar_block
+
+    assert "'/altcoin/radar/risk-meter'" in radar_js
+    assert "loadRiskMeter(force).catch(() => {});" in radar_js
+    # The chip sits inside the existing coin cells, so neither table gains a column.
+    assert "${riskChip(symbol)}" in radar_js
+    assert "${riskChip(row.base)}" in radar_js
+    assert "renderRiskPanel(selected.symbol);" in radar_js
+    # It must keep saying what it is: a risk reading, with a date, and not a signal.
+    assert radar_js.count("不判断方向") >= 3
+    assert "未含维持保证金" in radar_js
+    assert "数据截至" in radar_js
+
+    risk_css = style_css.split("One-week risk reading", 1)[1]
+    assert ".altcoin-radar-risk-chip" in risk_css
+    assert not re.search(r"#[0-9a-fA-F]{3,8}\b", risk_css.replace("#altcoin-radar", ""))
+
+    # Auto rows squeezed every inspector panel to about 116px and hid the rest with no scrollbar.
+    slim_css = style_css.split("ALTCOIN RADAR - SLIM PAGE", 1)[1]
+    shell_rule = slim_css.split(".altcoin-radar-inspector-shell {", 1)[1].split("}", 1)[0]
+    assert "grid-auto-rows: max-content;" in shell_rule
+
+
 def test_news_template_uses_versioned_css_asset():
     template_source = _read("web/templates/news.html")
     template = _render_template(template_source)

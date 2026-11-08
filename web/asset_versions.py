@@ -6,7 +6,7 @@ from typing import Final
 
 ASSET_VERSIONS: Final[dict[str, int]] = {
     "vendor/plotly-2.35.2.min.js": 1,
-    "css/style.css": 143,
+    "css/style.css": 144,
     "css/ai_agent.css": 2,
     "js/app.js": 167,
     "js/research_trackers.js": 6,
@@ -16,7 +16,7 @@ ASSET_VERSIONS: Final[dict[str, int]] = {
     "css/alastar_activity.css": 2,
     "js/ui_presentation.js": 4,
     "js/research_tracker_diagnostics.js": 2,
-    "js/altcoin_radar.js": 33,
+    "js/altcoin_radar.js": 34,
     "js/research_workbench.js": 12,
     "js/ai_research.js": 84,
     "js/ai_research_diagnostics.js": 7,
