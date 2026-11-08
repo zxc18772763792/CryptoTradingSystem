@@ -44,6 +44,19 @@ LOG_PATH = PROJECT_ROOT / "logs" / "research_loop_v3.log"
 SCRIPT = PROJECT_ROOT / "scripts" / "research_loop_v3.py"
 LOCK_STALE = timedelta(minutes=90)
 FEEDBACK_ROWS = 15
+INVALID_FEEDBACK_ROUNDS = 4  # about one day of rounds
+INVALID_FEEDBACK_ROWS = 12
+# Extra model calls per round to rewrite the formulas the validator rejected. A module constant rather than a
+# config field: the web process validates the stored config with extra="forbid" and would reject a key it does
+# not know yet until it restarts.
+MAX_REPAIR_ATTEMPTS = 1
+# Shown in the prompt to make the depth count concrete. It is an evaluated ledger entry (relative_premium_instability,
+# direction low), so a model that copies it with that direction costs no trial: it is a duplicate. The test checks it
+# sits exactly at the depth limit.
+DEPTH_EXAMPLE = {"op": "div", "args": [
+    {"op": "std", "window": 21, "args": [{"col": "premium"}]},
+    {"op": "mean", "window": 21, "args": [
+        {"op": "div", "args": [{"op": "sub", "args": [{"col": "high"}, {"col": "low"}]}, {"col": "close"}]}]}]}
 
 SYSTEM_PROMPT = """You are a quantitative researcher designing cross-sectional factors for crypto perpetual futures.
 Every day the ~150 most liquid USDT perpetuals are ranked by your formula. The question is whether the ranking
@@ -53,6 +66,8 @@ Reply with one JSON object:
 {"hypothesis": "<one sentence>", "formulas": [{"name": "<snake_case>", "direction": "high"|"low",
  "thesis": "<why this should carry information the known factors do not>", "expr": <expression>}]}
 "direction": "high" means the coins with the largest values should outperform. Propose falsifiable ideas.
+Every expression must obey "formula_rules" (nesting depth, node count, argument counts); a formula that breaks
+them is discarded without being evaluated, so count the levels before you answer.
 Do not claim returns. Do not repeat a formula already evaluated."""
 
 GOAL = (
@@ -157,6 +172,43 @@ def gate(dev: Dict[str, Any], holdout: Dict[str, Any], n_trials: int, cfg: Resea
 
 
 # ------------------------------------------------------------------------------------------ prompt
+def formula_rules() -> List[str]:
+    """The validator's limits spelled out for the model, built from the DSL constants so the two agree."""
+    from core.research.xs_feature_dsl import BINARY_OPS, MAX_DEPTH, MAX_NODES, MAX_WINDOW, MIN_WINDOW, UNARY_OPS, WINDOW_OPS
+
+    return [
+        f"Depth: the root node is level 1 and every \"args\" list opens the next level. No node, leaves included, may "
+        f"sit deeper than level {MAX_DEPTH}, so at most {MAX_DEPTH - 1} operators can be nested along any path and an "
+        f"operator at level {MAX_DEPTH - 1} may only take leaves. Wrapping a formula that is already {MAX_DEPTH} levels "
+        "deep in one more operator gets it rejected.",
+        f"Example exactly at the limit ({MAX_DEPTH} levels, 9 nodes; already evaluated with direction low, shown only "
+        "for the count): " + json.dumps(DEPTH_EXAMPLE)
+        + " - its deepest path is div(1) > mean(2) > div(3) > sub(4) > col high(5).",
+        f"Size: at most {MAX_NODES} nodes in total; every operator, column and constant counts as one.",
+        f"Arguments: {', '.join(sorted(BINARY_OPS))} take exactly 2 args; "
+        f"{', '.join(sorted(UNARY_OPS | WINDOW_OPS))} take exactly 1 arg.",
+        f"Window ops ({', '.join(sorted(WINDOW_OPS))}) need an integer \"window\" key on the same node "
+        f"({MIN_WINDOW}..{MAX_WINDOW}; pct_change and lag also allow 1). The window is never an element of args: "
+        '{"op": "mean", "window": 7, "args": [{"col": "close"}]}.',
+        'A column is a leaf {"col": "<name>"}, never {"op": "<name>"}; a constant is {"const": <number>}. '
+        "Every formula must use at least one column.",
+        "Saving levels: div already treats a denominator of about 0 (|d| <= 1e-12) as missing, so adding a tiny "
+        "constant to a denominator is not needed for safety and costs a level; zscore(x, w) is "
+        "(x - mean(x, w)) / std(x, w) in one node; pct_change(x, w) is x / lag(x, w) - 1 in one node.",
+    ]
+
+
+def recent_invalid(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The validator's messages on this loop's recent proposals, newest last (name and error only, no results)."""
+    rows: List[Any] = []
+    for r in state["rounds"][-INVALID_FEEDBACK_ROUNDS:]:
+        rows += list(r.get("invalid") or [])
+        for attempt in r.get("repairs") or []:
+            rows += list(attempt.get("invalid") or [])
+    keep = ("name", "error", "depth", "nodes")
+    return [{k: row[k] for k in keep if k in row} for row in rows if isinstance(row, dict)][-INVALID_FEEDBACK_ROWS:]
+
+
 def build_prompt(state: Dict[str, Any], panel, cfg: ResearchLoopV3Config) -> str:
     from core.research.xs_daily_panel import COLUMNS, FACTORS, anonymized_summary
     from core.research.xs_feature_dsl import describe_grammar
@@ -183,16 +235,81 @@ def build_prompt(state: Dict[str, Any], panel, cfg: ResearchLoopV3Config) -> str
     ]
     return json.dumps(
         {
-            "task": f"Propose {cfg.formulas_per_round} new factor formulas.",
+            "task": f"Propose {cfg.formulas_per_round} new factor formulas. Each must satisfy formula_rules; your "
+                    "recent formulas the validator rejected are listed with its message and their measured depth and size.",
             "grammar": describe_grammar(COLUMNS),
+            "formula_rules": formula_rules(),
             "panel": anonymized_summary(panel, end=DEV_END),
             "known_factors": FACTORS,
             "goal": GOAL,
             "names_already_tried": [e["name"] for e in ledger[:-FEEDBACK_ROWS]][-150:],
             "your_previous_formulas_development_results": feedback,
+            "your_recent_formulas_rejected_by_the_validator": recent_invalid(state),
         },
         ensure_ascii=False,
     )
+
+
+def build_repair_prompt(rejected: List[Any], errors: List[Dict[str, Any]], hypothesis: str) -> str:
+    """Ask the model to rewrite the formulas the validator rejected this round (its own text and the errors only)."""
+    from core.research.xs_daily_panel import COLUMNS
+    from core.research.xs_feature_dsl import describe_grammar
+
+    return json.dumps(
+        {
+            "task": f"The validator rejected these {len(rejected)} formulas, so they were not evaluated. Rewrite each one "
+                    "so it satisfies formula_rules, keeping its idea and direction; if the idea does not fit, simplify it "
+                    "(fewer nested operators). Reply with the same JSON object, holding only the rewritten formulas.",
+            "grammar": describe_grammar(COLUMNS),
+            "formula_rules": formula_rules(),
+            "hypothesis": hypothesis,
+            "rejected": [{"formula": raw if isinstance(raw, dict) else str(raw)[:400], **err}
+                         for raw, err in zip(rejected, errors)],
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+
+
+def expression_shape(node: Any, level: int = 1) -> tuple:
+    """(depth, node count) of an expression as the model wrote it, malformed nodes included.
+
+    Same counting as the validator (the root is level 1), but it measures the whole tree instead of
+    stopping at the first violation, so the feedback can say by how much a formula is over the limit.
+    """
+    args = node.get("args") if isinstance(node, dict) and "col" not in node and "const" not in node else None
+    if not isinstance(args, list) or not args or level >= 50:
+        return level, 1
+    shapes = [expression_shape(a, level + 1) for a in args]
+    return max(d for d, _ in shapes), 1 + sum(n for _, n in shapes)
+
+
+def screen(raws: List[Any], ledger: Dict[str, Any], accepted: List[Dict[str, Any]]) -> tuple:
+    """Validate and de-duplicate proposals, appending the new ones to ``accepted``.
+
+    Returns (invalid rows, the rejected proposals in the same order, duplicate names). Rejected
+    proposals never reach the ledger, so they do not count as trials.
+    """
+    from core.research.xs_daily_panel import COLUMNS
+    from core.research.xs_feature_dsl import FormulaError, fingerprint, validate_formula
+
+    invalid, rejected, duplicates = [], [], []
+    for raw in raws:
+        try:
+            formula = validate_formula(raw, columns=COLUMNS)
+        except FormulaError as exc:
+            row = {"name": str((raw or {}).get("name") if isinstance(raw, dict) else "?")[:80], "error": str(exc)}
+            if isinstance(raw, dict):
+                row["depth"], row["nodes"] = expression_shape(raw.get("expr"))
+            invalid.append(row)
+            rejected.append(raw)
+            continue
+        fp = fingerprint(formula)
+        if fp in ledger or any(fingerprint(f) == fp for f in accepted):
+            duplicates.append(formula["name"])
+            continue
+        accepted.append(formula)
+    return invalid, rejected, duplicates
 
 
 # ------------------------------------------------------------------------------------------ round
@@ -213,8 +330,8 @@ def run_round(*, force: bool = False, log: Callable[[str], None] = print, genera
             s.update(status="loading", last_error=None)
 
         update_state(start)
-        from core.research.xs_daily_panel import COLUMNS, load_panel
-        from core.research.xs_feature_dsl import FormulaError, fingerprint, validate_formula
+        from core.research.xs_daily_panel import load_panel
+        from core.research.xs_feature_dsl import fingerprint
         from core.research.xs_return_evaluation import EvalContext, bonferroni_z, evaluate
 
         panel = load_panel(log=log)
@@ -228,22 +345,38 @@ def run_round(*, force: bool = False, log: Callable[[str], None] = print, genera
 
             async def generate(prompt: str) -> Dict[str, Any]:
                 return await generate_json(prompt, system_prompt=SYSTEM_PROMPT, timeout=cfg.model_timeout_seconds)
+
+        def ask(prompt: str) -> Dict[str, Any]:
+            return asyncio.run(asyncio.wait_for(generate(prompt), cfg.model_timeout_seconds * 2 + 30))
+
         state = load_state()
-        output = asyncio.run(asyncio.wait_for(generate(build_prompt(state, panel, cfg)), cfg.model_timeout_seconds * 2 + 30))
-        formulas, invalid, duplicates = [], [], []
-        for raw in list(output.get("formulas") or [])[: cfg.formulas_per_round]:
+        output = ask(build_prompt(state, panel, cfg))
+        hypothesis = str(output.get("hypothesis") or "")[:400]
+        formulas: List[Dict[str, Any]] = []
+        invalid, rejected, duplicates = screen(list(output.get("formulas") or [])[: cfg.formulas_per_round], state["ledger"], formulas)
+
+        # Rewrite what the validator rejected, at most MAX_REPAIR_ATTEMPTS extra calls. A repair replaces a rejected
+        # formula one for one, so a round still evaluates at most formulas_per_round formulas.
+        repairs: List[Dict[str, Any]] = []
+        pending = invalid
+        while rejected and len(repairs) < MAX_REPAIR_ATTEMPTS:
+            attempt: Dict[str, Any] = {"requested": [row["name"] for row in pending]}
+            repairs.append(attempt)
+            _set_round(record, repair_attempts=len(repairs), repairs=repairs)
+            prompt = build_repair_prompt(rejected, pending, hypothesis)
             try:
-                formula = validate_formula(raw, columns=COLUMNS)
-            except FormulaError as exc:
-                invalid.append({"name": str((raw or {}).get("name") if isinstance(raw, dict) else "?")[:80], "error": str(exc)})
-                continue
-            fp = fingerprint(formula)
-            if fp in state["ledger"] or any(fingerprint(f) == fp for f in formulas):
-                duplicates.append(formula["name"])
-                continue
-            formulas.append(formula)
-        _set_round(record, status="evaluating", hypothesis=str(output.get("hypothesis") or "")[:400], invalid=invalid,
-                   duplicates=duplicates, generation=output.get("_generation", {}))
+                fixed = ask(prompt)
+            except Exception as exc:  # noqa: BLE001 - the formulas accepted on the first pass are still evaluated
+                attempt["error"] = f"{getattr(exc, 'code', type(exc).__name__)}: {str(exc)[:300]}"
+                log(f"repair {len(repairs)} failed: {attempt['error']}")
+                break
+            before = len(formulas)
+            pending, rejected, again = screen(list(fixed.get("formulas") or [])[: len(rejected)], state["ledger"], formulas)
+            attempt.update(accepted=[f["name"] for f in formulas[before:]], invalid=pending, duplicates=again,
+                           generation=fixed.get("_generation", {}))
+            log(f"repair {len(repairs)}: {len(attempt['accepted'])} fixed, {len(pending)} still invalid, {len(again)} duplicates")
+        _set_round(record, status="evaluating", hypothesis=hypothesis, invalid=invalid, duplicates=duplicates,
+                   generation=output.get("_generation", {}), repair_attempts=len(repairs), repairs=repairs)
 
         evaluated, frozen = [], []
         for formula in formulas:

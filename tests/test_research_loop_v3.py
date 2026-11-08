@@ -169,6 +169,118 @@ def test_a_round_shows_the_model_development_results_only(monkeypatch, tmp_path)
     assert loop.run_round(force=True, log=lambda m: None, generate=model([mom])) == {"skipped": "another_round_running"}
 
 
+def test_the_prompt_rules_match_the_validator():
+    example = {"name": "example", "direction": "low", "expr": loop.DEPTH_EXAMPLE}
+    dsl.validate_formula(example, columns=xp.COLUMNS)
+    assert loop.expression_shape(loop.DEPTH_EXAMPLE) == (dsl.MAX_DEPTH, 9)  # exactly at the limit, as the rules say
+    with pytest.raises(dsl.FormulaError, match="deeper than"):
+        dsl.validate_formula({**example, "expr": {"op": "neg", "args": [loop.DEPTH_EXAMPLE]}}, columns=xp.COLUMNS)
+    rules = " ".join(loop.formula_rules())
+    assert f"deeper than level {dsl.MAX_DEPTH}" in rules and f"at most {dsl.MAX_NODES} nodes" in rules
+    two, one = next(s for s in loop.formula_rules() if s.startswith("Arguments:")).split(";")
+    assert all(op in two for op in dsl.BINARY_OPS) and all(op in one for op in dsl.UNARY_OPS | dsl.WINDOW_OPS)
+    assert "holdout" not in rules
+    # the shape is measured on the formula as written, past the first violation and malformed nodes included
+    assert loop.expression_shape({"op": "mean", "args": [{"col": "close"}, {"op": "oi"}]}) == (2, 3)
+    assert loop.expression_shape("not a node") == (1, 1)
+
+
+TOO_DEEP = {"name": "too_deep", "direction": "high", "thesis": "t", "expr": {"op": "zscore", "window": 30, "args": [
+    {"op": "div", "args": [{"op": "mean", "window": 7, "args": [{"op": "add", "args": [
+        {"op": "abs", "args": [{"col": "liq_long"}]}, {"const": 1.0}]}]}, {"col": "oi"}]}]}}  # 6 levels, 8 nodes
+SHALLOW = {"name": "too_deep_fixed", "direction": "high", "thesis": "t", "expr": {"op": "zscore", "window": 30, "args": [
+    {"op": "div", "args": [{"op": "mean", "window": 7, "args": [{"col": "liq_long"}]}, {"col": "oi"}]}]}}
+WINDOW_AS_ARG = {"name": "window_as_arg", "direction": "low", "expr": {"op": "mean", "args": [{"col": "close"}, {"const": 7}]}}
+OP_AS_COLUMN = {"name": "op_as_column", "direction": "low", "expr": {"op": "div", "args": [{"col": "volume"}, {"op": "oi"}]}}
+MOM = {"name": "mom", "direction": "high", "expr": {"op": "pct_change", "window": 7, "args": [{"col": "close"}]}}
+
+
+@pytest.fixture
+def scripted_round(monkeypatch, tmp_path):
+    """run_round with a scripted model and a stub scorer: this checks the conversation, not the evaluation."""
+    monkeypatch.setattr(loop, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(loop, "LOCK_PATH", tmp_path / "round.lock")
+    panel = _panel(days=1600, coins=32)
+    monkeypatch.setattr(xp, "load_panel", lambda **kwargs: panel)
+    dev = {"status": "ok", "ic": 0.01, "z": 0.4, "coverage": 0.9, "period": ["2020-07-01", "2023-12-31"]}
+    holdout = {"status": "ok", "z": 0.1, "resid_z": 0.1, "coverage": 0.9, "net_per_book": -0.001, "net_per_book_ex_top3": -0.001}
+    monkeypatch.setattr(ev, "evaluate", lambda formula, ctx, **kw: {"dev": dict(dev), "holdout": dict(holdout)})
+    calls = []
+
+    def run(propose, repair=None):
+        """``propose``: formulas for a new round; ``repair``: formulas returned for each repair request (or an exception)."""
+        async def generate(prompt):
+            body = json.loads(prompt)
+            calls.append(body)
+            if "rejected" not in body:
+                return {"hypothesis": "h", "formulas": propose}
+            if isinstance(repair, Exception):
+                raise repair
+            return {"formulas": repair or []}
+        return loop.run_round(force=True, log=lambda m: None, generate=generate)
+
+    return run, calls
+
+
+def test_a_round_states_the_limits_and_repairs_rejected_formulas_once(scripted_round):
+    run, calls = scripted_round
+    assert "formula_rules" in loop.SYSTEM_PROMPT
+    record = run([TOO_DEEP, MOM], repair=[SHALLOW, MOM])
+    first, repair = calls
+    assert first["formula_rules"] == loop.formula_rules() and first["your_recent_formulas_rejected_by_the_validator"] == []
+    assert record["invalid"] == [{"name": "too_deep", "error": f"expression deeper than {dsl.MAX_DEPTH}", "depth": 6, "nodes": 8}]
+    # the repair request carries the model's own formula, the validator's message and the rules - nothing else
+    assert repair["rejected"] == [{"formula": TOO_DEEP, **record["invalid"][0]}]
+    assert repair["formula_rules"] == loop.formula_rules() and "holdout" not in json.dumps(repair)
+    assert record["repair_attempts"] == 1
+    attempt = record["repairs"][0]
+    # a repair replaces a rejected formula one for one: MOM in the reply is cut, the round stays at formulas_per_round
+    assert attempt["requested"] == ["too_deep"] and attempt["accepted"] == ["too_deep_fixed"]
+    assert attempt["invalid"] == [] and attempt["duplicates"] == []
+    assert record["status"] == "completed" and len(record["evaluated"]) == 2
+    state = loop.load_state()
+    assert sorted(e["name"] for e in state["ledger"].values()) == ["mom", "too_deep_fixed"]  # rejected ones are no trials
+    assert [e["trial_number"] for e in sorted(state["ledger"].values(), key=lambda e: e["trial_number"])] == [1, 2]
+
+    calls.clear()
+    record = run([WINDOW_AS_ARG])  # nothing to repair with: still exactly one repair call
+    assert len(calls) == 1 + loop.MAX_REPAIR_ATTEMPTS == 2
+    assert record["repair_attempts"] == 1 and record["evaluated"] == [] and record["status"] == "completed"
+    assert len(loop.load_state()["ledger"]) == 2
+
+    calls.clear()
+    run([MOM])  # a duplicate, nothing invalid: no repair call
+    feedback = calls[0]["your_recent_formulas_rejected_by_the_validator"]
+    assert len(calls) == 1
+    assert feedback == [
+        {"name": "too_deep", "error": "expression deeper than 5", "depth": 6, "nodes": 8},
+        {"name": "window_as_arg", "error": "mean takes 1 arg", "depth": 2, "nodes": 3},
+    ]
+    assert "holdout" not in json.dumps(calls[0])
+    assert loop.load_state()["rounds"][-1]["repair_attempts"] == 0
+
+
+def test_repair_retries_stop_at_the_cap(scripted_round, monkeypatch):
+    run, calls = scripted_round
+    monkeypatch.setattr(loop, "MAX_REPAIR_ATTEMPTS", 2)
+    record = run([OP_AS_COLUMN], repair=[OP_AS_COLUMN])  # the model never fixes it
+    assert len(calls) == 3 and record["repair_attempts"] == 2
+    assert [a["invalid"][0]["error"] for a in record["repairs"]] == ["op 'oi' needs an args list"] * 2
+    assert loop.load_state()["ledger"] == {}
+    # the second request names only what was still invalid after the first
+    assert [r["name"] for r in calls[2]["rejected"]] == ["op_as_column"]
+    feedback = loop.recent_invalid(loop.load_state())
+    assert [row["name"] for row in feedback] == ["op_as_column"] * 3  # first pass + both repairs
+
+
+def test_a_failed_repair_call_keeps_the_valid_formulas(scripted_round):
+    run, calls = scripted_round
+    record = run([TOO_DEEP, MOM], repair=TimeoutError("model timed out"))
+    assert len(calls) == 2 and record["status"] == "completed"
+    assert record["repair_attempts"] == 1 and record["repairs"][0]["error"].startswith("TimeoutError")
+    assert [e["name"] for e in loop.load_state()["ledger"].values()] == ["mom"]
+
+
 def test_any_started_round_books_the_next_one(monkeypatch, tmp_path):
     import asyncio
     from datetime import datetime, timedelta, timezone
