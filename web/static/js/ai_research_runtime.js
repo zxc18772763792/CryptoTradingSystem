@@ -26,6 +26,15 @@
     return String(status || '--');
   }
 
+  function isRejectedCandidate(candidate) {
+    return !!aiRoot().util?.isRejectedCandidate?.(candidate);
+  }
+
+  function candidateStatusText(candidate, fallback = '--') {
+    if (!candidate) return statusText(fallback);
+    return aiRoot().util?.candidateStatusLabel?.(candidate) || statusText(candidate?.status || fallback);
+  }
+
   function proposalDisplayName(item, index = 0) {
     if (typeof aiRoot().util?.proposalDisplayName === 'function') {
       return aiRoot().util.proposalDisplayName(item, index);
@@ -172,22 +181,23 @@
 
   function nextStepText(snapshot, proposal, candidate) {
     const pendingApprovals = Array.isArray(snapshot?.pendingApprovals) ? snapshot.pendingApprovals.length : 0;
-    if (!proposal) return '建议先做第 1 步“生成研究思路”，再执行第 2 步“生成提案”。';
+    if (!proposal) return '建议先生成研究思路，再生成提案。';
     if (['research_queued', 'research_running'].includes(String(proposal?.status || ''))) {
-      return '第 3 步“运行研究”进行中，先等待候选与验证结果。';
+      return '研究运行中，先等待候选与验证结果。';
     }
-    if (!candidate) return '第 2 步提案已就绪，下一步执行第 3 步“运行研究”。';
-    if (pendingApprovals > 0) return `进入第 4 步“注册/部署”，当前有 ${pendingApprovals} 个候选待人工确认。`;
+    if (!candidate) return '提案已就绪，下一步运行研究。';
+    if (pendingApprovals > 0) return `当前有 ${pendingApprovals} 个候选待人工确认。`;
     if (['paper_running', 'shadow_running', 'live_candidate', 'live_running'].includes(String(candidate?.status || ''))) {
-      return '已进入第 4 步“注册/部署”，可以继续观察运行表现。';
+      return '候选已进入运行，可以继续观察运行表现。';
     }
-    return '查看候选详情后，在右侧完成第 4 步“注册/部署”。';
+    if (isRejectedCandidate(candidate)) return aiRoot().util?.candidateBlockedText?.(candidate) || '当前候选未通过验证，不能注册。';
+    return '候选已通过验证，查看详情后决定是否注册。';
   }
 
   function focusCandidateText(candidate) {
     if (!candidate) return '暂无候选';
     const score = Number(candidate?.score);
-    const status = statusText(candidate?.status || '--');
+    const status = candidateStatusText(candidate);
     return Number.isFinite(score)
       ? `${candidate?.strategy || '--'} / ${status} / ${Math.round(score)}分`
       : `${candidate?.strategy || '--'} / ${status}`;
@@ -205,7 +215,8 @@
     if (!proposal) return '待生成提案';
     if (['research_queued', 'research_running'].includes(proposalStatus)) return '研究运行中';
     if (!candidate) return '待产出候选';
-    if (['rejected'].includes(candidateStatus) || ['rejected'].includes(proposalStatus)) return '验证未通过';
+    if (isRejectedCandidate(candidate) && candidateStatusText(candidate) === '观察中') return '新增行情观察中';
+    if (isRejectedCandidate(candidate) || ['rejected'].includes(candidateStatus) || ['rejected'].includes(proposalStatus)) return '验证未通过';
     if (['paper_running', 'shadow_running', 'live_candidate', 'live_running'].includes(candidateStatus)) return '已进入注册/部署';
     if (candidateStatus === 'validated') return '候选待注册/部署';
     return statusText(candidateStatus || proposalStatus || '--');
@@ -216,7 +227,7 @@
       const score = Number(candidate?.score);
       return Number.isFinite(score)
         ? `${candidate?.strategy || '--'} / ${Math.round(score)}分`
-        : `${candidate?.strategy || '--'} / ${statusText(candidate?.status || '--')}`;
+        : `${candidate?.strategy || '--'} / ${candidateStatusText(candidate)}`;
     }
     if (proposal) {
       const draftCount = Array.isArray(strategyDrafts) ? strategyDrafts.length : 0;
@@ -255,7 +266,7 @@
 
   function stageCard(index, title, tone, primary, metrics, note) {
     return `<article class="ai-flow-stage ${esc(`is-${tone}`)}">
-      <div class="ai-flow-stage-index">Step ${index}</div>
+      <div class="ai-flow-stage-index">第 ${index} 步</div>
       <div class="ai-flow-stage-title">${esc(title)}</div>
       <div class="ai-flow-stage-primary">${esc(primary)}</div>
       <div class="ai-flow-stage-metrics">${metrics.join('')}</div>
@@ -376,7 +387,7 @@
             : '尚未进入部署阶段',
         [
           metric('交易模式', tradingModeLabel(runtime?.trading_mode || '--')),
-          metric('候选状态', statusText(candidate?.status || proposal?.status || '--')),
+          metric('候选状态', candidateStatusText(candidate, proposal?.status || '--')),
           metric('运行中', runningCandidates),
         ],
         nextAction,

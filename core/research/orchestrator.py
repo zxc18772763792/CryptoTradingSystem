@@ -2081,6 +2081,25 @@ async def cancel_proposal_job(
     }
 
 
+def candidate_failed_validation(candidate: StrategyCandidate) -> bool:
+    """A rejected verdict stands until the candidate is validated again; a manual target cannot overwrite it.
+
+    Reserve candidates are the exception by design: borderline, or merely redundant with a running strategy,
+    they stay open to a manual decision (see /ai/reserve-candidates).
+    """
+    meta = getattr(candidate, "metadata", None) or {}
+    validation = getattr(candidate, "validation_summary", None)
+    outcome_type = str(meta.get("outcome_type") or getattr(validation, "outcome_type", "") or "")
+    if (
+        meta.get("reserve_eligible")
+        or getattr(validation, "reserve_eligible", False)
+        or outcome_type in {"redundant_correlated", "borderline"}
+    ):
+        return False
+    verdicts = (getattr(candidate, "promotion", None), validation)
+    return any(str(getattr(verdict, "decision", "") or "").strip() == "reject" for verdict in verdicts)
+
+
 async def promote_existing_candidate(
     app: FastAPI,
     *,
@@ -2102,6 +2121,8 @@ async def promote_existing_candidate(
         candidate.promotion = build_promotion_decision(candidate.candidate_id, candidate.validation_summary)
     promotion = candidate.promotion
     if target:
+        if candidate_failed_validation(candidate):
+            raise HTTPException(status_code=400, detail="候选未通过验证，不能注册")
         decision = str(target).strip()
         if decision == "shadow":
             decision = "paper"

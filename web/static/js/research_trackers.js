@@ -8,18 +8,36 @@ const pct=(v,d=2)=>finite(v)?`${Number(v)>=0?'+':''}${Number(v).toFixed(d)}%`:'-
 const pp=v=>pct(v).replace('%',' 个百分点');
 const date=v=>v?esc(root.fmtDateTime?root.fmtDateTime(v):v):'--';
 const tone=v=>!finite(v)?'':Number(v)>=0?'is-positive':'is-negative';
-const names={alastar_horizons_v3:'Alastar · 多周期',alastar_fresh_call_1h_v2:'Alastar · 1小时',telegram_cryptoquant_24h:'CryptoQuant · 顺势24h',cryptoquant_alert_shadow_v1:'CryptoQuant Alert · 资金流',next10xgem1_fade_24h_v2:'next10xgem1 · 反向24h v2',next10xgem1_fade_24h_v1:'next10xgem1 · v1（停收）',alastartrader1_as_written_v1:'alastartrader1（冒充号）· 按原文',telegram_binance_chat_sentiment:'币安中文群 · 情绪',unlock_short:'大额解锁 · 提前30天',unlock_short_t7:'大额解锁 · 提前7天',supply_factor:'供给通胀因子',xs_reversal:'横截面反转',xs_reversal_liq_filter:'横截面反转 · 异常过滤',coinglass_composite_7d:'Coinglass · 七日组合',coinglass_composite_7d_wide_eq:'Coinglass · 等权扩池',korea_caution_hedged:'韩国警示 · 合并对冲',upbit_caution:'Upbit · 警示做空',upbit_caution_hedged:'Upbit · 警示对冲',upbit_krw_listing:'Upbit · 韩元上币',bithumb_caution:'Bithumb · 警示做空',bithumb_caution_hedged:'Bithumb · 警示对冲',announcement_short_monitor:'币安 · 监控公告',announcement_short_delist:'币安 · 下架公告',listing_short:'新永续 · 上市做空'};
-const groups=[['all','全部'],['telegram','Telegram'],['events','事件'],['factors','因子']];
-const view={filter:'all',query:'',opened:new Set(),data:null};
+const names={alastar_horizons_v3:'Alastar · 多周期',alastar_fresh_call_1h_v2:'Alastar · 1小时',telegram_cryptoquant_24h:'CryptoQuant · 顺势24h',cryptoquant_alert_shadow_v1:'CryptoQuant Alert · 资金流',next10xgem1_fade_24h_v2:'next10xgem1 · 反向24h v2',next10xgem1_fade_24h_v1:'next10xgem1 · v1（停收）',alastartrader1_as_written_v1:'alastartrader1（冒充号）· 按原文',telegram_binance_chat_sentiment:'币安中文群 · 情绪',unlock_short:'大额解锁 · 提前30天',unlock_short_t7:'大额解锁 · 提前7天',supply_factor:'供给通胀因子',xs_reversal:'横截面反转',xs_reversal_liq_filter:'横截面反转 · 异常过滤',coinglass_composite_7d:'Coinglass · 七日组合',coinglass_composite_7d_wide_eq:'Coinglass · 等权扩池',korea_caution_hedged:'韩国警示 · 合并对冲',upbit_caution:'Upbit · 警示做空',upbit_caution_hedged:'Upbit · 警示对冲',upbit_krw_listing:'Upbit · 韩元上币',bithumb_caution:'Bithumb · 警示做空',bithumb_caution_hedged:'Bithumb · 警示对冲',announcement_short_monitor:'币安 · 监控公告',announcement_short_delist:'币安 · 下架公告',listing_short:'新永续 · 上市做空',hub_runup_filter_v1:'HUB · 过滤追涨单',unlock_t7_big_v1:'大额解锁 · 提前7天 ≥10%',event_short_preclose_v1:'事件做空 · 收盘前入场',coinglass_composite_7d_monthly_v1:'Coinglass · 月度换池',korea_frozen_skip_v1:'韩国警示 · 跳过双停'};
+// Older ledgers keep trade-level records in a panel of their own; the summary row links to it.
+const recordPanels={listing_short:'ai-listing-short-tracker',unlock_short:'ai-unlock-short-tracker',unlock_short_t7:'ai-unlock-short-t7-tracker',supply_factor:'ai-supply-factor-tracker',xs_reversal:'ai-xs-reversal-tracker',coinglass_composite_7d:'ai-coinglass-composite-tracker',coinglass_composite_7d_monthly_v1:'ai-coinglass-composite-monthly-tracker',coinglass_composite_7d_wide_eq:'ai-coinglass-composite-wide-tracker',korea_caution_hedged:'ai-korea-caution-tracker',upbit_caution:'ai-upbit-caution-tracker',upbit_caution_hedged:'ai-upbit-caution-hedged-tracker',upbit_krw_listing:'ai-upbit-krw-listing-tracker',bithumb_caution:'ai-bithumb-caution-tracker',bithumb_caution_hedged:'ai-bithumb-caution-hedged-tracker',announcement_short_monitor:'ai-announcement-short-tracker',announcement_short_delist:'ai-announcement-short-tracker'};
+const groups=[['all','全部'],['telegram','Telegram'],['events','事件'],['factors','因子'],['attention','需关注']];
+const view={filter:'all',query:'',showStopped:false,opened:new Set(),data:null};
 function category(r){return r.group==='Telegram信号'?'telegram':r.group==='因子'?'factors':'events';}
 function clock(value){
   const d=new Date(value);
   return value&&!Number.isNaN(d.getTime())?new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(d):'--';
 }
+function isStopped(r){return /停用|停运|已停止|已停收/.test(r.tracker_status_label||'');}
+// Straight-line estimate from the sample pace so far. It ignores time-based review dates some protocols also have.
+function judgmentEta(r,now=Date.now()){
+  if(!finite(r.min_n))return null;
+  const n=count(r.n),left=Number(r.min_n)-n;
+  if(left<=0)return {days:0,reached:true};
+  const start=Date.parse(r.started_at||'');
+  if(!n||!Number.isFinite(start)||now<=start)return null;
+  return {days:Math.round(left*(now-start)/864e5/n),reached:false};
+}
+function attention(r,now=Date.now()){
+  if(isStopped(r))return null;
+  if(r.verdict==='retire'||r.verdict==='confirmed'||judgmentEta(r,now)?.reached)return 'decide';
+  const tone=status(r)[1];
+  return tone==='warn'||tone==='bad'?'check':null;
+}
 function status(r){
   const label=r.tracker_status_label||'';
   if(r.error)return ['读取失败','bad'];
-  if(/停用|停运|已停止/.test(label))return ['已停用','muted'];
+  if(isStopped(r))return [/停收/.test(label)?'已停收':'已停用','muted'];
   if(r.strategy_inbox?.health?.status==='stale')return ['更新延迟','warn'];
   if(r.strategy_inbox?.health?.status==='degraded')return ['采集异常','bad'];
   if(r.source_health?.status==='inaccessible')return ['来源不可访问','bad'];
@@ -42,6 +60,16 @@ function mainResult(r){
   const delta=r.metric_kind==='paired_increment'||r.metric_kind==='excess_return';
   const label=r.metric_kind==='paired_increment'?'配对增益':r.metric_kind==='excess_return'?'同币超额':r.is_paper?'纸面净收益':'净收益';
   return `<strong class="${tone(r.mean_pct)}">${delta?pct(r.mean_pct).replace('%',' pp'):pct(r.mean_pct)}</strong><span class="rt-sub">${label} / ${esc(r.unit||'笔')}</span>`;
+}
+function backtestCell(r){
+  if(!finite(r.backtest_mean_pct))return '--';
+  return `${pct(r.backtest_mean_pct)}<span class="rt-sub">/ ${esc(r.unit||'笔')}</span>`;
+}
+function etaCell(r,now){
+  if(isStopped(r))return '<span class="rt-sub">已停</span>';
+  const eta=judgmentEta(r,now);
+  if(eta?.reached)return '<strong>已满样本</strong>';
+  return eta?`约 ${eta.days} 天`:'<span class="rt-sub">暂无样本</span>';
 }
 function kv(label,value){return `<div><span>${esc(label)}</span><strong>${value}</strong></div>`;}
 function sentimentReceipt(s){
@@ -78,13 +106,24 @@ function detail(r){
   return `<div class="rt-detail-grid"><section><h4>${esc(r.name)}</h4><p>${esc(r.rule||'规则暂未记录')}</p><p class="rt-note">${esc(r.group||'')} · ${esc(r.basis_label||'收益分母未记录')}</p><p class="rt-note">${esc(r.cost_scope||'')}</p>${r.backtest_reference_note?`<p class="rt-note">${esc(r.backtest_reference_note)}</p>`:''}</section>
     <section class="rt-stat-grid">${kv(r.metric_label||'净收益',`${metric(r.mean_pct)} / ${esc(r.unit||'笔')}`)}${kv('90% 区间',ci)}${kv('胜率',finite(r.win_rate)?`${(Number(r.win_rate)*100).toFixed(0)}%`:'--')}${kv('总名义敞口均值',`${metric(r.gross_mean_pct)} / ${esc(r.unit||'笔')}`)}${kv(backtestLabel,`${metric(r.backtest_mean_pct)} / ${esc(r.unit||'笔')}`)}${finite(r.actual_mean_pct)?kv(r.metric_kind==='paired_increment'?'影子自身':'含资金费的纸面收益',`${pct(r.actual_mean_pct,3)}/${esc(r.unit||'笔')}`):''}${r.metric_kind==='paired_increment'?kv('同期原版',`${pct(r.paired_evaluation?.baseline?.mean_pct,3)}/${esc(r.unit||'天')}`):''}</section>
     <section><h4>运行与判定</h4><p>${esc(r.tracker_status_label||'')}${progress?' · '+esc(progress):''}</p>${universe}<p>${esc(r.verdict_label||'')} · ${esc(r.verdict_reason||'')}</p><p class="rt-note">更新 ${date(r.updated_at)}</p>${r.collection_health&&r.collection_health.status!=='healthy'?`<p class="rt-warning">最近完整更新：${date(r.collection_health.last_success_at)}${failures.map(f=>`<br>${esc(f.phase)}：${esc(f.error)}`).join('')}</p>`:''}
+    ${recordPanels[r.id]?`<p><button type="button" class="btn btn-sm" data-tracker-records="${esc(recordPanels[r.id])}">查看逐笔记录</button></p>`:''}
     ${intake?`<p class="rt-note">自动语义解析${intakeStatus} · 已冻结解释 ${frozen} · 非信号 ${count(intake.counts?.non_signal)}${intake.counts?.predates_auto_intake?` · 启用前帖子 ${count(intake.counts.predates_auto_intake)}（未回填）`:''}${intake.counts?.label_queued?` · 旧投递待确认 ${count(intake.counts.label_queued)}`:''}${intake.counts?.retry_pending?` · 待重试 ${count(intake.counts.retry_pending)}`:''}</p>${intake.enabled_at_utc?`<p class="rt-note">启用于 ${date(intake.enabled_at_utc)}</p>`:''}${intake.enabled&&intake.runner_active&&Object.keys(intake.counts||{}).every(k=>k==='predates_auto_intake')?'<p class="rt-note">启用后尚无新帖，暂无可冻结的前向信号。</p>':''}`:''}</section>
     ${marks?`<section><h4>在持标价 · 非实时报价</h4>${marks}</section>`:''}${horizons}${root.TelegramSentimentV2?.detail(r.chat_sentiment?.event_time)||''}${sentimentDetail(r)}
     ${r.strategy_inbox?'<section class="rt-detail-wide"><div id="alastar-strategy-activity" class="alastar-activity" hidden></div></section>':''}</div>`;
 }
-function selectedRows(data,filter=view.filter,query=view.query){
+function matchesFilter(r,filter,now=Date.now()){
+  return filter==='all'||(filter==='attention'?!!attention(r,now):category(r)===filter);
+}
+function etaRank(r,now){
+  if(isStopped(r))return 2e9;
+  const eta=judgmentEta(r,now);
+  return eta?eta.days:1e9;
+}
+function selectedRows(data,filter=view.filter,query=view.query,showStopped=view.showStopped,now=Date.now()){
   const q=query.trim().toLocaleLowerCase();
-  return (data?.trackers||[]).map((r,i)=>({...r,_key:String(r.id||i)})).filter(r=>(filter==='all'||category(r)===filter)&&(!q||[r.name,names[r.id],r.group].join(' ').toLocaleLowerCase().includes(q)));
+  return (data?.trackers||[]).map((r,i)=>({...r,_key:String(r.id||i)}))
+    .filter(r=>(showStopped||!isStopped(r))&&matchesFilter(r,filter,now)&&(!q||[r.name,names[r.id],r.group].join(' ').toLocaleLowerCase().includes(q)))
+    .sort((a,b)=>etaRank(a,now)-etaRank(b,now));
 }
 function render(d){
   const doc=root.document||document;
@@ -93,20 +132,19 @@ function render(d){
   const nested=Array.from(tb.querySelectorAll?.('details[data-alastar-detail][open]')||[],e=>e.getAttribute('data-alastar-detail'));
   const telegramHistoryOpen=!!tb.querySelector?.('details[data-telegram-history][open]');
   const eventOpened=Array.from(tb.querySelectorAll?.('details[data-event-detail][open]')||[],e=>e.getAttribute('data-event-detail'));
-  const rows=selectedRows(d);
+  const now=Date.now();
+  const rows=selectedRows(d,view.filter,view.query,view.showStopped,now);
   let html='';
-  for(const [group,label] of groups.slice(1)){
-    const members=rows.filter(r=>category(r)===group);if(!members.length)continue;
-    if(view.filter==='all')html+=`<tr class="rt-group"><td colspan="6">${label}<span>${members.length}</span></td></tr>`;
-    for(const r of members){
-      const [state,kind]=status(r),open=view.opened.has(r._key),id='rt-detail-'+encodeURIComponent(r._key);
-      const title=names[r.id]||r.name;
-      html+=`<tr class="rt-row${open?' is-open':''}"><td><button type="button" class="rt-name" data-tracker-toggle="${esc(r._key)}" aria-expanded="${open}" aria-controls="${esc(id)}" title="${esc(r.name)}"><span class="rt-row-chevron" aria-hidden="true">›</span><span>${esc(title)}</span></button>${r.strategy_inbox?`<span class="rt-sub rt-receipt">收件 ${count(r.strategy_inbox.total_posts)} · 策略 ${count(r.strategy_inbox.strategy_posts)}</span>`:''}${r.chat_sentiment?`<span class="rt-sub rt-receipt">${esc(sentimentReceipt(r.chat_sentiment))}</span>`:''}</td><td><span class="rt-state" data-tone="${kind}">${state}</span></td><td class="rt-sample">${count(r.n)} / ${finite(r.min_n)?count(r.min_n):'--'} ${esc(r.unit||'笔')}</td><td class="rt-result" title="${esc(r.basis_label||'')}；${esc(r.cost_scope||'')}">${r.error?'--':mainResult(r)}</td><td class="rt-hold">${finite(r.open)?count(r.open):'--'}${r.waiting?`<span class="rt-sub">待入场 ${count(r.waiting)}</span>`:''}</td><td class="rt-time" title="${date(r.updated_at)}">${esc(clock(r.updated_at))}</td></tr>`;
-      html+=`<tr class="rt-detail-row" id="${esc(id)}"${open?'':' hidden'}><td colspan="6">${r.error?`<div class="rt-warning">读取失败：${esc(r.error)}</div>`:detail(r)}</td></tr>`;
-    }
+  for(const r of rows){
+    const [state,kind]=status(r),open=view.opened.has(r._key),id='rt-detail-'+encodeURIComponent(r._key);
+    const title=names[r.id]||r.name;
+    html+=`<tr class="rt-row${open?' is-open':''}"><td><button type="button" class="rt-name" data-tracker-toggle="${esc(r._key)}" aria-expanded="${open}" aria-controls="${esc(id)}" title="${esc(r.name)}"><span class="rt-row-chevron" aria-hidden="true">›</span><span>${esc(title)}</span></button><span class="rt-sub rt-receipt">${esc(r.group||'')}</span>${r.strategy_inbox?`<span class="rt-sub rt-receipt">收件 ${count(r.strategy_inbox.total_posts)} · 策略 ${count(r.strategy_inbox.strategy_posts)}</span>`:''}${r.chat_sentiment?`<span class="rt-sub rt-receipt">${esc(sentimentReceipt(r.chat_sentiment))}</span>`:''}</td><td><span class="rt-state" data-tone="${kind}">${esc(state)}</span></td><td class="rt-sample">${count(r.n)} / ${finite(r.min_n)?count(r.min_n):'--'} ${esc(r.unit||'笔')}</td><td class="rt-result" title="${esc(r.basis_label||'')}；${esc(r.cost_scope||'')}">${r.error?'--':mainResult(r)}</td><td class="rt-result" title="${esc(r.backtest_reference_note||'')}">${r.error?'--':backtestCell(r)}</td><td class="rt-sample">${r.error?'--':etaCell(r,now)}</td><td class="rt-hold">${finite(r.open)?count(r.open):'--'}${r.waiting?`<span class="rt-sub">待入场 ${count(r.waiting)}</span>`:''}</td><td class="rt-time" title="${date(r.updated_at)}">${esc(clock(r.updated_at))}</td></tr>`;
+    html+=`<tr class="rt-detail-row" id="${esc(id)}"${open?'':' hidden'}><td colspan="8">${r.error?`<div class="rt-warning">读取失败：${esc(r.error)}</div>`:detail(r)}</td></tr>`;
   }
-  tb.innerHTML=html||'<tr><td colspan="6" class="u-empty">没有匹配的跟踪器</td></tr>';
+  tb.innerHTML=html||`<tr><td colspan="8" class="u-empty">${view.filter==='attention'?'没有需要关注的账本':'没有匹配的账本'}</td></tr>`;
   tb.onclick=e=>{
+    const records=e.target.closest?.('[data-tracker-records]');
+    if(records){root.ResearchDesk?.openRecords(records.getAttribute('data-tracker-records'));return;}
     const button=e.target.closest?.('[data-tracker-toggle]');if(!button)return;
     const key=button.getAttribute('data-tracker-toggle');
     if(view.opened.has(key))view.opened.delete(key);else view.opened.add(key);
@@ -117,20 +155,27 @@ function render(d){
   };
   const filters=doc.getElementById('research-tracker-filters');
   if(filters){
-    const buttons=groups.map(([key,label])=>`<button type="button" data-tracker-filter="${key}" aria-pressed="${key===view.filter}" class="rt-filter${key===view.filter?' is-active':''}">${label}<span>${(d?.trackers||[]).filter(r=>key==='all'||category(r)===key).length}</span></button>`).join('');
+    const buttons=groups.map(([key,label])=>`<button type="button" data-tracker-filter="${key}" aria-pressed="${key===view.filter}" class="rt-filter${key===view.filter?' is-active':''}">${label}<span>${(d?.trackers||[]).filter(r=>(view.showStopped||!isStopped(r))&&matchesFilter(r,key,now)).length}</span></button>`).join('');
     if(filters.innerHTML!==buttons)filters.innerHTML=buttons;
     filters.onclick=e=>{const b=e.target.closest?.('[data-tracker-filter]');if(b){view.filter=b.getAttribute('data-tracker-filter');render(view.data);}};
   }
   const search=doc.getElementById('research-tracker-search');
   if(search)search.oninput=()=>{view.query=search.value;render(view.data);};
+  const showStopped=doc.getElementById('research-tracker-show-stopped');
+  if(showStopped)showStopped.onchange=()=>{view.showStopped=showStopped.checked;render(view.data);};
   const meta=doc.getElementById('research-trackers-meta');
-  if(meta){meta.textContent=`${rows.length} 个跟踪器 · 更新 ${clock(d?.generated_at)}`;meta.title='各行单位与周期不同，样本数不相加；不作跨周期排名。点击策略查看口径与完整记录。';}
+  if(meta){meta.textContent=`${rows.length} 本 · 按离判定远近排序 · 更新 ${clock(d?.generated_at)}`;meta.title='各行单位与周期不同，样本数不相加；排序只看离判定多远，不是收益排名。预计时间按目前样本速度线性外推，部分账本另有时间条件。';}
   const alastarRows=(d?.trackers||[]).filter(r=>['alastar_horizons_v3','alastar_fresh_call_1h_v2'].includes(r.id));
   root.AlastarActivity?.render(doc.getElementById('alastar-strategy-activity'),(d?.trackers||[]).find(r=>r.strategy_inbox)?.strategy_inbox,alastarRows);
   for(const el of tb.querySelectorAll?.('details[data-alastar-detail]')||[])if(nested.includes(el.getAttribute('data-alastar-detail')))el.open=true;
   if(telegramHistoryOpen){const el=tb.querySelector?.('details[data-telegram-history]');if(el)el.open=true;}
   for(const el of tb.querySelectorAll?.('details[data-event-detail]')||[])if(eventOpened.includes(el.getAttribute('data-event-detail')))el.open=true;
   root.ResearchTrackerDiagnostics?.render(doc.getElementById('research-tracker-diagnostics'),d?.diagnostics);
+  root.ResearchDesk?.setTrackers(d);
 }
-root.ResearchTrackers={render,detail,status,selectedRows};
+function setFilter(filter){
+  view.filter=filter;
+  if(view.data)render(view.data);
+}
+root.ResearchTrackers={render,detail,status,selectedRows,judgmentEta,isStopped,attention,setFilter,displayName:r=>names[r.id]||r.name};
 })(window);

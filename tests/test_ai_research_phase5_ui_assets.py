@@ -30,7 +30,6 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-planner-max-backtests"' in template
     assert 'id="ai-auto-goal-btn"' in template
     assert 'id="ai-oneclick-btn"' in template
-    assert 'id="ai-oneclick-allocation"' in template
     assert 'id="ai-oneclick-feedback"' in template
     assert 'id="ai-candidate-cards"' in template
     assert 'id="ai-clear-candidates-btn"' in template
@@ -40,7 +39,7 @@ def test_ai_research_template_loads_phase5_modules():
     assert 'id="ai-queue-hint"' in template
     assert '研究目标（可留空自动生成）' in template
     assert 'placeholder="留空自动生成，或写明研究方向"' in template
-    assert '判断市场 → 生成目标 → 生成提案 → 后台研究 → 尝试部署' in template
+    assert '判断市场 → 生成目标 → 生成提案 → 后台研究，到候选结果为止，不会自动部署。' in template
     assert '上海时间 UTC+8' in template
     assert '页面时区：上海时间 (UTC+8)' in news_template
     assert '/static/favicon.svg' in template
@@ -189,7 +188,7 @@ def test_ai_research_phase5_assets_exist_and_define_flow_styles():
     assert "const TRADING_STATS_TIMEOUT_MS=35000;" in app_js
     assert "const TRADING_POSITIONS_TIMEOUT_MS=30000;" in app_js
     assert "const TRADING_OPEN_ORDERS_TIMEOUT_MS=25000;" in app_js
-    assert "modules.agent?.refresh?.({includeDetails:activeTab==='ai-agent'})" in app_js
+    assert "modules.agent?.refresh?.({includeDetails:true})" in app_js
     assert "else if(tab==='ai-research')refreshAiResearchModules();" in app_js
     assert "provider_fallback" in ai_js
     assert "marketContext?.derivatives_context" in ai_js

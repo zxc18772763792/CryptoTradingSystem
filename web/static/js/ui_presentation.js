@@ -78,9 +78,6 @@
       const drawer = document.getElementById(output)?.closest('details');
       if (drawer) drawer.open = true;
     })));
-    [
-      ['.ai-research-use-guide', '使用指南'],
-    ].forEach(([selector, label]) => disclosure([document.querySelector(selector)], label));
     // Keep maintenance controls together, away from the primary price workflow.
     const health = document.querySelector('.data-health-card');
     if (health && !health.dataset.uiFolded) {
@@ -112,44 +109,48 @@
     if (trailing && ['order-trailing-pct', 'order-trailing-dist'].some(id => document.getElementById(id)?.value)) trailing.open = true;
   }
 
+  // Each ledger panel lives in its own collapsed disclosure. Panels re-render their inner HTML,
+  // so the wrapper sits outside them and keeps its open state across refreshes.
+  function ledgerItem(body, panel) {
+    let item = Array.from(body.children).find(node => node.dataset?.ledgerPanel === panel.id);
+    if (!item) {
+      item = document.createElement('details');
+      item.className = 'ui-disclosure ui-ledger-item';
+      item.dataset.uiDisclosure = 'true';
+      item.dataset.ledgerPanel = panel.id;
+      const summary = document.createElement('summary');
+      const title = document.createElement('span');
+      const flag = document.createElement('span');
+      flag.className = 'ui-disclosure-count ui-disclosure-warning';
+      summary.append(title, flag);
+      item.append(summary);
+      body.append(item);
+    }
+    // Move actual nodes, preserving delegated controls and refresh anchors.
+    if (panel.parentElement !== item) item.append(panel);
+    return item;
+  }
+
   function prepareResearchLedgers() {
     const root = document.getElementById('ai-research');
-    const workspace = root?.querySelector('.ai-workspace-stack');
-    if (!workspace) return;
-    const definitions = [
-      ['ui-factor-ledgers', '因子研究循环', '#ai-research-loop-v2, #ai-research-loop-v3'],
-      ['ui-paper-ledgers', '纸面观察账本', '[id^="ai-"][id$="-tracker"]'],
-    ];
-    definitions.forEach(([id, label, selector]) => {
-      const panels = Array.from(root.querySelectorAll(selector));
-      if (!panels.length) return;
-      let drawer = document.getElementById(id);
-      if (!drawer) {
-        drawer = document.createElement('details');
-        drawer.id = id;
-        drawer.dataset.uiDisclosure = 'true';
-        drawer.className = 'ui-disclosure ui-ledger-group';
-        const summary = document.createElement('summary');
-        const title = document.createElement('span');
-        title.textContent = label;
-        const count = document.createElement('span');
-        count.className = 'ui-disclosure-count';
-        summary.append(title, count);
-        const body = document.createElement('div');
-        body.className = 'ui-disclosure-body';
-        drawer.append(summary, body);
-        root.append(drawer);
-      }
-      const body = drawer.lastElementChild;
-      // Move actual nodes, preserving delegated controls and refresh anchors.
-      panels.forEach(panel => { if (panel.parentElement !== body) body.append(panel); });
-      const count = drawer.querySelector('.ui-disclosure-count');
-      const enabled = panels.filter(panel => panel.querySelector('[data-v2-action="toggle"], [data-v3-action="toggle"]')?.textContent.trim().startsWith('暂停')).length;
-      const errors = panels.filter(panel => /最近失败：|加载失败：|读取失败：/.test(panel.textContent)).length;
-      const text = `${panels.length} 项${enabled ? ` · ${enabled} 项已启用` : ''}${errors ? ` · ${errors} 项异常` : ''}`;
-      if (count.textContent !== text) count.textContent = text;
-      count.classList.toggle('ui-disclosure-warning', errors > 0);
+    const drawer = document.getElementById('ui-paper-ledgers');
+    const body = drawer?.querySelector('.ui-disclosure-body');
+    if (!root || !body) return;
+    const panels = Array.from(root.querySelectorAll('[id^="ai-"][id$="-tracker"]'));
+    if (!panels.length) return;
+    let errors = 0;
+    panels.forEach(panel => {
+      const [title, flag] = ledgerItem(body, panel).firstElementChild.children;
+      const heading = panel.querySelector('h3')?.textContent.trim() || panel.id;
+      if (title.textContent !== heading) title.textContent = heading;
+      const failed = /最近失败：|加载失败：|读取失败：/.test(panel.textContent);
+      if (failed) errors += 1;
+      if (flag.textContent !== (failed ? '异常' : '')) flag.textContent = failed ? '异常' : '';
     });
+    const count = drawer.querySelector(':scope > summary .ui-disclosure-count');
+    const text = `${panels.length} 项${errors ? ` · ${errors} 项异常` : ''}`;
+    if (count.textContent !== text) count.textContent = text;
+    count.classList.toggle('ui-disclosure-warning', errors > 0);
   }
 
   function init() {
@@ -160,11 +161,12 @@
     if (root) {
       let scheduled = false;
       const observer = new MutationObserver(records => {
-        const selector = '#ai-research-loop-v2, #ai-research-loop-v3, [id^="ai-"][id$="-tracker"]';
+        const selector = '[id^="ai-"][id$="-tracker"]';
         if (scheduled || !records.some(record => record.target.closest?.(selector) || Array.from(record.addedNodes).some(node =>
           node.nodeType === 1 && node.matches?.(selector)))) return;
         scheduled = true;
-        requestAnimationFrame(() => { scheduled = false; prepareResearchLedgers(); });
+        // Not requestAnimationFrame: it pauses in background tabs, which left panels unwrapped until the tab was shown.
+        setTimeout(() => { scheduled = false; prepareResearchLedgers(); }, 0);
       });
       observer.observe(root, {childList: true, subtree: true});
     }

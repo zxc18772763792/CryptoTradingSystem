@@ -49,6 +49,7 @@ from core.research.orchestrator import (
     list_lifecycle,
     list_promotions,
     list_proposals,
+    candidate_failed_validation,
     promote_existing_candidate,
     run_proposal,
     save_proposal,
@@ -3912,6 +3913,41 @@ async def get_ai_candidates(request: Request, limit: int = 50):
     return {"items": [row.model_dump(mode="json") for row in rows], "count": len(rows)}
 
 
+@router.get("/proposal-archive/summary")
+async def get_proposal_archive_summary(request: Request):
+    """Counts for the collapsed proposal archive, so the closed drawer still says what it holds."""
+    ensure_ai_research_runtime_state(request.app)
+
+    def _summarize() -> Dict[str, Any]:
+        proposals = request.app.state.ai_proposal_registry.list(limit=None)
+        candidates = request.app.state.ai_candidate_registry.list(limit=None)
+        stamps = [
+            # Registries hold both naive and aware UTC values, which cannot be compared directly.
+            stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+            for row in [*proposals, *candidates]
+            for stamp in [getattr(row, "updated_at", None) or getattr(row, "created_at", None)]
+            if stamp is not None
+        ]
+        passed = [
+            row for row in candidates
+            if not candidate_failed_validation(row)
+            and any(
+                str(getattr(verdict, "decision", "") or "") in {"paper", "shadow", "live_candidate"}
+                for verdict in (row.promotion, row.validation_summary)
+            )
+        ]
+        return {
+            "proposals": len(proposals),
+            "candidates": len(candidates),
+            "passed": len(passed),
+            # Passed validation but nobody has registered or dismissed it yet.
+            "awaiting_decision": sum(str(row.status) == "new" for row in passed),
+            "last_updated_at": max(stamps).isoformat() if stamps else None,
+        }
+
+    return await asyncio.to_thread(_summarize)
+
+
 @router.get("/reserve-candidates")
 async def get_reserve_candidates(request: Request, limit: int = 100):
     ensure_ai_research_runtime_state(request.app)
@@ -4112,6 +4148,8 @@ async def get_candidate_performance_divergence(
 async def handoff_candidate_to_autonomy(request: Request, candidate_id: str):
     ensure_ai_research_runtime_state(request.app)
     candidate = get_candidate(request.app, candidate_id)
+    if candidate_failed_validation(candidate):
+        raise HTTPException(status_code=400, detail="候选未通过验证，不能送入自治观察")
     meta = dict(candidate.metadata or {})
     symbol = _candidate_primary_symbol(candidate)
     timeframe = _candidate_timeframe(candidate)
@@ -4438,6 +4476,8 @@ async def human_approve_candidate(request: Request, candidate_id: str, payload: 
         if cand.validation_summary is None:
             raise HTTPException(status_code=400, detail="candidate has no validation summary")
         cand.promotion = build_promotion_decision(cand.candidate_id, cand.validation_summary)
+    if candidate_failed_validation(cand):
+        raise HTTPException(status_code=400, detail="候选未通过验证，不能批准")
     current_decision = str(cand.promotion.decision or "").strip()
     if current_decision == "shadow":
         current_decision = "paper"
@@ -5159,6 +5199,8 @@ async def quick_register_candidate(
         if cand.validation_summary is None:
             raise HTTPException(status_code=400, detail="candidate has no validation summary")
         cand.promotion = build_promotion_decision(cand.candidate_id, cand.validation_summary)
+    if candidate_failed_validation(cand):
+        raise HTTPException(status_code=400, detail="候选未通过验证，不能注册")
     cand.promotion.decision = "paper"
     cand.promotion.constraints["allocation_cap"] = float(payload.allocation_pct)
     cand.promotion.constraints["runtime_mode"] = "paper"

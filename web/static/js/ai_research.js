@@ -100,7 +100,6 @@
     signalKickoffTimer: null,
     liveSignalKickoffTimer: null,
     signalLoading: false,
-    signalPanelCollapsed: false,
     jobPollingTimers: {},   // proposalId → intervalId
     jobPollingConfigs: {},  // proposalId -> { jobId }
     actionLocks: { ...DEFAULT_ACTION_LOCKS },
@@ -424,18 +423,18 @@
     const btn = document.getElementById('ai-context-btn');
     if (!btn) return;
     if (mode === 'working') {
-      btn.textContent = '1) 生成研究思路中...';
+      btn.textContent = '生成研究思路中...';
       btn.disabled = true;
       btn.style.color = '';
       return;
     }
     if (mode === 'ready') {
-      btn.textContent = '1) 研究思路已生成';
+      btn.textContent = '研究思路已生成';
       btn.disabled = false;
       btn.style.color = '#20bf78';
       return;
     }
-    btn.textContent = '1) 生成研究思路';
+    btn.textContent = '生成研究思路';
     btn.disabled = false;
     btn.style.color = '';
   }
@@ -919,11 +918,7 @@
     const exchangeText = String(payload?.exchange || '--').trim() || '--';
     const days = Number(payload?.days || 0);
     const daysText = Number.isFinite(days) && days > 0 ? `${Math.round(days)} 天` : '--';
-    const allocationPct = Number(payload?.allocation_pct || 0);
-    const allocationText = Number.isFinite(allocationPct) && allocationPct > 0
-      ? `${Math.round(allocationPct * 100)}%`
-      : '--';
-    return normalizeUiText(`当前设置：${symbolText} · ${timeframeText} · ${exchangeText.toUpperCase()} · ${daysText} · 仓位 ${allocationText}`);
+    return normalizeUiText(`当前设置：${symbolText} · ${timeframeText} · ${exchangeText.toUpperCase()} · ${daysText}`);
   }
 
   function renderOneClickFeedback(feedback) {
@@ -980,7 +975,7 @@
   }
 
   function buildOneClickFailureFeedback(err, payload) {
-    const message = normalizeUiText(err?.message || '一键自动研究执行失败，请稍后重试。');
+    const message = normalizeUiText(err?.message || '一键研究执行失败，请稍后重试。');
     const lower = message.toLowerCase();
     const days = Number(payload?.days || 0);
     const suggestions = [];
@@ -1008,18 +1003,18 @@
     );
     let tone = 'error';
     let badge = '执行失败';
-    let title = '这次 one-click 自动研究没有跑起来';
+    let title = '这次一键研究没有跑起来';
 
     if (message.includes('研究目标太短') || message.includes('至少8个字符') || lower.includes('goal')) {
       tone = 'warn';
       badge = '目标过短';
-      title = '研究目标太短，one-click 还不能开始';
+      title = '研究目标太短，一键研究还不能开始';
       suggestions.push('把研究目标写得更具体一些，例如“寻找 BTC 在趋势行情中的高胜率 15m 策略”。');
       suggestions.push('最好同时写清楚币种、行情类型和想验证的思路。');
     } else if (isDataError) {
       tone = 'warn';
       badge = '数据不足';
-      title = '这次 one-click 没跑起来：研究窗口里没有足够历史数据';
+      title = '这次一键研究没跑起来：研究窗口里没有足够历史数据';
       if (Number.isFinite(days) && days > 0 && days < 365) {
         suggestions.push(`把“回测天数”从 ${Math.round(days)} 调大后重试，短周期研究通常更依赖更长历史。`);
       } else {
@@ -1062,12 +1057,12 @@
       suggestions.push('稍后重试一次，观察是否为临时服务波动。');
       suggestions.push('如果连续失败，先检查后端日志或接口状态。');
     } else {
-      suggestions.push('先点“3) 运行研究”单独验证数据与参数，再决定是否一键部署。');
+      suggestions.push('先点“运行研究”单独验证数据与参数。');
       suggestions.push('如果问题稳定复现，再查看后端日志定位具体报错来源。');
     }
 
-    if (!suggestions.some(item => item.includes('3) 运行研究'))) {
-      suggestions.push('也可以先点“3) 运行研究”单独验证，再决定是否一键部署。');
+    if (!suggestions.some(item => item.includes('运行研究'))) {
+      suggestions.push('也可以先点“运行研究”单独验证。');
     }
 
     return {
@@ -1111,10 +1106,23 @@
 
     let tone = 'success';
     let badge = '已完成';
-    let title = '一键自动研究已完成';
+    let title = '一键研究已完成';
     const suggestions = ['右侧候选详情与运行状态已经刷新，可以继续查看表现和验证结果。'];
+    const finishedCandidate = state.candidates.find((item) => String(item?.candidate_id || '') === candidateId);
 
-    if (candidateId && outcome === 'completed_without_compatible_runtime_target' && manualActionRequired) {
+    if (outcome === 'completed_no_deploy' && candidateId) {
+      suggestions.length = 0;
+      if (isRejectedCandidate(finishedCandidate)) {
+        tone = 'warn';
+        badge = '未通过验证';
+        title = '研究已完成，候选未通过验证';
+        candidateRejectReasons(finishedCandidate, 4).forEach((reason) => details.push(`未通过原因：${reason}`));
+        suggestions.push('先看候选详情里的验证结论，再决定是否调整研究目标。');
+      } else {
+        title = '研究已完成，结果在候选列表里';
+        suggestions.push('一键研究到此为止，不会自动部署；要运行请在候选详情里手动注册。');
+      }
+    } else if (candidateId && outcome === 'completed_without_compatible_runtime_target' && manualActionRequired) {
       tone = 'warn';
       badge = '需要手动部署';
       title = '研究已完成，但当前模式下未自动部署';
@@ -1137,7 +1145,7 @@
       details.push(`提案状态：${normalizeUiText(statusText(proposalStatus || 'rejected'))}`);
       reasons.forEach((reason) => details.push(`未通过原因：${reason}`));
       suggestions.length = 0;
-      suggestions.push('这次更像是研究结果被验证层筛掉，而不是 one-click 执行失败。');
+      suggestions.push('这次更像是研究结果被验证层筛掉，而不是一键研究执行失败。');
       suggestions.push('先看右侧候选详情和验证原因，再决定是否扩大样本、改周期或调整研究目标。');
     } else if (candidateStatus === 'rejected' || candidateStatus === 'failed' || reasons.length) {
       tone = 'warn';
@@ -1249,7 +1257,7 @@
       const progressTimeframes = toArray(parsed.progress?.timeframes).map(tf => String(tf || '').trim()).filter(Boolean);
       renderOneClickFeedback({
         tone: 'working',
-        badge: `阶段 2/3 · ${elapsedSec}s`,
+        badge: `阶段 2/2 · ${elapsedSec}s`,
         title: '研究任务运行中',
         summary: summarizeOneClickPayload(payload),
         details: [
@@ -1716,16 +1724,89 @@
       clearTimeout(state.liveDecisionActivityRetryTimer);
       state.liveDecisionActivityRetryTimer = setTimeout(() => {
         state.liveDecisionActivityRetryTimer = null;
-        if (isAiResearchActive()) {
+        if (document.getElementById('ai-review-drawer')?.open) {
           loadLiveDecisionActivitySummary().catch(() => {});
         }
       }, 3000);
     }
   }
 
+  const VALIDATION_REASON_TEXT = {
+    insufficient_trades: '交易样本不足',
+    no_net_edge: '扣费后无正收益',
+    excess_drawdown: '回撤超限',
+    weak_risk_adjusted_return: '风险收益不足',
+    cost_sensitive: '双倍成本未通过',
+    training_no_edge: '训练段无优势',
+    invalid_program: '程序无效',
+    duplicate_program: '程序重复',
+    data_outliers: '数据异常',
+    evaluation_budget: '回测预算不足',
+    observation_duplicate_or_full: '观察重复或名额已满',
+    observing: '新增行情观察中',
+  };
+
+  const WORK_QUEUE_TEXT = {
+    research_draft: '待运行提案',
+    human_approval: '待人工确认',
+    live_activation: '待激活实盘',
+    reserve_candidate: '备选候选',
+    validation_blocked: '验证未通过',
+    runtime_degradation: '运行降级',
+    agent_hold_root_blocker: '代理持币原因',
+    run_research: '运行研究',
+    human_approve: '人工确认',
+    activate_live: '激活实盘',
+    watch_reserve: '观察备选',
+    inspect_root_blocker: '查看拒绝原因',
+    inspect_operating_mode: '查看运行模式',
+    inspect_agent: '查看代理',
+  };
+
+  // Same reserve definition as the backend: borderline or merely redundant candidates stay open to a manual call.
+  function isReserveCandidate(cand) {
+    const meta = cand?.metadata || {};
+    const validation = cand?.validation_summary || {};
+    const outcome = String(meta.outcome_type || validation.outcome_type || '');
+    return !!(meta.reserve_eligible || validation.reserve_eligible) || ['redundant_correlated', 'borderline'].includes(outcome);
+  }
+
+  function isRejectedCandidate(cand) {
+    if (isReserveCandidate(cand)) return false;
+    return [cand?.promotion?.decision, cand?.validation_summary?.decision]
+      .some((decision) => String(decision || '').trim() === 'reject');
+  }
+
+  function candidateRejectReasons(cand, limit = 3) {
+    const reasons = toArray(cand?.validation_summary?.reasons)
+      .map((reason) => VALIDATION_REASON_TEXT[reason] || String(reason || '').trim())
+      .filter(Boolean);
+    return Array.from(new Set(reasons)).slice(0, limit);
+  }
+
+  // The loop marks a candidate "reject" until new market data confirms it, so this is not a final verdict.
+  function isObservingCandidate(cand) {
+    return String(cand?.validation_summary?.outcome_type || cand?.metadata?.outcome_type || '') === 'forward_observing';
+  }
+
+  function candidateBlockedText(cand, limit = 3) {
+    if (isObservingCandidate(cand)) return '新增行情观察中，暂不能注册';
+    return `未通过验证，不能注册：${candidateRejectReasons(cand, limit).join('；') || '验证结论为拒绝'}`;
+  }
+
+  // Registry status stays "new" after a rejected validation, so the verdict decides the label.
+  function candidateStatusLabel(cand) {
+    const status = String(cand?.status || 'new');
+    if (status !== 'new') return statusText(status);
+    if (isReserveCandidate(cand)) return '备选';
+    if (isObservingCandidate(cand)) return '观察中';
+    return statusText(isRejectedCandidate(cand) ? 'rejected' : status);
+  }
+
   function canRegisterCandidate(cand) {
     if (!cand) return false;
     if (governanceEnabled()) return false;
+    if (isRejectedCandidate(cand)) return false;
     const status = String(cand?.status || '').trim();
     return !new Set(['retired', 'paper_running', 'shadow_running', 'live_candidate', 'live_running']).has(status);
   }
@@ -1748,6 +1829,7 @@
       sharpe_ratio: merged.sharpe_ratio != null ? Number(merged.sharpe_ratio) : null,
       max_drawdown: merged.max_drawdown != null ? Number(merged.max_drawdown) : null,
       win_rate: merged.win_rate != null ? Number(merged.win_rate) : null,
+      total_trades: merged.total_trades != null ? Number(merged.total_trades) : null,
       score: merged.score != null ? Number(merged.score) : null,
     };
   }
@@ -2470,7 +2552,7 @@
       });
       renderSignalMini();
       renderCandidateCards();  // 更新卡片上的信号徽章
-      emitWorkbenchState('signal-mini', { symbol: selectedSymbol, watchlist });
+      emitWorkbenchState('signal-mini', { watchlist });
       if (statusEl) {
         statusEl.textContent = successCount > 0
           ? `已刷新 ${successCount}/${watchlist.length} 个，最近 ${fmtTs(latestTs || new Date().toISOString())}`
@@ -2829,11 +2911,11 @@
       ? (candidateCount
         ? (virtualProposal
           ? '该条目由候选结果回填，只支持查看候选详情与注册/部署，不支持重新运行研究任务'
-          : '点击候选策略卡片，在右侧进入第 4 步注册/部署')
+          : '点击候选策略卡片查看验证结论；通过验证的候选可在这里注册')
         : (virtualProposal
           ? '当前没有可展示的候选记录，请回到研究链路重新生成提案后再运行'
           : '先运行该研究任务，产出候选后再查看详情'))
-      : '查看详细分析与第 4 步注册/部署';
+      : '查看详细分析与验证结论';
     return `<div class="ai-detail-placeholder">
       <div style="font-size:36px;opacity:.3;">📊</div>
       <div style="margin-top:10px;color:var(--text-faint);font-size:13px;">${esc(summary)}<br>${esc(hint)}</div>
@@ -3099,7 +3181,7 @@
       if (cnt) cnt.textContent = totalCount ? `0/${totalCount}` : '';
       box.innerHTML = state.candidates.length
         ? `<div class="ai-empty-hint">当前类别筛选无结果，请调整筛选条件。</div>`
-        : `<div class="ai-empty-hint">暂无候选策略。<br>先在左侧点击 <strong>2) 生成提案</strong>，<br>再选中研究任务并点击 <strong>3) 运行研究</strong> 开始回测。</div>`;
+        : `<div class="ai-empty-hint">暂无候选策略。<br>先在左侧点击 <strong>生成提案</strong>，<br>再选中研究任务并点击 <strong>运行研究</strong> 开始回测。</div>`;
       emitWorkbenchState('candidate-cards');
       return;
     }
@@ -3392,6 +3474,8 @@
     const ddStr = dd != null ? `<strong style="color:var(--negative)">${dd.toFixed(1)}%</strong>` : '<strong>--</strong>';
     const wrStr = wr != null ? `<strong>${wr.toFixed(0)}%</strong>` : '<strong>--</strong>';
     const srStr = sr != null ? `<strong>${sr.toFixed(2)}</strong>` : '<strong>--</strong>';
+    const tradesStr = top.total_trades != null ? `<strong>${Math.round(top.total_trades)} 笔</strong>` : '<strong>--</strong>';
+    const rejected = isRejectedCandidate(cand);
     const vs = cand?.validation_summary || {};
     let oosBadge = '';
     if (vs.oos_score != null) {
@@ -3481,7 +3565,7 @@
         </div>
       </div>
       <div style="font-size:12px;color:var(--text-faint);margin-bottom:5px;">
-        ${esc(sym)} / ${esc(tf)} / ${esc(statusText(status))}
+        ${esc(sym)} / ${esc(tf)} / ${esc(candidateStatusLabel(cand))}
       </div>
       <div class="cand-score-bar">
         <div class="cand-score-bar-fill ${color}" style="width:${Math.min(100, score).toFixed(0)}%;"></div>
@@ -3491,13 +3575,14 @@
         <div class="cand-metric-item">回撤 ${ddStr}</div>
         <div class="cand-metric-item">胜率 ${wrStr}</div>
         <div class="cand-metric-item">夏普 ${srStr}</div>
+        <div class="cand-metric-item">交易 ${tradesStr}</div>
       </div>
       <div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${enrichmentBadges}</div>
       <div style="font-size:11px;color:var(--text-faint);margin-top:4px;">回放模式：${esc(enrichment.mode)}</div>
       ${oosBadge || wfBadge || paramsBadge || dsrBadge || optBadge || corrBadge ? `<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">${oosBadge}${wfBadge}${paramsBadge}${dsrBadge}${optBadge}${corrBadge}</div>` : ''}
       ${signalBadge}
       ${_renderValidationPipeline(vs)}
-      <div class="cand-recommendation">AI建议：${esc(promotionText(decision))}</div>
+      <div class="cand-recommendation">${rejected ? esc(candidateBlockedText(cand)) : `AI建议：${esc(promotionText(decision))}`}</div>
       <div class="cand-card-actions">
         <button class="btn btn-sm" data-action="view-candidate" data-candidate-id="${esc(cid)}" style="font-size:12px;">详情</button>
       </div>
@@ -3731,7 +3816,7 @@
           <span class="cand-score-badge ${color}" style="font-size:13px;">${score.toFixed(0)} \u5206</span>
         </div>
         <div style="font-size:12px;color:var(--text-faint);">
-          ${esc(cand?.symbol || '--')} / ${esc(cand?.timeframe || '--')} / ${esc(statusText(cand?.status))}
+          ${esc(cand?.symbol || '--')} / ${esc(cand?.timeframe || '--')} / ${esc(candidateStatusLabel(cand))}
         </div>
         ${searchRoleMeta && championStrategy ? `<div style="font-size:11px;color:var(--text-faint);margin-top:4px;">搜索角色：${esc(searchRoleMeta.label)}${cand?.metadata?.search_role === 'challenger' ? ` · 对照 champion ${esc(championStrategy)}` : ''}</div>` : ''}
         ${renderLifecycleStepper(cand?.status)}
@@ -3845,11 +3930,11 @@
       ${showRegisterButton
         ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-top:14px;">
             <button class="btn-register-cta full" data-action="open-register" data-register-mode="paper" data-candidate-id="${esc(candidateId)}" style="margin-top:0;">
-              4) 注册纸盘 →
+              注册纸盘 →
             </button>
             <button class="btn btn-sm" data-action="open-register" data-register-mode="live_candidate" data-candidate-id="${esc(candidateId)}"
               style="width:100%;padding:10px;font-size:14px;border-radius:8px;color:var(--warning);border-color:var(--warning);">
-              4) 注册实盘候选 →
+              注册实盘候选 →
             </button>
             <div style="grid-column:1 / -1;font-size:11px;color:var(--text-faint);">
               纸盘会直接启动模拟运行；实盘候选仅进入待激活链路，后续仍需人工确认与实盘激活。
@@ -3861,7 +3946,11 @@
             </div>`
           : '')}
 
-      <div style="margin-bottom:14px;">
+      ${isRejectedCandidate(cand)
+        ? `<div style="font-size:12px;color:var(--warning);border:1px solid var(--border-subtle);border-radius:6px;padding:8px 10px;margin-top:14px;">
+            ${esc(candidateBlockedText(cand, 5))}
+          </div>`
+        : `<div style="margin-bottom:14px;">
         <button class="btn btn-sm" id="btn-autonomy-handoff" style="font-size:12px;width:100%;margin-bottom:8px;color:var(--accent-soft);border-color:var(--steel-deep);">
           发送到自治观察
         </button>
@@ -3869,7 +3958,7 @@
           \u751f\u6210\u8ba2\u5355\u9884\u89c8
         </button>
         <div id="ai-order-preview-result" style="display:none;margin-top:10px;padding:12px;background:var(--panel-bg-deep);border:1px solid var(--border-subtle);border-radius:8px;"></div>
-      </div>
+      </div>`}
       ${canActivateLiveCandidate(cand)
           ? (() => { /*
           const activateLabel = String(cand?.status || '') === 'live_candidate'
@@ -4632,7 +4721,7 @@ ${confirmHint}`,
         ${_renderApprovalMeta(cand)}
         <div style="display:flex;gap:6px;flex-wrap:wrap;">
           <button class="btn btn-sm" style="font-size:11px;color:var(--positive);border-color:var(--positive);"
-            data-action="view-candidate" data-candidate-id="${cid}">第 4 步处理</button>
+            data-action="view-candidate" data-candidate-id="${cid}">去处理</button>
         </div>
       </div>`;
     }).join(''));
@@ -4788,6 +4877,8 @@ ${confirmHint}`,
   }
 
   async function refreshWorkbench(selectProposalId = '', selectCandidateId = '') {
+    // Proposals and candidates load only while the archive drawer is open.
+    if (!isProposalArchiveOpen()) return null;
     state.refreshWorkbenchPendingRequest = mergeWorkbenchRefreshRequest(
       state.refreshWorkbenchPendingRequest,
       selectProposalId,
@@ -4811,8 +4902,6 @@ ${confirmHint}`,
             return null;
           }),
           loadAgentStatus().catch(() => null),
-          loadLiveDecisionActivitySummary().catch(() => null),
-          refreshOperatingModeBanner({ preserveExisting: true }).catch(() => null),
           refreshWorkQueuePanel({ preserveExisting: true }).catch(() => null),
         ];
 
@@ -4885,7 +4974,7 @@ ${confirmHint}`,
     const status = String(proposal?.status || '').trim();
     const virtualProposal = isVirtualProposal(proposal);
     const runnable = proposal ? isRunnableProposalStatus(status) : has;
-    btn.textContent = ['research_queued', 'research_running'].includes(status) ? '3) 运行中...' : '3) 运行研究';
+    btn.textContent = ['research_queued', 'research_running'].includes(status) ? '运行中...' : '运行研究';
     btn.disabled = !has || busy || !runnable || virtualProposal;
     if (busy) {
       btn.title = '当前有任务执行中，请等待完成后再运行研究';
@@ -5041,7 +5130,7 @@ ${confirmHint}`,
       state.pendingLlmContext = null;
       setAIContextButtonState('idle');
       const btn = document.getElementById('ai-context-btn');
-      if (btn) { btn.textContent = '1) 生成研究思路'; btn.disabled = false; btn.style.color = ''; }
+      if (btn) { btn.textContent = '生成研究思路'; btn.disabled = false; btn.style.color = ''; }
     }
     // A: show filtered templates and planner notes
     const filteredTpls = result?.filtered_templates || result?.proposal?.filtered_templates || [];
@@ -5067,19 +5156,16 @@ ${confirmHint}`,
 
   // generateAIContext / generateProposal 使用上方唯一实现，避免重复覆盖。
 
-  async function runOneClickResearchDeploy() {
+  // Stops at the candidate result. Deploying is a separate, manual decision in the candidate detail.
+  async function runOneClickResearch() {
     const btn = document.getElementById('ai-oneclick-btn');
     const daysInput = document.getElementById('ai-oneclick-days');
-    const allocationInput = document.getElementById('ai-oneclick-allocation');
     await ensureAutoPlannerGoal({ silent: true });
     const goal = String(document.getElementById('ai-planner-goal')?.value || '').trim();
     const exchange = String(document.getElementById('run-exchange')?.value || getCurrentResearchExchange() || 'binance');
     const days = daysInput
       ? Math.max(7, Math.min(3650, parseInt(daysInput.value || '30', 10) || 30))
       : 30;
-    const allocationPercent = parseAllocationPercentInput(allocationInput?.value, 5);
-    if (allocationInput) allocationInput.value = String(Math.round(allocationPercent));
-    const allocationPct = allocationPercent / 100;
     const goalInput = document.getElementById('ai-planner-goal');
     const normalizedGoal = clampPlannerGoalText(goalInput?.value || goal);
     if (goalInput && normalizedGoal && goalInput.value !== normalizedGoal) goalInput.value = normalizedGoal;
@@ -5113,25 +5199,20 @@ ${confirmHint}`,
       llm_research_output: state.pendingLlmContext || {},
       exchange,
       days,
-      target: 'auto',
-      allocation_pct: allocationPct,
-      strategy_name: '',
-      approval_notes: 'oneclick approve from ui',
-      skip_deploy: false,
     };
 
     try {
       if (btn) { btn.disabled = true; btn.textContent = '提交中...'; }
       renderOneClickFeedback({
         tone: 'working',
-        badge: '阶段 1/3',
+        badge: '阶段 1/2',
         title: '正在生成提案并提交后台研究任务',
         summary: summarizeOneClickPayload(payload),
         details: [
           '系统将先创建提案，再把研究任务放入后台队列。',
           '此页面负责研究与候选，不会直接启动自治代理下单。',
         ],
-        suggestions: ['提案提交成功后会自动轮询状态，完成后再进入部署阶段。'],
+        suggestions: ['提案提交成功后会自动轮询状态，完成后停在候选结果，不会自动部署。'],
       });
       notify('正在执行：提交后台研究任务');
       const queueResult = await aiApi('/oneclick/research-deploy', {
@@ -5142,7 +5223,7 @@ ${confirmHint}`,
       state.pendingLlmContext = null;
       setAIContextButtonState('idle');
       const contextBtn = document.getElementById('ai-context-btn');
-      if (contextBtn) { contextBtn.textContent = '1) 生成研究思路'; contextBtn.disabled = false; contextBtn.style.color = ''; }
+      if (contextBtn) { contextBtn.textContent = '生成研究思路'; contextBtn.disabled = false; contextBtn.style.color = ''; }
 
       const proposalId = String(queueResult?.proposal_id || queueResult?.run?.proposal?.proposal_id || '').trim();
       const jobId = String(queueResult?.job_id || queueResult?.job?.job_id || '').trim();
@@ -5158,7 +5239,7 @@ ${confirmHint}`,
       if (btn) btn.textContent = '研究中...';
       renderOneClickFeedback({
         tone: 'working',
-        badge: '阶段 2/3',
+        badge: '阶段 2/2',
         title: '研究任务已入队，后台运行中',
         summary: summarizeOneClickPayload(payload),
         details: [
@@ -5193,67 +5274,21 @@ ${confirmHint}`,
         return;
       }
 
-      if (btn) btn.textContent = '部署中...';
-      renderOneClickFeedback({
-        tone: 'working',
-        badge: '阶段 3/3',
-        title: '研究完成，正在执行候选部署',
-        summary: summarizeOneClickPayload(payload),
-        details: [
-          `候选 ID：${candidateId}`,
-          '系统正在根据 promotion 结果自动选择部署目标。',
-        ],
-        suggestions: ['部署完成后会自动跳转候选详情。'],
-      });
-
-      let deployResult = null;
-      try {
-        deployResult = await aiApi('/oneclick/deploy-candidate', {
-          method: 'POST',
-          body: JSON.stringify({
-            candidate_id: candidateId,
-            target: 'auto',
-            allocation_pct: payload.allocation_pct,
-            approval_notes: 'oneclick approve from ui',
-          }),
-          timeoutMs: 30000,
-        });
-      } catch (deployErr) {
-        const deployMsg = String(deployErr?.message || '');
-        if (!/404|not found/i.test(deployMsg)) throw deployErr;
-        deployResult = {
-          proposal_id: proposalId,
-          candidate_id: candidateId,
-          deploy: { performed: false, action: null, result: null, runtime_status: null },
-          outcome: 'completed_no_deploy',
-        };
-      }
-
-      const finalResult = {
-        ...deployResult,
-        proposal_id: proposalId || deployResult?.proposal_id,
-        candidate_id: candidateId,
-      };
       await refreshWorkbench(proposalId, candidateId);
       viewCandidate(candidateId).catch(() => {});
       updatePlannerModeHint();
-      renderOneClickFeedback(buildOneClickSuccessFeedback(finalResult, payload));
-      const finalAction = String(finalResult?.deploy?.action || '').trim();
-      const finalStatus = String(finalResult?.runtime_status || finalResult?.deploy?.runtime_status || '').trim();
-      const finalOutcome = String(finalResult?.outcome || '').trim();
-      if (finalOutcome === 'completed_without_compatible_runtime_target') {
-        const modeHint = String(finalResult?.current_trading_mode || '').trim();
-        notify(`一键研究已完成，但${modeHint || '当前'}模式下未自动部署；请手动选择 live_candidate 或切换到 paper`);
-      } else if (finalOutcome.startsWith('completed_without')) {
-        notify(`一键研究已完成，但未生成可部署候选${finalStatus ? `：${normalizeUiText(statusText(finalStatus))}` : ''}`);
-      } else {
-        notify(`一键研究+部署完成${finalStatus ? `：${finalStatus}` : ''}${finalAction ? ` (${finalAction})` : ''}`);
-      }
+      renderOneClickFeedback(buildOneClickSuccessFeedback({
+        proposal_id: proposalId,
+        candidate_id: candidateId,
+        deploy: { performed: false, action: null, result: null, runtime_status: null },
+        outcome: 'completed_no_deploy',
+      }, payload));
+      notify('一键研究已完成，请在候选详情查看结论');
     } catch (err) {
       renderOneClickFeedback(buildOneClickFailureFeedback(err, payload));
-      notify(`\u4e00\u952e\u7814\u7a76+\u90e8\u7f72\u5931\u8d25: ${err.message}`, true);
+      notify(`\u4e00\u952e\u7814\u7a76\u5931\u8d25: ${err.message}`, true);
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '\u26a1 \u7814\u7a76+\u90e8\u7f72'; }
+      if (btn) { btn.disabled = false; btn.textContent = '\u4e00\u952e\u7814\u7a76\uff08\u5230\u5019\u9009\u7ed3\u679c\u4e3a\u6b62\uff09'; }
     }
   }
 
@@ -5980,11 +6015,9 @@ ${confirmHint}`,
     document.getElementById('ai-clear-candidates-btn')?.addEventListener('click', () =>
       clearVisibleCandidates().catch(err => notify(`清空候选失败: ${err.message}`, true)));
 
-    /* one-click 自动研究 */
+    /* 一键研究 */
     document.getElementById('ai-oneclick-btn')?.addEventListener('click', () =>
-      withActionLock('oneclick', () => runOneClickResearchDeploy()).catch(err => notify(`one-click 执行失败: ${err.message}`, true)));
-    document.getElementById('ai-iteration-start-btn')?.addEventListener('click', () =>
-      toggleAutonomousResearchLoop(true).catch(err => notify(`启动自主迭代失败: ${err.message}`, true)));
+      withActionLock('oneclick', () => runOneClickResearch()).catch(err => notify(`一键研究执行失败: ${err.message}`, true)));
     document.getElementById('ai-iteration-toggle-btn')?.addEventListener('click', () =>
       toggleAutonomousResearchLoop().catch(err => notify(`更新自主迭代状态失败: ${err.message}`, true)));
     document.getElementById('ai-iteration-run-btn')?.addEventListener('click', runAutonomousResearchOnce);
@@ -6050,8 +6083,6 @@ ${confirmHint}`,
     document.getElementById('run-days')?.addEventListener('change', () => clearOneClickFeedback());
     document.getElementById('ai-oneclick-days')?.addEventListener('input', () => clearOneClickFeedback());
     document.getElementById('ai-oneclick-days')?.addEventListener('change', () => clearOneClickFeedback());
-    document.getElementById('ai-oneclick-allocation')?.addEventListener('input', () => clearOneClickFeedback());
-    document.getElementById('ai-oneclick-allocation')?.addEventListener('change', () => clearOneClickFeedback());
     window.addEventListener('ai-agent:status', (event) => {
       const nextStatus = event?.detail?.status || null;
       if (!nextStatus) return;
@@ -6069,13 +6100,24 @@ ${confirmHint}`,
     document.getElementById('signal-refresh-btn')?.addEventListener('click', () =>
       loadSignal().catch(err => notify(`\u4fe1\u53f7\u5931\u8d25: ${err.message}`, true)));
 
-    /* \u4fe1\u53f7\u9762\u677f\u6298\u53e0 */
-    document.getElementById('signal-panel-toggle')?.addEventListener('click', () => {
-      state.signalPanelCollapsed = !state.signalPanelCollapsed;
-      const body   = document.getElementById('signal-panel-body');
-      const toggle = document.getElementById('signal-panel-toggle');
-      if (body)   body.style.display   = state.signalPanelCollapsed ? 'none' : '';
-      if (toggle) toggle.classList.toggle('collapsed', state.signalPanelCollapsed);
+    document.getElementById('ai-signal-disclosure')?.addEventListener('toggle', () => {
+      if (isAiWorkspaceActive()) startPolling();
+    });
+
+    /* Drawers load their data when opened, so the page stays light while they are closed. */
+    document.getElementById('ai-proposal-archive')?.addEventListener('toggle', (event) => {
+      if (event.target.open) {
+        refreshWorkbench().catch(err => notify(`加载提案档案失败: ${err.message}`, true));
+      }
+      if (isAiWorkspaceActive()) startPolling();
+    });
+    document.getElementById('ui-paper-ledgers')?.addEventListener('toggle', (event) => {
+      if (event.target.open) refreshPaperLedgerPanels().catch(() => {});
+    });
+    document.getElementById('ai-review-drawer')?.addEventListener('toggle', (event) => {
+      if (!event.target.open) return;
+      loadRuntimeConfig(true).catch(() => {});
+      loadLiveDecisionActivitySummary().catch(() => {});
     });
 
     /* 娉ㄥ唽 Modal 鍏抽棴 */
@@ -6180,31 +6222,36 @@ ${confirmHint}`,
     if (document.hidden || !isAiWorkspaceActive()) return;
     if (!canRunAiPolling()) return;
 
-    if (isAiResearchActive()) {
+    if (isSignalPanelActive()) {
       state.signalKickoffTimer = window.setTimeout(() => {
         state.signalKickoffTimer = null;
-        if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
+        if (!isSignalPanelActive() || document.hidden || !canRunAiPolling()) return;
         loadSignal().catch(() => {});
-      }, 1200);
+      }, 300);
       state.signalTimer = setInterval(() => {
-        if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
+        if (!isSignalPanelActive() || document.hidden || !canRunAiPolling()) return;
         loadSignal().catch(() => {});
       }, SIGNAL_INTERVAL_MS);
+    }
+
+    if (isAiResearchActive()) {
       state.refreshTimer = setInterval(() => {
         if (!isAiResearchActive() || document.hidden || !canRunAiPolling()) return;
         refreshWorkbench().catch(() => {});
         refreshAutonomousResearchCockpit().catch(() => {});
+        refreshOperatingModeBanner({ preserveExisting: true }).catch(() => {});
+        window.refreshResearchTrackersIfStale?.();
       }, REFRESH_INTERVAL_MS);
     }
 
-    if (isAiWorkspaceActive()) {
+    if (wantsLiveSignals()) {
       state.liveSignalKickoffTimer = window.setTimeout(() => {
         state.liveSignalKickoffTimer = null;
-        if (!isAiWorkspaceActive() || document.hidden || !canRunAiPolling()) return;
+        if (!wantsLiveSignals() || document.hidden || !canRunAiPolling()) return;
         loadLiveSignals().catch(() => {});
       }, isAiResearchActive() ? 1800 : 600);
       state.liveSignalTimer = setInterval(() => {
-        if (!isAiWorkspaceActive() || document.hidden || !canRunAiPolling()) return;
+        if (!wantsLiveSignals() || document.hidden || !canRunAiPolling()) return;
         loadLiveSignals().catch(() => {});
       }, 30000);
     }
@@ -6240,6 +6287,22 @@ ${confirmHint}`,
     return isAiResearchActive() || isAiAgentActive();
   }
 
+  function isProposalArchiveOpen() {
+    return !!document.getElementById('ai-proposal-archive')?.open;
+  }
+
+  function isSignalPanelActive() {
+    return isAiAgentActive() && !!document.getElementById('ai-signal-disclosure')?.open;
+  }
+
+  function wantsResearchLiveSignals() {
+    return isAiResearchActive() && isProposalArchiveOpen();
+  }
+
+  function wantsLiveSignals() {
+    return isAiAgentActive() || wantsResearchLiveSignals();
+  }
+
   function canRunAiPolling() {
     if (typeof window === 'undefined' || typeof window.__ctsSharedPolling?.canRun !== 'function') return true;
     return window.__ctsSharedPolling.canRun('ai');
@@ -6264,7 +6327,10 @@ ${confirmHint}`,
         setTimeout(() => {
           if (isAiWorkspaceActive()) {
             startPolling();
-            if (isAiResearchActive()) refreshWorkbench().catch(() => {});
+            if (isAiResearchActive()) {
+              refreshWorkbench().catch(() => {});
+              refreshAutonomousResearchCockpit().catch(() => {});
+            }
           } else stopPolling();
         }, 0);
       });
@@ -6368,9 +6434,13 @@ ${confirmHint}`,
     if (statusEl) statusEl.textContent = label;
     const detail = document.getElementById('ai-iteration-status-detail');
     if (detail) detail.textContent = payload?.last_error ? `原因：${payload.last_error}` : `已完成 ${Number(payload?.completed_rounds || 0)} 轮验证 · 间隔 ${Math.round(Number(config.interval_seconds || 3600) / 60)} 分钟`;
-    const next = document.getElementById('ai-iteration-next');
-    if (next) next.textContent = payload?.next_run_at ? `${status === 'daily_budget_reached' ? '预算重置' : '下一轮'}：${fmtTs(payload.next_run_at)}` : '';
     const rounds = Array.isArray(payload?.rounds) ? payload.rounds : [];
+    const lastStartedAt = rounds[rounds.length - 1]?.started_at;
+    const next = document.getElementById('ai-iteration-next');
+    // A paused loop keeps its old next_run_at; showing it would promise a run that will not happen.
+    if (next) next.textContent = enabled && payload?.next_run_at
+      ? `${status === 'daily_budget_reached' ? '预算重置' : '下一轮'}：${fmtTs(payload.next_run_at)}`
+      : (lastStartedAt ? `最近一轮：${fmtTs(lastStartedAt)}` : '');
     const setText = (id, value) => { const el = document.getElementById(id); if (el) el.textContent = value; };
     setText('ai-iteration-rounds', `${Number(payload?.attempts_today || 0)} 轮`);
     setText('ai-iteration-max-rounds', `${Number(config.max_rounds_per_day || 0)} 轮`);
@@ -6383,19 +6453,17 @@ ${confirmHint}`,
       const title = roundStatus === 'completed'
         ? (row.outcome === 'forward_observation' ? '验证完成 · 进入新增行情观察' : '验证完成 · 本轮无合格候选')
         : ({generating:'生成假设中', evaluating:'验证中', failed:'执行失败', interrupted:'运行中断', queued:'历史提案已入队'}[roundStatus] || roundStatus);
-      const reasonNames = {insufficient_trades:'交易样本不足', no_net_edge:'扣费后无正收益', excess_drawdown:'回撤超限', weak_risk_adjusted_return:'风险收益不足', cost_sensitive:'双倍成本未通过', training_no_edge:'训练段无优势', invalid_program:'程序无效', duplicate_program:'程序重复', data_outliers:'数据异常', evaluation_budget:'回测预算不足'};
-      const failures = Object.entries(row?.feedback?.rejection_counts || {}).map(([reason,count]) => `${reasonNames[reason] || reason} ${count}`).join('；');
+      const failures = Object.entries(row?.feedback?.rejection_counts || {}).map(([reason,count]) => `${VALIDATION_REASON_TEXT[reason] || reason} ${count}`).join('；');
       return `<div><b>${esc(row.started_at ? fmtTs(row.started_at) : `第 ${index + 1} 轮`)}</b><span>${esc(title)}${row.backtest_runs ? ` · ${Number(row.backtest_runs)} 次回测` : ''}</span><span>${esc(row.error || failures)}</span></div>`;
     }).join('') : '<span>暂无轮次记录</span>';
     const toggle = document.getElementById('ai-iteration-toggle-btn');
-    if (toggle) toggle.textContent = enabled ? '暂停研究循环' : '启用研究循环';
-    const start = document.getElementById('ai-iteration-start-btn');
-    if (start) start.textContent = enabled ? '查看迭代任务' : '启动自主迭代';
+    if (toggle) toggle.textContent = enabled ? '暂停 v1' : '启用 v1';
     const run = document.getElementById('ai-iteration-run-btn');
     if (run) { run.disabled = !!payload?.busy || Number(payload?.attempts_today || 0) >= Number(config.max_rounds_per_day || 0); run.textContent = payload?.busy ? '研究进行中…' : '立即研究一轮'; }
     const evidence = document.getElementById('ai-iteration-evidence');
     const observations = Array.isArray(payload?.observations) ? payload.observations : [];
     const champions = new Set(Object.values(payload?.champions || {}).map(row => row.candidate_id));
+    window.ResearchDesk?.setLoop('v1', payload);
     if (evidence) evidence.innerHTML = observations.length ? observations.slice(-8).map(row => {
       const verdict = row.data_status && row.data_status !== 'ready' ? '等待行情或重新计算，暂不推荐' : champions.has(row.candidate_id) ? '当前优胜候选 · 待人工注册' : ({observing:'观察中',qualified:'观察验证通过',rejected:'观察淘汰',expired:'观察期结束'}[row.status] || row.status);
       const metrics = row.metrics ? ` · 净收益 ${Number(row.metrics.total_return).toFixed(2)}% · 回撤 ${Number(row.metrics.max_drawdown).toFixed(2)}% · ${Number(row.metrics.total_trades)} 笔` : '';
@@ -6414,8 +6482,8 @@ ${confirmHint}`,
   }
 
   function ensureResearchLoopV2Panel() {
-    const cockpit = document.getElementById('ai-iteration-cockpit');
-    if (!cockpit) return null;
+    const slot = document.getElementById('ai-loop-secondary');
+    if (!slot) return null;
     let panel = document.getElementById('ai-research-loop-v2');
     if (!panel) {
       panel = document.createElement('section');
@@ -6427,7 +6495,7 @@ ${confirmHint}`,
         if (action === 'toggle') toggleResearchLoopV2().catch((err) => notify(err?.message || '操作失败', true));
         if (action === 'run') runResearchLoopV2Once().catch((err) => notify(err?.message || '无法启动研究', true));
       });
-      cockpit.insertAdjacentElement('afterend', panel);
+      slot.append(panel);
     }
     return panel;
   }
@@ -6435,6 +6503,7 @@ ${confirmHint}`,
   function renderResearchLoopV2(payload) {
     const panel = ensureResearchLoopV2Panel();
     if (!panel) return;
+    window.ResearchDesk?.setLoop('v2', payload);
     const config = payload?.config || {};
     const statusNames = {
       paused: '已暂停', waiting: '已启用 · 等待下一轮', generating: '模型正在提出特征公式', evaluating: '横截面评估中',
@@ -6454,7 +6523,7 @@ ${confirmHint}`,
         <h3 style="margin:0;">研究循环 v2 · 周度横截面特征</h3>
         <div style="display:flex;gap:8px;">
           <button class="btn btn-sm" data-v2-action="toggle">${config.enabled ? '暂停 v2' : '启用 v2'}</button>
-          <button class="btn btn-sm btn-primary" data-v2-action="run" ${busy || budgetLeft <= 0 ? 'disabled' : ''}>${busy ? '研究进行中…' : '立即研究一轮'}</button>
+          <button class="btn btn-sm" data-v2-action="run" ${busy || budgetLeft <= 0 ? 'disabled' : ''}>${busy ? '研究进行中…' : '立即研究一轮'}</button>
         </div>
       </div>
       <div style="margin-top:6px;color:var(--text-sub);">${esc(statusNames[payload?.status] || payload?.status || '--')} · 今日 ${Number(payload?.attempts_today || 0)}/${Number(config.max_rounds_per_day || 0)} 轮 · 台账 ${Number(payload?.ledger_size || 0)} 个公式 · 当前新增信息门槛 z ≥ ${num(payload?.holdout_z_bar)}${config.enabled && payload?.next_run_at ? ` · 下一轮 ${esc(fmtTs(payload.next_run_at))}` : ''}</div>
@@ -6469,8 +6538,8 @@ ${confirmHint}`,
   }
 
   function ensureResearchLoopV3Panel() {
-    const cockpit = document.getElementById('ai-iteration-cockpit');
-    if (!cockpit) return null;
+    const slot = document.getElementById('ai-loop-primary');
+    if (!slot) return null;
     let panel = document.getElementById('ai-research-loop-v3');
     if (!panel) {
       panel = document.createElement('section');
@@ -6482,7 +6551,7 @@ ${confirmHint}`,
         if (action === 'toggle') toggleResearchLoopV3().catch((err) => notify(err?.message || '操作失败', true));
         if (action === 'run') runResearchLoopV3Once().catch((err) => notify(err?.message || '无法启动研究', true));
       });
-      cockpit.insertAdjacentElement('afterend', panel);
+      slot.append(panel);
     }
     return panel;
   }
@@ -6490,6 +6559,8 @@ ${confirmHint}`,
   function renderResearchLoopV3(payload) {
     const panel = ensureResearchLoopV3Panel();
     if (!panel) return;
+    window.ResearchDesk?.setLoop('v3', payload);
+    const ledgerOpen = !!panel.querySelector('details[data-loop-ledger]')?.open;
     const config = payload?.config || {};
     const statusNames = {
       paused: '已暂停', waiting: '已启用 · 等待下一轮', loading: '读取本地面板', observing: '检查冻结公式的新增数据',
@@ -6510,18 +6581,20 @@ ${confirmHint}`,
         <h3 style="margin:0;">研究循环 v3 · 全量本地数据因子（7 天收益）</h3>
         <div style="display:flex;gap:8px;">
           <button class="btn btn-sm" data-v3-action="toggle">${config.enabled ? '暂停 v3' : '启用 v3'}</button>
-          <button class="btn btn-sm btn-primary" data-v3-action="run" ${busy || budgetLeft <= 0 ? 'disabled' : ''}>${busy ? '研究进行中…' : '立即研究一轮'}</button>
+          <button class="btn btn-sm" data-v3-action="run" ${busy || budgetLeft <= 0 ? 'disabled' : ''}>${busy ? '研究进行中…' : '立即研究一轮'}</button>
         </div>
       </div>
       <div style="margin-top:6px;color:var(--text-sub);">${esc(busy ? '一轮正在独立进程中运行' : (statusNames[payload?.status] || payload?.status || '--'))} · 今日 ${Number(payload?.attempts_today || 0)}/${Number(config.max_rounds_per_day || 0)} 轮 · 台账 ${Number(payload?.ledger_size || 0)} 个公式 · 下一个公式的增量门槛 z ≥ ${num(payload?.resid_z_bar)}${config.enabled && payload?.next_run_at ? ` · 下一轮 ${esc(fmtTs(payload.next_run_at))}` : ''}</div>
       ${payload?.last_error ? `<div style="margin-top:4px;color:var(--warning);">最近失败：${esc(payload.last_error)}</div>` : ''}
-      <div class="u-note" style="margin-top:4px;">每天按公式给约 150 个流动性最好的永续排序，看未来 7 天收益。模型只看到 2020-07~2023-12 的开发期结果；2024 年起的留出期和闸门结论对模型隐藏。通过者冻结后只用新增数据终审，不注册、不下单。</div>
       <div style="margin-top:10px;font-weight:600;color:var(--text-main);">冻结观察（${frozen.length}）</div>
       ${frozen.length ? frozen.slice(-6).map((row) => `<div style="padding:4px 0;border-top:1px solid var(--border-subtle);"><b>${esc(row.name)}</b> · ${esc(row.status === 'forward_observing' ? '前向观察中' : row.status === 'forward_passed' ? '前向确认 · 待人工决定' : '前向未确认')} · ${esc(row.forward_note || '')}</div>`).join('') : '<div class="u-note">尚无公式通过闸门。多数公式会被"扣掉已知因子后未过门槛"或"扣成本后不赚"淘汰，这是预期结果。</div>'}
-      <div style="margin-top:10px;font-weight:600;color:var(--text-main);">台账（按留出期增量 z 排序，前 ${Math.min(10, formulas.length)}）</div>
-      ${formulas.length ? `<div style="overflow-x:auto;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>公式</th><th>方向</th><th>开发期 IC / z</th><th>留出期 IC / z</th><th>留出期增量 IC / z</th><th>留出期每期净收益</th><th>结论</th></tr></thead><tbody>
-        ${formulas.map((row) => `<tr><td title="${esc(row.thesis || '')}">${esc(row.name)}</td><td>${row.direction === 'low' ? '低值' : '高值'}</td><td>${num(row.dev?.ic, 3)} / ${num(row.dev?.z)}</td><td>${num(row.holdout?.ic, 3)} / ${num(row.holdout?.z)}</td><td>${num(row.holdout?.resid_ic, 3)} / ${num(row.holdout?.resid_z)}</td><td>${pct(row.holdout?.net_per_book)}</td><td style="color:${row.decision === 'frozen' ? 'var(--positive)' : 'var(--text-faint)'};">${row.decision === 'frozen' ? '冻结观察' : esc((row.reasons || []).map((r) => reasonNames[r] || r).join('；'))}</td></tr>`).join('')}
-      </tbody></table></div>` : '<div class="u-note">台账为空。启用后每轮由模型提出 1–5 个公式。</div>'}`;
+      <details data-loop-ledger style="margin-top:10px;"${ledgerOpen ? ' open' : ''}>
+        <summary style="cursor:pointer;color:var(--text-sub);">说明与台账（按留出期增量 z 排序，前 ${Math.min(10, formulas.length)}）</summary>
+        <div class="u-note" style="margin-top:4px;">每天按公式给约 150 个流动性最好的永续排序，看未来 7 天收益。模型只看到 2020-07~2023-12 的开发期结果；2024 年起的留出期和闸门结论对模型隐藏。通过者冻结后只用新增数据终审，不注册、不下单。</div>
+        ${formulas.length ? `<div style="overflow-x:auto;margin-top:6px;"><table class="data-table" style="width:100%;font-size:11px;"><thead><tr><th>公式</th><th>方向</th><th>开发期 IC / z</th><th>留出期 IC / z</th><th>留出期增量 IC / z</th><th>留出期每期净收益</th><th>结论</th></tr></thead><tbody>
+          ${formulas.map((row) => `<tr><td title="${esc(row.thesis || '')}">${esc(row.name)}</td><td>${row.direction === 'low' ? '低值' : '高值'}</td><td>${num(row.dev?.ic, 3)} / ${num(row.dev?.z)}</td><td>${num(row.holdout?.ic, 3)} / ${num(row.holdout?.z)}</td><td>${num(row.holdout?.resid_ic, 3)} / ${num(row.holdout?.resid_z)}</td><td>${pct(row.holdout?.net_per_book)}</td><td style="color:${row.decision === 'frozen' ? 'var(--positive)' : 'var(--text-faint)'};">${row.decision === 'frozen' ? '冻结观察' : esc((row.reasons || []).map((r) => reasonNames[r] || r).join('；'))}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="u-note">台账为空。启用后每轮由模型提出 1–5 个公式。</div>'}
+      </details>`;
   }
 
   // Pre-registered retirement verdict (core/research/retirement.py), shown on every paper-tracker card.
@@ -6907,6 +6980,7 @@ ${confirmHint}`,
     } catch (err) {
       const panel = ensureResearchLoopV2Panel();
       if (panel) panel.textContent = `研究循环 v2 状态不可用：${err?.message || err}`;
+      window.ResearchDesk?.setLoop('v2', { error: String(err?.message || err) });
     }
   }
 
@@ -6930,6 +7004,7 @@ ${confirmHint}`,
     } catch (err) {
       const panel = ensureResearchLoopV3Panel();
       if (panel) panel.textContent = `研究循环 v3 状态不可用：${err?.message || err}`;
+      window.ResearchDesk?.setLoop('v3', { error: String(err?.message || err) });
     }
   }
 
@@ -6949,7 +7024,8 @@ ${confirmHint}`,
   async function refreshAutonomousResearchCockpit() {
     const root = document.getElementById('ai-iteration-cockpit');
     if (!root) return;
-    refreshResearchLoopV2().then(() => refreshResearchLoopV3()).then(() => refreshListingShortTracker()).then(() => refreshUnlockShortTracker()).then(() => refreshSupplyFactorTracker()).then(() => refreshUpbitCautionTracker()).then(() => refreshXsReversalTracker()).then(() => refreshCoinglassCompositeTracker()).then(() => refreshAnnouncementShortTracker()).catch(() => {});
+    refreshResearchLoopV3().then(() => refreshResearchLoopV2()).catch(() => {});
+    if (document.getElementById('ui-paper-ledgers')?.open) refreshPaperLedgerPanels().catch(() => {});
     try {
       const payload = await aiApi('/research-loop', { timeoutMs: 12000 });
       renderAutonomousResearchCockpit(payload);
@@ -6958,19 +7034,42 @@ ${confirmHint}`,
       if (status) status.textContent = '研究循环状态不可用';
       const detail = document.getElementById('ai-iteration-status-detail');
       if (detail) detail.textContent = err?.message || '稍后重试';
+      window.ResearchDesk?.setLoop('v1', { error: String(err?.message || err) });
     }
   }
 
-  async function toggleAutonomousResearchLoop(forceEnabled) {
+  // Trade-level panels are many sequential requests, so they load only while their drawer is open.
+  function refreshPaperLedgerPanels() {
+    if (state.paperLedgerPanelsInFlight) return state.paperLedgerPanelsInFlight;
+    state.paperLedgerPanelsInFlight = (async () => {
+      await refreshListingShortTracker();
+      await refreshUnlockShortTracker();
+      await refreshSupplyFactorTracker();
+      await refreshUpbitCautionTracker();
+      await refreshXsReversalTracker();
+      await refreshCoinglassCompositeTracker();
+      await refreshAnnouncementShortTracker();
+      window.dispatchEvent(new CustomEvent('ai-research:paper-ledgers-loaded'));
+    })().finally(() => {
+      state.paperLedgerPanelsInFlight = null;
+    });
+    return state.paperLedgerPanelsInFlight;
+  }
+
+  async function refreshProposalArchiveSummary() {
+    try {
+      window.ResearchDesk?.setArchive(await aiApi('/proposal-archive/summary', { timeoutMs: 15000 }));
+    } catch (err) {
+      console.debug('refreshProposalArchiveSummary failed:', err);
+    }
+  }
+
+  async function toggleAutonomousResearchLoop() {
     const button = document.getElementById('ai-iteration-toggle-btn');
     if (button) button.disabled = true;
     try {
       const current = await aiApi('/research-loop', { timeoutMs: 12000 });
-      const enabled = typeof forceEnabled === 'boolean' ? forceEnabled : !current?.config?.enabled;
-      if (forceEnabled === true && current?.config?.enabled) {
-        document.getElementById('ai-iteration-cockpit')?.scrollIntoView({behavior:'smooth', block:'start'});
-        return;
-      }
+      const enabled = !current?.config?.enabled;
       const payload = await aiApi('/research-loop', { method: 'PATCH', body: JSON.stringify({ enabled }), timeoutMs: 15000 });
       renderAutonomousResearchCockpit(payload);
       notify(enabled ? '自主迭代已启用' : '自主迭代已暂停');
@@ -6999,8 +7098,8 @@ ${confirmHint}`,
       const items = Array.isArray(data?.items) ? data.items.slice(0, 6) : [];
       panel.innerHTML = `<div style="font-size:11px;color:var(--text-sub);font-weight:700;letter-spacing:.5px;text-transform:uppercase;margin-bottom:6px;">工作队列</div>
         ${items.length ? items.map(item => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid var(--border-subtle);">
-          <span>${esc(item.type || '--')} · ${esc(item.title || item.id || '--')}</span>
-          <span style="color:var(--text-faint);">${esc(item.next_action || '--')}</span>
+          <span>${esc(WORK_QUEUE_TEXT[item.type] || item.type || '--')} · ${esc(item.title || item.id || '--')}</span>
+          <span style="color:var(--text-faint);">${esc(WORK_QUEUE_TEXT[item.next_action] || item.next_action || '--')}</span>
         </div>`).join('') : '<div style="color:var(--text-faint);">暂无排队任务。</div>'}`;
       return data;
     })()
@@ -7040,7 +7139,7 @@ ${confirmHint}`,
     normalizeDomText(document.getElementById('ai-research'));
     refreshOperatingModeBanner().catch(() => {});
     refreshAutonomousResearchCockpit().catch(() => {});
-    refreshWorkQueuePanel().catch(() => {});
+    refreshProposalArchiveSummary().catch(() => {});
     if (isAiResearchActive() && canRunAiPolling()) {
       refreshWorkbench().catch(err => console.error('AI研究初始化失败', err));
     }
@@ -7067,7 +7166,7 @@ ${confirmHint}`,
       let researchPayload = {};
       let agentPayload = {};
 
-      const researchTask = aiApi('/live-signals', { timeoutMs: LIVE_SIGNALS_TIMEOUT_MS })
+      const researchTask = !wantsResearchLiveSignals() ? Promise.resolve(null) : aiApi('/live-signals', { timeoutMs: LIVE_SIGNALS_TIMEOUT_MS })
         .then((payload) => {
           researchPayload = payload || {};
           renderLiveSignalPanel(
@@ -7082,7 +7181,7 @@ ${confirmHint}`,
           return null;
         });
 
-      const agentTask = aiApi('/autonomous-agent/live-signals', { timeoutMs: AGENT_LIVE_SIGNALS_TIMEOUT_MS })
+      const agentTask = !isAiAgentActive() ? Promise.resolve(null) : aiApi('/autonomous-agent/live-signals', { timeoutMs: AGENT_LIVE_SIGNALS_TIMEOUT_MS })
         .then((payload) => {
           agentPayload = payload || {};
           renderLiveSignalPanel(
@@ -7388,6 +7487,9 @@ ${confirmHint}`,
     util: {
       esc,
       fmtTs,
+      isRejectedCandidate,
+      candidateBlockedText,
+      candidateStatusLabel,
       notify,
       normalizeUiText,
       firstMeaningfulText,

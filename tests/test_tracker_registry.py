@@ -38,9 +38,10 @@ def test_all_live_trackers_produce_a_row():
     assert [r["id"] for r in rows] == [s["id"] for s in tr.TRACKERS]
 
 
-def test_strategies_tab_shows_the_tracker_table():
+def test_research_tab_shows_the_tracker_table():
     html = (ROOT / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     js = (ROOT / "web" / "static" / "js" / "app.js").read_text(encoding="utf-8")
-    assert 'id="research-trackers-tbody"' in html
+    research_tab = html.split('<div id="ai-research" class="tab-content">', 1)[1].split('<div id="ai-agent"', 1)[0]
+    assert 'id="research-trackers-tbody"' in research_tab
     assert "api('/ai/research-trackers'" in js
-    assert "loadResearchTrackers()" in js.split("async function loadStrategiesTabData(){", 1)[1].split("}", 1)[0]
+    assert "refreshResearchTrackersIfStale()" in js.split("function refreshAiResearchModules(){", 1)[1].split("function softRefresh(", 1)[0]

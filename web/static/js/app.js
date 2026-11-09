@@ -2162,10 +2162,7 @@ try{
 return Promise.allSettled(tasks);
 }
 function refreshStrategiesSecondary(){
-const tasks=[loadStrategyHealth()];
-// Research trackers are HTTP snapshots; the strategy WebSocket does not push them.
-if(state.wsConnected)tasks.push(loadResearchTrackers());
-return Promise.allSettled(tasks);
+return Promise.allSettled([loadStrategyHealth()]);
 }
 function replaceStuckLoading(containerId,message){
 const box=document.getElementById(containerId);
@@ -2221,10 +2218,19 @@ window.ResearchTrackers?.render(d);
 }
 async function loadResearchTrackers(){
 try{renderResearchTrackers(await api('/ai/research-trackers',{timeoutMs:45000}));}
-catch(e){const tb=document.getElementById('research-trackers-tbody');if(tb)tb.innerHTML=`<tr><td colspan="6">跟踪器加载失败：${esc(e.message||'')}</td></tr>`;}
+catch(e){const tb=document.getElementById('research-trackers-tbody');if(tb)tb.innerHTML=`<tr><td colspan="8">账本加载失败：${esc(e.message||'')}</td></tr>`;window.ResearchDesk?.setTrackersError(e.message);}
 }
+// Ledgers settle on the scale of hours, so a two-minute-old snapshot is fresh enough for every caller.
+let researchTrackersLoadedAt=0,researchTrackersInFlight=null;
+function refreshResearchTrackersIfStale(maxAgeMs=120000){
+if(researchTrackersInFlight)return researchTrackersInFlight;
+if(Date.now()-researchTrackersLoadedAt<maxAgeMs)return Promise.resolve();
+researchTrackersInFlight=loadResearchTrackers().finally(()=>{researchTrackersLoadedAt=Date.now();researchTrackersInFlight=null;});
+return researchTrackersInFlight;
+}
+window.refreshResearchTrackersIfStale=refreshResearchTrackersIfStale;
 async function loadStrategiesTabData(){
-await Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth(),loadResearchTrackers()]);
+await Promise.allSettled([loadStrategies(),loadStrategySummary(),loadStrategyHealth()]);
 }
 async function loadDataTabData(){
 await ensureDataTabInitialized();
@@ -6530,7 +6536,8 @@ if(activeTab==='ai-research'&&typeof ai.refreshWorkbench==='function'&&!aiResear
     .finally(()=>{if(aiResearchRefreshPromise===task)aiResearchRefreshPromise=null;});
   aiResearchRefreshPromise=task;
 }
-try{modules.agent?.refresh?.({includeDetails:activeTab==='ai-agent'});}catch{}
+if(activeTab==='ai-research')refreshResearchTrackersIfStale().catch(()=>{});
+if(activeTab==='ai-agent'){try{modules.agent?.refresh?.({includeDetails:true});}catch{}}
 try{modules.runtime?.render?.();}catch{}
 return aiResearchRefreshPromise||Promise.resolve();
 }
@@ -9370,7 +9377,7 @@ setInterval(()=>{
   if(isTabBootstrapping(tab))return;
   if(tab==='dashboard')refreshDashboardCore();
   else if(tab==='trading')refreshTradingCore();
-  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary(),loadResearchTrackers()]);
+  else if(tab==='strategies')Promise.allSettled([loadStrategies(),loadStrategySummary()]);
   else if(tab==='ai-research')refreshAiResearchModules();
   else if(tab==='ai-agent')refreshAiResearchModules();
 },CORE_TAB_POLL_INTERVAL_MS);

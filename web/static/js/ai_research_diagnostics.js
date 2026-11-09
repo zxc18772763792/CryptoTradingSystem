@@ -69,9 +69,10 @@
     return api(path, options);
   }
 
-  function isAiResearchActive() {
+  // Diagnostics serve the proposal archive, so they only refresh while that drawer is open.
+  function isDiagnosticsVisible() {
     const tab = document.getElementById('ai-research');
-    return !!(tab && tab.classList.contains('active'));
+    return !!(tab && tab.classList.contains('active') && document.getElementById('ai-proposal-archive')?.open);
   }
 
   function canRunAiPolling() {
@@ -405,11 +406,11 @@
   }
 
   function scheduleDiagnosticsRefresh(delayMs = 0, options = {}) {
-    if (document.hidden || !isAiResearchActive() || !canRunAiPolling()) return;
+    if (document.hidden || !isDiagnosticsVisible() || !canRunAiPolling()) return;
     if (diagnosticsScheduleTimer) clearTimeout(diagnosticsScheduleTimer);
     diagnosticsScheduleTimer = window.setTimeout(() => {
       diagnosticsScheduleTimer = null;
-      if (document.hidden || !isAiResearchActive() || !canRunAiPolling()) return;
+      if (document.hidden || !isDiagnosticsVisible() || !canRunAiPolling()) return;
       refreshDiagnostics({
         force: !!options.force,
         reason: String(options.reason || 'scheduled'),
@@ -418,14 +419,14 @@
   }
 
   function syncDiagnosticsPollingState({ immediate = false } = {}) {
-    if (document.hidden || !isAiResearchActive() || !canRunAiPolling()) {
+    if (document.hidden || !isDiagnosticsVisible() || !canRunAiPolling()) {
       stopDiagnosticsPolling();
       return;
     }
 
     if (!diagnosticsTimer) {
       diagnosticsTimer = window.setInterval(() => {
-        if (document.hidden || !isAiResearchActive() || !canRunAiPolling()) {
+        if (document.hidden || !isDiagnosticsVisible() || !canRunAiPolling()) {
           stopDiagnosticsPolling();
           return;
         }
@@ -475,16 +476,20 @@
     });
 
     document.addEventListener('visibilitychange', () => syncDiagnosticsPollingState({
-      immediate: !document.hidden && isAiResearchActive() && canRunAiPolling(),
+      immediate: !document.hidden && isDiagnosticsVisible() && canRunAiPolling(),
     }));
+
+    document.getElementById('ai-proposal-archive')?.addEventListener('toggle', (event) => {
+      syncDiagnosticsPollingState({ immediate: !!event.target.open });
+    });
 
     window.addEventListener('hashchange', () => {
       window.setTimeout(() => syncDiagnosticsPollingState({
-        immediate: !document.hidden && isAiResearchActive() && canRunAiPolling(),
+        immediate: !document.hidden && isDiagnosticsVisible() && canRunAiPolling(),
       }), 0);
     });
 
-    syncDiagnosticsPollingState({ immediate: isAiResearchActive() && canRunAiPolling() });
+    syncDiagnosticsPollingState({ immediate: isDiagnosticsVisible() && canRunAiPolling() });
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
